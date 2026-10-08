@@ -715,7 +715,7 @@ fn worktree() -> Vec<Value> {
 
 /// Every served tool.
 pub(crate) fn tools() -> Vec<Value> {
-    [orchestrator(), thread(), project(), worktree(), diagnostics()].concat()
+    [orchestrator(), thread(), project(), worktree(), diagnostics(), device()].concat()
 }
 
 fn diagnostics() -> Vec<Value> {
@@ -777,4 +777,51 @@ pub(crate) fn read_only_tools() -> Vec<String> {
         .filter(|tool| tool["annotations"]["readOnlyHint"] == true)
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
         .collect()
+}
+fn device() -> Vec<Value> {
+    vec![
+        tool(
+            "device_list",
+            Some("List devices"),
+            "List simulator and emulator device hosts, available devices, and devices open in this thread's Device panel. Call this before device_open when the id is unknown.",
+            json!({"hostId": described(string(), "Limit discovery to one device host.")}),
+            &[],
+            READ,
+        ),
+        tool(
+            "device_open",
+            Some("Open device"),
+            "Open a simulator or emulator for this thread, booting it when needed, and show it in the user's Device panel. The result includes the pinned agent-device target arguments.",
+            json!({
+                "hostId": described(string(), "Device host from device_list. Defaults to local."),
+                "deviceId": described(string(), "Simulator UDID or emulator serial from device_list. Omit to choose the booted device."),
+                "platform": described(literals(&["ios", "android"]), "Required when deviceId is omitted and both platforms are available."),
+            }),
+            &[],
+            Hints { destructive: false, idempotent: true, ..DEFAULT },
+        ),
+        tool(
+            "device_screenshot",
+            Some("Screenshot device"),
+            "Capture the current screen of an open device as a PNG image. Omit deviceId to use the most recently opened device in this thread.",
+            json!({
+                "hostId": described(string(), "Device host. Defaults to local."),
+                "deviceId": described(string(), "Device from device_list. Omit to use the most recently opened device in this thread."),
+            }),
+            &[],
+            READ,
+        ),
+        tool(
+            "device_close",
+            Some("Close device"),
+            "Remove a device from this thread's Device panel. Set shutdown to also power the simulator or emulator off.",
+            json!({
+                "hostId": described(string(), "Device host. Defaults to local."),
+                "deviceId": described(string(), "Device to close. Omit to close every device in this thread."),
+                "shutdown": described(json!({"type":"boolean"}), "Also power the simulator or emulator off. Defaults to false."),
+            }),
+            &[],
+            Hints { idempotent: true, ..DEFAULT },
+        ),
+    ]
 }

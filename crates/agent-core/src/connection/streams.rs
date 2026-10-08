@@ -23,6 +23,7 @@ pub(super) enum Payload {
     Preview(agent_protocol::preview::PreviewListResult),
     Awareness(agent_protocol::models::AwarenessSnapshot),
     Background(agent_protocol::background::BackgroundPolicySnapshot),
+    Device(agent_protocol::device::DeviceEvent),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }

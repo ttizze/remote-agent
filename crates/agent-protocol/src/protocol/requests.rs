@@ -1,8 +1,14 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
 use crate::{
-    conversation as c, models as m, operations as op, pull_requests as pr,
-    scheduled_tasks as st, vcs, workspace as w,
+    conversation as c,
+    device as d,
+    models as m,
+    operations as op,
+    pull_requests as pr,
+    scheduled_tasks as st,
+    vcs,
+    workspace as w,
 };
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
@@ -138,6 +144,21 @@ contracts! {
     PreviewRefresh, "host/preview/refresh" => (crate::preview::PreviewTab, crate::models::Empty) [clone],
     PreviewRecordingStart, "host/preview/recording/start" => (crate::preview::PreviewRecordingStart, crate::preview::PreviewRecordingStatus) [clone],
     PreviewRecordingStop, "host/preview/recording/stop" => (crate::preview::PreviewRecordingStop, crate::preview::PreviewRecordingArtifact) [clone],
+    DeviceList, "host/device/list" => (d::DeviceListInput, d::DeviceServiceState) [clone],
+    DeviceConfigure, "host/device/configure" => (d::DeviceConfigureInput, d::DeviceServiceState) [clone],
+    DeviceHosts, "host/device/hosts" => (d::DeviceHostsInput, d::DeviceServiceState) [clone],
+    DeviceOpen, "host/device/open" => (d::DeviceOpenInput, d::DeviceSession) [clone],
+    DeviceClose, "host/device/close" => (d::DeviceCloseInput, m::Empty) [clone],
+    DeviceShutdown, "host/device/shutdown" => (d::DeviceShutdownInput, m::Empty) [clone],
+    DeviceDetail, "host/device/detail" => (d::DeviceDetailInput, d::DeviceDetail) [clone],
+    DeviceAction, "host/device/action" => (d::DeviceActionInput, d::DeviceDetail) [clone],
+    DeviceScreenshot, "host/device/screenshot" => (d::DeviceScreenshotInput, d::DeviceScreenshot) [clone],
+    DeviceInput, "host/device/input" => (d::DeviceInput, m::Empty) [clone],
+    DeviceAccessibility, "host/device/accessibility" => (d::DeviceAccessibilityInput, d::DeviceAccessibilityTree) [clone],
+    DeviceEventLog, "host/device/event-log" => (d::DeviceEventLogInput, Vec<d::DeviceEventLogEntry>) [clone],
+    DeviceRecordingStart, "host/device/recording/start" => (d::DeviceRecordingStartInput, d::DeviceRecordingStatus) [clone],
+    DeviceRecordingStop, "host/device/recording/stop" => (d::DeviceRecordingStopInput, d::DeviceRecording) [clone],
+    DeviceSubscribe, "host/device/subscribe" => (d::DeviceSubscribeInput, d::DeviceEvent),
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
     ReadBackground, "host/background/read" => (crate::background::ReadBackground, crate::background::BackgroundPolicySnapshot) [clone],
     UpdateBackgroundPolicy, "host/background/updatePolicy" => (crate::background::UpdateBackgroundPolicy, crate::background::BackgroundPolicySnapshot) [clone],

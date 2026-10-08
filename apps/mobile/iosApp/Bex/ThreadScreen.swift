@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 /// Where the thread screen sends the user.
 struct ThreadRoutes {
@@ -7,6 +8,7 @@ struct ThreadRoutes {
     let terminal: (String?) -> Void
     let files: () -> Void
     let review: () -> Void
+    let device: () -> Void
 }
 
 /// One thread: header, feed, the floating working control, request cards and
@@ -24,6 +26,7 @@ struct ThreadScreen: View {
     @State private var openedFile: FileTarget?
     @State private var openedPDF: FileTarget?
     @State private var contextPreview: ContextChip?
+    @State private var touchingDevice: String?
     private let endId = "feed-end"
 
     var body: some View {
@@ -242,6 +245,10 @@ struct ThreadScreen: View {
                 mergeBack: { model.perform(.mergeBack) },
                 mergeBackAvailable: header?.actions.contains(where: { $0.kind == .mergeBack }) == true
             )
+            Button(action: routes.device) {
+                Label("Device", systemImage: "iphone")
+            }
+            .accessibilityLabel("Device")
             Button(action: routes.files) { Image(systemName: "folder") }
                 .accessibilityLabel("Files")
             TerminalMenu(model: model, open: routes.terminal)
@@ -303,6 +310,278 @@ private struct TerminalMenu: View {
         }
         .accessibilityLabel("Terminal")
         .disabled(!model.snapshot.canOpenTerminal())
+    }
+}
+
+/// Device picker, setup and the Host's latest live device frame.
+struct DeviceScreen: View {
+    @ObservedObject var model: BexAppViewModel
+    let threadId: String
+
+    var body: some View {
+        let view = model.snapshot.device()
+        let threadSessions = view.sessions.filter { $0.threadId == threadId }
+        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId)" }.joined(separator: ",")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if !view.enabled {
+                    Text("Device support is off").font(AppTheme.font(17, weight: .semibold))
+                    Text("Enable it to discover simulators and emulators on the Host.")
+                        .foregroundStyle(AppTheme.muted)
+                    Button("Enable device support") {
+                        model.perform(.configureDevices(enabled: true, agentAccessEnabled: nil, onboardingCompleted: false))
+                    }
+                } else {
+                    Text("Host status: \(view.status)").foregroundStyle(AppTheme.muted)
+                    HStack(spacing: 8) {
+                        Button("Inspect tools") { model.perform(.inspectDevices(hostId: nil)) }
+                        Button("Update hub") { model.perform(.updateDeviceTool(hostId: nil, tool: "hub")) }
+                        Button("Update agent") { model.perform(.updateDeviceTool(hostId: nil, tool: "agent")) }
+                    }
+                    if let detail = view.statusDetail {
+                        Text(detail).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                    }
+                    if !view.agentAccessEnabled {
+                        Button("Enable agent device access") {
+                            model.perform(.configureDevices(enabled: nil, agentAccessEnabled: true, onboardingCompleted: true))
+                        }
+                    }
+                    ForEach(view.hosts, id: \.id) { host in
+                        HStack {
+                            Text("\(host.label) · \(host.kind)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                            Spacer()
+                            Button("Retry") { model.perform(.retryDeviceHost(hostId: host.id)) }
+                        }
+                        ForEach(host.unavailableReasons, id: \.self) { reason in
+                            Text(reason).font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    ForEach(Array(view.devices.enumerated()), id: \.offset) { _, device in
+                        let opened = view.sessions.contains {
+                            $0.threadId == threadId && $0.hostId == device.hostId && $0.deviceId == device.id
+                        }
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(device.name).font(AppTheme.font(16, weight: .semibold))
+                                Text("\(device.platform) · \(device.version)").foregroundStyle(AppTheme.muted)
+                            }
+                            Spacer()
+                            Button(opened ? "Close" : "Open") {
+                                if opened {
+                                    model.perform(.closeDevice(hostId: device.hostId, deviceId: device.id, shutdown: false))
+                                } else {
+                                    model.perform(.openDevice(hostId: device.hostId, deviceId: device.id, platform: device.platform, boot: true))
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    ForEach(Array(threadSessions.enumerated()), id: \.offset) { _, session in
+                        let detail = view.details.first(where: { $0.hostId == session.hostId && $0.deviceId == session.deviceId })
+                        HStack(spacing: 8) {
+                            Button("Dark") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .setAppearance(dark: true)
+                                ))
+                            }
+                            Button("Light") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .setAppearance(dark: false)
+                                ))
+                            }
+                            Button("Text +") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .setTextSize(size: "large")
+                                ))
+                            }
+                            if session.platform == "android" {
+                                Button("Portrait") {
+                                    model.perform(.deviceAction(
+                                        hostId: session.hostId,
+                                        deviceId: session.deviceId,
+                                        action: .setOrientation(orientation: "portrait")
+                                    ))
+                                }
+                            }
+                            Button("Home") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "home")
+                                ))
+                            }
+                            Button("Rotate") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .rotate
+                                ))
+                            }
+                            Button("Record") {
+                                model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "avcc"))
+                            }
+                            Button("Stop record") {
+                                model.perform(.stopDeviceRecording(hostId: session.hostId, deviceId: session.deviceId))
+                            }
+                            Button("Power off") {
+                                model.perform(.closeDevice(hostId: session.hostId, deviceId: session.deviceId, shutdown: true))
+                            }
+                        }
+                        if let app = detail?.foregroundApp {
+                            Text("Foreground: \(app)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    if let frame = view.frames.filter({ $0.threadId == threadId }).max(by: { $0.sequence < $1.sequence }),
+                       let image = UIImage(data: Data(frame.png)) {
+                        ZStack {
+                            Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
+                            DeviceAccessibilityOverlay(view: view, deviceKey: "\(frame.hostId):\(frame.deviceId)")
+                        }
+                        .overlay {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .contentShape(Rectangle())
+                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                            }
+                        }
+                    } else if let frame = view.videoFrames.filter({ $0.threadId == threadId && ($0.encoding == "jpeg" || $0.encoding == "mjpeg") }).max(by: { $0.sequence < $1.sequence }),
+                              let image = UIImage(data: Data(frame.payload)) {
+                        ZStack {
+                            Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
+                            DeviceAccessibilityOverlay(view: view, deviceKey: "\(frame.hostId):\(frame.deviceId)")
+                        }
+                        .overlay {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .contentShape(Rectangle())
+                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                            }
+                        }
+                    } else {
+                        Text("Open a device to see its live frame").foregroundStyle(AppTheme.muted)
+                    }
+                    if view.videoFrames.contains(where: { $0.threadId == threadId && ($0.encoding == "h264" || $0.encoding == "semu") }) {
+                        Text("Live H.264 device video is unavailable in this native decoder")
+                            .font(AppTheme.font(12))
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                    ForEach(Array(view.accessibility.filter { tree in threadSessions.contains { $0.hostId == tree.hostId && $0.deviceId == tree.deviceId } }.enumerated()), id: \.offset) { _, tree in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Accessibility overlay").font(AppTheme.font(13, weight: .semibold))
+                            ForEach(tree.elements.filter { !$0.label.isEmpty }.prefix(20), id: \.id) { element in
+                                Text("\(element.role) · \(element.label)").font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
+                            }
+                        }
+                    }
+                    ForEach(Array(view.eventLog.filter { entry in threadSessions.contains { $0.hostId == entry.hostId && $0.deviceId == entry.deviceId } }.suffix(20).enumerated()), id: \.offset) { _, entry in
+                        Text("\(entry.kind) · \(entry.summary)")
+                            .font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
+                    }
+                    if let recording = view.lastRecording, recording.threadId == threadId {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Recording ready · \(recording.frameCount) frames · \(recording.byteCount) bytes")
+                                .font(AppTheme.font(12))
+                                .foregroundStyle(AppTheme.muted)
+                            Button("Attach recording") {
+                                do {
+                                    let directory = try AttachmentFiles.directory()
+                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).bin")
+                                    try Data(recording.bytes).write(to: url, options: .atomic)
+                                    model.perform(.attachFiles(draftKey: threadId, files: [
+                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: "application/octet-stream")
+                                    ]))
+                                } catch {
+                                    model.notice = error.localizedDescription
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(AppTheme.screen.ignoresSafeArea())
+        .navigationTitle("Device")
+        .onAppear {
+            model.perform(.openThread(threadId: threadId))
+            model.perform(.loadDevices)
+            model.perform(.subscribeDevice)
+            for session in threadSessions {
+                model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
+                model.perform(.loadDeviceAccessibility(hostId: session.hostId, deviceId: session.deviceId))
+                if session.platform == "ios" {
+                    model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
+                }
+            }
+        }
+        .onChange(of: threadSessionKey) { _, _ in
+            let sessions = model.snapshot.device().sessions
+            for session in sessions where session.threadId == threadId {
+                model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
+                model.perform(.loadDeviceAccessibility(hostId: session.hostId, deviceId: session.deviceId))
+                if session.platform == "ios" {
+                    model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
+                }
+            }
+        }
+        .onDisappear { model.perform(.unsubscribeDevice) }
+    }
+
+    private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let key = "\(hostId):\(deviceId)"
+                let phase = touchingDevice == key ? "move" : "begin"
+                touchingDevice = key
+                let x = value.location.x / max(size.width, 1)
+                let y = value.location.y / max(size.height, 1)
+                model.perform(.deviceAction(
+                    hostId: hostId,
+                    deviceId: deviceId,
+                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                ))
+            }
+            .onEnded { value in
+                touchingDevice = nil
+                let x = value.location.x / max(size.width, 1)
+                let y = value.location.y / max(size.height, 1)
+                model.perform(.deviceAction(
+                    hostId: hostId,
+                    deviceId: deviceId,
+                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                ))
+            }
+    }
+}
+
+private extension CGFloat {
+    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+private struct DeviceAccessibilityOverlay: View {
+    let view: DeviceView
+    let deviceKey: String
+
+    var body: some View {
+        GeometryReader { proxy in
+            ForEach(view.accessibility.filter { "\($0.hostId):\($0.deviceId)" == deviceKey }.flatMap(\.elements).filter { !$0.label.isEmpty }, id: \.id) { element in
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(AppTheme.primary, lineWidth: 1)
+                    .frame(width: proxy.size.width * CGFloat(element.width), height: proxy.size.height * CGFloat(element.height))
+                    .position(x: proxy.size.width * CGFloat(element.x + element.width / 2), y: proxy.size.height * CGFloat(element.y + element.height / 2))
+                    .accessibilityLabel(element.label)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

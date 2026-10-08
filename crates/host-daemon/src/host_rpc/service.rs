@@ -131,6 +131,7 @@ struct HostResources {
     commands: super::commands::CommandCache,
     search: crate::workspace_search::WorkspaceSearch,
     keybindings: Arc<crate::keybindings::Keybindings>,
+    devices: Arc<crate::device::DeviceService>,
     usage: crate::usage::UsageService,
     pull_requests: Arc<GitHubPullRequestService>,
     pull_request_watch_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
@@ -318,6 +319,9 @@ impl HostRpcService {
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
             projects.path().with_file_name("keybindings.json"),
         ));
+        let devices = crate::device::DeviceService::new(
+            projects.path().with_file_name("device"),
+        );
         let pull_requests = Arc::new(GitHubPullRequestService::new(
             projects.path().with_file_name("pull-requests.sqlite"),
         )?);
@@ -338,6 +342,7 @@ impl HostRpcService {
                 connections.clone(),
                 terminal_history,
             )),
+            devices: devices.clone(),
         };
         let source_control_auto_fetch_interval_seconds = Arc::new(AtomicU64::new(30));
         let interval = source_control_auto_fetch_interval_seconds.clone();
@@ -374,6 +379,7 @@ impl HostRpcService {
             background_consumers_task: OnceLock::new(),
             provider_cache: tokio::sync::RwLock::new(None),
             provider_refresh: tokio::sync::Mutex::new(()),
+            devices,
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -1004,6 +1010,7 @@ impl HostRpcService {
             browser.shutdown().await;
         }
         self.inner.resources.shared.terminals.shutdown().await;
+        self.inner.resources.devices.shutdown_owned().await;
     }
     fn conversation(&self) -> Result<&Arc<Conversation>, Failure> {
         self.inner.resources.conversation.get().ok_or_else(|| {
@@ -1029,6 +1036,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.keybindings(cancel).await);
         }
+        if let Call::DeviceSubscribe(params) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.device_subscribe(params, cancel).await);
+        }
         if let Call::SubscribeVcsStatus(params) = call {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.vcs_status(params, cancel).await);
@@ -1050,6 +1061,56 @@ impl HostRpcService {
             return Ok(self.background_stream(cancel).await);
         }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+
+    async fn device_subscribe(
+        &self,
+        params: &agent_protocol::device::DeviceSubscribeInput,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> HostReply {
+        let devices = self.inner.resources.devices.clone();
+        let thread = params.thread_id.clone();
+        let prefer_mjpeg = params.prefer_mjpeg;
+        let receiver = Arc::new(tokio::sync::Mutex::new(devices.subscribe()));
+        let initial = agent_protocol::device::DeviceEvent::State(devices.state_async().await);
+        crate::conversation::stream(
+            std::collections::VecDeque::from([initial]),
+            agent_protocol::device::DeviceEvent::State(
+                agent_protocol::device::DeviceServiceState::default(),
+            ),
+            move || {
+                let (receiver, devices, thread) =
+                    (receiver.clone(), devices.clone(), thread.clone());
+                Box::pin(async move {
+                    loop {
+                        let result = {
+                            let mut receiver = receiver.lock().await;
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(500),
+                                receiver.recv(),
+                            )
+                            .await
+                        };
+                        match result {
+                            Ok(Ok(event)) => return Some(vec![event]),
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                                return Some(vec![agent_protocol::device::DeviceEvent::State(
+                                    devices.state_async().await,
+                                )]);
+                            }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                            Err(_) => {
+                                let frames = devices.frames_for_thread(&thread, prefer_mjpeg).await;
+                                if !frames.is_empty() {
+                                    return Some(frames);
+                                }
+                            }
+                        }
+                    }
+                })
+            },
+            cancel,
+        )
     }
 
     /// The current policy snapshot, followed by semantic power or lease
@@ -2074,6 +2135,97 @@ impl HostRpcService {
                         .map_err(|error| Failure::new("browser_failed", error))?;
                     frame.into()
                 }
+                Call::DeviceList(params) => resources
+                    .devices
+                    .list(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_list_failed", error))?
+                    .into(),
+                Call::DeviceConfigure(params) => resources
+                    .devices
+                    .configure(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_configure_failed", error))?
+                    .into(),
+                Call::DeviceHosts(params) => resources
+                    .devices
+                    .update_hosts(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_hosts_failed", error))?
+                    .into(),
+                Call::DeviceOpen(params) => resources
+                    .devices
+                    .open(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_open_failed", error))?
+                    .into(),
+                Call::DeviceClose(params) => {
+                    resources
+                        .devices
+                        .close(params.clone())
+                        .await
+                        .map_err(|error| Failure::new("device_close_failed", error))?;
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::DeviceShutdown(params) => {
+                    resources
+                        .devices
+                        .shutdown(params.clone())
+                        .await
+                        .map_err(|error| Failure::new("device_shutdown_failed", error))?;
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::DeviceDetail(params) => resources
+                    .devices
+                    .detail(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_detail_failed", error))?
+                    .into(),
+                Call::DeviceAction(params) => resources
+                    .devices
+                    .action(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_action_failed", error))?
+                    .into(),
+                Call::DeviceScreenshot(params) => resources
+                    .devices
+                    .screenshot(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_screenshot_failed", error))?
+                    .into(),
+                Call::DeviceInput(params) => {
+                    resources
+                        .devices
+                        .input(params.clone())
+                        .await
+                        .map_err(|error| Failure::new("device_input_failed", error))?;
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::DeviceAccessibility(params) => resources
+                    .devices
+                    .accessibility(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_accessibility_failed", error))?
+                    .into(),
+                Call::DeviceEventLog(params) => resources
+                    .devices
+                    .event_log(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_event_log_failed", error))?
+                    .into(),
+                Call::DeviceRecordingStart(params) => resources
+                    .devices
+                    .start_recording(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_recording_start_failed", error))?
+                    .into(),
+                Call::DeviceRecordingStop(params) => resources
+                    .devices
+                    .stop_recording(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_recording_stop_failed", error))?
+                    .into(),
+                Call::DeviceSubscribe(_) => unreachable!("device subscription is handled above"),
                 Call::PreviewList(params) => {
                     params
                         .validate()

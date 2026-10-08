@@ -187,6 +187,10 @@ impl Snapshot {
         crate::view::usage::usage_limit_pools(self.accounts.as_ref(), now_ms)
     }
 
+    pub fn device(&self) -> crate::view::device::DeviceView {
+        crate::view::device::device_view(self)
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,

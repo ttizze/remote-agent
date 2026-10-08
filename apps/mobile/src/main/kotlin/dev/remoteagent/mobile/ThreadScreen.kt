@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Smartphone
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -126,6 +127,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
                     sheet = ThreadSheet.Git
                 }
             }
+            HeaderIconButton(Icons.Outlined.Smartphone, "Device") { model.navigate(Route.Device(threadId)) }
         },
     ) {
         if (current == null || current.syncStatus == ThreadStatus.DELETED) {

@@ -7,6 +7,7 @@ use crate::view::{
 };
 use agent_domain::CommandId;
 use agent_protocol::conversation::SessionScan;
+use agent_protocol::device::{DeviceAccessibilityTree, DeviceDetail, DeviceEvent, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame, DeviceRecording, DeviceScreenshot, DeviceScreenConfig, DeviceServiceState, DeviceSession, DeviceVideoFrame};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,4 +112,233 @@ pub struct SessionImport {
     pub progress: SessionImportProgress,
     /// Shown once the landing project opened.
     pub toast: Option<ImportToast>,
+}
+
+/// Host-owned device state folded into the client snapshot. Device commands
+/// remain typed protocol calls; this record only retains the latest state and
+/// frames for native views.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeviceState {
+    pub service: Option<DeviceServiceState>,
+    pub sessions: Vec<DeviceSession>,
+    pub details: BTreeMap<(String, String), DeviceDetail>,
+    pub frames: BTreeMap<(String, String, String), DeviceFrame>,
+    pub video_frames: BTreeMap<(String, String, String, u8), DeviceVideoFrame>,
+    pub accessibility: BTreeMap<(String, String), DeviceAccessibilityTree>,
+    pub event_log: BTreeMap<(String, String), Vec<DeviceEventLogEntry>>,
+    pub foreground: BTreeMap<(String, String), DeviceForegroundUpdate>,
+    pub screens: BTreeMap<(String, String, String), DeviceScreenConfig>,
+    pub recordings: BTreeMap<(String, String, String), agent_protocol::device::DeviceRecordingStatus>,
+    pub last_recording: Option<DeviceRecording>,
+    pub last_screenshot: Option<DeviceScreenshot>,
+    pub error: Option<String>,
+}
+
+impl DeviceState {
+    pub fn apply_event(&mut self, event: DeviceEvent) {
+        match event {
+            DeviceEvent::State(service) => {
+                self.sessions = service.sessions.clone();
+                self.service = Some(service);
+                let active = self
+                    .sessions
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.thread_id.to_string(),
+                            session.host_id.clone(),
+                            session.device_id.clone(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                self.frames.retain(|key, _| active.contains(key));
+                self.video_frames.retain(|key, _| {
+                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                });
+                let active_devices = self
+                    .sessions
+                    .iter()
+                    .map(|session| (session.host_id.clone(), session.device_id.clone()))
+                    .collect::<std::collections::BTreeSet<_>>();
+                self.details
+                    .retain(|key, _| active_devices.contains(key));
+                self.accessibility.retain(|key, _| active_devices.contains(key));
+                self.event_log.retain(|key, _| active_devices.contains(key));
+                self.foreground.retain(|key, _| active_devices.contains(key));
+                self.screens.retain(|key, _| active.contains(key));
+                self.recordings.retain(|(thread, host, device), _| active.contains(&(thread.clone(), host.clone(), device.clone())));
+                if self.last_recording.as_ref().is_some_and(|recording| {
+                    !active.contains(&(
+                        recording.status.thread_id.to_string(),
+                        recording.status.host_id.clone(),
+                        recording.status.device_id.clone(),
+                    ))
+                }) {
+                    self.last_recording = None;
+                }
+                self.error = None;
+            }
+            DeviceEvent::Frame(frame) => {
+                self.frames.insert(
+                    (
+                        frame.thread_id.to_string(),
+                        frame.device.host_id.clone(),
+                        frame.device.id.clone(),
+                    ),
+                    frame,
+                );
+            }
+            DeviceEvent::Video(frame) => {
+                self.video_frames.insert(
+                    (
+                        frame.thread_id.to_string(),
+                        frame.device.host_id.clone(),
+                        frame.device.id.clone(),
+                        frame.screen_id.unwrap_or(0),
+                    ),
+                    frame,
+                );
+            }
+            DeviceEvent::Accessibility(tree) => {
+                self.accessibility
+                    .insert((tree.host_id.clone(), tree.device_id.clone()), tree);
+            }
+            DeviceEvent::EventLog(entry) => {
+                let log = self
+                    .event_log
+                    .entry((entry.host_id.clone(), entry.device_id.clone()))
+                    .or_default();
+                if !log.iter().any(|existing| existing.id == entry.id) {
+                    log.push(entry);
+                    log.sort_by_key(|entry| entry.id);
+                    if log.len() > 100 {
+                        let keep_from = log.len() - 100;
+                        log.drain(..keep_from);
+                    }
+                }
+            }
+            DeviceEvent::Foreground(update) => {
+                self.foreground.insert((update.host_id.clone(), update.device_id.clone()), update);
+            }
+            DeviceEvent::Screen(screen) => {
+                if let (Some(thread), Some(host), Some(device)) = (&screen.thread_id, &screen.host_id, &screen.device_id) {
+                    self.screens.insert((thread.to_string(), host.clone(), device.clone()), screen);
+                }
+            }
+            DeviceEvent::Recording(status) => {
+                let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
+                if status.active {
+                    self.recordings.insert(key, status);
+                } else {
+                    self.recordings.remove(&key);
+                }
+            }
+            DeviceEvent::RecordingComplete(recording) => {
+                let key = (
+                    recording.status.thread_id.to_string(),
+                    recording.status.host_id.clone(),
+                    recording.status.device_id.clone(),
+                );
+                self.recordings.remove(&key);
+                self.last_recording = Some(recording);
+            }
+        }
+    }
+
+    pub fn service(&self) -> DeviceServiceState {
+        self.service.clone().unwrap_or_default()
+    }
+
+    pub fn session(&self, thread: &str) -> Option<&DeviceSession> {
+        self.sessions
+            .iter()
+            .rev()
+            .find(|session| session.thread_id.as_str() == thread)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_protocol::device::{DeviceFrame, DevicePlatform, DeviceRecording, DeviceRecordingFormat, DeviceRecordingStatus, DeviceSummary};
+
+    fn session(thread: &str, host: &str, device: &str) -> DeviceSession {
+        DeviceSession {
+            thread_id: agent_domain::ThreadId::new(thread).unwrap(),
+            host_id: host.into(),
+            device_id: device.into(),
+            platform: DevicePlatform::Android,
+            opened_at: "0".into(),
+        }
+    }
+
+    #[test]
+    fn state_updates_prune_frames_for_closed_sessions() {
+        let current = session("thread", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        state.apply_event(DeviceEvent::Frame(DeviceFrame {
+            thread_id: current.thread_id.clone(),
+            device: DeviceSummary {
+                host_id: current.host_id.clone(),
+                id: current.device_id.clone(),
+                platform: current.platform,
+                name: "Pixel".into(),
+                version: "Android".into(),
+                booted: true,
+                physical: false,
+            },
+            png: vec![1],
+            width: 1,
+            height: 1,
+            sequence: 1,
+        }));
+        assert_eq!(state.frames.len(), 1);
+        state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
+        assert!(state.frames.is_empty());
+        state.details.insert(
+            (current.host_id.clone(), current.device_id.clone()),
+            DeviceDetail {
+                host_id: current.host_id,
+                device_id: current.device_id,
+                settings: Default::default(),
+                foreground_app: None,
+                read_at: "0".into(),
+            },
+        );
+        state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
+        assert!(state.details.is_empty());
+    }
+
+    #[test]
+    fn recording_events_keep_active_state_and_release_completed_bytes() {
+        let current = session("thread", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let status = DeviceRecordingStatus {
+            thread_id: current.thread_id.clone(),
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            format: DeviceRecordingFormat::Avcc,
+            active: true,
+            started_at: "0".into(),
+            frame_count: 1,
+            byte_count: 2,
+            error: None,
+        };
+        state.apply_event(DeviceEvent::Recording(status.clone()));
+        assert_eq!(state.recordings.len(), 1);
+        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording { status: DeviceRecordingStatus { active: false, ..status }, bytes: vec![1, 2] }));
+        assert!(state.recordings.is_empty());
+        assert_eq!(state.last_recording.as_ref().unwrap().bytes, vec![1, 2]);
+        state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
+        assert!(state.recordings.is_empty());
+        assert!(state.last_recording.is_none());
+    }
 }
