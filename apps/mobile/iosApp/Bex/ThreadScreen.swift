@@ -236,10 +236,13 @@ struct ThreadScreen: View {
     }
 
     private func openContextTerminal(_ terminalId: String?) {
-        let resolved = terminalId
-            .flatMap { id in model.threadView?.terminals.first { $0.terminalId == id }?.terminalId }
-            ?? model.threadView?.terminals.first?.terminalId
-        routes.terminal(resolved)
+        let terminalIds = model.threadView?.terminals.map(\.terminalId) ?? []
+        routes.terminal(
+            terminalNavigationTarget(
+                availableTerminalIds: terminalIds,
+                requestedTerminalId: terminalId
+            )
+        )
     }
 
     @ToolbarContentBuilder

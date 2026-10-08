@@ -70,6 +70,7 @@ import dev.remoteagent.core.TimelineDisclosure
 import dev.remoteagent.core.TimelineLayout
 import dev.remoteagent.core.TimelineRowKind
 import dev.remoteagent.core.WorkingControlView
+import dev.remoteagent.core.terminalNavigationTarget
 import kotlinx.coroutines.launch
 
 private const val END_SLACK_PX = 80
@@ -116,13 +117,13 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
     val current = view
     val header = current?.header
     val terminalThreadId = current?.threadId
-    val terminals = current?.terminals ?: emptyList()
+    val terminalIds = current?.terminals?.map { it.terminalId } ?: emptyList()
     val projectName = header?.project?.name
     val cwd = header?.cwd
     val openTerminal: (String?) -> Unit = terminalAction@{ terminalId ->
         val routeThreadId = terminalThreadId ?: return@terminalAction
-        val terminal = terminals.firstOrNull { it.terminalId == terminalId } ?: terminals.firstOrNull()
-        model.navigate(Route.Terminal(routeThreadId, terminal?.terminalId ?: "", projectName, cwd))
+        val target = terminalNavigationTarget(terminalIds, terminalId)
+        model.navigate(Route.Terminal(routeThreadId, target ?: "", projectName, cwd))
     }
     ScreenScaffold(
         header?.title ?: "",
