@@ -353,71 +353,36 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         }
                     }
                 }
-            if (liveEvents.isEmpty()) {
-                view.frames.filter { it.threadId == threadId }.maxByOrNull { it.sequence }?.let { frame ->
-                    val epoch = threadSessions.firstOrNull {
-                        it.hostId == frame.hostId && it.deviceId == frame.deviceId
-                    }?.openedAt.orEmpty()
-                    val frameAspect = frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f)
-                    item(key = "frame-${frame.hostId}-${frame.deviceId}-$epoch") {
-                        val bitmap = remember(frame.sequence) {
-                            BitmapFactory.decodeByteArray(frame.png, 0, frame.png.size)?.asImageBitmap()
-                        }
-                        bitmap?.let {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(frameAspect)
-                                    .deviceKeyInput(model, frame.hostId, frame.deviceId)
-                                    .deviceTouchInput(
-                                        model,
-                                        frame.hostId,
-                                        frame.deviceId,
-                                        epoch,
-                                        0,
-                                        rawTouchFor(view, frame.hostId, frame.deviceId, 0),
-                                        frame.width.toInt(),
-                                        frame.height.toInt(),
-                                    ),
-                            ) {
-                                Image(it, "Live device frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                                DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
-                            }
+            liveEvents
+                .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0, it.sessionEpoch) }
+                .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }, { it.sessionEpoch }))
+                .forEach { (stream, events) ->
+                    val ordered = events.sortedBy { it.sequence }
+                    val frame = ordered.lastOrNull() ?: return@forEach
+                    val epoch = frame.sessionEpoch
+                    item(key = "video-frame-${stream.hostId}-${stream.deviceId}-${stream.screenId}-$epoch") {
+                        if (ordered.size > 1 || stream.screenId != 0) Text("Live screen ${stream.screenId}")
+                        when (frame.encoding) {
+                            "jpeg", "mjpeg" -> DeviceJpegFrame(
+                                model,
+                                view,
+                                frame,
+                                epoch,
+                                stream.screenId,
+                                rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
+                            )
+                            "h264", "semu", "avcc-description" -> DeviceH264Frame(
+                                model,
+                                view,
+                                ordered,
+                                epoch,
+                                stream.screenId,
+                                rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
+                            )
+                            else -> Text("Unsupported live device frame format: ${frame.encoding}")
                         }
                     }
                 }
-            } else {
-                liveEvents
-                    .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0, it.sessionEpoch) }
-                    .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }, { it.sessionEpoch }))
-                    .forEach { (stream, events) ->
-                        val ordered = events.sortedBy { it.sequence }
-                        val frame = ordered.lastOrNull() ?: return@forEach
-                        val epoch = frame.sessionEpoch
-                        item(key = "video-frame-${stream.hostId}-${stream.deviceId}-${stream.screenId}-$epoch") {
-                            if (ordered.size > 1 || stream.screenId != 0) Text("Live screen ${stream.screenId}")
-                            when (frame.encoding) {
-                                "jpeg", "mjpeg" -> DeviceJpegFrame(
-                                    model,
-                                    view,
-                                    frame,
-                                    epoch,
-                                    stream.screenId,
-                                    rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
-                                )
-                                "h264", "semu", "avcc-description" -> DeviceH264Frame(
-                                    model,
-                                    view,
-                                    ordered,
-                                    epoch,
-                                    stream.screenId,
-                                    rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
-                                )
-                                else -> Text("Unsupported live device frame format: ${frame.encoding}")
-                            }
-                        }
-                    }
-            }
             view.accessibility
                 .filter { tree -> threadSessions.any { it.hostId == tree.hostId && it.deviceId == tree.deviceId } }
                 .forEach { tree ->
