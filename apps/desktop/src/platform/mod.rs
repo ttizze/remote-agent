@@ -1055,8 +1055,6 @@ const SNAPSHOT_QUEUE_MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 pub(crate) struct PendingSnapshot {
     pub(crate) id: String,
     pub(crate) name: String,
-    pub(crate) mime_type: String,
-    pub(crate) size_bytes: u64,
     pub(crate) source: agent_domain::CapturedWindow,
     pub(crate) path: PathBuf,
 }
@@ -1124,8 +1122,6 @@ impl SnapshotMetadata {
         valid.then_some(PendingSnapshot {
             id: self.id,
             name: self.name,
-            mime_type: "image/png".into(),
-            size_bytes: self.size_bytes,
             source: agent_domain::CapturedWindow {
                 app_name: self.source.app_name,
                 window_title: self.source.window_title,
