@@ -1,8 +1,10 @@
 # BEX Dev for iOS
 
-BEX Dev is a separate TestFlight app (`dev.remoteagent.mobile.ios.dev`). It can be
-installed alongside BEX; its preferences, snapshots, and default Keychain
-access group are separate. Pair it with the development Host explicitly.
+BEX Dev is a separate TestFlight app (`dev.remoteagent.mobile.ios.dev`, App Store
+Connect app ID `6820657007`). It can be installed alongside BEX; its preferences,
+snapshots, and default Keychain access group are separate. Its amber icon has a
+`DEV` label and is selected by
+`Dev.xcconfig`. Pair it with the development Host explicitly.
 
 Archive with the reproducible command and fresh archive/derived-data paths:
 

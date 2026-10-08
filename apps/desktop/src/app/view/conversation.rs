@@ -67,9 +67,9 @@ impl Desktop {
                     .p_3()
                     .gap_2()
                     .rounded_lg()
-                    .bg(rgb(0x303030))
+                    .bg(rgb(appearance::RAISED))
                     .border_1()
-                    .border_color(rgb(0x454545))
+                    .border_color(rgb(appearance::BORDER))
                     .shadow_md()
                     .text_sm()
                     .child(div().max_h(px(44.)).overflow_hidden().child(user.clone()))
@@ -77,7 +77,7 @@ impl Desktop {
                         div()
                             .max_h(px(66.))
                             .overflow_hidden()
-                            .text_color(rgb(0xaaaaaa))
+                            .text_color(rgb(appearance::MUTED))
                             .child(answer)
                     }))
             });
@@ -119,9 +119,9 @@ impl Desktop {
                                         .h(px(if distance == Some(0) { 2. } else { 1. }))
                                         .w(px(width))
                                         .bg(rgb(if active || distance == Some(0) {
-                                            0xeeeeee
+                                            appearance::FOREGROUND
                                         } else {
-                                            0x777777
+                                            appearance::MUTED
                                         })),
                                 ),
                             ),
@@ -315,7 +315,7 @@ impl Desktop {
                         },
                     )
                     .icon(IconName::SquareTerminal)
-                    .text_color(rgb(0xa0a0a0)),
+                    .text_color(rgb(appearance::MUTED)),
                 );
                 if expanded {
                     let output = projected.expanded_body();
@@ -328,7 +328,7 @@ impl Desktop {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(0x999999))
+                                        .text_color(rgb(appearance::MUTED))
                                         .child("プレーンテキスト"),
                                 )
                                 .child(
@@ -344,11 +344,16 @@ impl Desktop {
                                 ),
                         )
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
-                        .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
-                            "{} {}",
-                            item.status.label(),
-                            exit_code.map(|v| format!("exit {v}")).unwrap_or_default()
-                        )));
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(appearance::MUTED))
+                                .child(format!(
+                                    "{} {}",
+                                    item.status.label(),
+                                    exit_code.map(|v| format!("exit {v}")).unwrap_or_default()
+                                )),
+                        );
                 }
                 body.into_any_element()
             }
@@ -487,11 +492,11 @@ impl Desktop {
                                 view.remeasure_item(&turn_id);
                             },
                         )
-                        .text_color(rgb(0xa0a0a0))
+                        .text_color(rgb(appearance::MUTED))
                         .into_any_element()
                     } else {
                         div()
-                            .text_color(rgb(0xa0a0a0))
+                            .text_color(rgb(appearance::MUTED))
                             .child(label.clone())
                             .into_any_element()
                     };
@@ -578,7 +583,7 @@ impl Desktop {
                             .debug_selector(|| "conversation-in-progress".into())
                             .gap_2()
                             .text_sm()
-                            .text_color(rgb(0xa0a0a0))
+                            .text_color(rgb(appearance::MUTED))
                             .child(spinner::Spinner::new().small())
                             .child(projected.progress_label(false, now)),
                     );
@@ -656,7 +661,7 @@ impl Desktop {
                 v_flex().min_w_0().gap_2().child(body).child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x999999))
+                        .text_color(rgb(appearance::MUTED))
                         .child(pending.delivery_label()),
                 ),
             )
@@ -679,7 +684,7 @@ impl Desktop {
                     .rounded_lg()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(rgb(0x444444))
+                    .border_color(rgb(appearance::BORDER))
                     .debug_selector(|| "user-image-thumbnail".into())
                     .child(self.image(source, false, 80., true, cx))
             })
@@ -708,18 +713,25 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use agent_protocol::requests::{Answer, ElicitationAnswer, ElicitationInput, RequestBody};
-        let id = &request.id;
-        let key = id;
+        let key = &request.id;
         let Some(inputs) = self.requests.get(key) else {
             return div().into_any_element();
         };
+        let is_question = matches!(request.request_body, RequestBody::Question { .. });
         let mut body = v_flex()
             .gap_3()
             .p_4()
             .rounded_lg()
-            .bg(rgb(0x30312a))
+            .bg(rgb(if is_question {
+                appearance::SURFACE
+            } else {
+                0x30312a
+            }))
             .child(request.title.clone())
-            .child(request.body.clone());
+            .when(
+                !is_question || inputs.sent || !request.can_respond,
+                |body| body.child(request.body.clone()),
+            );
         if !request.details.is_empty() {
             body = body.child(
                 TextView::markdown(
@@ -735,48 +747,103 @@ impl Desktop {
         match &request.request_body {
             RequestBody::Question { .. } => {
                 for question in &inputs.questions {
+                    if !question.definition.header.is_empty() {
+                        body = body.child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .child(question.definition.header.clone()),
+                        );
+                    }
                     body = body.child(question.definition.prompt.clone());
-                    for option in &question.definition.choices {
+                    for (index, option) in question.definition.choices.iter().enumerate() {
                         let request_key = key.to_owned();
                         let question_id = question.definition.id.clone();
                         let choice_id = option.id.clone();
                         let selected = question.selected.contains(&option.id);
-                        body = body.child(self.button(
-                            format!("answer-{key}-{}-{}", question_id, option.id),
-                            format!("{}{}", if selected { "✓ " } else { "" }, option.label),
-                            cx,
-                            move |view, window, cx| {
-                                let Some(question) =
-                                    view.requests.get_mut(&request_key).and_then(|inputs| {
-                                        inputs
-                                            .questions
-                                            .iter_mut()
-                                            .find(|question| question.definition.id == question_id)
-                                    })
-                                else {
-                                    return;
-                                };
-                                if question.definition.multiple {
-                                    toggle_set(&mut question.selected, &choice_id);
-                                } else {
-                                    question.selected.clear();
-                                    question.selected.insert(choice_id.clone());
-                                }
-                                question
-                                    .input
-                                    .update(cx, |input, cx| input.set_value("", window, cx));
-                            },
-                        ));
-                        if !option.description.is_empty() {
-                            body = body.child(option.description.clone());
-                        }
+                        let number = index + 1;
+                        body = body.child(
+                            Button::new(format!("answer-{key}-{}-{}", question_id, option.id))
+                                .accessibility_label(format!(
+                                    "{number}. {} {}",
+                                    option.label, option.description
+                                ))
+                                .ghost()
+                                .selected(selected)
+                                .toggled(selected)
+                                .w_full()
+                                .h_auto()
+                                .py_2()
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .items_start()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .min_w_6()
+                                                .h_6()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(rgb(appearance::RAISED))
+                                                .text_sm()
+                                                .text_color(rgb(appearance::MUTED))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(number.to_string()),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_1()
+                                                .whitespace_normal()
+                                                .text_left()
+                                                .child(option.label.clone())
+                                                .when(!option.description.is_empty(), |column| {
+                                                    column.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(appearance::MUTED))
+                                                            .child(option.description.clone()),
+                                                    )
+                                                }),
+                                        )
+                                        .child(div().flex_shrink_0().size_6().children(
+                                            selected.then(|| Icon::new(IconName::Check).size_4()),
+                                        )),
+                                )
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    let Some(question) =
+                                        view.requests.get_mut(&request_key).and_then(|inputs| {
+                                            inputs.questions.iter_mut().find(|question| {
+                                                question.definition.id == question_id
+                                            })
+                                        })
+                                    else {
+                                        return;
+                                    };
+                                    if question.definition.multiple {
+                                        toggle_set(&mut question.selected, &choice_id);
+                                    } else {
+                                        question.selected.clear();
+                                        question.selected.insert(choice_id.clone());
+                                    }
+                                    question
+                                        .input
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    cx.notify();
+                                })),
+                        );
                     }
                     if question.definition.allow_free_text {
                         body = body.child(Input::new(&question.input));
                     }
                 }
                 let key = key.to_owned();
-                let id = id.clone();
                 body = body.child(self.button(
                     format!("respond-{key}"),
                     "回答を送信",
@@ -799,7 +866,7 @@ impl Desktop {
                                 )
                             })
                             .collect();
-                        view.respond(id.clone(), Answer::Questions { answers });
+                        view.respond(key.clone(), Answer::Questions { answers });
                     },
                 ));
             }
@@ -808,7 +875,6 @@ impl Desktop {
                 let mut row = h_flex().gap_2().flex_wrap();
                 for choice in choices {
                     let key = key.to_owned();
-                    let id = id.clone();
                     let choice_id = choice.id.clone();
                     row = row.child(self.button(
                         format!("decision-{key}-{}", choice.id),
@@ -816,7 +882,7 @@ impl Desktop {
                         cx,
                         move |view, _, _| {
                             view.respond(
-                                id.clone(),
+                                key.clone(),
                                 if permission {
                                     Answer::Permission {
                                         choice_id: choice_id.clone(),
@@ -848,7 +914,6 @@ impl Desktop {
                     body = body.child(Textarea::new(&inputs.response));
                 }
                 let accept_key = key.to_owned();
-                let accept_id = id.clone();
                 let request_body = request.request_body.clone();
                 body = body.child(self.button(
                     format!("elicitation-accept-{accept_key}"),
@@ -862,7 +927,7 @@ impl Desktop {
                             &request_body,
                             &inputs.response.read(cx).value(),
                         ) {
-                            Ok(answer) => view.respond(accept_id.clone(), answer),
+                            Ok(answer) => view.respond(accept_key.clone(), answer),
                             Err(error) => view.set_error(error),
                         }
                     },
@@ -872,14 +937,13 @@ impl Desktop {
                     (ElicitationAnswer::Cancel, "キャンセル"),
                 ] {
                     let key = key.to_owned();
-                    let id = id.clone();
                     body = body.child(self.button(
                         format!("elicitation-{label}-{key}"),
                         label,
                         cx,
                         move |view, _, _| {
                             view.respond(
-                                id.clone(),
+                                key.clone(),
                                 Answer::Elicitation {
                                     action: action.clone(),
                                 },
@@ -890,7 +954,6 @@ impl Desktop {
             }
             RequestBody::ToolExecution { .. } => {
                 let key = key.to_owned();
-                let id = id.clone();
                 let request_body = request.request_body.clone();
                 body = body
                     .child(Textarea::new(&inputs.response))
@@ -906,7 +969,7 @@ impl Desktop {
                                 &request_body,
                                 &inputs.response.read(cx).value(),
                             ) {
-                                Ok(answer) => view.respond(id.clone(), answer),
+                                Ok(answer) => view.respond(key.clone(), answer),
                                 Err(error) => view.set_error(error),
                             }
                         },
@@ -998,11 +1061,13 @@ fn user_message_row(
                     .debug_selector(|| "user-message-actions".into())
                     .invisible()
                     .group_hover(group, |style| style.visible())
-                    .children(
-                        time.map(|time| {
-                            div().text_xs().text_color(rgb(0x999999)).mr_2().child(time)
-                        }),
-                    )
+                    .children(time.map(|time| {
+                        div()
+                            .text_xs()
+                            .text_color(rgb(appearance::MUTED))
+                            .mr_2()
+                            .child(time)
+                    }))
                     .child(
                         Button::new(format!("copy-{id}"))
                             .debug_selector(|| "user-message-copy".into())
@@ -1053,7 +1118,7 @@ mod tests {
 
     #[gpui::test]
     fn hovering_own_message_allows_copying_the_complete_text(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(crate::appearance::init);
         let (_, cx) = cx.add_window_view(|_, _| Message);
         cx.run_until_parked();
         let bounds = cx.debug_bounds("user-message-actions").unwrap();
@@ -1105,7 +1170,7 @@ mod rendering_tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),
