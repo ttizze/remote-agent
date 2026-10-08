@@ -81,17 +81,23 @@ struct GitFilesSection: View {
         allFiles.filter { !excludedFiles.contains($0.path) }
     }
 
+    private var selectedInsertions: UInt64 {
+        selectedFiles.reduce(0) { $0 + $1.insertions }
+    }
+
+    private var selectedDeletions: UInt64 {
+        selectedFiles.reduce(0) { $0 + $1.deletions }
+    }
+
     var body: some View {
         Section("Files") {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(selectedFiles.count) selected")
                         .font(AppTheme.font(14, weight: .semibold))
-                    Text(
-                        "+\(selectedFiles.reduce(0) { $0 + $1.insertions }) / -\(selectedFiles.reduce(0) { $0 + $1.deletions })"
-                    )
-                    .font(AppTheme.font(12))
-                    .foregroundStyle(AppTheme.muted)
+                    Text("+\(selectedInsertions) / -\(selectedDeletions)")
+                        .font(AppTheme.font(12))
+                        .foregroundStyle(AppTheme.muted)
                 }
                 Spacer()
                 if !allFiles.isEmpty {
