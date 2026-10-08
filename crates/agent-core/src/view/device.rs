@@ -162,17 +162,46 @@ pub fn project_touch_point(
     {
         return None;
     }
+    // Keep the fit calculation in f64.  With finite f32 inputs, the ratio can
+    // underflow to zero before the rendered size is calculated, which would
+    // otherwise turn a valid pointer into NaN coordinates.
+    let viewport_width = viewport_width as f64;
+    let viewport_height = viewport_height as f64;
+    let content_width = content_width as f64;
+    let content_height = content_height as f64;
+    let x = x as f64;
+    let y = y as f64;
     let scale = (viewport_width / content_width).min(viewport_height / content_height);
     let rendered_width = content_width * scale;
     let rendered_height = content_height * scale;
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !rendered_width.is_finite()
+        || !rendered_height.is_finite()
+        || rendered_width <= 0.0
+        || rendered_height <= 0.0
+    {
+        return None;
+    }
     let left = (viewport_width - rendered_width) / 2.0;
     let top = (viewport_height - rendered_height) / 2.0;
-    if x < left || x > left + rendered_width || y < top || y > top + rendered_height {
+    if !left.is_finite()
+        || !top.is_finite()
+        || x < left
+        || x > left + rendered_width
+        || y < top
+        || y > top + rendered_height
+    {
+        return None;
+    }
+    let normalized_x = ((x - left) / rendered_width).clamp(0.0, 1.0);
+    let normalized_y = ((y - top) / rendered_height).clamp(0.0, 1.0);
+    if !normalized_x.is_finite() || !normalized_y.is_finite() {
         return None;
     }
     Some(DeviceTouchPoint {
-        x: ((x - left) / rendered_width).clamp(0.0, 1.0),
-        y: ((y - top) / rendered_height).clamp(0.0, 1.0),
+        x: normalized_x as f32,
+        y: normalized_y as f32,
     })
 }
 
@@ -565,5 +594,16 @@ mod tests {
             project_touch_point(750.0, 750.0, 1000.0, 1000.0, 1000.0, 500.0),
             Some(DeviceTouchPoint { x: 0.75, y: 1.0 }),
         );
+        let extreme = project_touch_point(
+            f32::MAX / 2.0,
+            0.0,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+        )
+        .expect("finite extreme dimensions should remain projectable");
+        assert!(extreme.x.is_finite() && extreme.y.is_finite());
+        assert!((0.0..=1.0).contains(&extreme.x) && (0.0..=1.0).contains(&extreme.y));
     }
 }

@@ -482,7 +482,7 @@ struct DeviceScreen: View {
                                 }
                             }
                             Button("Record") {
-                                model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "avcc"))
+                                model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "mp4"))
                             }
                             Button("Stop record") {
                                 model.perform(.stopDeviceRecording(hostId: session.hostId, deviceId: session.deviceId))
@@ -525,25 +525,6 @@ struct DeviceScreen: View {
                         }
                         .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
-                    } else if let frame = view.frames.filter({ $0.threadId == threadId }).max(by: { $0.sequence < $1.sequence }),
-                       let image = UIImage(data: Data(frame.png)) {
-                        ZStack {
-                            Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
-                            DeviceAccessibilityOverlay(view: view, deviceKey: "\(frame.hostId):\(frame.deviceId)")
-                        }
-                        .overlay {
-                            GeometryReader { proxy in
-                                    Color.clear
-                                        .contentShape(Rectangle())
-                                        .gesture(deviceTouchGesture(
-                                            hostId: frame.hostId,
-                                            deviceId: frame.deviceId,
-                                            screenId: 0,
-                                            size: proxy.size,
-                                            raw: deviceRawTouch(view, hostId: frame.hostId, deviceId: frame.deviceId, screenId: 0),
-                                        ))
-                            }
-                        }
                     } else if let frame = view.videoFrames.filter({ $0.threadId == threadId && ($0.encoding == "jpeg" || $0.encoding == "mjpeg") }).max(by: { $0.sequence < $1.sequence }),
                               let image = UIImage(data: Data(frame.payload)) {
                         ZStack {

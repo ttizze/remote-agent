@@ -233,41 +233,6 @@ impl Desktop {
                 active_host == host_id && active_device == device_id && active_epoch == epoch
             })
         });
-        let mut newest_frames = BTreeMap::new();
-        for frame in view.frames.iter().filter(|frame| frame.thread_id == thread) {
-            let entry = newest_frames
-                .entry((frame.host_id.clone(), frame.device_id.clone()))
-                .or_insert(frame);
-            if frame.sequence > entry.sequence {
-                *entry = frame;
-            }
-        }
-        for frame in newest_frames.into_values().filter(|frame| !frame.png.is_empty()) {
-            let Some(epoch) = view.sessions.iter().find(|session| {
-                session.thread_id == thread
-                    && session.host_id == frame.host_id
-                    && session.device_id == frame.device_id
-            }).map(|session| session.opened_at.clone()) else {
-                continue;
-            };
-            let key = (frame.host_id.clone(), frame.device_id.clone(), epoch, 0);
-            if self
-                .panels
-                .device
-                .frames
-                .get(&key)
-                .is_none_or(|(sequence, _)| *sequence != frame.sequence)
-            {
-                self.panels.device.frames.insert(
-                    key,
-                    (
-                        frame.sequence,
-                        Arc::new(Image::from_bytes(ImageFormat::Png, frame.png.clone())),
-                    ),
-                );
-                cx.notify();
-            }
-        }
         let events = view
             .video_events
             .iter()
@@ -539,7 +504,7 @@ impl Desktop {
                     move |view, _, _, _| view.perform(Intent::StartDeviceRecording {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
-                        format: "avcc".into(),
+                        format: "mp4".into(),
                     })
                 })))
                 .child(Button::new(SharedString::from(format!("device-stop-record-{host_id}-{device_id}"))).label("Stop record").xsmall().on_click(cx.listener({

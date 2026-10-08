@@ -4858,7 +4858,7 @@ async fn hub_input(
         (DevicePlatform::Android, DeviceInputKind::Key { key, meta, ctrl, .. }) => {
             if key == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
             else if let Some(keycode) = android_keycode(key) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
-            else if key.chars().count() == 1 && !meta && !ctrl { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": key}).to_string().into()) }
+            else if key.encode_utf16().count() == 1 && !meta && !ctrl { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": key}).to_string().into()) }
             else { return Err(format!("unsupported Android keyboard key {key}")); }
         }
         (DevicePlatform::Ios, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::binary([vec![0x04], serde_json::to_vec(&serde_json::json!({"button": button_wire(*button, true)})).map_err(|error| error.to_string())?].concat()),
@@ -5862,35 +5862,6 @@ mod tests {
                 assert_eq!(payload, serde_json::json!({"type": "text", "text": "é"}));
             }
             other => panic!("unexpected Android Unicode frame: {other:?}"),
-        }
-        server.abort();
-
-        let (port, receiver, server) = fake_websocket_server().await;
-        hub_input(
-            port,
-            DevicePlatform::Android,
-            "emu",
-            &DeviceInputKind::Key {
-                code: "KeySmile".into(),
-                key: "😀".into(),
-                down: true,
-                meta: false,
-                ctrl: false,
-            },
-            0,
-        )
-        .await
-        .unwrap();
-        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
-            .await
-            .unwrap()
-            .unwrap();
-        match message {
-            async_tungstenite::tungstenite::Message::Text(text) => {
-                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
-                assert_eq!(payload, serde_json::json!({"type": "text", "text": "😀"}));
-            }
-            other => panic!("unexpected Android supplementary Unicode frame: {other:?}"),
         }
         server.abort();
 
