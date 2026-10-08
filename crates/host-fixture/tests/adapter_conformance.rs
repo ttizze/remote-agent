@@ -633,6 +633,84 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_admission() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let mut threads: Vec<_> = (0..200).map(|index| serde_json::json!({
+            "id":format!("root-{index:03}"), "name":format!("Conversation {index:03}"),
+            "updatedAt":index,
+        })).collect();
+        threads.extend([
+            serde_json::json!({"id":"child", "parentThreadId":"root-199", "name":"Child", "updatedAt":-1}),
+            serde_json::json!({"id":"grandchild", "parentThreadId":"child", "name":"Grandchild", "updatedAt":-2}),
+            serde_json::json!({"id":"hidden-child", "parentThreadId":"root-000", "updatedAt":-3}),
+        ]);
+        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
+        let host = start(&root, Arc::new(Memory::default())).await;
+        let first = host.local().await.unwrap();
+        let second = host.local().await.unwrap();
+        let descendant_reads = || {
+            std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap_or_default()
+                .lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|entry| entry["method"] == "thread/list" && entry["ancestorThreadId"].is_string()).count()
+        };
+        let query = op::ListSessions::new(agent_protocol::models::ListQuery {
+            chat_limit: 150, ..Default::default()
+        });
+        let (first_page, second_page) = tokio::join!(first.peer.call(&query), second.peer.call(&query));
+        for page in [first_page.unwrap(), second_page.unwrap()] {
+            assert!(page.provider_errors.is_none());
+            assert!(page.has_more_chats);
+            assert_eq!(page.data.len(), 150);
+            assert!(page.data.iter().all(|thread| thread.parent_id.is_none()));
+        }
+        let complete = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            chat_limit: 250, ..Default::default()
+        })).await.unwrap();
+        assert!(complete.provider_errors.is_none());
+        assert!(!complete.has_more_chats);
+        assert_eq!(complete.data.len(), 200);
+        let searched = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            search_term: "Conversation 199".into(), ..Default::default()
+        })).await.unwrap();
+        assert!(searched.provider_errors.is_none());
+        assert_eq!(searched.data.len(), 1);
+        assert_eq!(descendant_reads(), 0, "expanded, complete and searched root lists must not read descendants");
+        let gate = root.join("hold-list-reads");
+        std::fs::write(&gate, []).unwrap();
+        let agents = op::ListAgents {
+            thread_id: agent_protocol::session::SessionRef { provider: ProviderKind::Codex, id: "root-199".into() },
+        };
+        let [a, b, c, d, e, f, g, h] = [
+            &first.peer, &first.peer, &first.peer, &first.peer,
+            &second.peer, &second.peer, &second.peer, &second.peer,
+        ].map(|peer| peer.call(&agents));
+        let listing = async { tokio::join!(a, b, c, d, e, f, g, h) };
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while descendant_reads() < 4 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let pending = descendant_reads();
+            std::fs::remove_file(&gate).unwrap();
+            assert_eq!(pending, 4, "concurrent clients must share native list admission");
+        };
+        let ((a, b, c, d, e, f, g, h), ()) = tokio::join!(listing, release);
+        for response in [a, b, c, d, e, f, g, h] {
+            let agents = response.unwrap();
+            assert_eq!(agents.iter().map(|agent| agent.id.id.as_str()).collect::<Vec<_>>(), ["child", "grandchild"]);
+        }
+        assert_eq!(descendant_reads(), 8);
+        first.close().await;
+        second.close().await;
+        host.close().await.unwrap();
+    }).await.expect("concurrent fleet list deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_order() {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
@@ -664,12 +742,6 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .filter(|entry| entry["method"] == "thread/list")
             .collect::<Vec<_>>()
     };
-    let page_reads = || {
-        list_reads()
-            .iter()
-            .filter(|entry| entry["ancestorThreadId"].is_null())
-            .count()
-    };
     let listing = local
         .peer
         .call(&op::ListSessions::new(Default::default()))
@@ -681,23 +753,16 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
     assert!(listing.has_more_chats);
     assert!(listing.provider_errors.is_none());
-    assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
-    let mut descendant_roots = list_reads()
-        .iter()
-        .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    descendant_roots.sort();
-    let mut visible_roots = listing
-        .data
-        .iter()
-        .filter_map(|thread| thread.id.as_ref())
-        .filter(|id| id.provider == ProviderKind::Codex)
-        .map(|id| id.id.clone())
-        .collect::<Vec<_>>();
-    visible_roots.sort();
     assert_eq!(
-        descendant_roots, visible_roots,
-        "descendant reads must be scoped to the visible Codex roots"
+        list_reads().len(),
+        1,
+        "initial list must not fetch all 20 pages"
+    );
+    assert!(
+        list_reads()
+            .iter()
+            .all(|entry| entry["ancestorThreadId"].is_null()),
+        "root titles must not trigger descendant reads"
     );
 
     let expanded = local
@@ -713,7 +778,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
     assert!(expanded.has_more_chats);
     assert_eq!(
-        page_reads(),
+        list_reads().len(),
         3,
         "expansion needs only two additional page reads"
     );
@@ -729,7 +794,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(found.data.len(), 1);
     assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
     assert!(!found.has_more_chats);
-    assert_eq!(page_reads(), 4);
+    assert_eq!(list_reads().len(), 4);
 
     let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
         "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":100,
@@ -752,7 +817,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     );
     assert!(listing.has_more_chats);
     assert_eq!(
-        page_reads(),
+        list_reads().len(),
         7,
         "finish timestamp ties across native page boundaries"
     );
@@ -792,7 +857,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(listing.more_project_ids.len(), 3);
     assert!(listing.has_more_chats);
     assert_eq!(
-        page_reads(),
+        list_reads().len(),
         8,
         "stop when all visible sections have their lookahead"
     );
@@ -808,7 +873,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(expanded.data[159].id.as_ref().unwrap().id, "scoped-1400");
     assert_eq!(expanded.data[160].id.as_ref(), Some(&session));
     assert_eq!(
-        page_reads(),
+        list_reads().len(),
         15,
         "expand only the requested project before stopping"
     );
