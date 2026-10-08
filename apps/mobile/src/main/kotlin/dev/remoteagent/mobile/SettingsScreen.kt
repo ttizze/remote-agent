@@ -58,6 +58,12 @@ import dev.remoteagent.core.privacyPolicy
 
 private const val PERCENT = 100f
 
+private fun releaseUpdateChannel(): UpdateChannel = when (BuildConfig.RELEASE_CHANNEL) {
+    "nightly" -> UpdateChannel.Nightly
+    "preview" -> UpdateChannel.Preview
+    else -> UpdateChannel.Stable
+}
+
 @Composable
 internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
     val scope = projectId?.let { SettingsScope.Project(it) } ?: SettingsScope.Host
@@ -71,7 +77,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                     NativeUpdateRequest(
                         NativeUpdatePlatform.Android,
                         BuildConfig.VERSION_NAME,
-                        UpdateChannel.Stable,
+                        releaseUpdateChannel(),
                     )
                 )
             )

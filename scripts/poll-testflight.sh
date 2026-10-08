@@ -9,6 +9,7 @@ timeout=${2:-1800}
 : "${ASC_KEY_ID:?ASC_KEY_ID is required}"
 : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is required}"
 [[ -f $ASC_API_KEY_PATH ]] || { echo 'App Store Connect API key file does not exist' >&2; exit 1; }
+[[ $ASC_KEY_ID =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'invalid App Store Connect key id' >&2; exit 1; }
 [[ $delivery_id =~ ^[A-Za-z0-9-]+$ ]] || { echo 'invalid delivery id' >&2; exit 1; }
 [[ $timeout =~ ^[0-9]+$ ]] || { echo 'invalid timeout' >&2; exit 1; }
 

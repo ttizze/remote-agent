@@ -9,6 +9,10 @@ dmg=$1
 : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required}"
 : "${APPLE_API_ISSUER_ID:?APPLE_API_ISSUER_ID is required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required on CI}"
+[[ $APPLE_API_KEY_ID =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo 'APPLE_API_KEY_ID contains unsupported path characters' >&2
+    exit 1
+}
 
 key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
 printf '%s' "$APPLE_API_KEY_P8" > "$key_path"

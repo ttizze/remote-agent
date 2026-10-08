@@ -95,6 +95,10 @@ val releaseSigningValues = listOf(
 val releaseSigningConfigured = releaseSigningValues.all { !it.isNullOrEmpty() }
 val releaseVersion = providers.gradleProperty("releaseVersion").orNull
 val releaseCode = providers.gradleProperty("releaseCode").orNull?.toIntOrNull()
+val releaseChannel = providers.gradleProperty("releaseChannel").orNull ?: "stable"
+require(releaseChannel in setOf("nightly", "preview", "stable")) {
+    "releaseChannel must be nightly, preview, or stable"
+}
 
 android {
     namespace = "dev.remoteagent.mobile"
@@ -105,6 +109,7 @@ android {
         targetSdk = 37
         versionCode = releaseCode ?: 1
         versionName = releaseVersion ?: "0.1.0"
+        buildConfigField("String", "RELEASE_CHANNEL", "\"$releaseChannel\"")
     }
     if (releaseSigningConfigured) {
         signingConfigs {
@@ -125,7 +130,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     testOptions {
         unitTests.all {
             it.systemProperty("jna.library.path", rootProject.file("target/debug").absolutePath)

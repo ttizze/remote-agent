@@ -212,6 +212,9 @@ impl AssetSource for DesktopAssets {
     }
 }
 fn main() {
+    if matches!(platform::handoff_installed_desktop(), Ok(true)) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     let _ = std::thread::Builder::new()
         .name("microphone-prepare".into())

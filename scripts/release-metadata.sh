@@ -42,7 +42,11 @@ while (($#)); do
         --date) release_date=${2:?missing date}; shift 2 ;;
         --run-number) run_number=${2:?missing run number}; shift 2 ;;
         --sha) commit=${2:?missing sha}; shift 2 ;;
-        --repository) repository=${2:?missing repository}; shift 2 ;;
+        --repository)
+            (($# >= 2)) || { echo 'missing repository' >&2; exit 2; }
+            repository=$2
+            shift 2
+            ;;
         --android-store-url) android_store_url=${2:?missing Android store URL}; shift 2 ;;
         --ios-store-url) ios_store_url=${2:?missing iOS store URL}; shift 2 ;;
         --build-time) build_time=${2:?missing build time}; shift 2 ;;

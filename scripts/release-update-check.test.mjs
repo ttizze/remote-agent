@@ -1,22 +1,17 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
-import fs from "node:fs/promises";
 import test from "node:test";
-import os from "node:os";
-import path from "node:path";
 
 import {
   checkUpdate,
   checkUpdateState,
   compareVersions,
-  downloadArtifact,
   fetchMetadata,
   initialUpdateState,
-  installArtifact,
   nativeUpdate,
   restartDecision,
   transitionUpdateState,
   updateAction,
+  validateMetadata,
 } from "./release-update-check.mjs";
 
 test("compares stable and prerelease versions using semantic ordering", () => {
@@ -24,6 +19,9 @@ test("compares stable and prerelease versions using semantic ordering", () => {
   assert.equal(compareVersions("1.0.0-nightly.2", "1.0.0-nightly.10"), -1);
   assert.equal(compareVersions("1.0.0-nightly.10", "1.0.0"), -1);
   assert.equal(compareVersions("1.1.0", "1.0.9"), 1);
+  assert.equal(compareVersions("999999999999999999.0.0", "1000000000000000000.0.0"), -1);
+  assert.throws(() => compareVersions("01.0.0", "1.0.0"), /invalid semantic version/);
+  assert.throws(() => compareVersions("1.0.0-nightly.01", "1.0.0-nightly.1"), /invalid semantic version/);
 });
 
 test("reports an update and preserves the channel URL", () => {
@@ -85,43 +83,6 @@ test("retains a downloaded update across a failed check and requires a restart a
   assert.equal(restartDecision({ serviceInstalled: true, serviceCurrent: false, assumeYes: true }).action, "restart");
 });
 
-test("downloads only the selected platform asset and verifies its size and checksum", async () => {
-  const bytes = Buffer.from("verified host archive");
-  const metadata = {
-    schema: 1,
-    channel: "nightly",
-    version: "0.1.0-nightly.20261008.42",
-    update_url: "https://example.invalid/releases/nightly.json",
-    assets: [
-      {
-        name: "host-linux-x86_64.tar.gz",
-        sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
-        size: bytes.length,
-      },
-    ],
-  };
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "release-update-test-"));
-  try {
-    const requests = [];
-    const transaction = await downloadArtifact(metadata, {
-      target: "host",
-      platform: "linux",
-      architecture: "x64",
-      destination: path.join(directory, "download", "host.tar.gz"),
-      fetchImpl: async (url, options) => {
-        requests.push({ url, options });
-        return { ok: true, status: 200, arrayBuffer: async () => bytes };
-      },
-    });
-    assert.equal(transaction.name, "host-linux-x86_64.tar.gz");
-    assert.deepEqual(await fs.readFile(transaction.path), bytes);
-    assert.equal(requests[0].url, "https://example.invalid/releases/host-linux-x86_64.tar.gz");
-    assert.deepEqual(requests[0].options.headers, { accept: "application/octet-stream" });
-  } finally {
-    await fs.rm(directory, { recursive: true, force: true });
-  }
-});
-
 test("rejects an HTTPS metadata request that redirects to HTTP", async () => {
   await assert.rejects(
     fetchMetadata("https://example.invalid/channel.json", async () => ({
@@ -134,37 +95,61 @@ test("rejects an HTTPS metadata request that redirects to HTTP", async () => {
   );
 });
 
-test("installs into a versioned staging directory and exposes native store links only when configured", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "release-install-test-"));
-  try {
-    const installed = await installArtifact(
-      { path: "/tmp/verified.tar.gz", version: "0.1.0-nightly.20261008.42" },
-      {
-        installRoot: path.join(directory, "versions"),
-        extractImpl: async (_archive, destination) => {
-          await fs.mkdir(destination, { recursive: true });
-          await fs.writeFile(path.join(destination, "host-daemon"), "binary");
-        },
-      },
-    );
-    assert.equal(installed.restart_required, true);
-    assert.equal(await fs.readFile(path.join(installed.install_path, "host-daemon"), "utf8"), "binary");
+test("follows only bounded HTTPS redirect hops", async () => {
+  const requested = [];
+  const metadata = { schema: 1, channel: "nightly", version: "1.0.0" };
+  const result = await fetchMetadata("https://example.invalid/first.json", async (url, options) => {
+    requested.push({ url, options });
+    if (requested.length < 3) {
+      return {
+        ok: false,
+        status: 302,
+        headers: new Map([["location", `https://example.invalid/hop-${requested.length}.json`]]),
+      };
+    }
+    return { ok: true, status: 200, url, json: async () => metadata };
+  });
+  assert.equal(result.version, metadata.version);
+  assert.equal(requested.length, 3);
+  assert.equal(requested[0].options.redirect, "manual");
+});
 
-    const base = { schema: 1, channel: "nightly", version: "0.1.0-nightly.20261008.42", update_url: null };
-    const unconfigured = nativeUpdate(base, "0.1.0-nightly.20261008.41", "android");
-    assert.equal(unconfigured.store_url, null);
-    assert.equal(unconfigured.update_available, false);
-    assert.match(unconfigured.message, /no store link/);
-    const androidLink = "https://play.google.com/store/apps/details?id=dev.remoteagent.mobile";
-    assert.equal(
-      nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").store_url,
-      androidLink,
-    );
-    assert.equal(
-      nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").update_available,
-      true,
-    );
-  } finally {
-    await fs.rm(directory, { recursive: true, force: true });
-  }
+test("rejects an HTTPS redirect loop after the configured bound", async () => {
+  let requests = 0;
+  await assert.rejects(
+    fetchMetadata("https://example.invalid/loop.json", async () => {
+      requests += 1;
+      return {
+        ok: false,
+        status: 302,
+        headers: new Map([["location", "https://example.invalid/loop.json"]]),
+      };
+    }),
+    /redirect limit/,
+  );
+  assert.equal(requests, 6);
+});
+
+test("rejects unsafe or oversized manifest assets before a consumer can select them", () => {
+  const base = { schema: 1, channel: "nightly", version: "1.0.0" };
+  const asset = { name: "host-linux-x86_64.tar.gz", sha256: "0".repeat(64), size: 1 };
+  assert.throws(() => validateMetadata({ ...base, assets: [{ ...asset, name: "../host.tar.gz" }] }), /invalid asset/);
+  assert.throws(() => validateMetadata({ ...base, assets: [{ ...asset, size: 512 * 1024 * 1024 + 1 }] }), /invalid asset/);
+});
+
+test("exposes native store links only when configured", () => {
+  const base = { schema: 1, channel: "nightly", version: "0.1.0-nightly.20261008.42", update_url: null };
+  const unconfigured = nativeUpdate(base, "0.1.0-nightly.20261008.41", "android");
+  assert.equal(unconfigured.store_url, null);
+  assert.equal(unconfigured.update_available, false);
+  assert.match(unconfigured.message, /no store link/);
+  const androidLink = "https://play.google.com/store/apps/details?id=dev.remoteagent.mobile";
+  assert.equal(
+    nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").store_url,
+    androidLink,
+  );
+  assert.equal(
+    nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").update_available,
+    true,
+  );
 });

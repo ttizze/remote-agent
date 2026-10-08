@@ -36,6 +36,15 @@ scripts/release-metadata.sh \
     --output "$temporary/stable.json"
 jq -e '.channel == "stable" and .version == "1.2.3" and .tag == "v1.2.3"' "$temporary/stable.json" >/dev/null
 
+GITHUB_REPOSITORY=example/remote-agent scripts/release-metadata.sh \
+    --channel nightly \
+    --date 20261008 \
+    --run-number 43 \
+    --sha abcdef1234567890 \
+    --repository '' \
+    --output "$temporary/unpublished.json"
+jq -e '.update_url == null and .native_updates == {}' "$temporary/unpublished.json" >/dev/null
+
 GITHUB_OUTPUT="$temporary/github-output" scripts/release-metadata.sh \
     --channel preview \
     --date 20261008 \

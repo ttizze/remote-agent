@@ -69,8 +69,27 @@ struct SettingsScreen: View {
 private struct NativeUpdatePage: View {
     @ObservedObject var model: BexAppViewModel
 
+    private func buildSetting(_ key: String) -> String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+              !value.isEmpty,
+              !value.contains("$(") else {
+            return nil
+        }
+        return value
+    }
+
     private var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        buildSetting("APP_UPDATE_VERSION")
+            ?? buildSetting("CFBundleShortVersionString")
+            ?? "0.0.0"
+    }
+
+    private var updateChannel: UpdateChannel {
+        switch buildSetting("APP_RELEASE_CHANNEL") {
+        case "nightly": .nightly
+        case "preview": .preview
+        default: .stable
+        }
     }
 
     var body: some View {
@@ -101,7 +120,7 @@ private struct NativeUpdatePage: View {
             model.perform(.loadNativeUpdate(request: NativeUpdateRequest(
                 platform: .ios,
                 currentVersion: currentVersion,
-                channel: .stable
+                channel: updateChannel
             )))
         }
     }

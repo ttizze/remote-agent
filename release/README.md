@@ -31,15 +31,18 @@ to the trusted scheduled path or an explicitly requested manual run from
 
 ## Update transactions
 
-`scripts/release-update-check.mjs` is the shared update contract for Host and
-desktop consumers. It validates release metadata delivered over HTTPS, selects the platform asset,
-bounds release notes, and keeps pure check/download/install state transitions
-separate from network, filesystem, archive, and restart effects. The effectful
-helpers accept injected effects so contract tests never contact GitHub or
-replace a running process. A download is accepted only after both the manifest
-size and SHA-256 match; installation extracts into a private version directory
-and returns `restart_required` for the owning supervisor to decide when to hand
-off.
+`scripts/release-update-check.mjs` is the shared metadata and state contract for
+Host and desktop consumers. It validates release metadata delivered over HTTPS,
+selects the platform asset, bounds release notes, and keeps pure check state
+transitions separate from network and supervisor effects. The production Host
+owns verified streaming downloads, archive validation, installation, and the
+restart handoff; this script intentionally does not duplicate that installer.
+After a verified install, Host startup consumes `transactions/host.json` and
+starts the versioned executable under `installed/host/<version>`. Desktop
+startup consumes the corresponding desktop marker only when the local Host
+registry is stopped, then starts the versioned Linux/Windows executable or
+macOS app-bundle binary. A running Host and its active work keep the bundled
+Desktop executable in place until a later launch.
 
 Rust Host builds receive `APP_RELEASE_METADATA_URL` and
 `APP_RELEASE_CHANNEL`, and the channel version in `APP_UPDATE_VERSION` from the trusted release workflow. Local builds leave
@@ -50,11 +53,17 @@ the Host's private update directory so an interrupted download can be retried
 after a Host restart.
 
 The CLI supports local metadata (`--metadata`) and a configured HTTPS manifest
-(`--metadata-url`), with optional `--download` and `--install-dir` staging. It
-never restarts a Host or desktop process by itself. Native Android and iOS
-checks expose a Play/TestFlight URL only when release metadata was given an
-explicit `ANDROID_STORE_URL` or `IOS_STORE_URL` repository variable. Missing
-variables produce no native link and do not imply that a store release exists.
+(`--metadata-url`) for comparison and diagnostics. It never downloads, installs,
+or restarts a Host or desktop process by itself. Native Android and iOS checks
+expose a Play/TestFlight URL only after the corresponding mobile upload succeeds;
+missing publication data produces no native link and does not imply that a store
+release exists.
+
+Mobile packages carry the full release version used by the update protocol
+separately from their store-facing build number. iOS keeps the numeric
+`CFBundleShortVersionString` and `CFBundleVersion` values required by Apple while
+passing `APP_UPDATE_VERSION` and `APP_RELEASE_CHANNEL` through the archive; the
+Android build uses the same full version and a separate numeric `versionCode`.
 
 ## Naming audit
 

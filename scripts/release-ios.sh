@@ -46,6 +46,10 @@ if [[ ${IOS_UPLOAD:-0} == 1 ]]; then
     : "${ASC_API_KEY_PATH:?ASC_API_KEY_PATH is required for TestFlight upload}"
     : "${ASC_KEY_ID:?ASC_KEY_ID is required for TestFlight upload}"
     : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is required for TestFlight upload}"
+    [[ $ASC_KEY_ID =~ ^[A-Za-z0-9._-]+$ ]] || {
+        echo 'ASC_KEY_ID contains unsupported path characters' >&2
+        exit 1
+    }
     [[ -f $ASC_API_KEY_PATH ]] || { echo "App Store Connect API key file does not exist" >&2; exit 1; }
     upload_log="${RUNNER_TEMP:-$output_dir}/testflight-upload.log"
     xcrun altool --upload-app --type ios --file "$output_dir/mobile.ipa" \

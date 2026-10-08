@@ -35,6 +35,7 @@ printf '%s\n' "$MACOS_SIGNING_CERTIFICATE_PASSWORD" > "$certificate_password_fil
 # This keychain is private to the job and deliberately has an empty password.
 # The explicit flags avoid undocumented stdin or GUI password prompting.
 "$security_bin" create-keychain -p '' "$keychain"
+printf '%s\n' "$keychain" > "$RUNNER_TEMP/macos-distribution-keychain"
 "$security_bin" set-keychain-settings -lut 21600 "$keychain"
 "$security_bin" unlock-keychain -p '' "$keychain"
 "$security_bin" import "$decrypted_certificate" -f pemseq -t agg -k "$keychain" -T /usr/bin/codesign

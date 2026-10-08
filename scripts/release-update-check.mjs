@@ -1,15 +1,11 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
-import fsp from "node:fs/promises";
-import path from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
 
-const spawnFile = promisify(execFileCallback);
-const VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
 const CHANNELS = Object.freeze(["nightly", "preview", "stable"]);
 const UPDATE_TARGETS = Object.freeze(["host", "desktop"]);
 const NATIVE_TARGETS = Object.freeze(["android", "ios"]);
+const MAX_REDIRECTS = 5;
+const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const UPDATE_STATUSES = Object.freeze([
   "disabled",
   "idle",
@@ -28,19 +24,30 @@ const NOTE_ITEM_LENGTH = 220;
 function parseVersion(value) {
   const match = VERSION_PATTERN.exec(value);
   if (!match) throw new Error(`invalid semantic version: ${value}`);
+  const prerelease = match[4] ? match[4].split(".") : [];
+  if (prerelease.some((part) => /^\d+$/u.test(part) && part.length > 1 && part.startsWith("0"))) {
+    throw new Error(`invalid semantic version: ${value}`);
+  }
   return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3]),
-    prerelease: match[4] ? match[4].split(".") : [],
+    major: match[1],
+    minor: match[2],
+    patch: match[3],
+    prerelease,
   };
+}
+
+function compareNumericIdentifiers(left, right) {
+  if (left.length !== right.length) return left.length < right.length ? -1 : 1;
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function compareVersions(left, right) {
   const a = parseVersion(left);
   const b = parseVersion(right);
   for (const key of ["major", "minor", "patch"]) {
-    if (a[key] !== b[key]) return a[key] < b[key] ? -1 : 1;
+    const result = compareNumericIdentifiers(a[key], b[key]);
+    if (result !== 0) return result;
   }
   if (a.prerelease.length === 0 && b.prerelease.length === 0) return 0;
   if (a.prerelease.length === 0) return 1;
@@ -53,7 +60,7 @@ function compareVersions(left, right) {
     if (leftPart === rightPart) continue;
     const leftNumeric = /^\d+$/.test(leftPart);
     const rightNumeric = /^\d+$/.test(rightPart);
-    if (leftNumeric && rightNumeric) return Number(leftPart) < Number(rightPart) ? -1 : 1;
+    if (leftNumeric && rightNumeric) return compareNumericIdentifiers(leftPart, rightPart);
     if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
     return leftPart < rightPart ? -1 : 1;
   }
@@ -134,18 +141,21 @@ function validateMetadata(metadata, source = "release metadata") {
         !asset ||
         typeof asset.name !== "string" ||
         asset.name.length === 0 ||
-        path.basename(asset.name) !== asset.name ||
+        /[\\/\0]/u.test(asset.name) ||
+        asset.name === "." ||
+        asset.name === ".." ||
         typeof asset.sha256 !== "string" ||
         !/^[0-9a-f]{64}$/u.test(asset.sha256) ||
         !Number.isSafeInteger(asset.size) ||
-        asset.size < 0
+        asset.size < 0 ||
+        asset.size > MAX_ARTIFACT_BYTES
       ) {
         throw new Error("release metadata contains an invalid asset");
       }
     }
   }
   if (metadata.native_updates !== undefined) {
-    if (!metadata.native_updates || typeof metadata.native_updates !== "object") {
+    if (!metadata.native_updates || typeof metadata.native_updates !== "object" || Array.isArray(metadata.native_updates)) {
       throw new Error("release metadata native_updates must be an object");
     }
     for (const target of NATIVE_TARGETS) {
@@ -350,9 +360,8 @@ function restartDecision({ serviceInstalled, serviceCurrent, assumeYes = false, 
 async function fetchMetadata(url, fetchImpl = globalThis.fetch) {
   assertHttpsUrl(url, "metadata URL");
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable; pass a fetch implementation");
-  const response = await fetchImpl(url, { headers: { accept: "application/json" } });
+  const response = await fetchHttps(url, { accept: "application/json" }, fetchImpl);
   if (!response?.ok) throw new Error(`release metadata request failed: HTTP ${response?.status ?? "unknown"}`);
-  if (response.url) assertHttpsUrl(response.url, "metadata redirect URL");
   let metadata;
   try {
     metadata = await response.json();
@@ -362,95 +371,26 @@ async function fetchMetadata(url, fetchImpl = globalThis.fetch) {
   return validateMetadata(metadata, url);
 }
 
-function bytesHash(bytes) {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
-}
-
-function safeChildPath(root, relative) {
-  if (path.isAbsolute(relative) || relative.split(/[\\/]/u).includes("..")) {
-    throw new Error(`archive entry escapes install directory: ${relative}`);
+async function fetchHttps(url, headers, fetchImpl) {
+  let current = assertHttpsUrl(url, "HTTPS request URL");
+  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
+    const response = await fetchImpl(current, { headers, redirect: "manual" });
+    const status = Number(response?.status ?? 0);
+    if (status >= 300 && status < 400) {
+      if (redirect === MAX_REDIRECTS) throw new Error("HTTPS request exceeded the redirect limit");
+      const location = response.headers?.get?.("location")
+        ?? response.headers?.location
+        ?? response.location;
+      if (typeof location !== "string" || location.length === 0) {
+        throw new Error("HTTPS redirect did not include a Location header");
+      }
+      current = assertHttpsUrl(new URL(location, current).toString(), "HTTPS redirect URL");
+      continue;
+    }
+    if (response?.url) assertHttpsUrl(response.url, "HTTPS response URL");
+    return response;
   }
-  const resolvedRoot = path.resolve(root);
-  const resolved = path.resolve(resolvedRoot, relative);
-  if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
-    throw new Error(`archive entry escapes install directory: ${relative}`);
-  }
-  return resolved;
-}
-
-async function downloadArtifact(metadata, {
-  target,
-  platform = process.platform,
-  architecture = process.arch,
-  destination,
-  fetchImpl = globalThis.fetch,
-  fsImpl = fsp,
-} = {}) {
-  validateMetadata(metadata);
-  assertTarget(target);
-  const name = assetName({ target, platform, architecture });
-  const asset = findAsset(metadata, name);
-  if (!asset) throw new Error(`release has no ${target} artifact for ${platformName(platform)}-${architectureName(architecture)}`);
-  const url = assetUrl(metadata, asset);
-  if (!url) throw new Error("release metadata does not include an artifact URL");
-  if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable; pass a fetch implementation");
-  const response = await fetchImpl(url, { headers: { accept: "application/octet-stream" } });
-  if (!response?.ok) throw new Error(`artifact request failed: HTTP ${response?.status ?? "unknown"}`);
-  if (response.url) assertHttpsUrl(response.url, "artifact redirect URL");
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length !== asset.size) throw new Error(`artifact size mismatch for ${asset.name}`);
-  const digest = bytesHash(bytes);
-  if (digest !== asset.sha256) throw new Error(`artifact checksum mismatch for ${asset.name}`);
-  if (!destination) throw new Error("artifact destination is required");
-  const destinationPath = path.resolve(destination);
-  await fsImpl.mkdir(path.dirname(destinationPath), { recursive: true, mode: 0o700 });
-  const temporary = `${destinationPath}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    await fsImpl.writeFile(temporary, bytes, { mode: 0o600 });
-    await fsImpl.rename(temporary, destinationPath);
-  } catch (error) {
-    await fsImpl.rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
-  return { path: destinationPath, version: metadata.version, name: asset.name, size: bytes.length, sha256: digest };
-}
-
-async function listArchiveEntries(archivePath, extension, spawnImpl = spawnFile) {
-  const command = extension === ".zip" ? "unzip" : "tar";
-  const args = extension === ".zip" ? ["-Z1", archivePath] : ["-tzf", archivePath];
-  const result = await spawnImpl(command, args, { encoding: "utf8", windowsHide: true });
-  return String(result.stdout).split(/\r?\n/u).map((entry) => entry.trim()).filter(Boolean);
-}
-
-async function extractArchive(archivePath, destination, { spawnImpl = spawnFile } = {}) {
-  const extension = archivePath.endsWith(".zip") ? ".zip" : archivePath.endsWith(".tar.gz") ? ".tar.gz" : null;
-  if (!extension) throw new Error(`unsupported update archive: ${archivePath}`);
-  const entries = await listArchiveEntries(archivePath, extension, spawnImpl);
-  entries.forEach((entry) => safeChildPath(destination, entry));
-  await fsp.mkdir(destination, { recursive: true, mode: 0o700 });
-  const args = extension === ".zip"
-    ? ["-q", archivePath, "-d", destination]
-    : ["--extract", "--gzip", "--file", archivePath, "--directory", destination, "--no-same-owner", "--no-same-permissions"];
-  await spawnImpl(extension === ".zip" ? "unzip" : "tar", args, { windowsHide: true });
-}
-
-/** Install only into a private version directory; the owner decides when to restart. */
-async function installArtifact(transaction, { installRoot, extractImpl = extractArchive, fsImpl = fsp } = {}) {
-  if (!transaction?.path || !transaction.version) throw new Error("a verified artifact transaction is required");
-  if (!installRoot) throw new Error("update install root is required");
-  const root = path.resolve(installRoot);
-  const versionRoot = safeChildPath(root, transaction.version);
-  const temporary = `${versionRoot}.${process.pid}.${Date.now()}.staging`;
-  await fsImpl.rm(temporary, { recursive: true, force: true });
-  await fsImpl.mkdir(root, { recursive: true, mode: 0o700 });
-  try {
-    await extractImpl(transaction.path, temporary);
-    await fsImpl.rename(temporary, versionRoot);
-  } catch (error) {
-    await fsImpl.rm(temporary, { recursive: true, force: true }).catch(() => {});
-    throw error;
-  }
-  return { version: transaction.version, install_path: versionRoot, restart_required: true };
+  throw new Error("HTTPS request exceeded the redirect limit");
 }
 
 /** The original small local comparison remains useful to scripts and tests. */
@@ -504,11 +444,8 @@ export {
   checkUpdate,
   checkUpdateState,
   compareVersions,
-  downloadArtifact,
-  extractArchive,
   fetchMetadata,
   initialUpdateState,
-  installArtifact,
   nativeUpdate,
   normalizeReleaseNotes,
   parseVersion,
@@ -532,22 +469,7 @@ if (process.argv[1]?.endsWith("release-update-check.mjs")) {
     }
     const metadata = metadataPath ? readMetadata(metadataPath) : await fetchMetadata(metadataUrl);
     const state = checkUpdateState(metadata, { target, currentVersion, channel: channel ?? metadata.channel });
-    let result = { ...state, action: updateAction(state) };
-    const downloadPath = argument("--download");
-    if (downloadPath && result.action === "download") {
-      const transaction = await downloadArtifact(metadata, {
-        target,
-        platform: argument("--platform"),
-        architecture: argument("--arch"),
-        destination: downloadPath,
-      });
-      result = { ...transitionUpdateState(state, { type: "download-success", version: transaction.version }), transaction, action: "install" };
-      const installRoot = argument("--install-dir");
-      if (installRoot) {
-        const installed = await installArtifact(transaction, { installRoot });
-        result = { ...transitionUpdateState(result, { type: "install-start" }), ...transitionUpdateState(result, { type: "install-success" }), installed, action: "restart" };
-      }
-    }
+    const result = { ...state, action: updateAction(state) };
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);

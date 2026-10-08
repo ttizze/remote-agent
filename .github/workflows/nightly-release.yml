@@ -104,8 +104,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version || '' }}
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_RUN_NUMBER: ${{ github.run_number }}
-          ANDROID_STORE_URL: ${{ vars.ANDROID_STORE_URL || '' }}
-          IOS_STORE_URL: ${{ vars.IOS_STORE_URL || '' }}
+          RELEASE_PUBLISH: ${{ steps.flags.outputs.publish }}
         run: |
           set -euo pipefail
           args=(
@@ -113,14 +112,16 @@ jobs:
             --date "$(date -u +%Y%m%d)"
             --run-number "$RELEASE_RUN_NUMBER"
             --sha "$RELEASE_SHA"
-            --repository "$GITHUB_REPOSITORY"
             --build-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             --output release/metadata.json
             --github-output
           )
           if [[ -n "$RELEASE_VERSION" ]]; then args+=(--version "$RELEASE_VERSION"); fi
-          if [[ -n "$ANDROID_STORE_URL" ]]; then args+=(--android-store-url "$ANDROID_STORE_URL"); fi
-          if [[ -n "$IOS_STORE_URL" ]]; then args+=(--ios-store-url "$IOS_STORE_URL"); fi
+          if [[ "$RELEASE_PUBLISH" == true ]]; then
+            args+=(--repository "$GITHUB_REPOSITORY")
+          else
+            args+=(--repository '')
+          fi
           scripts/release-metadata.sh "${args[@]}"
           jq -e --arg sha "$RELEASE_SHA" '.commit == $sha' release/metadata.json >/dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -153,7 +154,7 @@ jobs:
     env:
       APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
       APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
-      APP_RELEASE_METADATA_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve.outputs.tag }}/${{ needs.resolve.outputs.manifest }}
+      APP_RELEASE_METADATA_URL: ${{ needs.resolve.outputs.publish == 'true' && format('https://github.com/{0}/releases/download/{1}/{2}', github.repository, needs.resolve.outputs.tag, needs.resolve.outputs.manifest) || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -187,7 +188,7 @@ jobs:
     env:
       APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
       APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
-      APP_RELEASE_METADATA_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve.outputs.tag }}/${{ needs.resolve.outputs.manifest }}
+      APP_RELEASE_METADATA_URL: ${{ needs.resolve.outputs.publish == 'true' && format('https://github.com/{0}/releases/download/{1}/{2}', github.repository, needs.resolve.outputs.tag, needs.resolve.outputs.manifest) || '' }}
     defaults:
       run:
         shell: bash
@@ -228,7 +229,7 @@ jobs:
     env:
       APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
       APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
-      APP_RELEASE_METADATA_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve.outputs.tag }}/${{ needs.resolve.outputs.manifest }}
+      APP_RELEASE_METADATA_URL: ${{ needs.resolve.outputs.publish == 'true' && format('https://github.com/{0}/releases/download/{1}/{2}', github.repository, needs.resolve.outputs.tag, needs.resolve.outputs.manifest) || '' }}
       APP_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       MACOS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
@@ -284,6 +285,9 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 14
+      - name: Remove macOS release credentials and keychain
+        if: always()
+        run: scripts/cleanup-macos-release.sh
 
   mobile_android:
     name: Android release artifact
@@ -320,6 +324,7 @@ jobs:
           nix develop . --command ./gradlew
           :apps:mobile:bundleRelease :apps:mobile:assembleRelease
           "-PreleaseVersion=$RELEASE_VERSION" "-PreleaseCode=$RELEASE_CODE"
+          "-PreleaseChannel=${{ needs.resolve.outputs.channel }}"
           --no-daemon --parallel --max-workers=4 --build-cache --console=plain
       - name: Collect Android release artifacts
         env:
@@ -356,6 +361,9 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 14
+      - name: Remove Android release credentials
+        if: always()
+        run: scripts/cleanup-android-release.sh
 
   mobile_ios:
     name: iOS archive and TestFlight
@@ -391,6 +399,7 @@ jobs:
         run: |
           set -euo pipefail
           : "${ASC_API_KEY_P8:?ASC_API_KEY_P8 is required for TestFlight upload}"
+          [[ "$ASC_KEY_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'ASC_KEY_ID contains unsupported path characters' >&2; exit 1; }
           key_dir="$HOME/.appstoreconnect/private_keys"
           mkdir -p "$key_dir"
           key_path="$key_dir/AuthKey_${ASC_KEY_ID}.p8"
@@ -400,6 +409,8 @@ jobs:
       - name: Archive, export, and optionally upload TestFlight build
         env:
           RELEASE_VERSION: ${{ needs.resolve.outputs.base_version }}
+          RELEASE_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
           RELEASE_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -408,6 +419,8 @@ jobs:
             "$RUNNER_TEMP/mobile-derived-data" \
             release-assets \
             MARKETING_VERSION="$RELEASE_VERSION" \
+            APP_UPDATE_VERSION="$RELEASE_UPDATE_VERSION" \
+            APP_RELEASE_CHANNEL="$RELEASE_CHANNEL" \
             CURRENT_PROJECT_VERSION="$RELEASE_BUILD_NUMBER"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -415,6 +428,9 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 14
+      - name: Remove iOS release credentials and keychain
+        if: always()
+        run: scripts/cleanup-ios-release.sh
 
   publish:
     name: Publish GitHub channel release
@@ -448,6 +464,10 @@ jobs:
       - name: Build channel manifest and publish the concrete release
         env:
           GH_TOKEN: ${{ github.token }}
+          ANDROID_STORE_URL: ${{ vars.ANDROID_STORE_URL || '' }}
+          IOS_STORE_URL: ${{ vars.IOS_STORE_URL || '' }}
+          ANDROID_UPLOAD_SUCCEEDED: ${{ needs.resolve.outputs.upload_mobile == 'true' && needs.mobile_android.result == 'success' }}
+          IOS_UPLOAD_SUCCEEDED: ${{ needs.resolve.outputs.upload_mobile == 'true' && needs.mobile_ios.result == 'success' }}
         run: |
           set -euo pipefail
           metadata=release/metadata.json
@@ -458,6 +478,17 @@ jobs:
           manifest=$(jq -er .manifest "$metadata")
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
           ((${#assets[@]} > 0)) || { echo 'no release artifacts were produced' >&2; exit 1; }
+          native_updates=$(jq -cn \
+            --arg android "$ANDROID_STORE_URL" \
+            --arg ios "$IOS_STORE_URL" \
+            --arg android_ok "$ANDROID_UPLOAD_SUCCEEDED" \
+            --arg ios_ok "$IOS_UPLOAD_SUCCEEDED" \
+            '{}
+             + (if $android_ok == "true" and $android != "" then {android: {url: $android}} else {} end)
+             + (if $ios_ok == "true" and $ios != "" then {ios: {url: $ios}} else {} end)')
+          jq --argjson native_updates "$native_updates" \
+            '.native_updates = $native_updates' "$metadata" > "$metadata.tmp"
+          mv "$metadata.tmp" "$metadata"
           scripts/release-manifest.sh "$metadata" "release-assets/$manifest" "${assets[@]}"
           printf 'Channel: %s\nVersion: %s\nCommit: %s\n\nArtifacts were built from this exact commit.\n' \
             "$channel" "$(jq -er .version "$metadata")" "$commit" > release-notes.md
