@@ -107,8 +107,10 @@ mod tests {
 
     #[test]
     fn browser_access_is_project_scoped_but_update_checks_are_host_only() {
-        let mut host = HostSettings::default();
-        host.enable_agent_browser_access = false;
+        let mut host = HostSettings {
+            enable_agent_browser_access: false,
+            ..Default::default()
+        };
         host.project_overrides.insert(
             "p".into(),
             crate::models::ProjectSettingsOverrides {

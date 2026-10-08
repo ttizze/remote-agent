@@ -500,7 +500,7 @@ impl ProviderInstanceEditor {
         };
         let name = self.display_name.read(cx).value().trim().to_owned();
         let editor = cx.entity().downgrade();
-        let _ = self.desktop.update(cx, |view, cx| {
+        self.desktop.update(cx, |view, cx| {
             view.confirm(
                 crate::app::dialogs::Confirm {
                     title: Some(format!("Remove provider instance \"{name}\"?")),

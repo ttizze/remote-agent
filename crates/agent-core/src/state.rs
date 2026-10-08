@@ -1260,11 +1260,11 @@ impl Snapshot {
         let target = project_id
             .clone()
             .unwrap_or_else(|| CHATS_PROJECT.to_owned());
-        if let Some(draft) = self.drafts.get_mut(&key) {
-            if draft.project_id.as_deref() != Some(target.as_str()) {
-                draft.project_id = Some(target);
-                draft.workspace = None;
-            }
+        if let Some(draft) = self.drafts.get_mut(&key)
+            && draft.project_id.as_deref() != Some(target.as_str())
+        {
+            draft.project_id = Some(target);
+            draft.workspace = None;
         }
         self.selected_project = project_id;
     }

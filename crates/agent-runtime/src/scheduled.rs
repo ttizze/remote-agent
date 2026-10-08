@@ -414,7 +414,7 @@ impl ScheduledTasks {
                 continue;
             };
             let result = if missed_fixed_time_run(&task.schedule, due_at, now.timestamp_millis()) {
-                self.reschedule_missed(&task, &now).await.map(|()| ())
+                self.reschedule_missed(&task, &now).await
             } else {
                 self.run(task.clone(), Trigger::Scheduled)
                     .await
@@ -582,7 +582,7 @@ impl ScheduledTasks {
         reservation.mark_running(active.clone(), started_at.clone());
         self.notify();
 
-        let finished = async {
+        async {
             let fire_key = format!(
                 "{}:{}:{}",
                 active.id,
@@ -642,8 +642,7 @@ impl ScheduledTasks {
                 ..source
             })
         }
-        .await;
-        finished
+        .await
     }
 
     /// Sends the prompt: a new thread, or a message into the bound thread.

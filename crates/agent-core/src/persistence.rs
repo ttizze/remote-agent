@@ -67,9 +67,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     } else {
         serde_json::from_slice(bytes)?
     };
-    let mut preferences = Preferences::default();
-    preferences.last_run_scripts = local.last_run_scripts;
-    preferences.resume_compaction_dismissed = local.resume_compaction_dismissed;
+    let preferences = Preferences {
+        last_run_scripts: local.last_run_scripts,
+        resume_compaction_dismissed: local.resume_compaction_dismissed,
+        ..Default::default()
+    };
     Ok(Snapshot {
         drafts: local.drafts.into(),
         default_draft: Snapshot::default().default_draft,
@@ -534,8 +536,10 @@ mod tests {
 
     #[test]
     fn environment_identity_roundtrips_for_offline_views() {
-        let mut state = Snapshot::default();
-        state.environment = Some(environment_descriptor());
+        let state = Snapshot {
+            environment: Some(environment_descriptor()),
+            ..Default::default()
+        };
 
         let restored = decode(&encode(&state).unwrap()).unwrap();
 

@@ -300,10 +300,10 @@ impl PushService {
     }
 
     pub(crate) fn set_host_id(&self, host_id: String) {
-        if !host_id.trim().is_empty() {
-            if let Ok(mut value) = self.host_id.try_write() {
-                *value = host_id;
-            }
+        if !host_id.trim().is_empty()
+            && let Ok(mut value) = self.host_id.try_write()
+        {
+            *value = host_id;
         }
     }
 
@@ -768,6 +768,10 @@ impl PushService {
         *state = next;
     }
 
+    /// Sends one provider request with independently sourced registration,
+    /// activity, expiry, delivery-clock, and alert facts. The flat call keeps
+    /// provider payload decisions explicit without a mutable request wrapper.
+    #[allow(clippy::too_many_arguments)]
     async fn send_notification(
         &self,
         config: &ProviderConfig,
@@ -958,7 +962,7 @@ fn live_activity_target<'a>(
         ));
     }
     (state.active_count > 0)
-        .then(|| registration.push_to_start_token.as_deref())
+        .then_some(registration.push_to_start_token.as_deref())
         .flatten()
         .map(|token| (token, "start"))
 }
@@ -1199,7 +1203,7 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                         continue;
                     };
                     if event.phase.is_terminal()
-                        && last_seen.get(&event.thread_id).is_none()
+                        && !last_seen.contains_key(&event.thread_id)
                         && event.occurred_at_ms <= service.started_at_ms
                     {
                         last_seen.insert(event.thread_id.clone(), event);
@@ -1682,6 +1686,10 @@ fn apns_jwt(config: &ApnsConfig) -> Result<String, DeliveryError> {
     ))
 }
 
+/// Builds an FCM payload from explicit provider, registration, source event,
+/// aggregate, timing, and alert facts. These inputs remain separate because
+/// each has a distinct ownership and privacy boundary.
+#[allow(clippy::too_many_arguments)]
 fn fcm_notification_request(
     project_id: &str,
     registration: &RegisterPushDevice,
@@ -2476,7 +2484,7 @@ mod tests {
             &registration,
             Some(&event),
             "host",
-            &content_state(&event, &[event.clone()]),
+            &content_state(&event, std::slice::from_ref(&event)),
             7_200_001,
             "access-token".into(),
             1_800_000_000_000,
@@ -2527,7 +2535,8 @@ mod tests {
             clear_source_timestamp(&[event.clone(), newer.clone()]),
             Some(newer.occurred_at_ms)
         );
-        *service.latest_state.write().await = Some(content_state(&event, &[event.clone()]));
+        *service.latest_state.write().await =
+            Some(content_state(&event, std::slice::from_ref(&event)));
         service
             .deliver(1, None, Vec::new(), vec![event, newer], true)
             .await;
@@ -2606,13 +2615,11 @@ mod tests {
             deep_link: thread_deep_link("host", "thread"),
             occurred_at_ms: 1_000,
         };
-        assert!(
-            agent_domain::activity_notification_is_fresh(
-                event.phase.wire_name(),
-                event.occurred_at_ms,
-                1_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS + 1,
-            ) == false
-        );
+        assert!(!agent_domain::activity_notification_is_fresh(
+            event.phase.wire_name(),
+            event.occurred_at_ms,
+            1_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS + 1,
+        ));
         assert!(agent_domain::activity_notification_is_fresh(
             event.phase.wire_name(),
             event.occurred_at_ms,

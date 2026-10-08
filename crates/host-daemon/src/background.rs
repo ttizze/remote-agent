@@ -349,8 +349,7 @@ impl ResourceOwner {
             .collect();
         let preceding = retained
             .iter()
-            .filter(|sample| sample.read_at.millis() < cutoff)
-            .next_back();
+            .rfind(|sample| sample.read_at.millis() < cutoff);
         let mut previous = preceding;
         let mut aggregate_samples = Vec::new();
         let mut process_samples = Vec::new();
@@ -474,6 +473,12 @@ impl DesktopProcessMonitor {
             process.category = ResourceProcessCategory::Unknown;
         }
         processes
+    }
+}
+
+impl Default for DesktopProcessMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1810,10 +1815,10 @@ impl BackgroundOwner {
         if !parent.starts_with(&logs) {
             return Err("trace path must be inside the Host diagnostics directory".into());
         }
-        if let Ok(canonical) = dunce::canonicalize(&path) {
-            if !canonical.starts_with(&logs) {
-                return Err("trace path must be inside the Host diagnostics directory".into());
-            }
+        if let Ok(canonical) = dunce::canonicalize(&path)
+            && !canonical.starts_with(&logs)
+        {
+            return Err("trace path must be inside the Host diagnostics directory".into());
         }
         Ok(path)
     }
@@ -2570,11 +2575,10 @@ mod tests {
         let stop = CancellationToken::new();
         let mut task = owner.spawn(stop.clone());
         stop.cancel();
-        let result = tokio::time::timeout(Duration::from_secs(2), &mut task)
+        tokio::time::timeout(Duration::from_secs(2), &mut task)
             .await
             .expect("background owner did not stop")
             .expect("background owner task failed");
-        assert_eq!(result, ());
         assert!(owner.probe_stop.is_cancelled());
     }
 
@@ -2747,7 +2751,7 @@ mod tests {
                 2,
                 agent_protocol::background::ReportClientActivity {
                     rpc_client_id: 4,
-                    report: report,
+                    report,
                 },
             )
             .await

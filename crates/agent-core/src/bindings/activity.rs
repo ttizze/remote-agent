@@ -52,6 +52,11 @@ pub fn agent_activity_display_expiry_at(expires_at_ms: i64, now_ms: i64) -> i64 
 /// Resolves envelope freshness, source-row ordering, absolute expiry and
 /// dismiss/re-arm behavior in the shared domain. Native code only persists the
 /// returned decision.
+///
+/// Keep the generated FFI surface flat: each parameter is an independent
+/// provider or persisted-state fact, and grouping them would hide that input
+/// contract behind a native-only wrapper.
+#[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn agent_activity_delivery_decision(
     delivery_updated_at_ms: i64,

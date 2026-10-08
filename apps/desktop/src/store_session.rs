@@ -2,7 +2,7 @@ use crate::Runtime;
 use agent_core::{connection::Store, state::Snapshot};
 use gpui_kit::Context;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio::{sync::watch, task::JoinHandle};
@@ -172,9 +172,9 @@ impl ClientPreferences {
         }
     }
 
-    async fn write_current(&self, path: &PathBuf, bytes: &[u8]) -> anyhow::Result<bool> {
+    async fn write_current(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<bool> {
         let shared = self.bytes.clone();
-        let path = path.clone();
+        let path = path.to_path_buf();
         let bytes = bytes.to_vec();
         tokio::task::spawn_blocking(move || {
             let current = shared
@@ -233,11 +233,11 @@ impl StoreSession {
                 return;
             }
         };
-        if let Some(client_preferences) = client_preferences {
-            if let Err(error) = client_preferences.apply_to(&store).await {
-                let _ = updates.send(connected(Err(format!("{error:#}")))).await;
-                return;
-            }
+        if let Some(client_preferences) = client_preferences
+            && let Err(error) = client_preferences.apply_to(&store).await
+        {
+            let _ = updates.send(connected(Err(format!("{error:#}")))).await;
+            return;
         }
         let mut snapshots = store.subscribe();
         let session = Self {

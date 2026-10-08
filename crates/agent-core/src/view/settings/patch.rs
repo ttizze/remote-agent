@@ -627,11 +627,10 @@ mod tests {
             })
         );
         let updated = host.patched(&style);
-        assert_eq!(
-            updated
+        assert!(
+            !updated
                 .source_control_writing_style
-                .follow_change_request_templates,
-            false
+                .follow_change_request_templates
         );
         assert_eq!(
             updated.source_control_writing_style.mode,
@@ -766,8 +765,10 @@ mod tests {
 
     #[test]
     fn absent_nullable_project_overrides_inherit_the_host_value() {
-        let mut host = HostSettings::default();
-        host.default_thread_env_mode = Some(ThreadEnvMode::Worktree);
+        let mut host = HostSettings {
+            default_thread_env_mode: Some(ThreadEnvMode::Worktree),
+            ..Default::default()
+        };
         let inherited = resolve_project_settings(&host, Some("p"));
         assert_eq!(
             inherited.default_thread_env_mode,

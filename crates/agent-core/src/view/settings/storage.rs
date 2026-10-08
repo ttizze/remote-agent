@@ -215,8 +215,10 @@ mod tests {
 
     #[test]
     fn add_project_base_directory_is_a_persisted_host_setting() {
-        let mut host = HostSettings::default();
-        host.add_project_base_directory = "~/projects".into();
+        let host = HostSettings {
+            add_project_base_directory: "~/projects".into(),
+            ..Default::default()
+        };
         let view = settings_view(
             &Snapshot::default(),
             Some(&host),

@@ -246,7 +246,7 @@ pub fn between(
         let completion_changed = thread.completed_at.is_some()
             && previous_thread
                 .completed_at
-                .map_or(true, |previous| thread.completed_at > Some(previous));
+                .is_none_or(|previous| thread.completed_at > Some(previous));
         let Some(decision) = decide(
             current.preferences.notification_mode,
             current.preferences.in_app_notifications_enabled,
@@ -287,6 +287,11 @@ pub fn between(
 /// shell updates. Operating-system notices are suppressed while the app is
 /// in the foreground; in-app notices are limited to that same foreground
 /// state and are also suppressed for the selected thread.
+///
+/// The flat arguments are independent snapshot, preference, and transition
+/// facts; keeping them explicit avoids hiding delivery policy in a mutable
+/// wrapper shared by clients.
+#[allow(clippy::too_many_arguments)]
 pub fn decide(
     mode: NotificationMode,
     in_app_notifications_enabled: bool,
@@ -401,7 +406,7 @@ mod tests {
                     thread.completed_at.is_some()
                         && prior
                             .and_then(|thread| thread.completed_at)
-                            .map_or(true, |previous| thread.completed_at > Some(previous)),
+                            .is_none_or(|previous| thread.completed_at > Some(previous)),
                 )?;
                 Some(NotificationEvent {
                     environment_id: None,

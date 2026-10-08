@@ -341,10 +341,15 @@ mod tests {
             deep_link: "remoteagent://threads/host/thread".into(),
             occurred_at_ms: 1,
         };
-        let mut preferences = PushPreferences::default();
-        preferences.notify_on_approval = false;
+        let preferences = PushPreferences {
+            notify_on_approval: false,
+            ..PushPreferences::default()
+        };
         assert!(!event.notification_enabled(preferences));
-        preferences.notify_on_approval = true;
+        let preferences = PushPreferences {
+            notify_on_approval: true,
+            ..PushPreferences::default()
+        };
         assert!(event.notification_enabled(preferences));
     }
 

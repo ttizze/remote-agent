@@ -289,26 +289,6 @@ fn expand_local_directory(value: &str, home: Option<&std::path::Path>) -> Option
         .or_else(|| Some(PathBuf::from(value)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::expand_local_directory;
-    use std::path::Path;
-
-    #[test]
-    fn expands_configured_project_folder_against_the_local_home() {
-        let home = Path::new("/Users/tester");
-        assert_eq!(
-            expand_local_directory("~/Development", Some(home)).as_deref(),
-            Some(Path::new("/Users/tester/Development"))
-        );
-        assert_eq!(
-            expand_local_directory("/Volumes/work", Some(home)).as_deref(),
-            Some(Path::new("/Volumes/work"))
-        );
-        assert_eq!(expand_local_directory("  ", Some(home)), None);
-    }
-}
-
 fn file_manager_name() -> &'static str {
     match std::env::consts::OS {
         "macos" => "Finder",
@@ -463,5 +443,25 @@ impl Desktop {
         self.route = Route::Chat;
         self.sync_settings(window, cx);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_local_directory;
+    use std::path::Path;
+
+    #[test]
+    fn expands_configured_project_folder_against_the_local_home() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            expand_local_directory("~/Development", Some(home)).as_deref(),
+            Some(Path::new("/Users/tester/Development"))
+        );
+        assert_eq!(
+            expand_local_directory("/Volumes/work", Some(home)).as_deref(),
+            Some(Path::new("/Volumes/work"))
+        );
+        assert_eq!(expand_local_directory("  ", Some(home)), None);
     }
 }

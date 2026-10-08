@@ -467,21 +467,23 @@ mod tests {
 
     #[test]
     fn branch_view_reuses_project_refs_and_marks_the_selected_branch() {
-        let mut snapshot = Snapshot::default();
-        snapshot.shell = std::sync::Arc::new(crate::sync::ShellCache::from_cache(
-            agent_protocol::conversation::ShellSnapshot {
-                snapshot_sequence: 1,
-                projects: vec![crate::models::Project {
-                    id: "project".into(),
-                    name: "Project".into(),
-                    roots: vec![crate::models::ProjectRoot {
-                        path: "/repo".into(),
+        let mut snapshot = Snapshot {
+            shell: std::sync::Arc::new(crate::sync::ShellCache::from_cache(
+                agent_protocol::conversation::ShellSnapshot {
+                    snapshot_sequence: 1,
+                    projects: vec![crate::models::Project {
+                        id: "project".into(),
+                        name: "Project".into(),
+                        roots: vec![crate::models::ProjectRoot {
+                            path: "/repo".into(),
+                        }],
+                        ..crate::models::Project::default()
                     }],
-                    ..crate::models::Project::default()
-                }],
-                threads: vec![],
-            },
-        ));
+                    threads: vec![],
+                },
+            )),
+            ..Snapshot::default()
+        };
         snapshot.sources.refs.insert(
             ("/repo".into(), RefScope::All),
             crate::state::RefsEntry {

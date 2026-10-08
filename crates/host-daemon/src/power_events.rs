@@ -182,7 +182,6 @@ async fn run_platform_source(mailbox: Arc<LifecycleMailbox>, stop: CancellationT
     #[cfg(target_os = "macos")]
     {
         run_macos_suspend_lifecycle_source(mailbox, stop).await;
-        return;
     }
 
     #[cfg(target_os = "windows")]
