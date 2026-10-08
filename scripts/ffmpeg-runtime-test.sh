@@ -42,10 +42,12 @@ printf '%s\n' 'untracked local license must not bypass the pinned inventory' > "
 license_dir="$temporary/split-licenses"
 mkdir -p "$license_dir"
 printf '%s\n' 'fixture FFmpeg GPLv3 split license' > "$license_dir/LICENSE-FFMPEG.txt"
+printf '%s\n' 'fixture FFmpeg LGPL split license' > "$license_dir/LICENSE-FFMPEG-LGPL.txt"
 printf '%s\n' 'fixture libvpx BSD split license' > "$license_dir/LICENSE-LIBVPX.txt"
 cat > "$license_dir/components.tsv" <<'EOF'
 # fixture uses split license files outside the binary roots
 ffmpeg-9.0.2-fixture-bin	LICENSE-FFMPEG.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+ffmpeg-9.0.2-fixture-bin	LICENSE-FFMPEG-LGPL.txt	LGPL-2.1-or-later	https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
 libvpx-1.16.0-fixture	LICENSE-LIBVPX.txt	BSD-3-Clause	https://chromium.googlesource.com/webm/libvpx/+refs/tags/v1.16.0
 EOF
 
@@ -95,7 +97,7 @@ if grep -F -- '--set-interpreter' "$temporary/patchelf.log" >/dev/null; then
     exit 1
 fi
 [[ $(cd "$temporary/linux-out" && ./ffmpeg -version) == 'ffmpeg version 9.0.2-fixture' ]]
-[[ $(find "$temporary/linux-out" -maxdepth 1 -name 'FFMPEG-LICENSE-*' | wc -l) -ge 2 ]]
+[[ $(find "$temporary/linux-out" -maxdepth 1 -name 'FFMPEG-LICENSE-*' | wc -l) -ge 3 ]]
 grep -F 'license.1.component=' "$temporary/linux-out/FFMPEG-RUNTIME.txt" >/dev/null
 grep -F 'license.1.source=https://' "$temporary/linux-out/FFMPEG-RUNTIME.txt" >/dev/null
 

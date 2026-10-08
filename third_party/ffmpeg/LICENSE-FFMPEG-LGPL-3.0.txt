@@ -1,7 +1,7 @@
 FFmpeg runtime license notice
 
-The pinned Nixpkgs FFmpeg output declares GNU Lesser General Public License,
-version 3 or later (LGPL-3.0-or-later) for the runtime source set.
+The pinned FFmpeg runtime source set includes code under the GNU Lesser General
+Public License, version 3 or later (LGPL-3.0-or-later).
 
 License text:
 https://www.gnu.org/licenses/lgpl-3.0.txt
