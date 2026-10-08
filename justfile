@@ -5,6 +5,10 @@ set positional-arguments
 default:
     @just --list
 
+# Check Rust without generating executables; use -p to select changed crates.
+check *args:
+    cargo check --locked "$@"
+
 # Run all unit tests; CI can add explicit integration targets to the same build.
 unit-tests *targets:
     #!/usr/bin/env bash
@@ -27,16 +31,16 @@ unit-tests *targets:
 clean-builds *args:
     cargo xtask clean-builds {{args}}
 
-# Build and verify the certificate-signed Host executable.
-build-host-macos:
-    scripts/build-macos.sh host
+# Build and verify the certificate-signed Host executable (dev or release).
+build-host-macos profile="release":
+    scripts/build-macos.sh host "$1"
 
-# Build and verify the certificate-signed target/Bex.app.
-build-desktop-macos:
-    scripts/build-macos.sh desktop
+# Build and verify the certificate-signed bundle in the selected profile directory.
+build-desktop-macos profile="release":
+    scripts/build-macos.sh desktop "$1"
 
-# Launch the normal build with a separate Host and shared provider accounts.
-dev: build-desktop-macos
+# Launch a debug build with a separate Host and shared provider accounts.
+dev: (build-desktop-macos "dev")
     #!/usr/bin/env bash
     set -euo pipefail
     accounts="$HOME/Library/Application Support/app.bex.BEX"
@@ -44,7 +48,7 @@ dev: build-desktop-macos
         accounts=$(/usr/bin/plutil -extract directory raw -o - "$accounts/host-instance.json")
     fi
     target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
-    open -n "$target/Bex.app" --env BEX_ISOLATED_HOST=1 \
+    open -n "$target/debug/Bex.app" --env BEX_ISOLATED_HOST=1 \
         --env "BEX_STATE_DIR=$HOME/Library/Application Support/app.bex.BEX-Dev" \
         --env "BEX_ACCOUNT_STATE_DIR=$accounts"
 

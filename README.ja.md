@@ -109,8 +109,8 @@ iPhoneから保存済みPCを削除するには、**タスク一覧 → PC一覧
 ## クライアントのビルド
 
 ```sh
-# Mac（署名証明書が必要。BEX_CODE_SIGN_IDENTITYで選択）
-scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
+# Mac配布用（署名証明書が必要。BEX_CODE_SIGN_IDENTITYで選択）
+scripts/dev-env.sh just build-desktop-macos && open target/release/Bex.app
 
 # iPhone（iOS 26）: Simulator用ライブラリをビルドしてXcodeを開く
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
@@ -122,7 +122,9 @@ scripts/dev-env.sh ./gradlew :apps:mobile:assembleDebug
 
 Rustのソースを変更したら、iOS用ライブラリも再ビルドしてください。デスクトップの下書きとログは`BEX_STATE_DIR`を使いますが、Host探索で別の認証情報ディレクトリを選ぶことがあります。デスクトップを隔離するには`BEX_ISOLATED_HOST=1`と`BEX_STATE_DIR`の両方が必要です。個人のプロバイダー状態をテストが読み込まないよう、別のCodexホームかフィクスチャ実行ファイルも使ってください。
 
-`scripts/dev-env.sh just dev`は、プロバイダーのアカウントと会話履歴を共有する別のローカルHostを起動します。再ビルド前に実行中タスクを確認し、古い開発Hostを停止してください。ウィンドウを閉じるだけではHostは停止しません。同じ会話を2つのHostで同時に実行しないでください。
+編集中は`scripts/dev-env.sh just check -p agent-core`で、実行ファイルを生成せずにRustを確認できます。`-p`には変更したクレートを指定してください。
+
+`scripts/dev-env.sh just dev`は、Hostとデスクトップを同じdebugビルドで`target/debug/Bex.app`にまとめ、プロバイダーのアカウントと会話履歴を共有する別のローカルHostを起動します。配布用は`target/release/Bex.app`に保存します。Macの両ビルドコマンドは`dev`または`release`を指定でき、既定は`release`です。再ビルド前に実行中タスクを確認し、古い開発Hostを停止してください。ウィンドウを閉じるだけではHostは停止しません。同じ会話を2つのHostで同時に実行しないでください。
 
 ## 会話の操作
 
