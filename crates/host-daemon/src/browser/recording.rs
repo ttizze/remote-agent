@@ -501,11 +501,29 @@ struct Encoder {
     executable: PathBuf,
 }
 
+fn ffmpeg_executable() -> PathBuf {
+    if let Some(path) = std::env::var_os("BEX_FFMPEG_EXECUTABLE") {
+        return PathBuf::from(path);
+    }
+    let sibling_name = if cfg!(target_os = "windows") {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        let sibling = directory.join(sibling_name);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    PathBuf::from(sibling_name)
+}
+
 impl Encoder {
     async fn start(output: &Path) -> Result<Self, String> {
-        let executable = std::env::var_os("BEX_FFMPEG_EXECUTABLE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("ffmpeg"));
+        let executable = ffmpeg_executable();
         let encoders = Command::new(&executable)
             .args(["-hide_banner", "-loglevel", "error", "-encoders"])
             .kill_on_drop(true)
