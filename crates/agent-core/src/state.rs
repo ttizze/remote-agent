@@ -455,7 +455,7 @@ impl PreviewState {
             && self
                 .server_epoch
                 .as_deref()
-                .is_some_and(|epoch| epoch != result.server_epoch);
+                .is_some_and(|epoch| epoch != result.server_epoch.as_str());
         let same_server_epoch = self
             .server_epoch
             .as_deref()
