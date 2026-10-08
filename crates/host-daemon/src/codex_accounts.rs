@@ -206,6 +206,18 @@ impl Accounts {
         account_id: &str,
         credit_id: Option<&str>,
     ) -> Result<Empty, String> {
+        let cache = self.usage.get(account_id).cloned();
+        let result = self
+            .consume_reset_credit_request(account_id, credit_id)
+            .await;
+        crate::account_usage::invalidate_after_reset(cache, result).await
+    }
+
+    async fn consume_reset_credit_request(
+        &mut self,
+        account_id: &str,
+        credit_id: Option<&str>,
+    ) -> Result<Empty, String> {
         let helper = self.helper(account_id)?;
         // The app-server pins the redemption to its own next available credit;
         // unlike the Claude endpoint it does not accept a grant id.
