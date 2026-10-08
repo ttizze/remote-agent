@@ -6,6 +6,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 const MAX_MESSAGE: usize = 6 * 1024 * 1024;
 
@@ -37,10 +38,30 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
                             let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
                             let Ok(Ok(Some(line))) = tokio::time::timeout(std::time::Duration::from_secs(5), input.read_line()).await else { return; };
                             let Ok(request) = serde_json::from_str::<BridgeRequest>(&line) else { return; };
+                            let request_cancel = CancellationToken::new();
+                            let request_future = bridge_request(
+                                &browser,
+                                request,
+                                request_cancel.clone(),
+                            );
+                            tokio::pin!(request_future);
                             let result = tokio::select! {
-                                result = bridge_request(&browser, request) => result,
-                                _ = input.read_line() => return,
-                                _ = browser.stop.cancelled() => return,
+                                result = &mut request_future => result,
+                                _ = input.read_line() => {
+                                    // MCP cancellation closes this bridge
+                                    // socket.  Drain the request after
+                                    // cancelling it so a recording start can
+                                    // detach CDP and clean its encoder before
+                                    // the Host task is dropped.
+                                    request_cancel.cancel();
+                                    let _ = request_future.await;
+                                    return;
+                                },
+                                _ = browser.stop.cancelled() => {
+                                    request_cancel.cancel();
+                                    let _ = request_future.await;
+                                    return;
+                                },
                             };
                             if let Ok(line) = serde_json::to_string(&result) { let _ = output.write_line(&line).await; }
                         });
@@ -77,7 +98,11 @@ enum BridgeResponse {
     Empty,
 }
 
-async fn bridge_request(browser: &Browser, request: BridgeRequest) -> Result<BridgeResponse, String> {
+async fn bridge_request(
+    browser: &Browser,
+    request: BridgeRequest,
+    request_cancel: CancellationToken,
+) -> Result<BridgeResponse, String> {
     match request {
         BridgeRequest::Browser { thread, action } => browser
             .agent(&thread, action)
@@ -110,7 +135,7 @@ async fn bridge_request(browser: &Browser, request: BridgeRequest) -> Result<Bri
                 None => browser.preview_active_tab(&thread).await?,
             };
             browser
-                .start_preview_recording(&thread, &tab_id)
+                .start_preview_recording_with_cancel(&thread, &tab_id, request_cancel)
             .await
             .map(BridgeResponse::PreviewRecordingStatus)
         }
@@ -120,7 +145,7 @@ async fn bridge_request(browser: &Browser, request: BridgeRequest) -> Result<Bri
                 None => browser.active_recording_tab(&thread).await?,
             };
             browser
-                .stop_preview_recording(&thread, &tab_id)
+                .stop_preview_recording_with_cancel(&thread, &tab_id, request_cancel)
             .await
             .map(BridgeResponse::PreviewRecordingArtifact)
         }

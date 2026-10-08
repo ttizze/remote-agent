@@ -35,8 +35,27 @@ const MAX_ENCODED_INPUT_BYTES: u64 = PREVIEW_RECORDING_MAX_BYTES * 4;
 
 pub(crate) const MIME_TYPE: &str = "video/webm;codecs=vp9";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureTermination {
+    Cancellation,
+    ExplicitStop,
+    Deadline,
+}
+
+fn capture_termination_result(termination: CaptureTermination) -> Result<(), String> {
+    match termination {
+        // All bounded termination signals finalize the frames already handed
+        // to the encoder.  Encoder and artifact validation still report real
+        // failures after cleanup.
+        CaptureTermination::Cancellation
+        | CaptureTermination::ExplicitStop
+        | CaptureTermination::Deadline => Ok(()),
+    }
+}
+
 pub(crate) struct StartResult {
     pub(crate) started_at: String,
+    pub(crate) artifact_path: PathBuf,
     pub(crate) startup: oneshot::Receiver<Result<(), String>>,
     pub(crate) task: tokio::task::JoinHandle<Result<PreviewRecordingArtifact, String>>,
 }
@@ -47,14 +66,16 @@ pub(crate) fn start(
     recording_directory: PathBuf,
     width: u32,
     height: u32,
+    protected_paths: &[PathBuf],
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<StartResult, String> {
     std::fs::create_dir_all(&recording_directory).map_err(|error| {
         format!("recording storage is unavailable: {error}")
     })?;
-    prune_directory(&recording_directory)?;
+    prune_directory(&recording_directory, protected_paths)?;
     let id = format!("browser-recording-{}", uuid::Uuid::new_v4().simple());
+    let artifact_path = recording_directory.join(format!("{id}.webm"));
     let started_at = chrono::Utc::now().to_rfc3339();
     let (startup_sender, startup) = oneshot::channel();
     let task = tokio::spawn(run(
@@ -70,6 +91,7 @@ pub(crate) fn start(
     ));
     Ok(StartResult {
         started_at,
+        artifact_path,
         startup,
         task,
     })
@@ -114,7 +136,6 @@ async fn run(
             std::fs::rename(&partial_path, &final_path)
                 .map_err(|error| format!("recording save-artifact failed: {error}"))?;
             partial_cleanup.disarm();
-            prune_directory(&recording_directory)?;
             Ok(PreviewRecordingArtifact {
                 id,
                 tab_id,
@@ -255,9 +276,12 @@ async fn run_capture(
     let capture_result = loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => break Ok(()),
-            _ = stop.cancelled() => break Ok(()),
-            _ = &mut deadline => break Err("recording capture deadline exceeded after 120000ms".to_owned()),
+            _ = cancel.cancelled() => break capture_termination_result(CaptureTermination::Cancellation),
+            _ = stop.cancelled() => break capture_termination_result(CaptureTermination::ExplicitStop),
+            // The fixed reference keeps the bounded desktop copy when the
+            // capture reaches its deadline.  Let the encoder finalize it;
+            // size and frame limits below still bound the artifact.
+            _ = &mut deadline => break capture_termination_result(CaptureTermination::Deadline),
             message = next_screencast_frame(&mut socket) => {
                 let (frame, timestamp, session_id) = match message {
                     Ok(frame) => frame,
@@ -379,7 +403,10 @@ async fn cleanup_cdp(
     next_id: &mut u64,
     session: &str,
 ) -> Result<(), String> {
-    let stop = send_command(
+    // Wait for both responses, with a bound per command.  A failed stop must
+    // not prevent the detach from being sent, and a failed detach must not be
+    // hidden by the stop error.
+    let stop = cleanup_command(
         socket,
         next_id,
         Some(session),
@@ -387,7 +414,7 @@ async fn cleanup_cdp(
         json!({}),
     )
     .await;
-    let detach = send_command(
+    let detach = cleanup_command(
         socket,
         next_id,
         None,
@@ -395,7 +422,43 @@ async fn cleanup_cdp(
         json!({"sessionId":session}),
     )
     .await;
-    stop.and(detach).map(|_| ())
+    combine_cleanup_results(stop, detach)
+}
+
+const CDP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn cleanup_command(
+    socket: &mut WebSocketStream<ConnectStream>,
+    next_id: &mut u64,
+    session: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
+    tokio::time::timeout(
+        CDP_CLEANUP_TIMEOUT,
+        command(socket, next_id, session, method, params),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "recording {method} cleanup timed out after {}ms",
+            CDP_CLEANUP_TIMEOUT.as_millis()
+        )
+    })?
+    .map(|_| ())
+}
+
+fn combine_cleanup_results(
+    stop: Result<(), String>,
+    detach: Result<(), String>,
+) -> Result<(), String> {
+    match (stop, detach) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(stop), Err(detach)) => Err(format!(
+            "{stop}; recording Target.detachFromTarget cleanup also failed: {detach}"
+        )),
+    }
 }
 
 fn frame_repetition_count(
@@ -407,8 +470,15 @@ fn frame_repetition_count(
     let Some(timestamp) = timestamp.filter(|timestamp| timestamp.is_finite() && *timestamp >= first) else {
         return 1;
     };
-    let target = ((timestamp - first) * OUTPUT_FPS).round() as u64 + 1;
-    target.saturating_sub(encoded_frames).max(1)
+    let elapsed_frames = (timestamp - first) * OUTPUT_FPS;
+    // Keep the value below the cast bound.  A finite CDP timestamp can still
+    // be large enough that the float-to-u64 cast saturates, and adding one to
+    // that result used to overflow before the duration cap was checked.
+    if !elapsed_frames.is_finite() || elapsed_frames >= MAX_ENCODED_FRAMES as f64 {
+        return MAX_ENCODED_FRAMES.saturating_add(1);
+    }
+    let target = elapsed_frames.round().max(0.0) as u64;
+    target.saturating_add(1).saturating_sub(encoded_frames).max(1)
 }
 
 fn notify_startup(
@@ -420,7 +490,7 @@ fn notify_startup(
     }
 }
 
-fn prune_directory(directory: &Path) -> Result<(), String> {
+fn prune_directory(directory: &Path, protected_paths: &[PathBuf]) -> Result<(), String> {
     const MAX_STORAGE_BYTES: u64 = PREVIEW_RECORDING_MAX_BYTES * 4;
     let mut files = std::fs::read_dir(directory)
         .map_err(|error| format!("recording storage is unavailable: {error}"))?
@@ -436,6 +506,9 @@ fn prune_directory(directory: &Path) -> Result<(), String> {
     for (path, metadata) in files {
         if total <= MAX_STORAGE_BYTES {
             break;
+        }
+        if protected_paths.iter().any(|protected| protected == &path) {
+            continue;
         }
         total = total.saturating_sub(metadata.len());
         let _ = std::fs::remove_file(path);
@@ -503,7 +576,7 @@ struct Encoder {
 }
 
 fn ffmpeg_executable() -> PathBuf {
-    if let Some(path) = std::env::var_os("BEX_FFMPEG_EXECUTABLE") {
+    if let Some(path) = std::env::var_os("AGENT_FFMPEG_EXECUTABLE") {
         return PathBuf::from(path);
     }
     let sibling_name = if cfg!(target_os = "windows") {
@@ -710,6 +783,44 @@ mod tests {
         assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 4), 1);
         assert_eq!(frame_repetition_count(Some(10.0), Some(9.0), 1), 1);
         assert_eq!(frame_repetition_count(Some(10.0), None, 1), 1);
+        assert_eq!(
+            frame_repetition_count(Some(0.0), Some(f64::MAX), 0),
+            MAX_ENCODED_FRAMES + 1
+        );
+    }
+
+    #[test]
+    fn cleanup_reports_both_failed_cdp_commands() {
+        let error = combine_cleanup_results(
+            Err("stop failed".into()),
+            Err("detach failed".into()),
+        )
+        .unwrap_err();
+        assert!(error.contains("stop failed"));
+        assert!(error.contains("detach failed"));
+    }
+
+    #[test]
+    fn deadline_is_a_normal_finalization_signal() {
+        assert!(capture_termination_result(CaptureTermination::Cancellation).is_ok());
+        assert!(capture_termination_result(CaptureTermination::ExplicitStop).is_ok());
+        assert!(capture_termination_result(CaptureTermination::Deadline).is_ok());
+    }
+
+    #[test]
+    fn fake_encoder_keeps_the_completed_copy_when_deadline_fires() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("capture.part.webm");
+        let final_path = directory.path().join("capture.webm");
+        std::fs::write(&partial, [0x1a, 0x45, 0xdf, 0xa3]).unwrap();
+        let mut cleanup = PartialArtifactCleanup::new(partial.clone());
+
+        assert!(capture_termination_result(CaptureTermination::Deadline).is_ok());
+        std::fs::rename(&partial, &final_path).unwrap();
+        cleanup.disarm();
+
+        assert!(final_path.exists());
+        assert!(!partial.exists());
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -785,9 +896,29 @@ mod tests {
         let partial = directory.path().join("active.part.webm");
         std::fs::write(&partial, b"partial").unwrap();
 
-        prune_directory(directory.path()).unwrap();
+        prune_directory(directory.path(), &[]).unwrap();
 
         assert!(!completed.exists());
         assert!(partial.exists());
+    }
+
+    #[test]
+    fn storage_pruning_keeps_artifacts_still_offered_to_the_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let offered = directory.path().join("offered.webm");
+        std::fs::File::create(&offered)
+            .unwrap()
+            .set_len(PREVIEW_RECORDING_MAX_BYTES * 2)
+            .unwrap();
+        let old = directory.path().join("old.webm");
+        std::fs::File::create(&old)
+            .unwrap()
+            .set_len(PREVIEW_RECORDING_MAX_BYTES * 3)
+            .unwrap();
+
+        prune_directory(directory.path(), std::slice::from_ref(&offered)).unwrap();
+
+        assert!(offered.exists());
+        assert!(!old.exists());
     }
 }
