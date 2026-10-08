@@ -248,7 +248,6 @@ impl SessionRouter {
     pub(super) fn task_activity(
         &self,
         native: Vec<Thread>,
-        unavailable: &[ProviderKind],
         read_revision: u64,
     ) -> agent_protocol::live_activity::TaskActivityState {
         let tasks: Vec<_> = native
@@ -257,28 +256,28 @@ impl SessionRouter {
                 let target = thread.id.clone()?;
                 let actor = self.actor(&target);
                 let owned = lock_state(&actor);
-                let status_known = owned.timeline.status
-                    != agent_protocol::models::SessionStatus::Unknown
-                    || thread.list_stale != Some(true);
-                let thread = owned.overlay(thread);
-                drop(owned);
-                let task = TaskState {
-                    status: if status_known {
-                        thread.status
-                    } else {
-                        agent_protocol::models::SessionStatus::Unknown
-                    },
-                    waiting: thread.requests.values().any(|request| {
-                        request.delivery == agent_protocol::session::RequestDelivery::Awaiting
-                    }),
-                    latest: thread
-                        .turns
-                        .as_ref()
-                        .and_then(|turns| turns.last())
-                        .map(|turn| turn.status),
+                let task = if owned.timeline.status
+                    == agent_protocol::models::SessionStatus::Unknown
+                    && thread.list_stale == Some(true)
+                {
+                    None
+                } else {
+                    let thread = owned.overlay(thread);
+                    Some(TaskState {
+                        status: thread.status,
+                        waiting: thread.requests.values().any(|request| {
+                            request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+                        }),
+                        latest: thread
+                            .turns
+                            .as_ref()
+                            .and_then(|turns| turns.last())
+                            .map(|turn| turn.status),
+                    })
                 };
+                drop(owned);
                 self.prune(&target, &actor);
-                Some((target, task))
+                task.map(|task| (target, task))
             })
             .collect();
         let mut state = lock_state(&self.state);
@@ -295,31 +294,6 @@ impl SessionRouter {
             state.task_revision += 1;
             let revision = state.task_revision;
             state.tasks.insert(session, (task, revision));
-        }
-        let uncertain: Vec<_> = state
-            .tasks
-            .iter()
-            .filter_map(|(session, (task, revision))| {
-                (unavailable.contains(&session.provider)
-                    && *revision <= read_revision
-                    && task.phase().0 != "unknown"
-                    && task.phase().1)
-                    .then(|| session.clone())
-            })
-            .collect();
-        for session in uncertain {
-            state.task_revision += 1;
-            let revision = state.task_revision;
-            state.tasks.insert(
-                session,
-                (
-                    TaskState {
-                        status: agent_protocol::models::SessionStatus::Unavailable,
-                        ..Default::default()
-                    },
-                    revision,
-                ),
-            );
         }
         let display = task_display(&state.tasks);
         let failed = if display != before {
@@ -1140,10 +1114,16 @@ mod tests {
                 seed(&target, SessionStatus::Running),
                 seed(&other, SessionStatus::Running),
             ],
-            &[],
             0,
         );
         assert_eq!(initial.display.current.label, "実行中 2件");
+        let mut cached = seed(&target, SessionStatus::Idle);
+        cached.list_stale = Some(true);
+        assert_eq!(
+            router.task_activity(vec![cached], initial.revision).display,
+            initial.display,
+            "a cached list cannot change the last confirmed task state"
+        );
         let request = serde_json::from_value(serde_json::json!({
             "id":"question", "target":"session", "delivery":"awaiting", "body":{"question":{"questions":[]}}
         })).unwrap();
@@ -1154,7 +1134,7 @@ mod tests {
             },
         );
         router.session_change(&target, SessionChange::Request { request });
-        let waiting = router.task_activity(Vec::new(), &[], 0);
+        let waiting = router.task_activity(Vec::new(), 0);
         assert_eq!(waiting.display.current.label, "確認待ち 1件 · 実行中 1件");
         router.session_change(
             &target,
@@ -1164,11 +1144,7 @@ mod tests {
             },
         );
         assert_eq!(
-            router
-                .task_activity(Vec::new(), &[], 0)
-                .display
-                .current
-                .label,
+            router.task_activity(Vec::new(), 0).display.current.label,
             "実行中 2件"
         );
         let read_revision = router.task_activity_revision();
@@ -1178,12 +1154,18 @@ mod tests {
                 status: SessionStatus::Idle,
             },
         );
-        let remaining = router.task_activity(
-            vec![seed(&target, SessionStatus::Running)],
-            &[],
-            read_revision,
-        );
+        let remaining =
+            router.task_activity(vec![seed(&target, SessionStatus::Running)], read_revision);
         assert_eq!(remaining.display.current.label, "実行中 1件");
+        let mut cached = seed(&target, SessionStatus::Running);
+        cached.list_stale = Some(true);
+        assert_eq!(
+            router
+                .task_activity(vec![cached], remaining.revision)
+                .display,
+            remaining.display,
+            "a cached list cannot revive an already completed task"
+        );
         router.session_change(
             &other,
             SessionChange::Status {
@@ -1191,52 +1173,15 @@ mod tests {
             },
         );
         assert_eq!(
-            router
-                .task_activity(Vec::new(), &[], 0)
-                .display
-                .current
-                .label,
+            router.task_activity(Vec::new(), 0).display.current.label,
             "状態確認中 1件"
         );
         let completed = router.task_activity(
             vec![seed(&other, SessionStatus::Idle)],
-            &[],
             router.task_activity_revision(),
         );
         assert!(!completed.display.ongoing);
         assert!(completed.revision > initial.revision);
-    }
-
-    #[test]
-    fn a_failed_provider_marks_seeded_activity_unknown_until_a_fresh_read_recovers() {
-        let router = SessionRouter::new();
-        let target = SessionRef {
-            provider: ProviderKind::Codex,
-            id: "external".into(),
-        };
-        let thread = |status| Thread {
-            id: Some(target.clone()),
-            status,
-            ..Default::default()
-        };
-        router.task_activity(
-            vec![thread(agent_protocol::models::SessionStatus::Running)],
-            &[],
-            0,
-        );
-        assert!(router.execution_targets().is_empty());
-        let uncertain = router.task_activity(
-            Vec::new(),
-            &[ProviderKind::Codex],
-            router.task_activity_revision(),
-        );
-        assert_eq!(uncertain.display.current.label, "状態確認中 1件");
-        let ended = router.task_activity(
-            vec![thread(agent_protocol::models::SessionStatus::Idle)],
-            &[],
-            uncertain.revision,
-        );
-        assert!(!ended.display.ongoing);
     }
 
     #[test]
@@ -1276,7 +1221,6 @@ mod tests {
                 status: SessionStatus::Idle,
                 ..Default::default()
             }],
-            &[],
             0,
         );
         router.register_live_activity(phone.id(), &params).unwrap();

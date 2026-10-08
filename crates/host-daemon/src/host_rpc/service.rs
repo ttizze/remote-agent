@@ -99,35 +99,30 @@ impl HostRpcService {
         &self,
     ) -> Result<agent_protocol::live_activity::TaskActivityState, Failure> {
         let revision = self.inner.router.task_activity_revision();
-        let listings = futures_util::future::join_all(self.agents().into_iter().map(
-            |(provider, agent)| async move {
-                let pages = session_pages(agent.as_ref(), "", None);
-                let result = tokio::time::timeout(
+        let agents = self.agents();
+        let has_sources = !agents.is_empty() || !self.inner.startup_errors.is_empty();
+        let listings =
+            futures_util::future::join_all(agents.into_iter().map(|(_, agent)| async move {
+                tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    pages.try_collect::<Vec<_>>(),
+                    session_pages(agent.as_ref(), "", None).try_collect::<Vec<_>>(),
                 )
-                .await;
-                (provider, result)
-            },
-        ))
-        .await;
-        let mut unavailable: Vec<_> = self.inner.startup_errors.keys().copied().collect();
+                .await
+            }))
+            .await;
         let mut native = Vec::new();
         let mut successful = false;
-        for (provider, result) in listings {
-            match result {
-                Ok(Ok(pages)) => {
-                    successful = true;
-                    native.extend(pages.into_iter().flatten().map(|summary| summary.thread));
-                }
-                _ => unavailable.push(provider),
+        for result in listings {
+            if let Ok(Ok(pages)) = result {
+                successful |= pages
+                    .iter()
+                    .flatten()
+                    .all(|summary| summary.thread.list_stale != Some(true));
+                native.extend(pages.into_iter().flatten().map(|summary| summary.thread));
             }
         }
-        let state = self
-            .inner
-            .router
-            .task_activity(native, &unavailable, revision);
-        if !successful && !unavailable.is_empty() {
+        let state = self.inner.router.task_activity(native, revision);
+        if !successful && has_sources {
             return Err(Failure::new(
                 "task_activity_unavailable",
                 "タスクの状態を取得できません。",

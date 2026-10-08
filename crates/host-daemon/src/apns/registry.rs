@@ -287,14 +287,14 @@ mod tests {
         assert!(!heartbeat.urgent);
         registry.complete(&heartbeat, ResultKind::Accepted, 160);
         registry.update(display(0, 0, 1), 161);
-        let stale = registry.deliveries(161).remove(0);
-        assert_eq!(aps(&stale)["event"], "update");
+        let uncertain = registry.deliveries(161).remove(0);
+        assert_eq!(aps(&uncertain)["event"], "update");
         assert_eq!(
-            aps(&stale)["content-state"]["display"]["current"]["label"],
+            aps(&uncertain)["content-state"]["display"]["current"]["label"],
             "状態確認中 1件"
         );
-        assert!(aps(&stale).get("stale-date").is_none());
-        registry.complete(&stale, ResultKind::Accepted, 161);
+        assert!(aps(&uncertain).get("stale-date").is_none());
+        registry.complete(&uncertain, ResultKind::Accepted, 161);
         registry.update(display(0, 0, 1), 162);
         assert!(registry.deliveries(162).is_empty());
         registry.update(display(0, 1, 0), 164);
