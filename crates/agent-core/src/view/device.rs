@@ -188,6 +188,9 @@ pub struct DeviceView {
     pub details: Vec<DeviceDetailView>,
     pub frames: Vec<DeviceFrameView>,
     pub video_frames: Vec<DeviceVideoFrameView>,
+    /// Ordered access units for stateful native decoders. `video_frames` keeps
+    /// the latest frame per screen for lightweight still-image consumers.
+    pub video_events: Vec<DeviceVideoFrameView>,
     pub accessibility: Vec<DeviceAccessibilityView>,
     pub foreground: Vec<DeviceForegroundView>,
     pub event_log: Vec<DeviceEventLogView>,
@@ -308,24 +311,11 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 sequence: frame.sequence,
             })
             .collect(),
-        video_frames: state
-            .video_frames
+        video_frames: state.video_frames.values().map(video_frame_view).collect(),
+        video_events: state
+            .video_events
             .values()
-            .map(|frame| DeviceVideoFrameView {
-                thread_id: frame.thread_id.to_string(),
-                session_epoch: frame.session_epoch.clone(),
-                host_id: frame.device.host_id.clone(),
-                device_id: frame.device.id.clone(),
-                platform: platform_name(frame.device.platform).into(),
-                payload: frame.payload.clone(),
-                encoding: video_encoding_name(frame.encoding).into(),
-                width: frame.width,
-                height: frame.height,
-                sequence: frame.sequence,
-                timestamp_us: frame.timestamp_us,
-                keyframe: frame.keyframe,
-                screen_id: frame.screen_id,
-            })
+            .flat_map(|frames| frames.iter().map(video_frame_view))
             .collect(),
         accessibility: state
             .accessibility
@@ -463,6 +453,23 @@ fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) ->
         agent_protocol::device::DeviceFrameEncoding::Jpeg => "jpeg",
         agent_protocol::device::DeviceFrameEncoding::Png => "png",
         agent_protocol::device::DeviceFrameEncoding::Semu => "semu",
+    }
+}
+
+fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
+    DeviceVideoFrameView {
+        thread_id: frame.thread_id.to_string(),
+        host_id: frame.device.host_id.clone(),
+        device_id: frame.device.id.clone(),
+        platform: platform_name(frame.device.platform).into(),
+        payload: frame.payload.clone(),
+        encoding: video_encoding_name(frame.encoding).into(),
+        width: frame.width,
+        height: frame.height,
+        sequence: frame.sequence,
+        timestamp_us: frame.timestamp_us,
+        keyframe: frame.keyframe,
+        screen_id: frame.screen_id,
     }
 }
 

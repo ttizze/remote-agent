@@ -9,7 +9,9 @@ use agent_domain::CommandId;
 use agent_protocol::conversation::SessionScan;
 use agent_protocol::device::{DeviceAccessibilityTree, DeviceDetail, DeviceEvent, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame, DeviceRecording, DeviceScreenshot, DeviceScreenConfig, DeviceServiceState, DeviceSession, DeviceVideoFrame};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+const MAX_VIDEO_EVENTS_PER_STREAM: usize = 32;
 
 /// Settings this device keeps across launches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,6 +127,9 @@ pub struct DeviceState {
     pub details: BTreeMap<(String, String), DeviceDetail>,
     pub frames: BTreeMap<(String, String, String), DeviceFrame>,
     pub video_frames: BTreeMap<(String, String, String, u8), DeviceVideoFrame>,
+    /// Ordered access units retained for stateful native decoders. The latest
+    /// frame map above remains the cheap projection used by still-image views.
+    pub video_events: BTreeMap<(String, String, String, u8), VecDeque<DeviceVideoFrame>>,
     pub accessibility: BTreeMap<(String, String), DeviceAccessibilityTree>,
     pub event_log: BTreeMap<(String, String), Vec<DeviceEventLogEntry>>,
     pub foreground: BTreeMap<(String, String), DeviceForegroundUpdate>,
@@ -184,6 +189,15 @@ impl DeviceState {
                                 && session.host_id == key.1
                                 && session.device_id == key.2
                                 && session.session_epoch == frame.session_epoch
+                        })
+                });
+                self.video_events.retain(|key, events| {
+                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                        && self.sessions.iter().any(|session| {
+                            session.thread_id.to_string() == key.0
+                                && session.host_id == key.1
+                                && session.device_id == key.2
+                                && events.iter().any(|frame| frame.session_epoch == session.session_epoch)
                         })
                 });
                 let active_devices = self
@@ -289,15 +303,19 @@ impl DeviceState {
                 if !self.accepts_thread_event(&frame.thread_id, &frame.device.host_id, &frame.device.id, &frame.session_epoch) {
                     return;
                 }
-                self.video_frames.insert(
-                    (
-                        frame.thread_id.to_string(),
-                        frame.device.host_id.clone(),
-                        frame.device.id.clone(),
-                        frame.screen_id.unwrap_or(0),
-                    ),
-                    frame,
+                let key = (
+                    frame.thread_id.to_string(),
+                    frame.device.host_id.clone(),
+                    frame.device.id.clone(),
+                    frame.screen_id.unwrap_or(0),
                 );
+                if self.video_frames.get(&key).is_some_and(|latest| frame.sequence <= latest.sequence) {
+                    return;
+                }
+                self.video_frames.insert(key.clone(), frame.clone());
+                let events = self.video_events.entry(key).or_default();
+                events.push_back(frame);
+                retain_video_tail(events);
             }
             DeviceEvent::Accessibility(tree) => {
                 if !self.accepts_device_event(&tree.host_id, &tree.device_id, &tree.session_epoch) {
@@ -338,6 +356,13 @@ impl DeviceState {
             }
             DeviceEvent::Recording(status) => {
                 let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
+                if !self.sessions.iter().any(|session| {
+                    session.thread_id == status.thread_id
+                        && session.host_id == status.host_id
+                        && session.device_id == status.device_id
+                }) {
+                    return;
+                }
                 if status.active {
                     if self
                         .sessions
@@ -419,6 +444,25 @@ impl DeviceState {
             .iter()
             .rev()
             .find(|session| session.thread_id.as_str() == thread)
+    }
+}
+
+fn retain_video_tail(events: &mut VecDeque<DeviceVideoFrame>) {
+    while events.len() > MAX_VIDEO_EVENTS_PER_STREAM {
+        let latest_keyframe = events.iter().rposition(|frame| frame.keyframe);
+        match latest_keyframe {
+            Some(index) if index > 0 => {
+                for _ in 0..index {
+                    events.pop_front();
+                }
+            }
+            Some(_) if events.len() > 1 => {
+                events.remove(1);
+            }
+            _ => {
+                events.pop_front();
+            }
+        }
     }
 }
 
