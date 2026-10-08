@@ -102,11 +102,10 @@ extension BexAppViewModel {
         let task = Task { [weak self] in
             var delayNanoseconds: UInt64 = 250_000_000
             defer {
-                guard let self, self.backgroundTaskGenerations[profile.id] == generation else {
-                    return
+                if let self, self.backgroundTaskGenerations[profile.id] == generation {
+                    self.backgroundTasks[profile.id] = nil
+                    self.backgroundTaskGenerations[profile.id] = nil
                 }
-                self.backgroundTasks[profile.id] = nil
-                self.backgroundTaskGenerations[profile.id] = nil
             }
             while !Task.isCancelled {
                 guard let self,
