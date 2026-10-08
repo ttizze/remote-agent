@@ -1647,7 +1647,7 @@ UniFFI の公開（`bindings/views.rs`）:
 | web `ModelPickerContent.tsx` legacySection | `ModelPickerView.legacy`（`ModelPickerOptions.toggled_legacy`）。`legacy_models_fold_under_a_row_that_opens_for_a_legacy_selection`。 |
 | mobile `use-composer-command-menu.ts`（workspace snapshot の取得と 10 秒の再試行）、`queries.ts` useComposerPathSearch、web `queries.ts`、`ComposerCommandMenu.tsx` と mobile `ComposerCommandPopover.tsx` の文言、client-runtime `providerSkills.ts` | `Intent::UpdateComposerMenu`、`connection::workspace`（`ensure_provider_commands`、debounce した `host/workspace/searchEntries`）、`view::composer::menu`。`the_menu_lists_the_providers_skills_commands_and_found_paths`、`an_empty_menu_names_what_its_trigger_searched`。 |
 | web `ChatView.tsx` の Compact context と `ContextWindowMeter.logic.ts` providerSupportsManualCompaction | `view::composer::view::compact_control`、`Intent::CompactContext`（`/compact` を送る）。 |
-| web `DiffPanel.tsx`（diffPreview・vcs status・listRefs）、`lib/baseRefChoices.ts` | `Intent::LoadDiff` が `host/review/diffPreview` と `host/vcs/status` を読む。`view::checkpoints::{git_diff_view, build_base_ref_choices}`、`Intent::SearchDiffBaseRefs`。`base_choices_pair_local_branches_with_their_origin_twin`、`the_git_view_reads_the_preview_source_its_scope_picks`、`uncommitted_reads_the_working_tree_preview`。 |
+| web `DiffPanel.tsx`（diffPreview・vcs status・listRefs）、`lib/baseRefChoices.ts` | `Intent::LoadDiff` が `host/review/diffPreview` と `host/vcs/status` を読む。`EnvironmentDescriptor.cwd` を設定 cwd の再試行に使い、desktop は window activation で branch / working-tree preview を再読する。`view::checkpoints::{git_diff_view, build_base_ref_choices}`、`Intent::SearchDiffBaseRefs`。`base_choices_pair_local_branches_with_their_origin_twin`、`the_git_view_reads_the_preview_source_its_scope_picks`、`uncommitted_reads_the_working_tree_preview`。 |
 | mobile `new-task-flow-provider.tsx`、`new-task-context-presentation.ts`、`projectThreadCreationValidation.ts` | `Draft.workspace`（`DraftWorkspace`）、`NewThreadView.workspace`、`view::new_thread::{new_thread_launch_workspace, branch_worktree_path, new_task_branch_label, new_task_workspace_label}`、`Intent::{SetNewThreadWorkspace, SelectNewThreadBranch, SetNewThreadStartFromOrigin, SearchNewThreadBranches, NewThreadOnBranch}`。`a_local_draft_works_on_the_checked_out_branch_and_a_worktree_starts_from_the_default`、`a_branch_checked_out_in_another_worktree_runs_there_locally`。 |
 | mobile `checkout-new-task-branch.ts`、`queries.ts` usePaginatedBranches、server `GitVcsDriverCore.ts` switchRef | `host/vcs/switchRef`（`vcs::switch_ref`）、`Intent::LoadMoreNewThreadBranches`。`switching_refs_checks_out_local_and_remote_branches`、`picking_another_local_branch_switches_the_checkout_first`、`a_later_branch_page_joins_the_first`。 |
 | mobile `ThreadRouteScreen.tsx` handleWorkLocally、web の setup card の Retry | `Intent::WorkLocally`（`CancelSetup` の結果で launch）、`Intent::RetryPreparation`（`Command::RetryPrepared`）。 |
@@ -1659,7 +1659,7 @@ UniFFI の公開（`bindings/views.rs`）:
 
 未接続（T3 にあって、まだ持たないもの）:
 
-- diff の window focus での再読み込み、環境 cwd での再試行。
+- 追加の未接続項目はない。
 
 truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 

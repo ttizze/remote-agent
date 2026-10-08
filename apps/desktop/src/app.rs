@@ -254,6 +254,11 @@ impl Desktop {
                 apply_appearance(window.appearance(), cx);
                 view.refresh_views(cx);
             }),
+            cx.observe_window_activation(window, |view, window, cx| {
+                if window.is_window_active() {
+                    view.refresh_diff_on_window_activation(cx);
+                }
+            }),
         ];
         let sidebar = sidebar::SidebarState::new(window, cx);
         let header = header::HeaderState::new(window, cx);

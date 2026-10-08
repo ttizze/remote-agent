@@ -354,7 +354,10 @@ impl Owner {
                     Call::DiffPreview(request) if request.file.is_some() => {
                         self.diff_file_finished(request, Err(&error))
                     }
-                    Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
+                    Call::DiffPreview(request) => {
+                        self.diff_preview_finished(request, Err(&error));
+                        self.retry_diff_preview_at_environment_cwd(request, &error);
+                    }
                     Call::Search(params) => self.search_finished(&params.query, None),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
