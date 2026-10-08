@@ -575,8 +575,12 @@ internal fun splitCodecDescription(payload: ByteArray): Pair<ByteArray?, ByteArr
         return parseAvcConfiguration(payload) ?: (null to null)
     }
     val nalUnits = annexBNalUnits(payload)
-    return nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and AVC_NAL_TYPE_MASK) == AVC_SPS_NAL_TYPE } to
-        nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and AVC_NAL_TYPE_MASK) == AVC_PPS_NAL_TYPE }
+    return nalUnits
+        .firstOrNull { it.isNotEmpty() && (it[0].toInt() and AVC_NAL_TYPE_MASK) == AVC_SPS_NAL_TYPE }
+        ?.withAnnexBPrefix() to
+        nalUnits
+            .firstOrNull { it.isNotEmpty() && (it[0].toInt() and AVC_NAL_TYPE_MASK) == AVC_PPS_NAL_TYPE }
+            ?.withAnnexBPrefix()
 }
 
 private data class AvcParameterSetRead(val first: ByteArray?, val nextOffset: Int)
