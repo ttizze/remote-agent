@@ -60,6 +60,10 @@ struct ThreadListRowView: View {
             }
             Text(row.title).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text)
                 .lineLimit(2).multilineTextAlignment(.leading)
+            if let pullRequest = row.pullRequestLabel {
+                Label(pullRequest, systemImage: "arrow.triangle.pull")
+                    .font(AppTheme.mono(12)).foregroundStyle(AppTheme.indigo)
+            }
             if let snippet = row.searchSnippet {
                 Text(snippet).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted).lineLimit(2)
             }
@@ -85,6 +89,9 @@ struct ThreadListRowView: View {
             ProjectGlyph(name: row.projectTitle ?? "", icon: icon).opacity(0.4)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title).font(AppTheme.font(16)).foregroundStyle(AppTheme.muted).lineLimit(1)
+                if let pullRequest = row.pullRequestLabel {
+                    Text(pullRequest).font(AppTheme.mono(12)).foregroundStyle(AppTheme.indigo).lineLimit(1)
+                }
                 if let snippet = row.searchSnippet {
                     Text(snippet).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted).lineLimit(1)
                 }

@@ -90,7 +90,7 @@ pub fn composer_draft(snapshot: &Snapshot, thread: Option<&ThreadId>) -> (String
                 .drafts
                 .get(&key)
                 .cloned()
-                .unwrap_or_else(|| snapshot.default_draft.clone());
+                .unwrap_or_else(|| snapshot.default_draft.user_defaults());
             (key, draft)
         }
     }
@@ -308,10 +308,16 @@ pub(crate) fn assemble(
         delivery_deferred,
     });
     let projects = snapshot.shell_projects();
-    let target_project = snapshot
-        .selected_project
-        .as_deref()
-        .unwrap_or(CHATS_PROJECT);
+    let target_project = if thread.is_none() {
+        snapshot
+            .new_thread_project_id()
+            .unwrap_or(CHATS_PROJECT)
+    } else {
+        snapshot
+            .selected_project
+            .as_deref()
+            .unwrap_or(CHATS_PROJECT)
+    };
     let editor = composer_editor(&EditorState {
         pending_approval: approval_pending,
         // Every question also takes a typed answer.

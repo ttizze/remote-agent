@@ -138,3 +138,9 @@ standalone agent-peer tests. Retired conversation fixtures and acceptance runner
 are removed. `scripts/build-agent-ios.sh simulator` plus xcodebuild build and
 `nix develop .#android --command ./gradlew :apps:mobile:assembleDebug` verify
 native compilers without launching clients. Tests remain close to implementation.
+On macOS, `just quality rust` (the Mac CI job) also runs the Host-owned Chrome
+live case (`browser::tests::shared_browser_live`: navigation, clicks, concurrent
+phone and agent input, popups and persistence), which normal unit runs ignore.
+The environment wrapper shares a fixed, garbage-collection-rooted Nix
+environment across worktrees, keyed by the flake, lockfile, Kache package
+definition and platform; cached runs do not enter Nix.

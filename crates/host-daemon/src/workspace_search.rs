@@ -1,6 +1,8 @@
 //! Path search for `@` mentions: an index of a directory's files and folders
 //! that honors ignore files, ranked by how closely each path matches.
-use agent_protocol::workspace::{EntryKind, EntrySearch, SearchEntries, WorkspaceEntry};
+use agent_protocol::workspace::{
+    ContentMatchRange, EntryKind, EntrySearch, SearchContents, SearchEntries, WorkspaceEntry,
+};
 use anyhow::{Result, anyhow};
 use std::{
     collections::HashMap,
@@ -19,6 +21,10 @@ const EXCLUDED: [&str; 3] = [".git", "node_modules", ".convex"];
 const IMAGE_EXTENSIONS: [&str; 8] = [
     ".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp",
 ];
+const MAX_CONTENT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_CONTENT_LINE_BYTES: usize = 64 * 1024;
+const CONTENT_SEARCH_TIME_BUDGET: Duration = Duration::from_millis(250);
+const CONTENT_SEARCH_MAX_MATCHES_PER_FILE: usize = 100;
 
 type Index = Arc<Vec<WorkspaceEntry>>;
 
@@ -61,6 +67,34 @@ fn build(root: &Path) -> Vec<WorkspaceEntry> {
         entries.push(WorkspaceEntry { path, kind });
     }
     entries
+}
+
+fn content_files(root: &Path) -> Vec<(PathBuf, String)> {
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .filter_entry(|entry| {
+            !EXCLUDED
+                .iter()
+                .any(|excluded| entry.file_name() == *excluded)
+        })
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .build();
+    let mut files = walker
+        .flatten()
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let relative = entry.path().strip_prefix(root).ok()?;
+            let path = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            (!path.is_empty()).then(|| (entry.into_path(), path))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.1.cmp(&right.1));
+    files
 }
 
 /// The edit distance with adjacent transpositions.
@@ -227,6 +261,139 @@ impl WorkspaceSearch {
         };
         Ok(search(&index, &request))
     }
+
+    pub(crate) async fn search_contents(
+        &self,
+        request: agent_protocol::workspace::SearchContents,
+    ) -> Result<agent_protocol::workspace::ContentSearch> {
+        request
+            .validate()
+            .map_err(|error| anyhow!(error))?;
+        let root = tokio::fs::canonicalize(request.cwd.trim()).await?;
+        let root = dunce::simplified(&root).to_owned();
+        if !root.is_dir() {
+            return Err(anyhow!("workspace root is not a directory"));
+        }
+        let files = root.clone();
+        let files = tokio::task::spawn_blocking(move || content_files(&files)).await?;
+        let matcher = match ContentMatcher::new(&request) {
+            Ok(matcher) => matcher,
+            Err(error) => {
+                return Ok(agent_protocol::workspace::ContentSearch {
+                    matches: Vec::new(),
+                    truncated: false,
+                    regex_fallback_error: Some(error.to_string()),
+                });
+            }
+        };
+        let mut matches = Vec::new();
+        let mut truncated = false;
+        let deadline = Instant::now() + CONTENT_SEARCH_TIME_BUDGET;
+        for (path, relative) in files {
+            if Instant::now() >= deadline {
+                truncated = true;
+                break;
+            }
+            let Ok(metadata) = tokio::fs::metadata(&path).await else {
+                continue;
+            };
+            if metadata.len() > MAX_CONTENT_FILE_BYTES {
+                continue;
+            }
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            let Ok(contents) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let mut file_matches = 0usize;
+            let mut file_capped = false;
+            let mut stop_after_file = false;
+            for (line_index, line) in contents.lines().enumerate() {
+                if Instant::now() >= deadline {
+                    truncated = true;
+                    stop_after_file = true;
+                    break;
+                }
+                if line.len() > MAX_CONTENT_LINE_BYTES {
+                    continue;
+                }
+                let ranges = matcher.ranges(line);
+                if ranges.is_empty() {
+                    continue;
+                }
+                if file_matches >= CONTENT_SEARCH_MAX_MATCHES_PER_FILE {
+                    file_capped = true;
+                    continue;
+                }
+                matches.push(agent_protocol::workspace::ContentMatch {
+                    path: relative.clone(),
+                    line_number: line_index.saturating_add(1) as u32,
+                    line_content: line.to_owned(),
+                    match_ranges: ranges,
+                });
+                file_matches += 1;
+                if matches.len() > request.limit as usize {
+                    truncated = true;
+                    stop_after_file = true;
+                    break;
+                }
+            }
+            truncated |= file_capped;
+            if stop_after_file {
+                break;
+            }
+        }
+        matches.truncate(request.limit as usize);
+        Ok(agent_protocol::workspace::ContentSearch {
+            matches,
+            truncated,
+            regex_fallback_error: None,
+        })
+    }
+}
+
+struct ContentMatcher {
+    regex: regex::Regex,
+    whole_word: bool,
+}
+
+impl ContentMatcher {
+    fn new(request: &agent_protocol::workspace::SearchContents) -> Result<Self> {
+        let pattern = if request.use_regex {
+            request.query.clone()
+        } else {
+            regex::escape(&request.query)
+        };
+        let regex = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!request.case_sensitive)
+            .build()
+            .map_err(|error| anyhow!("{error}"))?;
+        Ok(Self {
+            regex,
+            whole_word: request.whole_word,
+        })
+    }
+
+    fn ranges(&self, line: &str) -> Vec<agent_protocol::workspace::ContentMatchRange> {
+        self.regex
+            .find_iter(line)
+            .filter(|found| found.start() != found.end())
+            .filter(|found| !self.whole_word || whole_word(line, found.start(), found.end()))
+            .map(|found| agent_protocol::workspace::ContentMatchRange {
+                start: line[..found.start()].encode_utf16().count() as u32,
+                end: line[..found.end()].encode_utf16().count() as u32,
+            })
+            .collect()
+    }
+}
+
+fn whole_word(line: &str, start: usize, end: usize) -> bool {
+    let previous = line[..start].chars().next_back();
+    let next = line[end..].chars().next();
+    let word = |value: Option<char>| value.is_some_and(|value| value.is_alphanumeric() || value == '_');
+    !(word(previous) && line[start..].chars().next().is_some_and(|value| value.is_alphanumeric() || value == '_'))
+        && !(word(next) && line[..end].chars().next_back().is_some_and(|value| value.is_alphanumeric() || value == '_'))
 }
 
 #[cfg(test)]

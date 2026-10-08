@@ -45,10 +45,21 @@ impl Owner {
             }
             StreamKey::Thread(_) => tokio::spawn(follow(target, call, Payload::Thread)),
             StreamKey::Setup(_) => tokio::spawn(follow(target, call, Payload::Setup)),
+            StreamKey::Preview(_) => tokio::spawn(follow(target, call, Payload::Preview)),
             StreamKey::TerminalMetadata => {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
+            StreamKey::VcsStatus(_) => tokio::spawn(follow(target, call, Payload::VcsStatus)),
+            StreamKey::GitAction(_) => {
+                tokio::spawn(follow(target, call, Payload::ActionProgress))
+            }
+            StreamKey::ScheduledTasks => {
+                tokio::spawn(follow(target, call, Payload::ScheduledTasks))
+            }
+            StreamKey::Awareness => tokio::spawn(follow(target, call, Payload::Awareness)),
+            StreamKey::Background => tokio::spawn(follow(target, call, Payload::Background)),
+            StreamKey::Device(_) => tokio::spawn(follow(target, call, Payload::Device)),
         };
         let failures = network
             .streams
@@ -107,6 +118,7 @@ impl Owner {
                     Call::SubscribeThread(request),
                 );
                 self.subscribe_setup(thread);
+                self.subscribe_preview(thread);
             }
             None => self.close_thread_streams(thread),
         }
@@ -117,6 +129,20 @@ impl Owner {
             StreamKey::Setup(thread.clone()),
             Call::SetupStream(SubscribeSetup {
                 thread_id: thread.clone(),
+            }),
+        );
+    }
+
+    /// The selected thread's Host-owned Preview tabs and local-server cards.
+    pub(super) fn subscribe_preview(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Preview(thread.clone()),
+            Call::PreviewSubscribe(agent_protocol::preview::PreviewSubscribe {
+                thread_id: thread.clone(),
+                configured_urls: self.state.preview.configured_urls.clone(),
             }),
         );
     }
@@ -140,6 +166,94 @@ impl Owner {
         self.open_stream(
             StreamKey::Keybindings,
             Call::Keybindings(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// Subscribes to one checkout's local and remote Git status.
+    pub(super) fn subscribe_vcs_status(&mut self, cwd: String) {
+        if !self.connected() || cwd.is_empty() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::VcsStatus(cwd.clone()),
+            Call::SubscribeVcsStatus(agent_protocol::vcs::SubscribeVcsStatus { cwd }),
+        );
+    }
+
+    /// Starts one checkout stream without replacing a healthy subscription.
+    pub(super) fn ensure_vcs_status(&mut self, cwd: String) {
+        if !self.connected() || cwd.is_empty() {
+            return;
+        }
+        let key = StreamKey::VcsStatus(cwd.clone());
+        if self
+            .network
+            .as_ref()
+            .is_some_and(|network| network.streams.contains_key(&key))
+        {
+            return;
+        }
+        self.subscribe_vcs_status(cwd);
+    }
+
+    pub(super) fn ensure_selected_vcs_status(&mut self) {
+        let Some(thread) = self.state.selected_thread.clone() else {
+            return;
+        };
+        self.ensure_vcs_status(self.state.thread_cwd(&thread));
+    }
+
+    pub(super) fn start_git_action(&mut self, request: agent_protocol::vcs::RunStackedAction) {
+        if !self.connected() {
+            return;
+        }
+        let key = StreamKey::GitAction(request.action_id.clone());
+        self.open_stream(key, Call::RunStackedAction(request));
+    }
+
+    /// The Host's complete scheduled-task list and every later change.
+    pub(super) fn subscribe_scheduled_tasks(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::ScheduledTasks,
+            Call::SubscribeScheduledTasks(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The authenticated Host's live activity for threads running there.
+    pub(super) fn subscribe_awareness(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Awareness,
+            Call::Awareness(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The Host's background policy and power snapshot, followed by semantic
+    /// lease or power changes.
+    pub(super) fn subscribe_background(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Background,
+            Call::SubscribeBackground(agent_protocol::models::Empty {}),
+        );
+    }
+
+    pub(super) fn subscribe_device(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Device(thread.clone()),
+            Call::DeviceSubscribe(agent_protocol::device::DeviceSubscribeInput {
+                thread_id: thread.clone(),
+            }),
         );
     }
 
@@ -176,6 +290,8 @@ impl Owner {
     fn close_thread_streams(&mut self, thread: &ThreadId) {
         self.close_stream(&StreamKey::Thread(thread.clone()));
         self.close_stream(&StreamKey::Setup(thread.clone()));
+        self.close_stream(&StreamKey::Preview(thread.clone()));
+        self.close_stream(&StreamKey::Device(thread.clone()));
     }
 
     /// The archive is subscribed only while it is shown.
@@ -222,6 +338,7 @@ impl Owner {
                 && !self.state.threads.contains_key(thread)
             {
                 self.open_thread(thread);
+                self.ensure_selected_vcs_status();
             }
             return;
         }
@@ -235,6 +352,7 @@ impl Owner {
         let workspace = &mut self.state.workspace;
         workspace.review = None;
         workspace.diff_request = None;
+        workspace.diff_retry_when_cwd_available = false;
         workspace.directory = None;
         workspace.listed_directory = None;
         workspace.file = None;
@@ -243,6 +361,7 @@ impl Owner {
         if let Some(thread) = thread {
             self.visited.remove(&thread);
             self.open_thread(&thread);
+            self.ensure_selected_vcs_status();
             self.visit_selected();
         }
     }
@@ -258,6 +377,21 @@ impl Owner {
         if let Some(thread) = self.state.selected_thread.clone() {
             self.subscribe_thread(&thread);
         }
+        self.subscribe_git_statuses();
+        self.subscribe_scheduled_tasks();
+        self.subscribe_background();
+        self.refresh_accounts_if_due(super::owner::now_ms());
+    }
+
+    pub(super) fn subscribe_git_statuses(&mut self) {
+        let checkouts: Vec<String> = self.state.git.status_events.keys().cloned().collect();
+        for cwd in checkouts {
+            self.subscribe_vcs_status(cwd);
+        }
+        // A restored device has no persisted Git status events. The selected
+        // checkout still needs its first snapshot so the desktop toolbar and
+        // native controls can render immediately after reconnecting.
+        self.ensure_selected_vcs_status();
     }
 
     fn current(&self, key: &StreamKey, generation: u64) -> bool {
@@ -320,8 +454,23 @@ impl Owner {
                     self.subscribe_setup(&thread);
                 }
             }
+            StreamKey::Preview(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_preview(&thread);
+                }
+            }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
+            StreamKey::VcsStatus(cwd) => self.subscribe_vcs_status(cwd),
+            StreamKey::GitAction(_) => {}
+            StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
+            StreamKey::Awareness => self.subscribe_awareness(),
+            StreamKey::Background => self.subscribe_background(),
+            StreamKey::Device(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_device(&thread);
+                }
+            }
         }
     }
 
@@ -356,6 +505,10 @@ impl Owner {
                 self.healthy(&StreamKey::Setup(thread.clone()));
                 self.setup_update(&thread, setup);
             }
+            (StreamKey::Preview(thread), Payload::Preview(snapshot)) => {
+                self.healthy(&StreamKey::Preview(thread));
+                self.state.preview.apply_list(snapshot);
+            }
             (StreamKey::TerminalMetadata, Payload::TerminalMetadata(event)) => {
                 self.healthy(&StreamKey::TerminalMetadata);
                 self.terminal_metadata(event);
@@ -363,6 +516,39 @@ impl Owner {
             (StreamKey::Keybindings, Payload::Keybindings(config)) => {
                 self.healthy(&StreamKey::Keybindings);
                 self.state.keybindings = Some(Arc::new(config));
+            }
+            (StreamKey::VcsStatus(cwd), Payload::VcsStatus(event)) => {
+                self.healthy(&StreamKey::VcsStatus(cwd.clone()));
+                self.state.git.apply_status(cwd, event);
+            }
+            (StreamKey::GitAction(action_id), Payload::ActionProgress(event)) => {
+                let key = StreamKey::GitAction(action_id);
+                let terminal = matches!(
+                    &event.kind,
+                    agent_protocol::vcs::ActionProgressKind::ActionFinished { .. }
+                        | agent_protocol::vcs::ActionProgressKind::ActionFailed { .. }
+                );
+                self.healthy(&key);
+                self.state.git.apply_action(event);
+                if terminal {
+                    self.close_stream(&key);
+                }
+            }
+            (StreamKey::ScheduledTasks, Payload::ScheduledTasks(list)) => {
+                self.healthy(&StreamKey::ScheduledTasks);
+                self.state.scheduled_tasks = list.tasks;
+            }
+            (StreamKey::Awareness, Payload::Awareness(snapshot)) => {
+                self.healthy(&StreamKey::Awareness);
+                self.state.awareness = Some(snapshot);
+            }
+            (StreamKey::Background, Payload::Background(snapshot)) => {
+                self.healthy(&StreamKey::Background);
+                self.state.background_policy = Some(snapshot);
+            }
+            (StreamKey::Device(thread), Payload::Device(event)) => {
+                self.healthy(&StreamKey::Device(thread));
+                self.state.device.apply_event(event);
             }
             _ => {}
         }
@@ -389,7 +575,16 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
+                StreamKey::Setup(_)
+                | StreamKey::TerminalMetadata
+                | StreamKey::Keybindings
+                | StreamKey::VcsStatus(_)
+                | StreamKey::GitAction(_)
+                | StreamKey::Preview(_)
+                | StreamKey::ScheduledTasks
+                | StreamKey::Awareness
+                | StreamKey::Background
+                | StreamKey::Device(_) => {}
             }
             self.schedule_resubscribe(key);
             return;
@@ -456,6 +651,7 @@ impl Owner {
         if !applied.changed {
             return;
         }
+        self.reconcile_pull_request_links(location);
         if location == ShellLocation::Active
             && let Some(snapshot) = &self.state.shell.snapshot
         {
@@ -467,6 +663,36 @@ impl Owner {
         self.drain();
         if location == ShellLocation::Active {
             self.refresh_project_icons();
+            self.ensure_selected_vcs_status();
+        }
+    }
+
+    /// Shell rows are the durable projection seen by every native surface.
+    /// Keep the client operation cache aligned with them so a restarted client
+    /// can render link/watch controls before its next explicit RPC.
+    fn reconcile_pull_request_links(&mut self, location: ShellLocation) {
+        let rows = match location {
+            ShellLocation::Active => self
+                .state
+                .shell
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.threads.clone()),
+            ShellLocation::Archived => self
+                .state
+                .archived
+                .as_ref()
+                .and_then(|cache| cache.snapshot.as_ref())
+                .map(|snapshot| snapshot.threads.clone()),
+        };
+        let Some(rows) = rows else {
+            return;
+        };
+        for row in rows {
+            self.state
+                .pull_requests
+                .links_by_thread
+                .insert(row.id, row.pull_requests);
         }
     }
 
@@ -500,6 +726,9 @@ impl Owner {
         if applied.deleted {
             self.thread_deleted(thread);
             return;
+        }
+        if self.state.selected_thread.as_ref() == Some(thread) {
+            self.ensure_selected_vcs_status();
         }
         if !applied.changed {
             return;
@@ -714,7 +943,7 @@ impl Owner {
                     item_id: item.clone(),
                 })
                 .await
-                .map(|detail| detail.map(|detail| detail.row.item));
+                .map(|detail| detail.map(|detail| (detail.row.item, detail.task)));
             let _ = sender
                 .send(Event::Detail {
                     epoch,
@@ -731,14 +960,14 @@ impl Owner {
         &mut self,
         thread: &ThreadId,
         item: &TurnItemId,
-        result: Result<Option<Item>, PeerError>,
+        result: Result<Option<(Item, Option<agent_domain::Task>)>, PeerError>,
     ) {
         let Some(sync) = self.state.threads.get_mut(thread) else {
             return;
         };
         let sync = Arc::make_mut(sync);
         match result {
-            Ok(loaded) => sync.detail_loaded(item, loaded),
+            Ok(loaded) => sync.detail_loaded_with_task(item, loaded),
             Err(error) => sync.detail_failed(item, error.to_string()),
         }
     }

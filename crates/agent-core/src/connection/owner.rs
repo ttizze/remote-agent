@@ -230,8 +230,8 @@ pub(super) struct Owner {
     pub work_locally: Option<ThreadId>,
     /// A selected thread's folded stream has changed but its configured
     /// publication boundary has not arrived yet.
-    stream_publish_pending: bool,
-    stream_publish_deferred: bool,
+    pub(super) stream_publish_pending: bool,
+    pub(super) stream_publish_deferred: bool,
     /// The last attempted account/quota refresh, retained across connection epochs.
     pub(super) usage_refresh_last_attempt_ms: Option<u64>,
     /// Any account request currently running on this connection epoch.

@@ -1884,6 +1884,7 @@ impl Decision {
                 created_by: message.created_by,
                 creation_source: message.creation_source.clone(),
                 context: context.clone(),
+                scheduled_task: message.scheduled_task.clone(),
             });
             self.user_item(&message.id, run);
             if restart {
@@ -1930,6 +1931,7 @@ impl Decision {
             created_by: message.created_by,
             creation_source: message.creation_source.clone(),
             context,
+            scheduled_task: message.scheduled_task.clone(),
         });
         self.fact(FactBody::RunRequested {
             id: id.clone(),
@@ -2084,6 +2086,7 @@ impl Decision {
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
                     context: None,
+                    scheduled_task: None,
                 });
                 self.fact(FactBody::RunRequested {
                     id: run.clone(),
@@ -2330,6 +2333,7 @@ impl Decision {
                             },
                             creation_source: "server".into(),
                             context: None,
+                            scheduled_task: None,
                         },
                     );
                     self.fact_at(
@@ -2756,6 +2760,7 @@ impl Decision {
             }
             Compact => {
                 let message = SendMessage {
+                    scheduled_task: None,
                     context: None,
                     created_by: MessageAuthor::User,
                     creation_source: "client".into(),
@@ -2930,6 +2935,79 @@ impl Decision {
                     }
                     _ => {}
                 }
+                Reply::Accepted
+            }
+            SyncPullRequests { links } => {
+                if links.iter().any(|link| link.number == 0 || link.url.trim().is_empty()) {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestsSynced {
+                    links: links.clone(),
+                });
+                Reply::Accepted
+            }
+            LinkPullRequest { link } => {
+                if link.number == 0 || link.host.trim().is_empty() || link.repository.trim().is_empty() || link.url.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestLinkSynced { link: link.clone() });
+                Reply::Accepted
+            }
+            SyncPullRequestLink { link } => {
+                if link.number == 0 || link.host.trim().is_empty() || link.repository.trim().is_empty() || link.url.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestLinkSynced { link: link.clone() });
+                Reply::Accepted
+            }
+            SetPullRequestWatch { key, watch } => {
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestWatchSet {
+                    key: key.clone(),
+                    watch: watch.clone(),
+                });
+                Reply::Accepted
+            }
+            SyncPullRequestWatch { key, watch } => {
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestWatchSynced {
+                    key: key.clone(),
+                    watch: watch.clone(),
+                });
+                Reply::Accepted
+            }
+            ResolveBranchPullRequest { link } => {
+                if link.as_ref().is_some_and(|link| link.number == 0 || link.url.trim().is_empty()) {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::BranchPullRequestResolved { link: link.clone() });
+                Reply::Accepted
+            }
+            PullRequestWake {
+                message,
+                notification,
+            } => {
+                let reply = self.create_run(message);
+                if !matches!(&reply, Reply::Rejected { .. }) {
+                    self.fact(FactBody::MessageNotificationAssigned {
+                        id: message.id.clone(),
+                        notification: notification.clone(),
+                    });
+                }
+                reply
+            }
+            UnlinkPullRequest { key } => {
+                if key.number == 0
+                    || key.host.trim().is_empty()
+                    || key.repository.trim().is_empty()
+                {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestUnlinked { key: key.clone() });
                 Reply::Accepted
             }
             // Any change after the sweep's snapshot, or an explicit settle or
@@ -3431,6 +3509,7 @@ impl Decision {
                 self.complete_request_cards(request, card);
                 if r.capability == ResponseCapability::Message {
                     let message = SendMessage {
+                        scheduled_task: None,
                         context: None,
                         created_by: MessageAuthor::User,
                         creation_source: "server".into(),
@@ -3927,6 +4006,7 @@ impl Decision {
                             created_by: MessageAuthor::Agent,
                             creation_source: "mcp".into(),
                             message: Box::new(SendMessage {
+                                scheduled_task: None,
                                 context: None,
                                 created_by: MessageAuthor::Agent,
                                 creation_source: "mcp".into(),
@@ -4162,6 +4242,7 @@ impl Decision {
                         created_by: MessageAuthor::Agent,
                         creation_source: "server".into(),
                         context: None,
+                        scheduled_task: None,
                     });
                     self.fact(FactBody::MessageNotificationAssigned {
                         id: message_id.clone(),
@@ -4186,6 +4267,7 @@ impl Decision {
                 }
                 let tasks = task_ids.clone();
                 let message = SendMessage {
+                    scheduled_task: None,
                     context: None,
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
@@ -4438,6 +4520,7 @@ impl Decision {
                         created_by: MessageAuthor::Agent,
                         creation_source: "provider".into(),
                         context: None,
+                        scheduled_task: None,
                     });
                 }
                 ItemKind::AssistantMessage { message }
@@ -5168,6 +5251,7 @@ impl Decision {
                             created_by: MessageAuthor::Agent,
                             creation_source: "provider".into(),
                             context: None,
+                            scheduled_task: None,
                         });
                         let item = TurnItemId::new(self.native_key("item", attempt, key)).unwrap();
                         self.item_start(
@@ -5586,6 +5670,7 @@ impl Decision {
             }
             Wake { text, detail } => {
                 let message = SendMessage {
+                    scheduled_task: None,
                     context: None,
                     created_by: MessageAuthor::Agent,
                     creation_source: "provider".into(),
@@ -5659,6 +5744,7 @@ impl Decision {
             created_by: MessageAuthor::Agent,
             creation_source: "provider".into(),
             context: None,
+            scheduled_task: None,
         });
         if let Some(notification) = background_notification(
             &self

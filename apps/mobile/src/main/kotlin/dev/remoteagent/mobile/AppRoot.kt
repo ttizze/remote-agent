@@ -64,11 +64,15 @@ internal fun RemoteAgentApp(
                 { href ->
                     when (val target = dev.remoteagent.core.markdownLinkAction(href, root)) {
                         is dev.remoteagent.core.MarkdownLinkAction.WorkspaceFile ->
-                            model.navigate(
-                                Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
-                            )
+                            if (dev.remoteagent.core.isPdfFile(target.path))
+                                model.navigate(Route.Pdf(java.io.File(root, target.path).path))
+                            else
+                                model.navigate(
+                                    Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
+                                )
                         is dev.remoteagent.core.MarkdownLinkAction.HostFile ->
-                            model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
+                            if (dev.remoteagent.core.isPdfFile(target.path)) model.navigate(Route.Pdf(target.path))
+                            else model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
                         is dev.remoteagent.core.MarkdownLinkAction.External ->
                             runCatching {
                                     context.startActivity(
@@ -100,6 +104,7 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     Route.Pairing -> PairingScreen(model, requestQrScan)
                     Route.Home -> HomeScreen(model)
                     is Route.Thread -> ThreadScreen(model, route.id)
+                    is Route.Device -> DeviceScreen(model, route.threadId)
                     Route.ChooseProject -> ChooseProjectScreen(model)
                     Route.AddProject -> AddProjectScreen(model)
                     Route.AddProjectLocal -> LocalFolderScreen(model)
@@ -107,7 +112,13 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     is Route.Terminal ->
                         TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
                     is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file, route.line)
+                    is Route.Pdf -> PdfScreen(model, route.file)
                     is Route.Settings -> SettingsScreen(model, route.projectId)
+                    Route.Appearance -> AppearanceScreen(model)
+
+                    Route.ScheduledTasks -> ScheduledTasksScreen(model)
+
+                    Route.Usage -> UsageScreen(model)
                     Route.Archived -> ArchivedScreen(model)
                 }
             }
@@ -156,6 +167,7 @@ private fun HostsScreen(model: AndroidAppModel) {
     ) {
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(model.profiles, key = { it.id }) { profile ->
+                val environment = model.environments.firstOrNull { it.profileId == profile.id }
                 Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
                     Row(
                         Modifier.fillMaxWidth().clickable { model.selectProfile(profile.id) }.padding(16.dp),
@@ -164,13 +176,55 @@ private fun HostsScreen(model: AndroidAppModel) {
                         Column(Modifier.weight(1f)) {
                             Text(profile.name, style = AppTheme.headline, color = AppTheme.colors.foreground)
                             Text(
-                                if (profile.id == model.profileId) "Connected device" else "Paired",
+                                environment?.let { current ->
+                                    listOfNotNull(
+                                        current.state,
+                                        current.platform,
+                                        current.machine,
+                                        current.capabilities.takeIf { it.isNotEmpty() }?.let { "${it.size} capabilities" },
+                                    ).joinToString(" · ")
+                                } ?: if (profile.id == model.profileId) "Connected device" else "Paired",
                                 style = AppTheme.caption,
                                 color = AppTheme.colors.foregroundSecondary,
                             )
+                            environment?.reconnectReason?.takeIf { it.isNotBlank() }?.let { reason ->
+                                Text(reason, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
+                            }
                         }
                         IconButton(onClick = { model.removeProfile(profile.id) }) {
                             Icon(Icons.Outlined.Delete, "Remove ${profile.name}", tint = AppTheme.colors.iconMuted)
+                        }
+                    }
+                }
+            }
+            val activities = model.environments.flatMap { environment ->
+                environment.activities.map { activity -> environment to activity }
+            }
+            if (activities.isNotEmpty()) {
+                item {
+                    Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Agent activity", style = AppTheme.headline, color = AppTheme.colors.foreground)
+                            activities.forEach { (environment, activity) ->
+                                Column {
+                                    Text(
+                                        "${environment.label} · ${activity.title}",
+                                        style = AppTheme.body,
+                                        color = AppTheme.colors.foreground,
+                                    )
+                                    Text(
+                                        "${activity.phase}: ${activity.headline}",
+                                        style = AppTheme.caption,
+                                        color = AppTheme.colors.foregroundSecondary,
+                                    )
+                                    activity.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                                        Text(detail, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
+                                    }
+                                }
+                            }
                         }
                     }
                 }

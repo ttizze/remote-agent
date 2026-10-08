@@ -52,12 +52,20 @@ pub enum BrowserAction {
 }
 impl BrowserAction {
     pub fn validate(&self) -> Result<(), String> {
-        fn point(x: f64, y: f64) -> bool {
+        self.validate_for_viewport(WIDTH, HEIGHT)
+    }
+
+    /// Validates input against the viewport owned by the page resource.  The
+    /// default `validate` method remains for the existing browser operation,
+    /// while preview pages must use this method so a device viewport is not
+    /// silently constrained by the historical desktop size.
+    pub fn validate_for_viewport(&self, width: u32, height: u32) -> Result<(), String> {
+        let point = |x: f64, y: f64| {
             x.is_finite()
                 && y.is_finite()
-                && (0.0..f64::from(WIDTH)).contains(&x)
-                && (0.0..f64::from(HEIGHT)).contains(&y)
-        }
+                && (0.0..f64::from(width)).contains(&x)
+                && (0.0..f64::from(height)).contains(&y)
+        };
         let valid = match self {
             Self::Navigate { url } => {
                 browser_url(url)?;
@@ -137,6 +145,10 @@ impl BrowserRequest {
     pub fn validate(&self) -> Result<(), String> {
         self.action.validate()
     }
+
+    pub fn validate_for_viewport(&self, width: u32, height: u32) -> Result<(), String> {
+        self.action.validate_for_viewport(width, height)
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +187,13 @@ mod tests {
             frame
         );
         assert!(!format!("{frame:?}").contains("255"));
+    }
+
+    #[test]
+    fn preview_input_uses_the_resource_owned_viewport() {
+        let click = BrowserAction::Click { x: 1100.0, y: 800.0 };
+        assert!(click.validate().is_err());
+        assert!(click.validate_for_viewport(1200, 900).is_ok());
     }
 }
 

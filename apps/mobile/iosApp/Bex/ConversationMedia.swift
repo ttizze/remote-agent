@@ -1,4 +1,5 @@
 import AgentCore
+import PDFKit
 import SwiftUI
 import UIKit
 
@@ -8,6 +9,8 @@ struct MarkdownLinkOpener {
     let workspaceRoot: String?
     /// Opens a Host file, by absolute path, at a line.
     let openFile: (FileTarget) -> Void
+    /// Opens a resource-backed PDF instead of sending it through the text reader.
+    let openPDF: ((FileTarget) -> Void)?
     let loadFile: @MainActor (String) async throws -> URL
 }
 
@@ -43,19 +46,36 @@ enum MarkdownLinkURL {
     }
 
     /// Opens a workspace or Host file in the app; web, mail and phone links outside it.
-    @MainActor static func open(_ url: URL, links: MarkdownLinkOpener?) -> OpenURLAction.Result {
+    @MainActor static func open(
+        _ url: URL,
+        links: MarkdownLinkOpener?,
+        contextAction: ((String) -> Void)? = nil
+    ) -> OpenURLAction.Result {
         guard let href = href(from: url) else { return .systemAction }
+        if href.hasPrefix("context://") {
+            contextAction?(href)
+            return .handled
+        }
         let root = links?.workspaceRoot
         switch markdownLinkAction(href: href, workspaceRoot: root) {
         case let .workspaceFile(path, line):
             guard let root, let links else { return .handled }
             Haptics.selection()
-            links.openFile(FileTarget(path: (root as NSString).appendingPathComponent(path), displayPath: path,
-                                      line: line))
+            let target = FileTarget(path: (root as NSString).appendingPathComponent(path), displayPath: path, line: line)
+            if isPdfFile(path: path), let openPDF = links.openPDF {
+                openPDF(target)
+            } else {
+                links.openFile(target)
+            }
         case let .hostFile(path, line):
             guard let links else { return .handled }
             Haptics.selection()
-            links.openFile(FileTarget(path: path, displayPath: path, line: line))
+            let target = FileTarget(path: path, displayPath: path, line: line)
+            if isPdfFile(path: path), let openPDF = links.openPDF {
+                openPDF(target)
+            } else {
+                links.openFile(target)
+            }
         case let .external(target):
             if let target = URL(string: target) {
                 return .systemAction(target)
@@ -236,17 +256,21 @@ struct ThreadFileSheet: View {
 
     private func source(_ text: String) -> some View {
         let lines = text.components(separatedBy: "\n")
+        let wrapping = AppTheme.codeWordWrap
         return ScrollViewReader { reader in
-            ScrollView([.vertical, .horizontal]) {
+            ScrollView(wrapping ? .vertical : [.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                         HStack(alignment: .top, spacing: 12) {
-                            Text("\(index + 1)").font(AppTheme.mono(13)).foregroundStyle(AppTheme.tertiary)
+                            Text("\(index + 1)").font(.custom("Menlo", size: AppTheme.codeLineNumberFontSize))
+                                .foregroundStyle(AppTheme.tertiary)
                                 .frame(minWidth: 36, alignment: .trailing)
                             Text(line.isEmpty ? " " : line).font(AppTheme.mono(13)).foregroundStyle(AppTheme.text)
-                                .fixedSize()
+                                .fixedSize(horizontal: !wrapping, vertical: false)
+                                .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 1)
+                        .frame(maxWidth: wrapping ? .infinity : nil, minHeight: AppTheme.codeLineHeight, alignment: .top)
                         .background(UInt64(index + 1) == target.line ? AppTheme.primary.opacity(0.12) : .clear)
                         .id(index + 1)
                     }
@@ -255,10 +279,98 @@ struct ThreadFileSheet: View {
                 .textSelection(.enabled)
             }
             .onAppear {
-                if let line = target.line {
-                    reader.scrollTo(Int(line), anchor: .center)
+                if let line = target.line,
+                   let targetLine = markdownLineTarget(line: line, lineCount: UInt64(lines.count)),
+                   targetLine <= UInt64(Int.max) {
+                    reader.scrollTo(Int(targetLine), anchor: .center)
                 }
             }
+        }
+    }
+}
+
+/// A resource-backed Host PDF. It downloads the bytes and lets PDFKit render
+/// them, so PDF Markdown links never enter the text-file reader.
+struct ThreadPDFSheet: View {
+    @ObservedObject var model: BexAppViewModel
+    let target: FileTarget
+    @Environment(\.dismiss) private var dismiss
+    @State private var local: URL?
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let local {
+                    PDFDocumentView(url: local)
+                } else if let error {
+                    EmptyStateText(title: "PDF unavailable", detail: error)
+                        .frame(maxHeight: .infinity)
+                } else {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .background(AppTheme.screen.ignoresSafeArea())
+            .navigationTitle(URL(fileURLWithPath: target.path).lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .task(id: target) {
+            do {
+                local = try await model.download(target.path)
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+        .onDisappear {
+            if let local {
+                try? FileManager.default.removeItem(at: local.deletingLastPathComponent())
+            }
+        }
+    }
+}
+
+/// The captured output behind a terminal context link, with a route to its source terminal.
+struct ContextPreviewSheet: View {
+    let chip: ContextChip
+    let openTerminal: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(chip.previewText ?? "Context unavailable")
+                    .font(AppTheme.terminalMono())
+                    .foregroundStyle(AppTheme.text)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .background(AppTheme.screen.ignoresSafeArea())
+            .navigationTitle(chip.label)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Open terminal", action: openTerminal) }
+            }
+        }
+    }
+}
+
+private struct PDFDocumentView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context _: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.backgroundColor = UIColor.clear
+        return view
+    }
+
+    func updateUIView(_ view: PDFView, context _: Context) {
+        if view.document?.documentURL != url {
+            view.document = PDFDocument(url: url)
         }
     }
 }

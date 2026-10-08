@@ -80,7 +80,15 @@ impl Desktop {
         if let Some(existing) = find_existing_add_project(self.snapshot.shell_projects(), &path) {
             let project = existing.id.clone();
             window.close_dialog(cx);
-            self.new_thread(Some(project), cx);
+            if self.snapshot.selected_thread.is_none()
+                && self.snapshot.open_new_thread_draft.is_some()
+            {
+                self.perform(Intent::SetNewThreadProject {
+                    project_id: Some(project),
+                });
+            } else {
+                self.new_thread(Some(project), cx);
+            }
             return;
         }
         self.perform_then(
@@ -89,7 +97,13 @@ impl Desktop {
                 Ok(_) => {
                     window.close_dialog(cx);
                     let project = view.snapshot.selected_project.clone();
-                    view.new_thread(project, cx);
+                    if view.snapshot.selected_thread.is_none()
+                        && view.snapshot.open_new_thread_draft.is_some()
+                    {
+                        view.perform(Intent::SetNewThreadProject { project_id: project });
+                    } else {
+                        view.new_thread(project, cx);
+                    }
                 }
                 Err(error) => {
                     let message = agent_core::presentation::error::error_message(error);

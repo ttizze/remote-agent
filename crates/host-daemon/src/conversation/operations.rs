@@ -204,7 +204,24 @@ const CLAUDE_TEXT_MODEL: &str = "claude-haiku-4-5";
 const TEXT_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl TextGenerator {
-    async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
+    pub(crate) fn generation_settings(
+        &self,
+        project: &str,
+        operation: &str,
+    ) -> TextGenerationSettings {
+        self.worktrees
+            .as_ref()
+            .map(|worktrees| {
+                resolve_text_generation_settings(
+                    &worktrees.latest_host_settings(),
+                    project,
+                    operation,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
         let driver = request.model.as_ref().map(|selection| selection.driver);
         let configured = request.model.as_ref().and_then(|selection| {
             self.worktrees.as_ref().and_then(|worktrees| {

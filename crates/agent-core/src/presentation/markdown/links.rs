@@ -280,6 +280,22 @@ fn positive(digits: Option<regex::Match<'_>>) -> Option<u64> {
     (value > 0).then_some(value)
 }
 
+/// Returns the one-based line target only when it fits the rendered file.
+/// Keeping this check in core lets native clients handle oversized Markdown
+/// line numbers without converting them to a platform integer first.
+pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
+    (line > 0 && line <= line_count).then_some(line)
+}
+
+/// Recognizes a PDF resource by its path, ignoring a query or fragment.
+/// Resource routes need this decision before a native client asks the Host
+/// for text, so all clients use the same case-insensitive extension rule.
+pub fn is_pdf_file(path: &str) -> bool {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    path.get(path.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".pdf"))
+}
+
 pub fn split_file_path_position(path: &str, hash: &str) -> FilePathPosition {
     if let Some(suffix) = POSITION_SUFFIX.captures(path) {
         let start = suffix.get(0).expect("whole match").start();

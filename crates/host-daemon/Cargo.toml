@@ -15,13 +15,17 @@ bex-process = { path = "../bex-process" }
 agent-protocol = { path = "../agent-protocol" }
 agent-transport = { path = "../agent-transport" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = { version = "0.10.4", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 directories = "6"
+semver = "1.0.28"
+tar = { version = "0.4.46", default-features = false }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
 base64.workspace = true
 codex-app-server = { path = "../codex-app-server" }
 ring.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "multipart", "json", "http2", "system-proxy"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "multipart", "json", "http2", "system-proxy", "stream", "query"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util.workspace = true
 regex = "1"
@@ -29,12 +33,13 @@ url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-std", "net"] }
+tokio = { workspace = true, features = ["fs", "io-std", "net", "process", "time"] }
 async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink", "tokio-rustls-platform-verifier"] }
 futures-io = "0.3"
 tokio-util.workspace = true
 zeroize.workspace = true
 tempfile = "3"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 scopeguard = "1.2"
 atomicwrites = "0.4.4"
 anyhow.workspace = true
@@ -43,9 +48,26 @@ alacritty_terminal = "=0.26.0"
 icu_collator = "1.5"
 icu_normalizer = "1.5"
 ignore = "0.4.33"
+sysinfo = "=0.31.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Power",
+    "Win32_System_LibraryLoader",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 proptest = "1.11"

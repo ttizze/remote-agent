@@ -48,6 +48,15 @@ extension BexAppViewModel {
         }
     }
 
+    /// Adds the template's prompt to the draft and brings the composer up with the cursor after it.
+    func useArtifactTemplate(_ template: ArtifactTemplate) {
+        let next = appendArtifactTemplateUsePrompt(draft: composerText, template: template)
+        if next != composerText {
+            editDraft(next)
+        }
+        composerFocusRequests += 1
+    }
+
     private func resetEditor() {
         draftEdits.reset()
     }

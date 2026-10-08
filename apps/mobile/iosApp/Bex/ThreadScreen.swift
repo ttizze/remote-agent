@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 /// Where the thread screen sends the user.
 struct ThreadRoutes {
@@ -7,6 +8,7 @@ struct ThreadRoutes {
     let terminal: (String?) -> Void
     let files: () -> Void
     let review: () -> Void
+    let device: () -> Void
 }
 
 /// One thread: header, feed, the floating working control, request cards and
@@ -22,6 +24,8 @@ struct ThreadScreen: View {
     @State private var showingSettings = false
     @State private var forkingRun: String?
     @State private var openedFile: FileTarget?
+    @State private var openedPDF: FileTarget?
+    @State private var contextPreview: ContextChip?
     private let endId = "feed-end"
 
     var body: some View {
@@ -47,8 +51,23 @@ struct ThreadScreen: View {
         .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
         .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
         .sheet(item: $openedFile) { ThreadFileSheet(model: model, target: $0) }
+        .sheet(item: $openedPDF) { ThreadPDFSheet(model: model, target: $0) }
+        .sheet(isPresented: Binding(
+            get: { contextPreview != nil },
+            set: { if !$0 { contextPreview = nil } }
+        )) {
+            if let contextPreview {
+                ContextPreviewSheet(chip: contextPreview, openTerminal: {
+                    openContextTerminal(contextPreview.terminalId)
+                    self.contextPreview = nil
+                })
+            }
+        }
         .environment(\.markdownLinks, MarkdownLinkOpener(
-            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd, openFile: { openedFile = $0 }, loadFile: model.download
+            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd,
+            openFile: { openedFile = $0 },
+            openPDF: { openedPDF = $0 },
+            loadFile: model.download
         ))
         .sheet(isPresented: $showingSettings) {
             if let controls = model.threadView?.composer.controls {
@@ -119,7 +138,7 @@ struct ThreadScreen: View {
                 setupCard(view)
             }
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil).equatable()
+                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil)
                 if index == firstUserMessage {
                     setupCard(view)
                 }
@@ -192,8 +211,18 @@ struct ThreadScreen: View {
                 }
             },
             openThread: { model.openThread($0) },
-            download: model.downloadAttachment
+            openTerminal: openContextTerminal,
+            showContextPreview: { contextPreview = $0 },
+            download: model.downloadAttachment,
+            useArtifactTemplate: { model.useArtifactTemplate($0) }
         )
+    }
+
+    private func openContextTerminal(_ terminalId: String?) {
+        let resolved = terminalId
+            .flatMap { id in model.threadView?.terminals.first { $0.terminalId == id }?.terminalId }
+            ?? model.threadView?.terminals.first?.terminalId
+        routes.terminal(resolved)
     }
 
     @ToolbarContentBuilder
@@ -208,21 +237,17 @@ struct ThreadScreen: View {
             }
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-            Menu {
-                Button(action: routes.review) {
-                    Label("Review changes", systemImage: "text.bubble")
-                    Text("Turn diffs and worktree changes")
-                }
-                if header?.actions.contains(where: { $0.kind == .mergeBack }) == true {
-                    Button { model.perform(.mergeBack) } label: {
-                        Label("Merge back to source", systemImage: "arrow.triangle.merge")
-                        Text("Bring this thread's latest turn into its source")
-                    }
-                }
-            } label: {
-                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+            GitToolbarButton(
+                model: model,
+                cwd: header?.cwd ?? model.cwd,
+                review: routes.review,
+                mergeBack: { model.perform(.mergeBack) },
+                mergeBackAvailable: header?.actions.contains(where: { $0.kind == .mergeBack }) == true
+            )
+            Button(action: routes.device) {
+                Label("Device", systemImage: "iphone")
             }
-            .accessibilityLabel("Git")
+            .accessibilityLabel("Device")
             Button(action: routes.files) { Image(systemName: "folder") }
                 .accessibilityLabel("Files")
             TerminalMenu(model: model, open: routes.terminal)
@@ -284,6 +309,132 @@ private struct TerminalMenu: View {
         }
         .accessibilityLabel("Terminal")
         .disabled(!model.snapshot.canOpenTerminal())
+    }
+}
+
+/// Device picker, setup and the Host's latest streamed PNG frame.
+struct DeviceScreen: View {
+    @ObservedObject var model: BexAppViewModel
+    let threadId: String
+
+    var body: some View {
+        let view = model.snapshot.device()
+        let threadSessions = view.sessions.filter { $0.threadId == threadId }
+        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId)" }.joined(separator: ",")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if !view.enabled {
+                    Text("Device support is off").font(AppTheme.font(17, weight: .semibold))
+                    Text("Enable it to discover simulators and emulators on the Host.")
+                        .foregroundStyle(AppTheme.muted)
+                    Button("Enable device support") {
+                        model.perform(.configureDevices(enabled: true, agentAccessEnabled: nil, onboardingCompleted: false))
+                    }
+                } else {
+                    Text("Host status: \(view.status)").foregroundStyle(AppTheme.muted)
+                    if let detail = view.statusDetail {
+                        Text(detail).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                    }
+                    if !view.agentAccessEnabled {
+                        Button("Enable agent device access") {
+                            model.perform(.configureDevices(enabled: nil, agentAccessEnabled: true, onboardingCompleted: true))
+                        }
+                    }
+                    ForEach(view.hosts, id: \.id) { host in
+                        Text("\(host.label) · \(host.kind)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                        ForEach(host.unavailableReasons, id: \.self) { reason in
+                            Text(reason).font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    ForEach(Array(view.devices.enumerated()), id: \.offset) { _, device in
+                        let opened = view.sessions.contains {
+                            $0.threadId == threadId && $0.hostId == device.hostId && $0.deviceId == device.id
+                        }
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(device.name).font(AppTheme.font(16, weight: .semibold))
+                                Text("\(device.platform) · \(device.version)").foregroundStyle(AppTheme.muted)
+                            }
+                            Spacer()
+                            Button(opened ? "Close" : "Open") {
+                                if opened {
+                                    model.perform(.closeDevice(hostId: device.hostId, deviceId: device.id, shutdown: false))
+                                } else {
+                                    model.perform(.openDevice(hostId: device.hostId, deviceId: device.id, platform: device.platform, boot: true))
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    ForEach(Array(threadSessions.enumerated()), id: \.offset) { _, session in
+                        let detail = view.details.first(where: { $0.hostId == session.hostId && $0.deviceId == session.deviceId })
+                        HStack(spacing: 8) {
+                            Button("Dark") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .setAppearance(dark: true)
+                                ))
+                            }
+                            Button("Light") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .setAppearance(dark: false)
+                                ))
+                            }
+                            Button("Text +") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .setTextSize(size: "large")
+                                ))
+                            }
+                            if session.platform == "android" {
+                                Button("Portrait") {
+                                    model.perform(.deviceAction(
+                                        hostId: session.hostId,
+                                        deviceId: session.deviceId,
+                                        action: .setOrientation(orientation: "portrait")
+                                    ))
+                                }
+                            }
+                            Button("Power off") {
+                                model.perform(.closeDevice(hostId: session.hostId, deviceId: session.deviceId, shutdown: true))
+                            }
+                        }
+                        if let app = detail?.foregroundApp {
+                            Text("Foreground: \(app)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    if let frame = view.frames.filter({ $0.threadId == threadId }).max(by: { $0.sequence < $1.sequence }),
+                       let image = UIImage(data: Data(frame.png)) {
+                        Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
+                    } else {
+                        Text("Open a device to see its live frame").foregroundStyle(AppTheme.muted)
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(AppTheme.screen.ignoresSafeArea())
+        .navigationTitle("Device")
+        .onAppear {
+            model.perform(.openThread(threadId: threadId))
+            model.perform(.loadDevices)
+            model.perform(.subscribeDevice)
+            for session in threadSessions {
+                model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
+            }
+        }
+        .onChange(of: threadSessionKey) { _, _ in
+            let sessions = model.snapshot.device().sessions
+            for session in sessions where session.threadId == threadId {
+                model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
+            }
+        }
+        .onDisappear { model.perform(.unsubscribeDevice) }
     }
 }
 

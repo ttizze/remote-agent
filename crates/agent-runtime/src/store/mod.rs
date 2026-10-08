@@ -11,16 +11,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Cached projections older than this marker are rebuilt from facts.
-pub const SNAPSHOT_FORMAT: &str = "state-json-3";
+pub const SNAPSHOT_FORMAT: &str = "state-json-4";
 const _: () = assert!(
-    agent_domain::STATE_FORMAT == 3,
+    agent_domain::STATE_FORMAT == 4,
     "bump SNAPSHOT_FORMAT with STATE_FORMAT"
 );
 pub const SNAPSHOT_INTERVAL: u64 = 256;
 /// Stored list rows older than this marker are rebuilt from facts on open.
-const SHELL_FORMAT: &str = "shell-json-1";
+const SHELL_FORMAT: &str = "shell-json-2";
 const _: () = assert!(
-    agent_domain::SHELL_FORMAT == 1,
+    agent_domain::SHELL_FORMAT == 2,
     "bump SHELL_FORMAT with agent_domain::SHELL_FORMAT"
 );
 

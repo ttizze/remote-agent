@@ -1,12 +1,13 @@
 //! The conversation views apps render. Each getter calls one `view` function
 //! with the device state the snapshot holds.
 use crate::commands::build::FollowUpBehavior;
-use crate::state::{DraftAttachment, Snapshot};
+use crate::state::{Draft, DraftAttachment, ScheduledTaskDraft, Snapshot};
 use crate::view::{
     archived::{ArchivedOptions, ArchivedView, archived_view},
     attachments::{AttachmentAdmission, AttachmentCandidate},
     checkpoints::{DiffPanelSelection, DiffPanelView, checkpoint_summaries, diff_panel},
     composer::{
+        controls::{RuntimeModeChoice, runtime_mode_choices},
         menu::{ComposerMenuView, composer_menu},
         stash::{StashEntryView, stash_menu},
         view::ComposerOptions,
@@ -16,14 +17,23 @@ use crate::view::{
         ordering::FavoriteModel,
         picker::{ModelPickerOptions, ModelPickerView, PickerRail, model_picker},
         staging::{self, StagedModel},
-        traits::{TraitsView, traits},
+        traits::{TraitsView, select_trait, toggle_trait, traits},
     },
     new_thread::{NewThreadView, new_thread_view},
+    preview::PreviewView,
     projects::{
         add::{AddProjectTarget, FolderBrowserView, add_project_target, folder_browser},
         import::{ImportToast, SessionImportView, session_import_view},
         picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
+    },
+    pull_requests::{
+        PullRequestDetailView, PullRequestDiffView, PullRequestListView, PullRequestPanelOptions,
+        pull_request_detail, pull_request_diff, pull_request_list,
+    },
+    scheduled_tasks::{
+        ScheduledTaskBranchView, ScheduledTaskListView, branch_view as scheduled_task_branch_view,
+        draft as scheduled_task_draft, list as scheduled_task_list,
     },
     search::{SearchOptions, SearchView, search_view},
     settings::{
@@ -43,8 +53,9 @@ use crate::view::{
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
     timeline::rows::{TimelineRow, TimelineUpdate},
+    workspace_search::ContentSearchView,
 };
-use agent_domain::ThreadId;
+use agent_domain::{Attachment, MessageContext, ThreadId};
 use chrono::{Local, TimeZone};
 
 /// A project icon's image bytes.
@@ -80,6 +91,30 @@ pub struct PreferencesView {
 }
 
 impl Snapshot {
+    pub fn pull_request_list(&self, options: PullRequestPanelOptions) -> PullRequestListView {
+        pull_request_list(self, &options)
+    }
+
+    pub fn pull_request_detail(
+        &self,
+        key: agent_domain::PullRequestKey,
+    ) -> Option<PullRequestDetailView> {
+        pull_request_detail(self, &key)
+    }
+
+    pub fn pull_request_diff(
+        &self,
+        key: agent_domain::PullRequestKey,
+    ) -> Option<PullRequestDiffView> {
+        pull_request_diff(self, &key)
+    }
+
+    pub fn preview(&self) -> PreviewView {
+        crate::view::preview::preview(self)
+    }
+    pub fn content_search(&self) -> ContentSearchView {
+        crate::view::workspace_search::content_search(self)
+    }
     fn picker_options(
         &self,
         query: String,
@@ -111,8 +146,62 @@ fn thread(id: String) -> Option<ThreadId> {
     ThreadId::new(id).ok()
 }
 
+fn scheduled_task_draft_as_composer(draft: &ScheduledTaskDraft) -> Draft {
+    Draft {
+        text: draft.prompt.clone(),
+        instance_id: draft.instance_id.clone(),
+        driver: draft.driver,
+        model: draft.model.clone(),
+        options: draft.options.clone(),
+        runtime_mode: draft.runtime_mode,
+        interaction_mode: draft.interaction_mode,
+        ..Draft::default()
+    }
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn scheduled_tasks(&self) -> ScheduledTaskListView {
+        scheduled_task_list(self)
+    }
+    pub fn scheduled_task_draft(&self, id: Option<String>) -> crate::state::ScheduledTaskDraft {
+        scheduled_task_draft(self, id.as_deref())
+    }
+    pub fn scheduled_task_branches(
+        &self,
+        project_id: String,
+        selected_branch: String,
+    ) -> ScheduledTaskBranchView {
+        scheduled_task_branch_view(self, &project_id, &selected_branch)
+    }
+
+    pub fn usage_preferences(&self) -> crate::view::usage::UsagePreferences {
+        self.preferences.usage.clone()
+    }
+
+    pub fn usage_page(&self) -> crate::view::usage::UsagePageView {
+        crate::view::usage::usage_page(self)
+    }
+
+    pub fn usage_limits(&self) -> Vec<crate::view::usage::UsageLimitAccount> {
+        crate::view::usage::usage_limits(self.accounts.as_ref())
+    }
+
+    pub fn composer_usage_limits(
+        &self,
+        provider: crate::provider::ProviderKind,
+    ) -> Option<crate::view::usage::ComposerUsageLimits> {
+        crate::view::usage::composer_usage_limits(self.accounts.as_ref(), provider)
+    }
+
+    pub fn device(&self) -> crate::view::device::DeviceView {
+        crate::view::device::device_view(self)
+    }
+
+    pub fn usage_limit_pools(&self, now_ms: i64) -> Vec<crate::view::usage::UsageLimitPool> {
+        crate::view::usage::usage_limit_pools(self.accounts.as_ref(), now_ms)
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,
@@ -258,6 +347,59 @@ impl Snapshot {
         options: crate::view::models::catalog_sheet::CatalogSheetOptions,
     ) -> crate::view::models::catalog_sheet::CatalogSheetView {
         crate::view::models::catalog_sheet::catalog_sheet(self, &options)
+    }
+    /// The model option controls for a scheduled task draft.
+    pub fn scheduled_task_traits(&self, draft: ScheduledTaskDraft) -> TraitsView {
+        let composer = scheduled_task_draft_as_composer(&draft);
+        traits(self, &composer, false)
+    }
+    /// Applies a model select option in a scheduled task draft.
+    pub fn select_scheduled_task_trait(
+        &self,
+        mut draft: ScheduledTaskDraft,
+        descriptor_id: String,
+        choice: String,
+    ) -> ScheduledTaskDraft {
+        let composer = scheduled_task_draft_as_composer(&draft);
+        if let Some(change) =
+            select_trait(&catalog(self), &composer, false, &descriptor_id, &choice)
+        {
+            if let Some(options) = change.options {
+                draft.options = options;
+            }
+            if let Some(prompt) = change.text {
+                draft.prompt = prompt;
+            }
+        }
+        draft
+    }
+    /// Applies a model toggle option in a scheduled task draft.
+    pub fn toggle_scheduled_task_trait(
+        &self,
+        mut draft: ScheduledTaskDraft,
+        descriptor_id: String,
+        on: bool,
+    ) -> ScheduledTaskDraft {
+        let composer = scheduled_task_draft_as_composer(&draft);
+        if let Some(change) = toggle_trait(&catalog(self), &composer, &descriptor_id, on) {
+            if let Some(options) = change.options {
+                draft.options = options;
+            }
+        }
+        draft
+    }
+    /// Runtime modes advertised by the selected provider for a scheduled task.
+    pub fn scheduled_task_runtime_modes(
+        &self,
+        draft: ScheduledTaskDraft,
+    ) -> Vec<RuntimeModeChoice> {
+        let catalog = catalog(self);
+        let supported = catalog
+            .instance(&draft.instance_id)
+            .map_or(&[][..], |instance| {
+                instance.supported_runtime_modes.as_slice()
+            });
+        runtime_mode_choices(supported)
     }
     pub fn traits(&self) -> TraitsView {
         traits(self, &self.current_draft(), true)
@@ -553,6 +695,92 @@ pub fn markdown_link_action(
     crate::presentation::markdown::links::markdown_link_action(&href, workspace_root.as_deref())
 }
 
+/// Converts a sent mobile message into Markdown while preserving the
+/// context-link destinations and marking records that are no longer present.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_message_markdown(text: String, context: Option<MessageContext>) -> String {
+    crate::view::composer::chips::mobile_message_markdown(&text, context.as_ref())
+}
+
+/// The resolved context records a native mobile feed can act on when a user
+/// taps a context link. Attachments are supplied so file and image records
+/// keep their attachment ids without native JSON parsing.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_message_context_chips(
+    text: String,
+    context: Option<MessageContext>,
+    attachments: Vec<Attachment>,
+) -> Vec<crate::view::composer::chips::ContextChip> {
+    crate::view::composer::chips::context_chips(
+        &text,
+        context.as_ref(),
+        &attachments,
+        &[],
+        crate::view::composer::chips::ContextChipSurface::Message,
+    )
+}
+
+/// Whether a safe, one-based line target exists in a rendered file.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
+    crate::presentation::markdown::links::markdown_line_target(line, line_count)
+}
+
+/// Whether a Host resource path should open in the PDF viewer.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn is_pdf_file(path: String) -> bool {
+    crate::presentation::markdown::links::is_pdf_file(&path)
+}
+
+/// Defaults for the mobile-only appearance controls.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_appearance_default() -> crate::view::appearance::MobileAppearance {
+    crate::view::appearance::MobileAppearance::default()
+}
+
+/// Normalizes mobile appearance values before a native client stores or uses
+/// them.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn normalize_mobile_appearance(
+    appearance: crate::view::appearance::MobileAppearance,
+) -> crate::view::appearance::MobileAppearance {
+    crate::view::appearance::normalize_mobile_appearance(appearance)
+}
+
+/// Assigns one mobile appearance's theme while preserving an independent
+/// selection for the other appearance.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_assign_theme(
+    appearance: crate::view::appearance::MobileAppearance,
+    dark: bool,
+    theme_id: Option<String>,
+) -> crate::view::appearance::MobileAppearance {
+    crate::view::appearance::mobile_assign_theme(appearance, dark, theme_id)
+}
+
+/// Resolves the mobile text and terminal sizes from appearance controls.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_typography(
+    appearance: crate::view::appearance::MobileAppearance,
+) -> crate::view::appearance::MobileTypography {
+    crate::view::appearance::mobile_typography(appearance)
+}
+
+/// The hex role values a native client uses for a stock or built-in theme.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_theme_colors(
+    theme_id: Option<String>,
+    dark: bool,
+) -> std::collections::HashMap<String, String> {
+    crate::view::appearance::mobile_theme_colors(theme_id.as_deref(), dark)
+}
+
+/// Steps a mobile terminal size through the shared bounded half-point scale.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn terminal_font_size_step(current: f64, larger: bool) -> f64 {
+    crate::view::terminals::text_size::step_terminal_font_size(current, larger)
+}
+
 /// The file screen's subtitle for `path` in the project `project_name`.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn file_header_subtitle(project_name: String, path: String) -> String {
@@ -568,6 +796,22 @@ pub fn markdown_image_source(
     crate::view::work_log::media_source::classify_markdown_image_source(
         Some(&href),
         workspace_root.as_deref(),
+    )
+}
+
+/// Fits image or document pixels inside explicit rendering bounds.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn fit_image_display_size(
+    source_width: f64,
+    source_height: f64,
+    max_width: f64,
+    max_height: f64,
+) -> Option<crate::presentation::markdown::image_size::ImageDisplaySize> {
+    crate::presentation::markdown::image_size::fit_image_display_size(
+        source_width,
+        source_height,
+        max_width,
+        max_height,
     )
 }
 

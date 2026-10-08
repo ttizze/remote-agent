@@ -146,6 +146,30 @@ pub enum FactBody {
     PullRequestLinked {
         pull_request: Option<LinkedPullRequest>,
     },
+    PullRequestsSynced {
+        links: Vec<PullRequestLink>,
+    },
+    /// A provider snapshot for one linked request was refreshed.
+    PullRequestLinkSynced {
+        link: PullRequestLink,
+    },
+    /// A user or Host changed the durable watch for one linked request.
+    PullRequestWatchSet {
+        key: PullRequestKey,
+        watch: Option<PullRequestWatch>,
+    },
+    /// A persisted watch was updated by the background reactor.
+    PullRequestWatchSynced {
+        key: PullRequestKey,
+        watch: Option<PullRequestWatch>,
+    },
+    /// The current checkout was resolved to a provider request, if one exists.
+    BranchPullRequestResolved {
+        link: Option<PullRequestLink>,
+    },
+    PullRequestUnlinked {
+        key: PullRequestKey,
+    },
     RateLimitRejected {
         attempt: RunAttemptId,
         limit: String,
@@ -222,6 +246,7 @@ pub enum FactBody {
         created_by: MessageAuthor,
         creation_source: String,
         context: Option<MessageContext>,
+        scheduled_task: Option<String>,
     },
     MessageNotificationAssigned {
         id: MessageId,
@@ -779,6 +804,36 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 .ok_or(FoldError::Missing("thread"))?
                 .linked_pull_request = pull_request.clone()
         }
+        PullRequestsSynced { links } => {
+            state.pull_requests = links.clone();
+        }
+        PullRequestLinkSynced { link } => {
+            let key = normalize_pull_request_key(&link.key());
+            state.pull_requests.retain(|candidate| candidate.key() != key);
+            state.pull_requests.push(link.clone());
+        }
+        PullRequestWatchSet { key, watch } | PullRequestWatchSynced { key, watch } => {
+            let key = normalize_pull_request_key(key);
+            if let Some(link) = state
+                .pull_requests
+                .iter_mut()
+                .find(|candidate| candidate.key() == key)
+            {
+                link.watch = watch.clone();
+            }
+        }
+        BranchPullRequestResolved { link } => {
+            state
+                .pull_requests
+                .retain(|candidate| candidate.source != PullRequestLinkSource::Agent);
+            if let Some(link) = link {
+                state.pull_requests.push(link.clone());
+            }
+        }
+        PullRequestUnlinked { key } => {
+            let key = normalize_pull_request_key(key);
+            state.pull_requests.retain(|link| link.key() != key);
+        }
         RateLimitRejected {
             attempt,
             limit,
@@ -969,6 +1024,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             created_by,
             creation_source,
             context,
+            scheduled_task,
         } => {
             if state.messages.iter().any(|m| &m.id == id) {
                 return Err(FoldError::Conflict);
@@ -987,6 +1043,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 created_at: at.clone(),
                 updated_at: at.clone(),
                 context: context.clone(),
+                scheduled_task: scheduled_task.clone(),
             });
         }
         MessageNotificationAssigned { id, notification } => {
@@ -1634,7 +1691,7 @@ pub fn text_chunks(text: &str) -> Vec<&str> {
 }
 /// Version of the folded `State` and `Fact` encodings. Stored snapshots with
 /// another value are rebuilt from facts.
-pub const STATE_FORMAT: u32 = 3;
+pub const STATE_FORMAT: u32 = 4;
 pub fn fold(initial: &State, facts: &[Fact]) -> Result<State, FoldError> {
     let mut state = initial.clone();
     for fact in facts {

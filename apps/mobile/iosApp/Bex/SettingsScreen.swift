@@ -1,4 +1,5 @@
 import AgentCore
+import Foundation
 import SwiftUI
 
 /// Settings: connections, thread behavior, follow-ups, archive, provider
@@ -13,11 +14,12 @@ struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: 20) {
                     SettingsGroup(title: "Connections") {
                         SettingsLink(symbol: "point.3.connected.trianglepath.dotted", label: "Environments",
-                                     value: "\(model.profiles.count)") {
+                                     value: "\(model.environmentSettings().count)") {
                             ConnectionsScreen(model: model, close: { dismiss() })
                         }
                     }
                     SettingsGroup(title: "Interface") {
+                        SettingsLink(symbol: "paintbrush", label: "Appearance") { MobileAppearancePage() }
                         SettingsLink(symbol: "keyboard", label: "Keyboard") { KeyboardSettingsPage() }
                     }
                     SettingsGroup(title: "Projects & threads") {
@@ -36,6 +38,12 @@ struct SettingsScreen: View {
                         }
                     }
                     SettingsGroup(title: "Server settings") {
+                        SettingsLink(symbol: "calendar.badge.clock", label: "Scheduled tasks") {
+                            ScheduledTasksScreen(model: model)
+                        }
+                        SettingsLink(symbol: "chart.bar.xaxis", label: "Usage") {
+                            UsageScreen(model: model)
+                        }
                         SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
                             ProviderAccountsPage(model: model)
                         }
@@ -57,8 +65,14 @@ struct SettingsScreen: View {
                         SettingsLink(symbol: "internaldrive", label: "Storage") {
                             HostSettingsPage(model: model, title: "Storage", sections: ["storage"])
                         }
+                        SettingsLink(symbol: "waveform.path.ecg", label: "Background activity") {
+                            BackgroundDiagnosticsPage(model: model)
+                        }
                     }
                     SettingsGroup(title: "App") {
+                        SettingsLink(symbol: "arrow.down.circle", label: "App updates") {
+                            NativeUpdatePage(model: model)
+                        }
                         PrivacyPolicyButton().font(AppTheme.font(18)).padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -72,9 +86,335 @@ struct SettingsScreen: View {
             .onAppear {
                 model.perform(.loadSettings)
                 model.perform(.loadWorktreeSettings)
+                model.perform(.loadBackgroundPolicy)
             }
         }
         .tint(AppTheme.color("mobilePrimaryText"))
+    }
+}
+
+/// Mobile color scheme, theme and independent text/code/terminal controls.
+private struct MobileAppearancePage: View {
+    @State private var appearance = MobileAppearanceState.load()
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingsGroup(title: "Color scheme") {
+                    ForEach(MobileAppearanceState.ColorScheme.allCases, id: \.self) { scheme in
+                        Button { update { $0.colorScheme = scheme } } label: {
+                            HStack {
+                                Text(scheme.label).font(AppTheme.font(18)).foregroundStyle(AppTheme.text)
+                                Spacer()
+                                if appearance.colorScheme == scheme {
+                                    Image(systemName: "checkmark").foregroundStyle(AppTheme.primary)
+                                }
+                            }
+                            .padding(16)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                SettingsGroup(title: "Themes") {
+                    sharedThemePicker
+                    Divider().overlay(AppTheme.borderSubtle)
+                    themePicker("Light theme", dark: false)
+                    Divider().overlay(AppTheme.borderSubtle)
+                    themePicker("Dark theme", dark: true)
+                }
+                SettingsGroup(title: "Text") {
+                    StepperRow(label: "Base size", value: baseBinding, range: 11...22)
+                }
+                SettingsGroup(title: "Code") {
+                    ToggleRow("Custom size", isOn: codeCustomBinding)
+                    if appearance.codeFontSize != nil {
+                        StepperRow(label: "Code size", value: codeBinding, range: 8...18)
+                    }
+                    ToggleRow("Wrap long lines", isOn: wrapBinding)
+                }
+                SettingsGroup(title: "Terminal") {
+                    ToggleRow("Custom size", isOn: terminalCustomBinding)
+                    if appearance.terminalFontSize != nil {
+                        Stepper(value: terminalBinding, in: 6...14, step: 0.5) {
+                            HStack {
+                                Text("Terminal size").font(AppTheme.font(18)).foregroundStyle(AppTheme.text)
+                                Spacer()
+                                Text(String(format: "%.1f", appearance.terminalFontSize ?? 10.5))
+                                    .font(AppTheme.mono(14)).foregroundStyle(AppTheme.muted)
+                            }
+                        }
+                        .padding(16)
+                    }
+                }
+            }
+            .padding(.horizontal, 20).padding(.vertical, 16)
+        }
+        .background(AppTheme.sheet.ignoresSafeArea())
+        .navigationTitle("Appearance")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func themePicker(_ title: String, dark: Bool) -> some View {
+        Picker(title, selection: Binding(
+            get: { (dark ? appearance.darkTheme : appearance.lightTheme) ?? "" },
+            set: { value in
+                appearance = appearance.assigningTheme(value.isEmpty ? nil : value, dark: dark)
+                AppTheme.update(appearance)
+            }
+        )) {
+            ForEach(MobileAppearanceState.themes, id: \.label) { theme in
+                Text(theme.label).tag(theme.id ?? "")
+            }
+        }
+        .font(AppTheme.font(18))
+        .padding(16)
+    }
+
+    private var sharedThemePicker: some View {
+        Picker("Both appearances", selection: Binding(
+            get: { appearance.theme ?? "" },
+            set: { value in
+                update {
+                    $0.theme = value.isEmpty ? nil : value
+                    $0.lightTheme = nil
+                    $0.darkTheme = nil
+                }
+            }
+        )) {
+            ForEach(MobileAppearanceState.themes, id: \.label) { theme in
+                Text(theme.label).tag(theme.id ?? "")
+            }
+        }
+        .font(AppTheme.font(18))
+        .padding(16)
+    }
+
+    private var baseBinding: Binding<Int> {
+        Binding(get: { appearance.baseFontSize }, set: { value in update { $0.baseFontSize = value } })
+    }
+
+    private var codeBinding: Binding<Int> {
+        Binding(get: { appearance.codeFontSize ?? 12 }, set: { value in update { $0.codeFontSize = value } })
+    }
+
+    private var terminalBinding: Binding<Double> {
+        Binding(get: { appearance.terminalFontSize ?? 10.5 }, set: { value in update { $0.terminalFontSize = value } })
+    }
+
+    private var codeCustomBinding: Binding<Bool> {
+        Binding(get: { appearance.codeFontSize != nil }, set: { enabled in
+            update { $0.codeFontSize = enabled ? ($0.codeFontSize ?? 12) : nil }
+        })
+    }
+
+    private var terminalCustomBinding: Binding<Bool> {
+        Binding(get: { appearance.terminalFontSize != nil }, set: { enabled in
+            update { $0.terminalFontSize = enabled ? ($0.terminalFontSize ?? 10.5) : nil }
+        })
+    }
+
+    private var wrapBinding: Binding<Bool> {
+        Binding(get: { appearance.codeWordWrap }, set: { value in update { $0.codeWordWrap = value } })
+    }
+
+    private func update(_ edit: (inout MobileAppearanceState) -> Void) {
+        var next = appearance
+        edit(&next)
+        appearance = next.normalized()
+        AppTheme.update(appearance)
+    }
+}
+
+private struct StepperRow: View {
+    let label: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+
+    var body: some View {
+        Stepper(value: $value, in: range) {
+            HStack {
+                Text(label).font(AppTheme.font(18)).foregroundStyle(AppTheme.text)
+                Spacer()
+                Text("\(value)").font(AppTheme.mono(14)).foregroundStyle(AppTheme.muted)
+            }
+        }
+        .padding(16)
+    }
+}
+
+private struct ToggleRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    init(_ title: String, isOn: Binding<Bool>) {
+        self.title = title
+        _isOn = isOn
+    }
+
+    var body: some View {
+        Toggle(title, isOn: $isOn).font(AppTheme.font(18)).padding(16)
+    }
+}
+
+private struct NativeUpdatePage: View {
+    @ObservedObject var model: BexAppViewModel
+
+    private func buildSetting(_ key: String) -> String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+              !value.isEmpty,
+              !value.contains("$(") else {
+            return nil
+        }
+        return value
+    }
+
+    private var currentVersion: String {
+        buildSetting("APP_UPDATE_VERSION")
+            ?? buildSetting("CFBundleShortVersionString")
+            ?? "0.0.0"
+    }
+
+    private var updateChannel: UpdateChannel {
+        switch buildSetting("APP_RELEASE_CHANNEL") {
+        case "nightly": .nightly
+        case "preview": .preview
+        default: .stable
+        }
+    }
+
+    var body: some View {
+        List {
+            Section("App updates") {
+                if let update = model.snapshot.nativeUpdate() {
+                    Text(
+                        update.updateAvailable
+                            ? "Version \(update.latestVersion ?? "new") is available"
+                            : update.message ?? "Up to date"
+                    )
+                    if update.updateAvailable,
+                       let storeURL = update.storeUrl,
+                       let url = URL(string: storeURL),
+                       url.scheme == "https" {
+                        Link("Open TestFlight", destination: url)
+                    }
+                } else {
+                    ProgressView("Checking for updates…")
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(AppTheme.sheet)
+        .navigationTitle("App updates")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            model.perform(.loadNativeUpdate(request: NativeUpdateRequest(
+                platform: .ios,
+                currentVersion: currentVersion,
+                channel: updateChannel
+            )))
+        }
+    }
+}
+
+private struct BackgroundDiagnosticsPage: View {
+    @ObservedObject var model: BexAppViewModel
+
+    private let profiles = ["balanced", "performance", "battery-saver"]
+
+    var body: some View {
+        let rows = model.snapshot.backgroundRows()
+        let selected = rows.first(where: { $0.key == "profile" })?.value.lowercased()
+        let gitFetchSeconds = backgroundIntervalSeconds(rows, key: "automaticGitFetchIntervalMs")
+        let providerHealthSeconds = backgroundIntervalSeconds(rows, key: "providerHealthRefreshIntervalMs")
+        List {
+            Section {
+                Button("Refresh diagnostics") {
+                    model.perform(.loadDiagnostics(traceFilePath: ""))
+                }
+                ForEach(rows, id: \.key) { row in
+                    if row.key != "profile" &&
+                        row.key != "automaticGitFetchIntervalMs" &&
+                        row.key != "providerHealthRefreshIntervalMs" {
+                        HStack {
+                            Text(row.key)
+                            Spacer()
+                            Text(row.value).foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                }
+            } header: {
+                Text("Host policy")
+            }
+            Section("Profile") {
+                ForEach(profiles, id: \.self) { profile in
+                    Button {
+                        model.perform(.setBackgroundProfile(profile: profile))
+                    } label: {
+                        HStack {
+                            Text(profile.replacingOccurrences(of: "-", with: " ").capitalized)
+                                .foregroundStyle(AppTheme.text)
+                            Spacer()
+                            if selected == profile { Image(systemName: "checkmark") }
+                        }
+                    }
+                }
+            }
+            Section("Intervals") {
+                Picker(
+                    "Git fetch interval",
+                    selection: Binding(get: { gitFetchSeconds }, set: { value in
+                        model.perform(.setAutomaticGitFetchInterval(seconds: UInt32(value)))
+                    }),
+                ) {
+                    ForEach([0, 15, 30, 60, 300, 900], id: \.self) { value in
+                        Text(value == 0 ? "Disabled" : "\(value) seconds").tag(value)
+                    }
+                }
+                Picker(
+                    "Provider health interval",
+                    selection: Binding(get: { providerHealthSeconds }, set: { value in
+                        model.perform(.setProviderHealthRefreshInterval(seconds: UInt32(value)))
+                    }),
+                ) {
+                    ForEach([0, 60, 300, 900, 1800], id: \.self) { value in
+                        Text(value == 0 ? "Disabled" : "\(value) seconds").tag(value)
+                    }
+                }
+            }
+            DiagnosticRows(title: "Host resources", rows: model.snapshot.hostResourceRows())
+            DiagnosticRows(title: "Processes", rows: model.snapshot.processRows())
+            DiagnosticRows(title: "Process history", rows: model.snapshot.processHistoryRows())
+            DiagnosticRows(title: "Traces", rows: model.snapshot.traceRows())
+        }
+        .scrollContentBackground(.hidden)
+        .background(AppTheme.sheet)
+        .navigationTitle("Background activity")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private func backgroundIntervalSeconds(_ rows: [DiagnosticRow], key: String) -> Int {
+    guard let value = rows.first(where: { $0.key == key })?.value,
+          let milliseconds = Int(value) else {
+        return 0
+    }
+    return max(0, milliseconds / 1_000)
+}
+
+private struct DiagnosticRows: View {
+    let title: String
+    let rows: [DiagnosticRow]
+
+    var body: some View {
+        Section(title) {
+            ForEach(rows, id: \.key) { row in
+                HStack {
+                    Text(row.key)
+                    Spacer()
+                    Text(row.value).foregroundStyle(AppTheme.muted)
+                }
+            }
+        }
     }
 }
 
@@ -329,12 +669,27 @@ private struct ProviderAccountsPage: View {
     @State private var code = ""
 
     var body: some View {
+        let usageLimits = model.snapshot.usageLimits()
         List {
             Section("Provider accounts") {
                 ForEach(model.snapshot.accounts()?.accounts ?? [], id: \.id) { account in
+                    let limits = usageLimits.first {
+                        $0.sourceAccountIds.contains(account.id)
+                    }
                     VStack(alignment: .leading, spacing: 8) {
                         AccountIdentityView(account: account)
-                        AccountUsageView(usage: account.usage)
+                        AccountUsageView(limits: limits) {
+                            let sourceId = limits?.resetCreditAccountId ?? account.id
+                            let source = model.snapshot.accounts()?.accounts.first {
+                                $0.id == sourceId
+                            }
+                            model.perform(.consumeResetCredit(
+                                provider: source?.provider ?? account.provider,
+                                accountId: sourceId,
+                                creditId: limits?.nextCreditId
+                            ))
+                            model.perform(.loadAccounts)
+                        }
                         HStack {
                             Button("Select") {
                                 model.perform(.selectAccount(provider: account.provider, id: account.id))

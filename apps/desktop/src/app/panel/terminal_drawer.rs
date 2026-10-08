@@ -118,6 +118,16 @@ impl TerminalState {
             .and_then(|thread| self.drawers.get(thread))
             .is_some_and(|drawer| drawer.open)
     }
+
+    pub(super) fn drawer_present(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| self.drawers.contains_key(thread))
+    }
+
+    pub(super) fn drawer_height(&self, viewport: f32) -> f32 {
+        clamp_drawer_height(self.height, viewport)
+    }
     fn drawer(&mut self, thread: &str) -> &mut Drawer {
         self.drawers.entry(thread.to_owned()).or_default()
     }

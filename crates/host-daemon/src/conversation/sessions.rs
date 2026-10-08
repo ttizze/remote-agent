@@ -19,10 +19,64 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, OnceLock, Weak},
 };
+
+fn claude_transcript_path(config_home: &Path, cwd: &Path, session: &str) -> io::Result<PathBuf> {
+    if session.is_empty()
+        || !session
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(io::Error::other("invalid Claude session id"));
+    }
+    let cwd = dunce::simplified(cwd).to_string_lossy();
+    #[cfg(target_os = "macos")]
+    let cwd = icu_normalizer::ComposingNormalizer::new_nfc().normalize(&cwd);
+    Ok(config_home
+        .join("projects")
+        .join(claude_project_key(&cwd))
+        .join(format!("{session}.jsonl")))
+}
+
+#[cfg(test)]
+mod transcript_paths {
+    use super::*;
+
+    #[test]
+    fn fork_transcripts_use_the_native_normalized_project_directory() {
+        let path = claude_transcript_path(
+            Path::new("fixture-home"),
+            Path::new("/tmp/cafe\u{301}"),
+            "123e4567-e89b-12d3-a456-426614174000",
+        )
+        .unwrap();
+        let project = if cfg!(target_os = "macos") {
+            "-tmp-caf-"
+        } else {
+            "-tmp-cafe-"
+        };
+        assert_eq!(
+            path,
+            Path::new("fixture-home")
+                .join("projects")
+                .join(project)
+                .join("123e4567-e89b-12d3-a456-426614174000.jsonl")
+        );
+    }
+
+    #[test]
+    fn a_session_id_cannot_escape_its_project_directory() {
+        for session in ["", "../other", "/other", "a/b", "a\\b", ".", "a:other"] {
+            assert!(
+                claude_transcript_path(Path::new("fixture-home"), Path::new("/tmp"), session)
+                    .is_err()
+            );
+        }
+    }
+}
 
 /// One provider process to start.
 #[derive(Debug, Clone, PartialEq)]
@@ -264,11 +318,13 @@ impl ProviderHost {
             self.tools.provider_config(&key.thread, &key.instance)?,
         )]);
         let project = if let Some(runtime) = self.runtime.get().and_then(Weak::upgrade) {
-            runtime
-                .state(&key.thread)
-                .await
-                .ok()
-                .and_then(|state| state.state.thread.map(|thread| thread.project))
+            runtime.state(&key.thread).await.ok().and_then(|state| {
+                state
+                    .state
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.project.clone())
+            })
         } else {
             None
         };
@@ -285,19 +341,7 @@ impl ProviderHost {
             .map_err(io::Error::other)?;
         let cwd = self.cwd(target).await.map_err(io::Error::other)?;
         let real = tokio::fs::canonicalize(&cwd).await.unwrap_or(cwd);
-        let key = claude_project_key(&dunce::simplified(&real).to_string_lossy());
-        if session.is_empty()
-            || !session
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err(io::Error::other("invalid Claude session id"));
-        }
-        Ok(claude
-            .config_home
-            .join("projects")
-            .join(key)
-            .join(format!("{session}.jsonl")))
+        claude_transcript_path(&claude.config_home, &real, session)
     }
 }
 

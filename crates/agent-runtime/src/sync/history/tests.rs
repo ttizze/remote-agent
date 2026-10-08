@@ -70,6 +70,7 @@ pub(crate) fn command_rows(count: usize) -> State {
 }
 fn message(id: &str, run: Option<&str>, role: Role, author: MessageAuthor, text: &str) -> Message {
     Message {
+        scheduled_task: None,
         context: None,
         notification: None,
         id: MessageId::new(id).unwrap(),

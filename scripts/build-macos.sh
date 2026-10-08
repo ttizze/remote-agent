@@ -7,11 +7,11 @@ case "${1:-desktop}" in
     host|desktop) product=${1:-desktop} ;;
     *) echo "usage: $0 [host|desktop]" >&2; exit 2 ;;
 esac
-identity=${BEX_CODE_SIGN_IDENTITY:-}
+identity=${APP_CODE_SIGN_IDENTITY:-}
 if [[ -z $identity ]]; then
     identities=$(/usr/bin/security find-identity -v -p codesigning | awk '/"Apple Development:|"Developer ID Application:/ {print $2}')
     [[ -n $identities && $identities != *$'\n'* ]] || {
-        echo 'Set BEX_CODE_SIGN_IDENTITY to one Apple Development or Developer ID Application certificate.' >&2
+        echo 'Set APP_CODE_SIGN_IDENTITY to one Apple Development or Developer ID Application certificate.' >&2
         exit 1
     }
     identity=$identities
@@ -25,10 +25,21 @@ sign() { /usr/bin/codesign --force --sign "$identity" --timestamp=none "$@"; }
 verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 if [[ $product == host ]]; then
     cargo build --locked --package host-daemon --package codex-app-server --package bex-process --release
+    cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$target/release/Claude-Agent-SDK-LICENSE.md"
+    scripts_dir=$(cd "$(dirname "$0")" && pwd)
+    rm -f "$target/release/ffmpeg" "$target/release/ffmpeg-bin" \
+        "$target/release/FFMPEG-RUNTIME.txt" "$target/release"/FFMPEG-LICENSE-*
+    rm -rf "$target/release/lib"
+    "$scripts_dir/stage-ffmpeg-runtime.sh" macos "$target/release"
     sign --identifier app.bex.provider-supervisor "$target/release/bex-provider-supervisor"
     verify "$target/release/bex-provider-supervisor"
     sign --identifier app.bex.host "$target/release/host-daemon"
     verify "$target/release/host-daemon"
+    sign "$target/release/ffmpeg"
+    for library in "$target/release"/lib/*.dylib; do
+        [[ -e $library ]] || continue
+        sign "$library"
+    done
     echo "$target/release/host-daemon"
     exit
 fi
@@ -55,13 +66,27 @@ executables="$bundle/Contents/MacOS"
 resources="$bundle/Contents/Resources"
 mkdir -p "$executables" "$resources"
 cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
+cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$resources/Claude-Agent-SDK-LICENSE.md"
 cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
+scripts_dir=$(cd "$(dirname "$0")" && pwd)
+"$scripts_dir/stage-ffmpeg-runtime.sh" macos "$executables"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
+if [[ -n ${APP_RELEASE_VERSION:-} ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_RELEASE_VERSION" "$bundle/Contents/Info.plist"
+fi
+if [[ -n ${APP_BUILD_NUMBER:-} ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD_NUMBER" "$bundle/Contents/Info.plist"
+fi
 sign "$executables/Bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"
+sign "$executables/ffmpeg"
+for library in "$executables"/lib/*.dylib; do
+    [[ -e $library ]] || continue
+    sign "$library"
+done
 sign "$bundle"
 verify "$bundle"
 if [[ -e $destination ]]; then mv "$destination" "$staging/previous.app"; fi

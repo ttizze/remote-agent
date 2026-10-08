@@ -607,7 +607,6 @@ pub struct AcpRegistryState {
     pub probes: BTreeMap<String, agent_protocol::operations::AcpProbeResult>,
     pub error: Option<String>,
 }
-
 /// The device's fold of Host preview metadata. Pixels remain in the browser
 /// panel; this state only describes tabs, server cards and ordering.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2305,6 +2304,28 @@ pub enum Intent {
         credit_id: Option<String>,
     },
     LoadProviders,
+    /// Runs the updater owned by a configured provider installation.
+    UpdateProvider {
+        instance: String,
+        target_version: Option<String>,
+    },
+    /// Searches the Host's credential-free ACP registry.
+    SearchAcpRegistry {
+        query: String,
+    },
+    /// Installs or prepares one ACP registry agent on the Host.
+    PrepareAcpAgent {
+        agent_id: String,
+    },
+    /// Removes one Host-managed ACP agent.
+    UninstallAcpAgent {
+        agent_id: String,
+    },
+    /// Probes one prepared ACP agent from a working directory.
+    ProbeAcpAgent {
+        agent_id: String,
+        cwd: String,
+    },
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,

@@ -2004,9 +2004,14 @@ mod snapshot {
         );
     }
 
-    fn new_task_draft(text: &str, created_at_ms: i64) -> crate::state::Draft {
+    fn new_task_draft(
+        project_id: &str,
+        text: &str,
+        created_at_ms: i64,
+    ) -> crate::state::Draft {
         crate::state::Draft {
             text: text.into(),
+            project_id: Some(project_id.into()),
             created_at_ms: Some(created_at_ms),
             ..Default::default()
         }
@@ -2031,12 +2036,13 @@ mod snapshot {
     fn surfaces_every_new_task_draft_with_content_alongside_queued_creations() {
         let mut outbox = Outbox::default();
         outbox.enqueue(launch("a", "project", "queued a")).unwrap();
-        let mut old = new_task_draft("first idea", now() - 3_600_000);
+        let mut old = new_task_draft("project-old", "first idea", now() - 3_600_000);
         old.workspace = Some(crate::state::DraftWorkspace {
             mode: crate::view::projects::selection::ThreadWorkspaceMode::Worktree,
             branch: Some("main".into()),
             worktree_path: None,
             start_from_origin: false,
+            start_from_origin_choice: None,
         });
         let snapshot = Snapshot {
             outbox: Arc::new(outbox),
@@ -2044,7 +2050,7 @@ mod snapshot {
                 ("new:project-old".to_string(), old),
                 (
                     "new:project-new".to_string(),
-                    new_task_draft("second idea", now() + 3_600_000),
+                    new_task_draft("project-new", "second idea", now() + 3_600_000),
                 ),
             ])
             .into(),
@@ -2079,9 +2085,9 @@ mod snapshot {
     fn hides_settings_only_drafts_and_titles_attachment_only_ones_by_count() {
         let settings_only = crate::state::Draft {
             model: "gpt".into(),
-            ..new_task_draft("", now())
+            ..new_task_draft("settings", "", now())
         };
-        let mut with_image = new_task_draft("", now());
+        let mut with_image = new_task_draft("with-image", "", now());
         with_image.attachments.push(crate::state::DraftAttachment {
             id: "image-1".into(),
             remote_id: None,
@@ -2096,10 +2102,13 @@ mod snapshot {
         let mut snapshot = Snapshot {
             drafts: std::collections::BTreeMap::from([
                 ("new:settings-only".to_string(), settings_only),
-                ("new:blank".to_string(), new_task_draft("   ", now())),
+                (
+                    "new:blank".to_string(),
+                    new_task_draft("blank", "   ", now()),
+                ),
                 (
                     "thread-1".to_string(),
-                    new_task_draft("thread composer text", now()),
+                    new_task_draft("thread", "thread composer text", now()),
                 ),
             ])
             .into(),
@@ -2130,7 +2139,7 @@ mod snapshot {
         let mut snapshot = Snapshot::default();
         snapshot
             .drafts
-            .insert("new:app".into(), new_task_draft("", 0));
+            .insert("new:app".into(), new_task_draft("app", "", 0));
         snapshot.drafts.get_mut("new:app").unwrap().created_at_ms = None;
         snapshot.settle_new_thread_drafts(5);
         assert_eq!(snapshot.drafts["new:app"].created_at_ms, None);

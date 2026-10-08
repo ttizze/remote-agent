@@ -41,6 +41,20 @@ Native transcript import scans at most 100 recent transcripts from the last 30
 days and imports up to 200 messages per thread. Imported threads keep their
 native session for resumption.
 
+Claude execution uses the official Agent SDK with existing subscription
+authentication. The SDK is pinned by the npm lockfile in
+`crates/host-daemon/src/claude/sdk`, vendored as `sdk.mjs` and embedded in the
+Host executable; before a launch the Host writes that copy under its Claude
+configuration directory (`remote-agent-sdk/<version>-<sha256>/`) and runs the
+small bridge (`bridge.mjs`) with Node under the process supervisor, using `node`
+beside the Host executable when present and otherwise `node` on PATH (18 or
+newer). The bridge owns only SDK I/O: the persistent query and prompt stream,
+permission and dialog callbacks, interrupt, usage and session fork. Rust owns
+conversation state and permission decisions through `agent-providers`. The SDK
+spawns the unmodified CLI with the selected account's configuration and
+credential directories; credential variables from the Host environment and
+`NODE_OPTIONS` are not passed on. Viewing or listing history starts no process.
+
 Terminals, files, browser, worktrees, accounts, dictation, pairing and
 revocation have independent Host owners. Thread terminals are keyed by thread
 and terminal ID. A build does not replace a running Host.

@@ -65,6 +65,7 @@ struct WorkspaceScreen: View {
     @ObservedObject var model: BexAppViewModel
     let root: String
     let close: () -> Void
+    @State private var openedPDF: FileTarget?
 
     var body: some View {
         WorkspaceNavigation(root: root) { directory, openDirectory in
@@ -72,9 +73,15 @@ struct WorkspaceScreen: View {
                                      perform: request, fileDraft: fileDraft,
                                      downloadFile: model.download,
                                      aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
-                                     close: close, openDirectory: openDirectory)
+                                     close: close, openDirectory: openDirectory,
+                                     openPDF: { path in
+                                         openedPDF = FileTarget(path: path, displayPath: path, line: nil)
+                                     })
         }
         .background(AppTheme.screen)
+        .sheet(item: $openedPDF) { target in
+            ThreadPDFSheet(model: model, target: target)
+        }
     }
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
@@ -101,6 +108,7 @@ private struct WorkspaceDirectoryScreen: View {
     let aiEdit: (String) -> Void
     let close: () -> Void
     let openDirectory: (String) -> Void
+    let openPDF: (String) -> Void
     @State private var path = ""
     @State private var entries: [FileEntry] = []
     @State private var error: String?
@@ -134,7 +142,13 @@ private struct WorkspaceDirectoryScreen: View {
                             }
                             .accessibilityIdentifier("file.\(entry.name)")
                         } else {
-                            Button { selected = entry } label: { Label(entry.name, systemImage: "doc") }
+                            Button {
+                                if isPdfFile(path: entry.path) {
+                                    openPDF(entry.path)
+                                } else {
+                                    selected = entry
+                                }
+                            } label: { Label(entry.name, systemImage: "doc") }
                                 .buttonStyle(.borderless)
                                 .accessibilityIdentifier("file.\(entry.name)")
                         }

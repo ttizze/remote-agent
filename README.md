@@ -48,6 +48,8 @@ The session architecture, limits, local data and verification matrix are documen
 
 The Host needs Git and at least one available agent for conversations. Codex is optional; the Host prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH; `--codex <path>` is authoritative.
 
+Claude conversations run through the official Agent SDK on Node.js 18 or newer. The Host runs `node` found beside its own executable, otherwise `node` on its PATH. The Nix development environment includes Node. The SDK is pinned by the npm lockfile in `crates/host-daemon/src/claude/sdk`, vendored as `sdk.mjs` and embedded in the Host executable, so nothing is installed with npm at build or run time.
+
 ```sh
 scripts/dev-env.sh cargo build --locked -p bex-process --bin bex-provider-supervisor
 scripts/dev-env.sh cargo run -p host-daemon -- --name 'BEX Host'
@@ -104,7 +106,7 @@ To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続�
 ## Build the clients
 
 ```sh
-# Mac (requires a signing certificate; BEX_CODE_SIGN_IDENTITY selects it)
+# Mac (requires a signing certificate; APP_CODE_SIGN_IDENTITY selects it)
 scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
 
 # iPhone (iOS 26): build Simulator libraries, then open Xcode
@@ -198,13 +200,13 @@ Run all local unit tests with `scripts/dev-env.sh just unit-tests`. Native clien
 
 Android CI runs on GitHub-hosted Ubuntu 24.04 with the pinned Nix SDK, checks Kotlin formatting and builds the app APK. Apple CI has separate Mac and iPhone jobs on macos-26 with Xcode 26.6; Mac runs Rust checks and builds Host/desktop, while iPhone builds the native client. Optional PR Apple jobs share a queued runner slot. Cargo and Xcode derived data are cached, and verification logs are retained for seven days, including failed runs.
 
-Development and test builds keep filename/line-number backtraces without full variable debug information. Use `CARGO_PROFILE_DEV_DEBUG=full` when a debugger needs variables. Quality checks disable Rust incremental compilation; normal local builds retain it.
+Development and test builds keep filename/line-number backtraces without full variable debug information. Use `CARGO_PROFILE_DEV_DEBUG=full` when a debugger needs variables. Quality checks disable Rust incremental compilation; Kache manages incremental state for normal local builds.
 
-The `default` and `native` Nix shells enable sccache for local Rust compilation. Its user-level disk cache reuses matching dependency compilations when Cargo outputs need to be rebuilt; normal Cargo output reuse and workspace incremental compilation remain enabled. The per-worktree `CARGO_HOME` and `CARGO_TARGET_DIR` exported by `scripts/dev-env.sh` prevent Rust cache reuse across worktrees with the pinned sccache version. Incremental crates and crates that invoke the linker bypass this cache. Run `scripts/dev-env.sh sccache --show-stats` to inspect cache hits. Set `SCCACHE_DIR` to override the cache location. CI retains its existing Cargo cache; the shells do not enable the wrapper when `CI` is set.
+The `default` and `native` Nix shells enable the pinned Kache compiler wrapper for local Rust compilation. Its content-addressed store reuses eligible compilations across worktrees while Cargo indexes, locks and build outputs remain separate. On Linux and macOS it also caches eligible Rust executables and build-script runs; rapidly changing crates can use Kache's adaptive incremental policy. Run `scripts/dev-env.sh kache stats --last-build` to inspect reuse, or `scripts/dev-env.sh kache explain` to investigate misses. Set `KACHE_CACHE_DIR` to override the shared store. When `bex.buildRoot` is configured, `scripts/dev-env.sh` defaults the store to `<buildRoot>/.kache` so outputs on that volume can use copy-on-write restores. Otherwise the shells use `~/Library/Caches/kache` on macOS or `~/.cache/kache` on Linux. CI retains its existing Cargo cache; the shells do not enable the wrapper when `CI` is set.
 
 `just unit-tests` runs all Rust workspace library and binary tests with native bindings enabled, and the standalone agent-peer CLI assertions with Cargo. The Nix-pinned cargo-nextest runner executes workspace tests in parallel with agent-peer; the command waits for both results and collects failures. The supervisor is built before tests start. Enable `agent-ffi/bindgen` only for binding generation. Retired conversation fixtures, Swift Markdown tests and native conversation acceptance runners are removed. Build cleanup and connection diagnostics remain Rust commands in `cargo xtask`. On macOS, the Nix shells select the operating system's `lsof` for kernel process inspection; Linux uses Nix's `lsof`.
 
-`scripts/dev-env.sh` reuses a fixed Nix environment across worktrees when `flake.nix`, `flake.lock` and the platform match; cached runs do not invoke Nix. It selects the pinned Bash before loading that environment, including when started with macOS Bash 3. Its shared profile protects the pinned tools from garbage collection. Cargo indexes, locks and `target` belong to each worktree; tests and dev builds within that worktree use the same Cargo cache and outputs. Only locked dependency sources and archives are seeded from existing caches, using APFS copy-on-write or reflinks where available to share their bytes. Changed test/code sources still require compilation; unchanged outputs are reused. Tests build their required helpers and bindings, while dev app builds, installation and restarts happen when applying changes to dev.
+`scripts/dev-env.sh` reuses a fixed Nix environment across worktrees when `flake.nix`, `flake.lock`, the Kache package definition and the platform match; cached runs do not invoke Nix. It selects the pinned Bash before loading that environment, including when started with macOS Bash 3. Its shared profile protects the pinned tools from garbage collection. Cargo indexes, locks and `target` belong to each worktree; tests and dev builds within that worktree use the same Cargo cache and outputs. Only locked dependency sources and archives are seeded from existing caches, using APFS copy-on-write or reflinks where available to share their bytes. Changed test/code sources still require compilation; unchanged outputs are reused. Tests build their required helpers and bindings, while dev app builds, installation and restarts happen when applying changes to dev.
 
 To place new worktrees' build outputs on an external disk, create a directory on
 the mounted disk and set `git config --local bex.buildRoot /absolute/path/to/builds`.

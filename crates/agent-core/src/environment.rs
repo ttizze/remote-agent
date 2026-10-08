@@ -11,7 +11,7 @@ use crate::{
         thread_menu::{ThreadMenuAction, ThreadMenuChild, ThreadMenuItem},
     },
 };
-use agent_domain::Driver;
+use agent_domain::{Driver, ThreadId};
 use agent_protocol::models::{
     AgentActivityPhase, AwarenessActivity, AwarenessSnapshot, EnvironmentCapabilities,
     EnvironmentDescriptor, ProviderInstance,
@@ -865,10 +865,8 @@ impl EnvironmentRegistry {
                     .rows
                     .into_iter()
                     .filter_map(|row| {
-                        let project_id = scoped_key(
-                            &summary.descriptor.environment_id,
-                            &row.project_id,
-                        )?;
+                        let project_id =
+                            scoped_key(&summary.descriptor.environment_id, &row.project_id)?;
                         Some(EnvironmentProjectRow {
                             environment_id: summary.descriptor.environment_id.clone(),
                             environment_label: summary.descriptor.label.clone(),
@@ -916,7 +914,7 @@ impl EnvironmentRegistry {
             local.selected_thread = selected_thread
                 .and_then(parse_scoped_thread_key)
                 .filter(|reference| reference.environment_id == environment_id)
-                .and_then(|reference| reference.thread_id.parse().ok());
+                .and_then(|reference| ThreadId::new(reference.thread_id.clone()).ok());
             let view = local.thread_list(now_ms, options);
             has_threads |= view.has_threads;
             for item in view.items {
@@ -1108,17 +1106,12 @@ impl EnvironmentRegistry {
             if !entry.snapshot.connected {
                 continue;
             }
-            let Some(target_project) = entry
-                .snapshot
-                .shell_projects()
-                .iter()
-                .find(|project| {
-                    project
-                        .repository_identity
-                        .as_ref()
-                        .is_some_and(|identity| identity.canonical_key == repository_key)
-                })
-            else {
+            let Some(target_project) = entry.snapshot.shell_projects().iter().find(|project| {
+                project
+                    .repository_identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.canonical_key == repository_key)
+            }) else {
                 continue;
             };
             let Some(provider) = entry
@@ -1129,8 +1122,9 @@ impl EnvironmentRegistry {
                 .iter()
                 .find(|provider| {
                     provider.driver == driver
-                        && provider_instance
-                            .is_none_or(|instance| instance.is_empty() || provider.instance == instance)
+                        && provider_instance.is_none_or(|instance| {
+                            instance.is_empty() || provider.instance == instance
+                        })
                         && provider.enabled
                         && provider.installed
                         && !matches!(
@@ -1159,7 +1153,12 @@ impl EnvironmentRegistry {
                 .models
                 .iter()
                 .find(|candidate| candidate.slug == model)
-                .or_else(|| provider.models.iter().find(|candidate| candidate.is_default))
+                .or_else(|| {
+                    provider
+                        .models
+                        .iter()
+                        .find(|candidate| candidate.is_default)
+                })
                 .or_else(|| provider.models.first())
             else {
                 continue;
@@ -1524,6 +1523,7 @@ mod tests {
                 enabled: true,
                 installed: true,
                 version: None,
+                version_advisory: None,
                 status: ProviderStatus::Ready,
                 message: None,
                 unavailable_reason: None,
@@ -1540,6 +1540,7 @@ mod tests {
                 enabled: false,
                 installed: true,
                 version: None,
+                version_advisory: None,
                 status: ProviderStatus::Disabled,
                 message: None,
                 unavailable_reason: None,
@@ -1575,6 +1576,7 @@ mod tests {
             enabled,
             installed,
             version: None,
+            version_advisory: None,
             status: if enabled && installed {
                 ProviderStatus::Ready
             } else {
@@ -1733,6 +1735,7 @@ mod tests {
             enabled: true,
             installed: true,
             version: None,
+            version_advisory: None,
             status: ProviderStatus::Ready,
             message: None,
             unavailable_reason: None,

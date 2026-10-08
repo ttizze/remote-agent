@@ -205,6 +205,7 @@ impl Rig {
         self.command(
             thread,
             Command::Send(SendMessage {
+                scheduled_task: None,
                 context: None,
                 created_by: MessageAuthor::User,
                 creation_source: "web".into(),

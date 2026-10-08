@@ -2,8 +2,12 @@
 
 package dev.remoteagent.mobile
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
+import android.util.LruCache
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.widget.ImageView
@@ -11,7 +15,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,12 +26,17 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -45,6 +57,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -52,12 +65,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -76,17 +90,172 @@ import dev.remoteagent.core.WorkspaceDiffFile
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 private const val BROWSER_REFRESH_MILLIS = 500L
+private const val PDF_PAGE_WIDTH = 1200
+private const val PDF_PAGE_HEIGHT = 1600
+private const val PDF_PAGE_CACHE_SIZE = 4
+
+/** Downloads a Host PDF into the resource cache and renders its pages locally. */
+@Composable
+internal fun PdfScreen(model: AndroidAppModel, path: String) {
+    val context = LocalContext.current
+    var local by remember(path, model.profileId) { mutableStateOf<File?>(null) }
+    var error by remember(path, model.profileId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(path, model.profileId) {
+        val temporary = File(context.cacheDir, "pdf-${UUID.randomUUID()}.pdf")
+        try {
+            model.download(path, temporary.path)
+            local = temporary
+        } catch (cancellation: CancellationException) {
+            temporary.delete()
+            throw cancellation
+        } catch (failure: Exception) {
+            temporary.delete()
+            error = failure.message ?: "Unable to open PDF"
+        }
+    }
+    DisposableEffect(local) {
+        val downloaded = local
+        onDispose { downloaded?.delete() }
+    }
+    ScreenScaffold(File(path).name, onBack = model::back) {
+        when {
+            error != null -> Text(error!!, Modifier.padding(20.dp), color = AppTheme.colors.dangerForeground)
+            local == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = AppTheme.colors.iconMuted)
+            }
+            else -> PdfPages(local!!)
+        }
+    }
+}
+
+@Composable
+private fun PdfPages(file: File) {
+    val cache = remember(file.path) { LruCache<Int, Bitmap>(PDF_PAGE_CACHE_SIZE) }
+    DisposableEffect(cache) {
+        onDispose { cache.evictAll() }
+    }
+    val pageCount by produceState<Result<Int>?>(null, file.path) {
+        value = try {
+            Result.success(
+                withContext(Dispatchers.IO) {
+                    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                        PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
+                    }
+                }
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+    }
+    if (pageCount == null) {
+        CircularProgressIndicator(Modifier.padding(20.dp), color = AppTheme.colors.iconMuted)
+    } else if (pageCount!!.isFailure) {
+        Text(
+            pageCount!!.exceptionOrNull()?.message ?: "Unable to render PDF",
+            Modifier.padding(20.dp),
+            color = AppTheme.colors.dangerForeground,
+        )
+    } else {
+        val count = pageCount!!.getOrThrow()
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
+            items(count, key = { it }) { index ->
+                PdfPage(file, index, cache)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>) {
+    val rendered by produceState<Result<Bitmap>?>(null, file.path, index) {
+        value = try {
+            Result.success(renderPdfPage(file, index, cache))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+    }
+    when {
+        rendered == null ->
+            Box(Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = AppTheme.colors.iconMuted)
+            }
+        rendered!!.isFailure ->
+            Text(
+                rendered!!.exceptionOrNull()?.message ?: "Unable to render PDF page",
+                Modifier.padding(20.dp),
+                color = AppTheme.colors.dangerForeground,
+            )
+        else ->
+            Image(
+                rendered!!.getOrThrow().asImageBitmap(),
+                "PDF page ${index + 1}",
+                Modifier.fillMaxWidth().heightIn(max = PDF_PAGE_HEIGHT.dp).padding(bottom = 12.dp),
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            )
+    }
+}
+
+private suspend fun renderPdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>): Bitmap {
+    cache.get(index)?.let { return it }
+    currentCoroutineContext().ensureActive()
+    // Keep ownership outside withContext: its prompt cancellation can discard
+    // a successfully rendered result before control returns to the UI thread.
+    var pending: Bitmap? = null
+    try {
+        val bitmap = withContext(Dispatchers.IO) {
+            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                PdfRenderer(descriptor).use { renderer ->
+                    require(index in 0 until renderer.pageCount) { "PDF page is unavailable" }
+                    renderer.openPage(index).use { page ->
+                        val size = requireNotNull(
+                            dev.remoteagent.core.fitImageDisplaySize(
+                                page.width.toDouble(), page.height.toDouble(),
+                                PDF_PAGE_WIDTH.toDouble(), PDF_PAGE_HEIGHT.toDouble(),
+                            )
+                        ) { "PDF page dimensions are invalid" }
+                        Bitmap.createBitmap(
+                            size.width.toInt().coerceAtLeast(1),
+                            size.height.toInt().coerceAtLeast(1),
+                            Bitmap.Config.ARGB_8888,
+                        ).also { candidate ->
+                            pending = candidate
+                            page.render(candidate, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            currentCoroutineContext().ensureActive()
+                        }
+                    }
+                }
+            }
+        }
+        currentCoroutineContext().ensureActive()
+        cache.put(index, bitmap)
+        pending = null
+        return bitmap
+    } finally {
+        pending?.recycle()
+    }
+}
 
 /** The open thread's files, diff and browser, each as its own screen. */
 @Composable
 internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: String? = null, line: ULong? = null) {
+    if (tab == WorkspaceTab.Files && file != null && dev.remoteagent.core.isPdfFile(file)) {
+        PdfScreen(model, file)
+        return
+    }
     if (tab == WorkspaceTab.Diff) {
         ReviewScreen(model)
         return
@@ -204,6 +373,8 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                             if (entry.directory) {
                                 directory = entry.path
                                 path = directory
+                            } else if (dev.remoteagent.core.isPdfFile(entry.path)) {
+                                model.navigate(Route.Pdf(entry.path))
                             } else {
                                 selected = entry
                                 model.perform(Intent.ReadFile(entry.path, false))
@@ -246,22 +417,50 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                     else if (line != null && entry.path == linkedFile) {
                         val lines = text.split('\n')
                         val scroll = androidx.compose.foundation.lazy.rememberLazyListState()
+                        val horizontal = rememberScrollState()
+                        val wrap = AppTheme.codeWordWrap
                         LaunchedEffect(file, line, lines.size) {
-                            scroll.scrollToItem((line - 1uL).coerceAtMost((lines.size - 1).toULong()).toInt())
+                            val target = dev.remoteagent.core.markdownLineTarget(line, lines.size.toULong())
+                            if (target != null) scroll.scrollToItem((target - 1uL).toInt())
                         }
-                        androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f)) {
-                            LazyColumn(state = scroll) {
+                        androidx.compose.foundation.text.selection.SelectionContainer(
+                            Modifier.weight(1f).then(if (wrap) Modifier else Modifier.horizontalScroll(horizontal))
+                        ) {
+                            LazyColumn(
+                                state = scroll,
+                                modifier = if (wrap) Modifier.fillMaxWidth() else Modifier.wrapContentWidth(unbounded = true),
+                            ) {
                                 items(lines.size) { index ->
-                                    Text(
-                                        "${index + 1}  ${lines[index]}",
-                                        fontFamily = FontFamily.Monospace,
-                                        modifier = Modifier.fillMaxWidth().padding(4.dp),
-                                    )
+                                    Row(
+                                        (if (wrap) Modifier.fillMaxWidth() else Modifier.wrapContentWidth(unbounded = true))
+                                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.Top,
+                                    ) {
+                                        Text(
+                                            (index + 1).toString(),
+                                            fontFamily = AppTheme.mono,
+                                            fontSize = AppTheme.codeLineNumberFontSize.sp,
+                                            lineHeight = AppTheme.codeLineHeight.sp,
+                                            color = AppTheme.colors.foregroundTertiary,
+                                            textAlign = TextAlign.End,
+                                            modifier = Modifier.width(36.dp),
+                                        )
+                                        Text(
+                                            lines[index].ifEmpty { " " },
+                                            fontFamily = AppTheme.mono,
+                                            fontSize = AppTheme.codeFontSize.sp,
+                                            lineHeight = AppTheme.codeLineHeight.sp,
+                                            softWrap = wrap,
+                                            modifier = (if (wrap) Modifier.weight(1f) else Modifier)
+                                                .padding(start = 8.dp),
+                                        )
+                                    }
                                 }
                             }
                         }
                     } else {
-                        OutlinedTextField(
+                        val horizontal = rememberScrollState()
+                        BasicTextField(
                             text,
                             { value ->
                                 text = value
@@ -271,8 +470,19 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                                     if (pending == current) pending = null
                                 }
                             },
-                            Modifier.weight(1f).fillMaxWidth(),
-                            textStyle = AppTheme.footnote.copy(fontFamily = FontFamily.Monospace),
+                            Modifier.weight(1f).then(
+                                if (AppTheme.codeWordWrap) Modifier.fillMaxWidth()
+                                else Modifier.wrapContentWidth(unbounded = true)
+                            )
+                                .border(1.dp, AppTheme.colors.border, RoundedCornerShape(4.dp))
+                                .horizontalScroll(horizontal, enabled = !AppTheme.codeWordWrap)
+                                .padding(12.dp),
+                            textStyle = AppTheme.footnote.copy(
+                                fontFamily = AppTheme.mono,
+                                fontSize = AppTheme.codeFontSize.sp,
+                                lineHeight = AppTheme.codeLineHeight.sp,
+                            ),
+                            maxLines = Int.MAX_VALUE,
                         )
                         Button(onClick = { model.perform(Intent.SaveFile(entry.path)) }) { Text("Save") }
                     }
@@ -333,6 +543,22 @@ private fun ReviewScreen(model: AndroidAppModel) {
             contentPadding = PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            val pullRequestLabel = model.snapshot.selectedPullRequestLabel()
+            val pullRequestUrl = model.snapshot.selectedPullRequestUrl()
+            if (pullRequestLabel != null && pullRequestUrl != null)
+                item {
+                    val context = LocalContext.current
+                    TextButton(
+                        onClick = {
+                            context.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(pullRequestUrl))
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    ) {
+                        Text("$pullRequestLabel  ↗", color = colors.primaryText)
+                    }
+                }
             val error = git?.error?.takeIf { gitScope }
             val empty = panel?.emptyMessage
             when {
@@ -403,12 +629,20 @@ private fun ReviewScreen(model: AndroidAppModel) {
                             }
                         }
                         androidx.compose.foundation.text.selection.SelectionContainer {
-                            Column {
+                            Column(
+                                Modifier.then(
+                                    if (AppTheme.codeWordWrap) Modifier.fillMaxWidth()
+                                    else Modifier.horizontalScroll(rememberScrollState())
+                                )
+                            ) {
                                 file.rows.forEach { row ->
                                     Text(
                                         row.text,
-                                        fontFamily = FontFamily.Monospace,
-                                        style = AppTheme.caption,
+                                        Modifier.then(if (AppTheme.codeWordWrap) Modifier.fillMaxWidth() else Modifier),
+                                        fontFamily = AppTheme.mono,
+                                        fontSize = AppTheme.codeFontSize.sp,
+                                        lineHeight = AppTheme.codeLineHeight.sp,
+                                        softWrap = AppTheme.codeWordWrap,
                                         color =
                                             when (row.kind) {
                                                 "+" -> colors.emerald

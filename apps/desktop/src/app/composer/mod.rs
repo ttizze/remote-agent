@@ -44,6 +44,8 @@ pub(crate) struct ComposerState {
     banners: banners::BannerState,
     /// How many footer blocks sit in the overflow menu.
     footer_layout: agent_core::view::composer::footer_layout::FooterLayout,
+    /// The picker widths measured before the footer starts compacting it.
+    footer_picker_measurement: Option<(String, f32, f32)>,
     /// The image attachments of the draft just sent to the stash: id, name,
     /// MIME type and local file.
     stash_images: Vec<(String, String, String, PathBuf)>,
@@ -67,6 +69,7 @@ impl ComposerState {
                 hidden_count: 0,
                 visible: true,
             },
+            footer_picker_measurement: None,
             stash_images: vec![],
         }
     }

@@ -53,6 +53,7 @@ fn creation_is_a_pure_replayable_decision() {
 }
 fn send_message(key: &str, mode: DispatchMode) -> Command {
     Command::Send(SendMessage {
+        scheduled_task: None,
         context: None,
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
@@ -1822,6 +1823,7 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
         &mut s,
         "implement",
         Command::Send(SendMessage {
+            scheduled_task: None,
             context: None,
             created_by: MessageAuthor::User,
             creation_source: "client".into(),
@@ -3456,6 +3458,7 @@ fn wire_encodings_round_trip_state_facts_commands_and_effects() {
     let mut s = state();
     let mut steps = vec![];
     let send = Command::Send(SendMessage {
+        scheduled_task: None,
         context: None,
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
@@ -5266,7 +5269,7 @@ fn wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces() {
         stale_file_refs: vec!["later".into()],
     });
     round_trip(&s);
-    assert_eq!(STATE_FORMAT, 3);
+    assert_eq!(STATE_FORMAT, 4);
 }
 // A command outliving its turn reports back and wakes the thread.
 #[test]

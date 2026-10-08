@@ -178,6 +178,33 @@ fn optional_thread() -> Value {
     json!({"threadId": string()})
 }
 
+fn scheduled_schedule() -> Value {
+    json!({
+        "anyOf": [
+            object(
+                json!({
+                    "type": literals(&["interval"]),
+                    "everyMs": int(60_000, None),
+                }),
+                &["type", "everyMs"],
+            ),
+            object(
+                json!({
+                    "type": literals(&["fixed_time"]),
+                    "timeOfDay": {
+                        "type":"string",
+                        "minLength":4,
+                        "maxLength":5,
+                        "pattern":"^([01]?\\d|2[0-3]):([0-5]\\d)$"
+                    },
+                    "weekdays": {"type":"array", "items":int(0, Some(6)), "maxItems":7},
+                }),
+                &["type", "timeOfDay"],
+            ),
+        ],
+    })
+}
+
 fn orchestrator() -> Vec<Value> {
     vec![
         tool(
@@ -232,6 +259,52 @@ fn orchestrator() -> Vec<Value> {
                 "clientRequestId": client_request_id(),
             }),
             &["taskId"],
+            DEFAULT,
+        ),
+        tool(
+            "schedule_task",
+            Some("Schedule a recurring task"),
+            "Create persistent recurring work in the Host scheduler, which runs even when no turn is active. Pass schedule as a STRUCTURED OBJECT, never JSON text: {type:'interval', everyMs:3600000} means hourly; {type:'fixed_time', timeOfDay:'09:00', weekdays:[1,2,3,4,5]} means weekday mornings. By default (bindToCurrentThread=true) each run posts into the calling thread; use false only when a fresh top-level thread per run is wanted. Provider, model and runtime settings inherit from the calling thread. Report the returned schedule and nextRunAt after success.",
+            json!({
+                "prompt": prompt(),
+                "schedule": scheduled_schedule(),
+                "title": title(),
+                "enabled": {"type":"boolean"},
+                "bindToCurrentThread": {"type":"boolean"},
+                "clientRequestId": client_request_id(),
+            }),
+            &["prompt", "schedule"],
+            DEFAULT,
+        ),
+        tool(
+            "list_scheduled_tasks",
+            Some("List scheduled tasks"),
+            "List recurring scheduled tasks in the calling thread's project, including their id, schedule, prompt, enabled state, bound thread, next run time and last run status. Use the returned scheduledTaskId with update_scheduled_task or delete_scheduled_task.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "update_scheduled_task",
+            Some("Update a scheduled task"),
+            "Update an existing scheduled task by scheduledTaskId from list_scheduled_tasks. Only provided fields change; omit a field to leave it unchanged. Use enabled=false to pause a task without deleting it, or bindToCurrentThread to move it between posting into this thread and launching a fresh thread per run.",
+            json!({
+                "scheduledTaskId": text(None),
+                "prompt": prompt(),
+                "title": title(),
+                "schedule": scheduled_schedule(),
+                "enabled": {"type":"boolean"},
+                "bindToCurrentThread": {"type":"boolean"},
+            }),
+            &["scheduledTaskId"],
+            DEFAULT,
+        ),
+        tool(
+            "delete_scheduled_task",
+            Some("Delete a scheduled task"),
+            "Permanently delete a scheduled task by scheduledTaskId from list_scheduled_tasks. The task stops running immediately. To keep it but stop runs, use update_scheduled_task with enabled=false instead.",
+            json!({"scheduledTaskId": text(None)}),
+            &["scheduledTaskId"],
             DEFAULT,
         ),
         tool(
@@ -384,6 +457,14 @@ fn thread() -> Vec<Value> {
         definition
     };
     vec![
+        tool(
+            "run_scheduled_task_now",
+            Some("Run a scheduled task"),
+            "Run a scheduled task in the calling project now through the existing scheduler. Requires a full-access/default caller. Each call is a new manual run; completion means dispatch and bookkeeping completed, not that the provider turn finished.",
+            json!({"taskId": text(None)}),
+            &["taskId"],
+            DEFAULT,
+        ),
         tool(
             "thread_search",
             None,
@@ -587,9 +668,155 @@ fn project() -> Vec<Value> {
     ]
 }
 
+fn worktree() -> Vec<Value> {
+    vec![
+        tool(
+            "worktree_handoff",
+            Some("Hand off thread to a Git worktree"),
+            "Move this agent thread into a new Git worktree. Creates the branch, records the thread binding, and optionally runs the project's setup script there. Changing the workspace detaches the current provider session; pass continuationPrompt to queue the remaining work as the next turn inside the worktree. The worktree is not removed automatically when the thread is deleted. Fails when the thread is already attached to a worktree.",
+            json!({
+                "branch": described(text(Some(512)), "Branch name for the new worktree."),
+                "baseRef": described(text(Some(512)), "Branch or ref to start from; defaults to the current branch."),
+                "startFromOrigin": described(json!({"type":"boolean"}), "Fetch the primary remote before creating the worktree; defaults to the Host setting."),
+                "path": described(text(Some(4096)), "Absolute path for the checkout; defaults to the Host-managed worktree directory."),
+                "runSetupScript": described(json!({"type":"boolean"}), "Run the project's configured setup script after binding; defaults to true."),
+                "continuationPrompt": prompt(),
+            }),
+            &["branch"],
+            Hints {
+                open_world: true,
+                ..DEFAULT
+            },
+        ),
+        tool(
+            "worktree_status",
+            Some("Get thread worktree status"),
+            "Report whether this thread is attached to a Git worktree, its path and branch, the project workspace root, and the Host default used by worktree_handoff.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "worktree_list",
+            Some("List workspace branches"),
+            "List branch refs and their checkout paths for this thread's project workspace. Detached checkouts are not included. Use worktree_status for this thread's binding and worktree_handoff to create a new checkout.",
+            json!({
+                "query": text(Some(256)),
+                "cursor": int(0, None),
+                "limit": int(1, Some(200)),
+                "refKind": literals(&["all", "local", "remote"]),
+                "includeMatchingRemoteRefs": {"type":"boolean"},
+            }),
+            &[],
+            READ,
+        ),
+    ]
+}
+
+
+fn device() -> Vec<Value> {
+    vec![
+        tool(
+            "device_list",
+            Some("List devices"),
+            "List simulator and emulator device hosts, available devices, and devices open in this thread's Device panel. Call this before device_open when the id is unknown.",
+            json!({"hostId": described(string(), "Limit discovery to one device host.")}),
+            &[],
+            READ,
+        ),
+        tool(
+            "device_open",
+            Some("Open device"),
+            "Open a simulator or emulator for this thread, booting it when needed, and show it in the user's Device panel. The result includes the pinned agent-device target arguments.",
+            json!({
+                "hostId": described(string(), "Device host from device_list. Defaults to local."),
+                "deviceId": described(string(), "Simulator UDID or emulator serial from device_list. Omit to choose the booted device."),
+                "platform": described(literals(&["ios", "android"]), "Required when deviceId is omitted and both platforms are available."),
+            }),
+            &[],
+            Hints { destructive: false, idempotent: true, ..DEFAULT },
+        ),
+        tool(
+            "device_screenshot",
+            Some("Screenshot device"),
+            "Capture the current screen of an open device as a PNG image. Omit deviceId to use the most recently opened device in this thread.",
+            json!({
+                "hostId": described(string(), "Device host. Defaults to local."),
+                "deviceId": described(string(), "Device from device_list. Omit to use the most recently opened device in this thread."),
+            }),
+            &[],
+            READ,
+        ),
+        tool(
+            "device_close",
+            Some("Close device"),
+            "Remove a device from this thread's Device panel. Set shutdown to also power the simulator or emulator off.",
+            json!({
+                "hostId": described(string(), "Device host. Defaults to local."),
+                "deviceId": described(string(), "Device to close. Omit to close every device in this thread."),
+                "shutdown": described(json!({"type":"boolean"}), "Also power the simulator or emulator off. Defaults to false."),
+            }),
+            &[],
+            Hints { idempotent: true, ..DEFAULT },
+        ),
+    ]
+}
+
 /// Every served tool.
 pub(crate) fn tools() -> Vec<Value> {
-    [orchestrator(), thread(), project()].concat()
+    [orchestrator(), thread(), project(), worktree(), device(), diagnostics()].concat()
+}
+
+fn diagnostics() -> Vec<Value> {
+    vec![
+        tool(
+            "background_status",
+            Some("Read background activity"),
+            "Read the Host-owned background activity leases, power state, and opportunistic work gate.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "host_resources",
+            Some("Read Host resources"),
+            "Read one demand-driven local Host resource sample owned by the Host process.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "process_diagnostics",
+            Some("Read process diagnostics"),
+            "Read signalable child, provider, and terminal process diagnostics from the local Host sample.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "process_resource_history",
+            Some("Read process resource history"),
+            "Read bounded local process resource history for the requested window and bucket size.",
+            json!({
+                "windowMs": int(1_000, Some(3_600_000)),
+                "bucketMs": int(1_000, Some(3_600_000)),
+            }),
+            &[],
+            READ,
+        ),
+        tool(
+            "trace_diagnostics",
+            Some("Read trace diagnostics"),
+            "Read bounded local trace and warning records from the Host diagnostics directory.",
+            json!({
+                "traceFilePath": string(),
+                "maxFiles": int(0, Some(16)),
+                "slowSpanThresholdMs": {"type":"number","minimum":0},
+            }),
+            &[],
+            READ,
+        ),
+    ]
 }
 
 /// The tools annotated read-only, which a read-only Claude sandbox pre-approves.

@@ -406,6 +406,13 @@ pub fn desktop_work_log_row(
         {
             Some(loaded.as_ref())
         }
+        Some(Detail::LoadedWithTask { item: loaded, .. })
+            if item.is_some_and(|item| {
+                std::mem::discriminant(&item.kind) == std::mem::discriminant(&loaded.kind)
+            }) =>
+        {
+            Some(loaded.as_ref())
+        }
         _ => None,
     };
     let fetch_error = match detail {

@@ -27,6 +27,18 @@ test("SDK forks through a native boundary before any filesystem write", async ()
   await assert.rejects(forkTranscript(sdk, source, sourceSession, targetSession, "missing"), /not found/);
 });
 
+test("the SDK uses NFC project keys for decomposed macOS working directories", { skip: process.platform !== "darwin" }, async () => {
+  let project;
+  await sdk.forkSession(sourceSession, { dir: "/tmp/cafe\u0301", sessionStore: {
+    load: async (key) => {
+      project = key.projectKey;
+      return [{ type: "user", uuid: "u1", parentUuid: null, sessionId: sourceSession, message: { role: "user", content: "fixture" } }];
+    },
+    append: async () => {},
+  } });
+  assert.equal(project, "-tmp-caf-");
+});
+
 function harness() {
   const input = new PassThrough();
   const events = new EventEmitter();
@@ -62,6 +74,19 @@ test("real SDK streams multiple turns and preserves permission response correlat
       assert.equal((await h.take((frame) => frame.type === "assistant")).message.content[0].text, "allow");
       assert.equal((await h.take((frame) => frame.type === "result")).uuid, `result-${id}`);
     }
+  } finally { h.input.end(); await h.completion; }
+});
+
+test("SDK registers private MCP configuration through stdin before accepting prompts", { timeout: 10000 }, async () => {
+  const h = harness();
+  try {
+    h.request("initialize", "initialize", { options: { mcpServers: {
+      orchestration: { command: "fixture-mcp", env: { AGENT_TOOLS_TOKEN: "fixture-private-scope" } },
+    } } });
+    assert.deepEqual(await h.take((frame) => frame.type === "fixture_mcp_registered"), {
+      type: "fixture_mcp_registered", hasToken: true, tokenInArguments: false, mcpInArguments: false,
+    });
+    assert.equal((await h.take((frame) => frame.response?.request_id === "initialize")).response.subtype, "success");
   } finally { h.input.end(); await h.completion; }
 });
 

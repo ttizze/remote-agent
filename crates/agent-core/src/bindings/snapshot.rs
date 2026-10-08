@@ -73,7 +73,6 @@ pub struct ProviderAdvisoryView {
     pub can_install_version: bool,
     pub message: Option<String>,
 }
-
 fn environment_registry(snapshots: Vec<Arc<Snapshot>>) -> EnvironmentRegistry {
     let mut registry = EnvironmentRegistry::default();
     for snapshot in snapshots {
@@ -399,13 +398,21 @@ impl Snapshot {
         self.selected_thread
             .as_ref()
             .and_then(|thread| self.thread_row(thread))
-            .and_then(|row| row.pull_request_label.clone())
+            .and_then(|row| {
+                row.linked_pull_request
+                    .as_ref()
+                    .map(|pull_request| format!("#{}", pull_request.number))
+            })
     }
     pub fn selected_pull_request_url(&self) -> Option<String> {
         self.selected_thread
             .as_ref()
             .and_then(|thread| self.thread_row(thread))
-            .and_then(|row| row.pull_request_url.clone())
+            .and_then(|row| {
+                row.linked_pull_request
+                    .as_ref()
+                    .map(|pull_request| pull_request.url.clone())
+            })
     }
     pub fn current_directory(&self) -> String {
         self.cwd()
