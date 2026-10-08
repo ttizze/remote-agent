@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 
 private data class LocalNotificationRequest(
     val title: String,
@@ -56,7 +57,7 @@ internal object LocalNotifications {
     ) {
         val request = LocalNotificationRequest(title, body, threadId, deepLink, sound, kind, soundKind)
         if (
-            android.os.Build.VERSION.SDK_INT >= 33 &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             if (permissionDenied) {
@@ -101,7 +102,7 @@ internal object LocalNotifications {
         val requests = synchronized(activeNotifications) { activeNotifications.values.toList() }
         if (requests.isEmpty()) {
             manager.activeNotifications
-                .filter { isLocalAttentionTag(it.tag) }
+                .filter { it.tag?.startsWith(LOCAL_ATTENTION_PREFIX) == true }
                 .forEach { notice -> notice.tag?.let { manager.cancel(it, notice.id) } }
             return
         }
@@ -122,7 +123,7 @@ internal object LocalNotifications {
     fun clearDelivered(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.activeNotifications
-            .filter { isLocalAttentionTag(it.tag) }
+            .filter { it.tag?.startsWith(LOCAL_ATTENTION_PREFIX) == true }
             .forEach { notice -> notice.tag?.let { manager.cancel(it, notice.id) } }
         synchronized(activeNotifications) {
             activeNotifications.keys.forEach { tag -> manager.cancel(tag, LOCAL_NOTIFICATION_ID) }
@@ -201,17 +202,18 @@ internal object LocalNotifications {
     }
 
     private const val LOCAL_NOTIFICATION_ID = 1
+    private const val LOCAL_ATTENTION_PREFIX = "$LOCAL_ATTENTION_TAG:"
 
     private fun notificationTag(request: LocalNotificationRequest): String =
         notificationTag(request.deepLink ?: request.threadId ?: "local")
 
     private fun notificationTag(route: String): String = "$LOCAL_ATTENTION_TAG:$route"
 
-    private fun isLocalAttentionTag(tag: String?): Boolean = tag?.startsWith("$LOCAL_ATTENTION_TAG:") == true
-
-    private fun deepLinkEnvironmentId(deepLink: String): String? {
-        val uri = runCatching { Uri.parse(deepLink) }.getOrNull() ?: return null
-        if (uri.scheme != "remoteagent" || uri.host != "threads") return null
-        return uri.pathSegments.takeIf { it.size == 2 }?.first()
-    }
+    private fun deepLinkEnvironmentId(deepLink: String): String? =
+        runCatching { Uri.parse(deepLink) }
+            .getOrNull()
+            ?.takeIf { it.scheme == "remoteagent" && it.host == "threads" }
+            ?.pathSegments
+            ?.takeIf { it.size == 2 }
+            ?.firstOrNull()
 }

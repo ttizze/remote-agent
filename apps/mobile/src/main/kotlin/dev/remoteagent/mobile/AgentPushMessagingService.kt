@@ -1,5 +1,11 @@
+// This file owns the complete FCM/activity state machine. Its small pure
+// policy functions stay beside the Android callback so their shared storage
+// and lifecycle callers cannot drift into separate, duplicate implementations.
+@file:Suppress("TooManyFunctions")
+
 package dev.remoteagent.mobile
 
+import android.content.Context
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import dev.remoteagent.core.agentActivityDeliveryDecision
@@ -25,7 +31,9 @@ internal data class ActivityPresentation(
 
 private const val ACTIVITY_STATE_PREFERENCES = "push-activity-state"
 private const val ACTIVITY_MAX_BYTES = 64 * 1024
+private const val ACTIVITY_MAX_ROWS = 64
 private const val ACTIVITY_MAX_HOSTS = 64
+private const val MAX_HOST_ID_BYTES = 256
 
 private const val ACTIVITY_HOST_PREFIX = "host:"
 private const val ACTIVITY_EXPIRY_PREFIX = "expiry:"
@@ -59,61 +67,71 @@ internal data class ActivityAggregateSnapshot(val aggregate: String?, val expire
  * Parses the core-owned display projection. Android does not choose priority, colors, urgency, or rows; those decisions
  * come from agent-core's shared activity widget helper.
  */
-internal fun parseActivityPresentation(value: String): ActivityPresentation? {
-    if (value.toByteArray(Charsets.UTF_8).size > ACTIVITY_MAX_BYTES) return null
-    val input = activityState(value) ?: return null
-    val activeCount = (input["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0) ?: return null
-    val projected =
-        runCatching {
-                agentActivityWidgetJson(value, stale = false, light = false, monochrome = false, reduced = false)
-            }
-            .getOrNull() ?: return null
-    val display = runCatching { Json.parseToJsonElement(projected).jsonObject }.getOrNull() ?: return null
-    val title = (display["headline"] as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty) ?: return null
-    val rows =
-        display["rows"]
-            ?.let { element ->
-                (element as? JsonArray)?.mapNotNull { row ->
-                    val rowObject = row as? JsonObject ?: return@mapNotNull null
-                    val project = (rowObject["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
-                    val thread = (rowObject["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
-                    val status = (rowObject["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
-                    listOf(project, thread, status)
-                        .filter(String::isNotEmpty)
-                        .joinToString(" · ")
-                        .takeIf(String::isNotEmpty)
-                }
-            }
-            .orEmpty()
-    val body =
-        rows.takeIf { it.isNotEmpty() }?.joinToString("\n")
-            ?: (display["summary"] as? JsonPrimitive)?.content?.trim().orEmpty()
-    val deepLink = (display["deepLink"] as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
-    return ActivityPresentation(title, body, activeCount > 0, deepLink)
-}
-
-private fun activityState(value: String): JsonObject? {
-    if (value.toByteArray(Charsets.UTF_8).size > ACTIVITY_MAX_BYTES) return null
-    val root = runCatching { Json.parseToJsonElement(value).jsonObject }.getOrNull() ?: return null
-    return runCatching {
-            val activities = root["activities"] as? JsonArray ?: return@runCatching null
-            if (activities.isEmpty() || activities.size > 64) return@runCatching null
-            val activeCount =
-                (root["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
-                    ?: return@runCatching null
-            val title = (root["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
-            val subtitle = (root["subtitle"] as? JsonPrimitive)?.content?.trim().orEmpty()
-            val updatedAt = (root["updatedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
-            buildJsonObject {
-                put("title", title)
-                put("subtitle", subtitle)
-                put("activeCount", activeCount)
-                put("updatedAt", updatedAt)
-                put("activities", activities)
+internal fun parseActivityPresentation(value: String): ActivityPresentation? =
+    activityState(value)
+        ?.let { input ->
+            val activeCount = (input["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
+            val projected =
+                runCatching {
+                        agentActivityWidgetJson(
+                            value,
+                            stale = false,
+                            light = false,
+                            monochrome = false,
+                            reduced = false,
+                        )
+                    }
+                    .getOrNull()
+            val display = projected?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() }
+            val title = (display?.get("headline") as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty)
+            if (activeCount == null || display == null || title == null) {
+                null
+            } else {
+                val rows =
+                    (display["rows"] as? JsonArray)?.mapNotNull { row ->
+                        (row as? JsonObject)?.let { rowObject ->
+                            val project = (rowObject["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                            val thread = (rowObject["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                            val status = (rowObject["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                            listOf(project, thread, status)
+                                .filter(String::isNotEmpty)
+                                .joinToString(" · ")
+                                .takeIf(String::isNotEmpty)
+                        }
+                    }.orEmpty()
+                val body =
+                    rows.takeIf { it.isNotEmpty() }?.joinToString("\n")
+                        ?: (display["summary"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                val deepLink = (display["deepLink"] as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
+                ActivityPresentation(title, body, activeCount > 0, deepLink)
             }
         }
-        .getOrNull()
-}
+
+private fun activityState(value: String): JsonObject? =
+    value
+        .takeIf { it.toByteArray(Charsets.UTF_8).size <= ACTIVITY_MAX_BYTES }
+        ?.let { raw -> runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() }
+        ?.let { root ->
+            val activities = root["activities"] as? JsonArray
+            val activeCount =
+                (root["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
+            if (activities == null || activeCount == null) {
+                null
+            } else if (activities.isEmpty() || activities.size > ACTIVITY_MAX_ROWS) {
+                null
+            } else {
+                val title = (root["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                val subtitle = (root["subtitle"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                val updatedAt = (root["updatedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
+                buildJsonObject {
+                    put("title", title)
+                    put("subtitle", subtitle)
+                    put("activeCount", activeCount)
+                    put("updatedAt", updatedAt)
+                    put("activities", activities)
+                }
+            }
+        }
 
 internal fun activityUpdatedAtMillis(state: JsonObject): Long? =
     (state["updatedAt"] as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty)?.let { value ->
@@ -174,37 +192,38 @@ internal fun mergeActivityStates(
     expiryAtMillis: Map<String, Long> = emptyMap(),
 ): ActivityStateMerge {
     val retained = retainedActivityStates(states, expiryAtMillis, nowMillis).toMap().toMutableMap()
-    if (!deliveryAllowed) {
-        retained.remove(hostId)
-        return ActivityStateMerge(ActivityStateMergeDisposition.Blocked, retained)
-    }
     val previous = retained[hostId]
     val previousUpdatedAt = previous?.let(::activityUpdatedAtMillis)
     val incomingUpdatedAt = activityUpdatedAtMillis(incoming)
-    if (incomingUpdatedAt == null) {
-        return ActivityStateMerge(ActivityStateMergeDisposition.Ignored, retained)
-    }
-    when (
-        agentActivityDeliveryDecision(
-            deliveryUpdatedAtMs = incomingDeliveryAtMillis,
-            sourceUpdatedAtMs = incomingUpdatedAt,
-            expiryAtMs = incomingExpiryAtMillis,
-            nowMs = nowMillis,
-            previousSourceUpdatedAtMs = previousUpdatedAt ?: -1,
-            dismissed = false,
-            active = false,
-            previousActive = false,
-        )
-    ) {
-        "ignore_stale" -> return ActivityStateMerge(ActivityStateMergeDisposition.Ignored, retained)
-        "expired" -> {
-            retained.remove(hostId)
-            return ActivityStateMerge(ActivityStateMergeDisposition.Expired, retained)
+    val disposition =
+        when {
+            !deliveryAllowed -> ActivityStateMergeDisposition.Blocked
+            incomingUpdatedAt == null -> ActivityStateMergeDisposition.Ignored
+            else ->
+                when (
+                    agentActivityDeliveryDecision(
+                        deliveryUpdatedAtMs = incomingDeliveryAtMillis,
+                        sourceUpdatedAtMs = incomingUpdatedAt,
+                        expiryAtMs = incomingExpiryAtMillis,
+                        nowMs = nowMillis,
+                        previousSourceUpdatedAtMs = previousUpdatedAt ?: -1,
+                        dismissed = false,
+                        active = false,
+                        previousActive = false,
+                    )
+                ) {
+                    "expired" -> ActivityStateMergeDisposition.Expired
+                    "ignore_stale", "dismissed" -> ActivityStateMergeDisposition.Ignored
+                    else -> ActivityStateMergeDisposition.Accepted
+                }
         }
-        "dismissed" -> return ActivityStateMerge(ActivityStateMergeDisposition.Ignored, retained)
+    when (disposition) {
+        ActivityStateMergeDisposition.Blocked,
+        ActivityStateMergeDisposition.Expired -> retained.remove(hostId)
+        ActivityStateMergeDisposition.Accepted -> retained[hostId] = incoming
+        ActivityStateMergeDisposition.Ignored -> Unit
     }
-    retained[hostId] = incoming
-    return ActivityStateMerge(ActivityStateMergeDisposition.Accepted, retained)
+    return ActivityStateMerge(disposition, retained)
 }
 
 private fun aggregateActivityState(states: List<Pair<String, JsonObject>>): String? {
@@ -248,9 +267,7 @@ private fun activityAggregateLocked(
     val expiryAtMillis = storedActivityExpiries(preferences)
     val states =
         storedActivityStates(preferences).filterKeys {
-            it in profiles &&
-                !preferences.getBoolean(blockedKey(it), false) &&
-                !activityExpiryDue(expiryAtMillis[it] ?: 0L, nowMillis, null)
+            it in profiles && !preferences.getBoolean(blockedKey(it), false)
         }
     val retained = retainedActivityStates(states, expiryAtMillis, nowMillis)
     if (retained.size != states.size || expiryAtMillis.keys != states.keys) {
@@ -284,102 +301,179 @@ private fun mergeActivityState(
     incomingExpiryAtMillis: Long,
     incomingDeliveryAtMillis: Long,
 ): ActivityDeliveryResult? {
-    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
-    if (incomingExpiryAtMillis <= 0L) return null
-    val state = activityState(value) ?: return null
-    synchronized(ACTIVITY_STATE_LOCK) {
-        val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
-        val nowMillis = System.currentTimeMillis()
-        val expiryAtMillis = storedActivityExpiries(preferences)
-        val storedStates = storedActivityStates(preferences)
-        val currentStates = storedStates.filterKeys { !activityExpiryDue(expiryAtMillis[it] ?: 0L, nowMillis, null) }
-        val expiredBeforeMerge = storedStates.keys.any { it !in currentStates }
-        val previous = currentStates[hostId]
-        val previousActive =
-            if (preferences.contains(ACTIVITY_LAST_ACTIVE_KEY)) {
-                preferences.getBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
-            } else {
-                currentStates.values.any { state ->
-                    (state["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.let { it > 0 } == true
-                }
-            }
-        val result =
-            mergeActivityStates(
-                states = currentStates,
-                hostId = hostId,
-                incoming = state,
-                nowMillis = nowMillis,
-                deliveryAllowed = activityDeliveryAllowed(context, preferences, hostId),
-                incomingExpiryAtMillis = incomingExpiryAtMillis,
-                incomingDeliveryAtMillis = incomingDeliveryAtMillis,
-                expiryAtMillis = expiryAtMillis,
-            )
-        if (result.disposition == ActivityStateMergeDisposition.Blocked) {
-            preferences.edit().putBoolean(blockedKey(hostId), true).apply()
+    if (
+        hostId.isBlank() ||
+            hostId.toByteArray(Charsets.UTF_8).size > MAX_HOST_ID_BYTES ||
+            incomingExpiryAtMillis <= 0L
+    ) {
+        return null
+    }
+    return activityState(value)?.let { state ->
+        synchronized(ACTIVITY_STATE_LOCK) {
+            mergeActivityStateLocked(context, hostId, state, incomingExpiryAtMillis, incomingDeliveryAtMillis)
         }
-        val nextExpiryAtMillis = expiryAtMillis.filterKeys { it in result.states }.toMutableMap()
-        if (result.disposition == ActivityStateMergeDisposition.Accepted) {
-            nextExpiryAtMillis[hostId] = incomingExpiryAtMillis
-        }
-        writeActivityStates(preferences, result.states, nextExpiryAtMillis, nowMillis)
-        var snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
-        var previousActiveForDecision = previousActive
-        if (activityLifecycleNeedsReset(expiredBeforeMerge, snapshot.active)) {
-            preferences
-                .edit()
-                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
-                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
-                .apply()
-            previousActiveForDecision = false
-        }
-        val incomingUpdatedAt = activityUpdatedAtMillis(state)
-        val decision =
-            when (result.disposition) {
-                ActivityStateMergeDisposition.Blocked -> "blocked"
-                ActivityStateMergeDisposition.Ignored -> "ignore_stale"
-                ActivityStateMergeDisposition.Expired -> "expired"
-                ActivityStateMergeDisposition.Accepted -> {
-                    val value =
-                        agentActivityDeliveryDecision(
-                            deliveryUpdatedAtMs = incomingDeliveryAtMillis,
-                            sourceUpdatedAtMs = incomingUpdatedAt ?: -1,
-                            expiryAtMs = incomingExpiryAtMillis,
-                            nowMs = nowMillis,
-                            previousSourceUpdatedAtMs = previous?.let(::activityUpdatedAtMillis) ?: -1,
-                            dismissed = preferences.getBoolean(ACTIVITY_DISMISSED_KEY, false),
-                            active = snapshot.active,
-                            previousActive = previousActiveForDecision,
-                        )
-                    if (value == "expired") {
-                        val states = result.states.toMutableMap().also { it.remove(hostId) }
-                        val expiries = nextExpiryAtMillis.toMutableMap().also { it.remove(hostId) }
-                        writeActivityStates(preferences, states, expiries, nowMillis)
-                        snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
-                    }
-                    value
-                }
-            }
-        if (decision == "expired") {
-            preferences
-                .edit()
-                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
-                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
-                .apply()
-        } else if (decision == "accept" || decision == "rearmed") {
-            preferences
-                .edit()
-                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
-                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, snapshot.active)
-                .apply()
-        } else if (result.disposition == ActivityStateMergeDisposition.Accepted) {
-            preferences.edit().putBoolean(ACTIVITY_LAST_ACTIVE_KEY, snapshot.active).apply()
-        }
-        ActivityDeliveryResult(
-            decision = decision,
-            aggregate = snapshot.aggregate,
-            expiresAtMillis = snapshot.expiresAtMillis,
-            active = snapshot.active,
+    }
+}
+
+private fun mergeActivityStateLocked(
+    context: Context,
+    hostId: String,
+    state: JsonObject,
+    incomingExpiryAtMillis: Long,
+    incomingDeliveryAtMillis: Long,
+): ActivityDeliveryResult {
+    val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, Context.MODE_PRIVATE)
+    val nowMillis = System.currentTimeMillis()
+    val expiryAtMillis = storedActivityExpiries(preferences)
+    val storedStates = storedActivityStates(preferences)
+    val currentStates = storedStates.filterKeys { !activityExpiryDue(expiryAtMillis[it] ?: 0L, nowMillis, null) }
+    val previous = currentStates[hostId]
+    val result =
+        mergeActivityStates(
+            states = currentStates,
+            hostId = hostId,
+            incoming = state,
+            nowMillis = nowMillis,
+            deliveryAllowed = activityDeliveryAllowed(context, preferences, hostId),
+            incomingExpiryAtMillis = incomingExpiryAtMillis,
+            incomingDeliveryAtMillis = incomingDeliveryAtMillis,
         )
+    val nextExpiryAtMillis = persistActivityMerge(
+        preferences,
+        hostId,
+        result,
+        expiryAtMillis,
+        incomingExpiryAtMillis,
+        nowMillis,
+    )
+    var snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
+    val expiredBeforeMerge = storedStates.keys.any { it !in currentStates }
+    val previousActive = previousActivityActive(preferences, currentStates)
+    val previousActiveForDecision =
+        resetActivityLifecycleIfNeeded(preferences, expiredBeforeMerge, snapshot.active, previousActive)
+    val decision =
+        activityDecisionForMerge(
+            result = result,
+            incomingUpdatedAt = activityUpdatedAtMillis(state),
+            incomingDeliveryAtMillis = incomingDeliveryAtMillis,
+            incomingExpiryAtMillis = incomingExpiryAtMillis,
+            nowMillis = nowMillis,
+            previousSourceUpdatedAtMillis = previous?.let(::activityUpdatedAtMillis) ?: -1,
+            dismissed = preferences.getBoolean(ACTIVITY_DISMISSED_KEY, false),
+            active = snapshot.active,
+            previousActive = previousActiveForDecision,
+        )
+    if (decision == "expired") {
+        val states = result.states.toMutableMap().also { it.remove(hostId) }
+        val expiries = nextExpiryAtMillis.toMutableMap().also { it.remove(hostId) }
+        writeActivityStates(preferences, states, expiries, nowMillis)
+        snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
+    }
+    persistActivityLifecycleDecision(preferences, decision, result.disposition, snapshot.active)
+    return ActivityDeliveryResult(decision, snapshot.aggregate, snapshot.expiresAtMillis, snapshot.active)
+}
+
+private fun previousActivityActive(
+    preferences: android.content.SharedPreferences,
+    currentStates: Map<String, JsonObject>,
+): Boolean =
+    if (preferences.contains(ACTIVITY_LAST_ACTIVE_KEY)) {
+        preferences.getBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+    } else {
+        currentStates.values.any { state ->
+            (state["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.let { it > 0 } == true
+        }
+    }
+
+/** Persists each independently owned Host state and its absolute expiry. */
+@Suppress("LongParameterList")
+private fun persistActivityMerge(
+    preferences: android.content.SharedPreferences,
+    hostId: String,
+    result: ActivityStateMerge,
+    expiryAtMillis: Map<String, Long>,
+    incomingExpiryAtMillis: Long,
+    nowMillis: Long,
+): MutableMap<String, Long> {
+    if (result.disposition == ActivityStateMergeDisposition.Blocked) {
+        preferences.edit().putBoolean(blockedKey(hostId), true).apply()
+    }
+    val nextExpiryAtMillis = expiryAtMillis.filterKeys { it in result.states }.toMutableMap()
+    if (result.disposition == ActivityStateMergeDisposition.Accepted) {
+        nextExpiryAtMillis[hostId] = incomingExpiryAtMillis
+    }
+    writeActivityStates(preferences, result.states, nextExpiryAtMillis, nowMillis)
+    return nextExpiryAtMillis
+}
+
+private fun resetActivityLifecycleIfNeeded(
+    preferences: android.content.SharedPreferences,
+    expiredBeforeMerge: Boolean,
+    active: Boolean,
+    previousActive: Boolean,
+): Boolean =
+    if (activityLifecycleNeedsReset(expiredBeforeMerge, active)) {
+        preferences
+            .edit()
+            .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+            .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+            .apply()
+        false
+    } else {
+        previousActive
+    }
+
+/** Keeps delivery facts flat because the core decision has no mutable owner. */
+@Suppress("LongParameterList")
+private fun activityDecisionForMerge(
+    result: ActivityStateMerge,
+    incomingUpdatedAt: Long?,
+    incomingDeliveryAtMillis: Long,
+    incomingExpiryAtMillis: Long,
+    nowMillis: Long,
+    previousSourceUpdatedAtMillis: Long,
+    dismissed: Boolean,
+    active: Boolean,
+    previousActive: Boolean,
+): String =
+    when (result.disposition) {
+        ActivityStateMergeDisposition.Blocked -> "blocked"
+        ActivityStateMergeDisposition.Ignored -> "ignore_stale"
+        ActivityStateMergeDisposition.Expired -> "expired"
+        ActivityStateMergeDisposition.Accepted ->
+            agentActivityDeliveryDecision(
+                deliveryUpdatedAtMs = incomingDeliveryAtMillis,
+                sourceUpdatedAtMs = incomingUpdatedAt ?: -1,
+                expiryAtMs = incomingExpiryAtMillis,
+                nowMs = nowMillis,
+                previousSourceUpdatedAtMs = previousSourceUpdatedAtMillis,
+                dismissed = dismissed,
+                active = active,
+                previousActive = previousActive,
+            )
+    }
+
+private fun persistActivityLifecycleDecision(
+    preferences: android.content.SharedPreferences,
+    decision: String,
+    disposition: ActivityStateMergeDisposition,
+    active: Boolean,
+) {
+    when {
+        decision == "expired" ->
+            preferences
+                .edit()
+                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+                .apply()
+        decision == "accept" || decision == "rearmed" ->
+            preferences
+                .edit()
+                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, active)
+                .apply()
+        disposition == ActivityStateMergeDisposition.Accepted ->
+            preferences.edit().putBoolean(ACTIVITY_LAST_ACTIVE_KEY, active).apply()
     }
 }
 
@@ -390,40 +484,44 @@ private fun clearActivityState(
     deliveryAtMillis: Long,
     sourceUpdatedAtMillis: Long,
 ): ActivityDeliveryResult? {
-    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
-    synchronized(ACTIVITY_STATE_LOCK) {
+    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > MAX_HOST_ID_BYTES) return null
+    return synchronized(ACTIVITY_STATE_LOCK) {
         val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
         val nowMillis = System.currentTimeMillis()
-        if (!agentActivityMessageIsFresh(deliveryAtMillis, nowMillis)) return null
-        val states = storedActivityStates(preferences)
-        val previous = states[hostId]
-        if (previous != null && (activityUpdatedAtMillis(previous) ?: Long.MIN_VALUE) > sourceUpdatedAtMillis) {
-            return null
+        if (!agentActivityMessageIsFresh(deliveryAtMillis, nowMillis)) {
+            null
+        } else {
+            val states = storedActivityStates(preferences)
+            val previous = states[hostId]
+            if (previous != null && (activityUpdatedAtMillis(previous) ?: Long.MIN_VALUE) > sourceUpdatedAtMillis) {
+                null
+            } else {
+                val expiries = storedActivityExpiries(preferences)
+                val nextStates = states.toMutableMap().also { it.remove(hostId) }
+                val nextExpiries = expiries.toMutableMap().also { it.remove(hostId) }
+                writeActivityStates(preferences, nextStates, nextExpiries, nowMillis)
+                val snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
+                if (activityLifecycleNeedsReset(true, snapshot.active)) {
+                    preferences
+                        .edit()
+                        .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+                        .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+                        .apply()
+                }
+                ActivityDeliveryResult(
+                    decision = "cleared",
+                    aggregate = snapshot.aggregate,
+                    expiresAtMillis = snapshot.expiresAtMillis,
+                    active = snapshot.active,
+                )
+            }
         }
-        val expiries = storedActivityExpiries(preferences)
-        val nextStates = states.toMutableMap().also { it.remove(hostId) }
-        val nextExpiries = expiries.toMutableMap().also { it.remove(hostId) }
-        writeActivityStates(preferences, nextStates, nextExpiries, nowMillis)
-        val snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
-        if (activityLifecycleNeedsReset(true, snapshot.active)) {
-            preferences
-                .edit()
-                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
-                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
-                .apply()
-        }
-        ActivityDeliveryResult(
-            decision = "cleared",
-            aggregate = snapshot.aggregate,
-            expiresAtMillis = snapshot.expiresAtMillis,
-            active = snapshot.active,
-        )
     }
 }
 
 /** Enables or disables activity delivery for one Host and returns the aggregate. */
 internal fun setActivityDeliveryEnabled(context: android.content.Context, hostId: String, enabled: Boolean): String? {
-    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
+    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > MAX_HOST_ID_BYTES) return null
     synchronized(ACTIVITY_STATE_LOCK) {
         val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
         val editor = preferences.edit()
@@ -544,6 +642,9 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
         sendBroadcast(android.content.Intent(ACTION_PUSH_TOKEN_UPDATED))
     }
 
+    // This platform callback owns payload parsing, Host-state delivery, and
+    // alert routing; splitting those gates would duplicate the lifecycle.
+    @Suppress("CyclomaticComplexMethod")
     override fun onMessageReceived(message: RemoteMessage) {
         if (!FirebasePushBootstrap.ensure(this)) return
         val data = message.data
@@ -560,31 +661,28 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
         val activityClearSourceAtMillis = data["activity_clear_source_at"]?.toLongOrNull()
         val activityClear = data["activity_clear"] == "1"
         val merge =
-            if (hostId != null && activityJson != null) {
-                if (activityClear) {
-                    if (activityDeliveryAtMillis == null || activityClearSourceAtMillis == null) null
-                    else clearActivityState(this, hostId, activityDeliveryAtMillis, activityClearSourceAtMillis)
-                } else if (activityDeliveryAtMillis == null) null
-                else
+            when {
+                hostId == null -> null
+                activityClear ->
+                    if (activityDeliveryAtMillis == null || activityClearSourceAtMillis == null) {
+                        null
+                    } else {
+                        clearActivityState(this, hostId, activityDeliveryAtMillis, activityClearSourceAtMillis)
+                    }
+                activityJson == null || activityDeliveryAtMillis == null -> null
+                else ->
                     activityExpiryAtMillis?.let { expiry ->
                         mergeActivityState(this, hostId, activityJson, expiry, activityDeliveryAtMillis)
                     }
-            } else if (
-                activityClear &&
-                    hostId != null &&
-                    activityDeliveryAtMillis != null &&
-                    activityClearSourceAtMillis != null
-            ) {
-                clearActivityState(this, hostId, activityDeliveryAtMillis, activityClearSourceAtMillis)
-            } else null
-        if (merge != null) {
-            if (merge.decision != "dismissed") {
+            }
+        merge
+            ?.takeIf { it.decision != "dismissed" }
+            ?.let { result ->
                 renderActivitySnapshot(
                     this,
-                    ActivityAggregateSnapshot(merge.aggregate, merge.expiresAtMillis, merge.active),
+                    ActivityAggregateSnapshot(result.aggregate, result.expiresAtMillis, result.active),
                 )
             }
-        }
         if (alertRequested) {
             val alertKey =
                 data["alertId"]?.takeIf(String::isNotBlank)
@@ -603,9 +701,10 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
 
     private fun threadDeepLink(environment: String?, thread: String?): String? =
         if (environment.isNullOrBlank() || thread.isNullOrBlank()) null
-        else "remoteagent://threads/${UriComponent.encode(environment)}/${UriComponent.encode(thread)}"
-}
-
-private object UriComponent {
-    fun encode(value: String): String = java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+        else {
+            val encode = { value: String ->
+                java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+            }
+            "remoteagent://threads/${encode(environment)}/${encode(thread)}"
+        }
 }

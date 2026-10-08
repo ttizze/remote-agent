@@ -38,7 +38,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.DefaultBranchActionCopy
 import dev.remoteagent.core.GitAction
-import dev.remoteagent.core.GitActionMenuItem
 import dev.remoteagent.core.GitActionProgress
 import dev.remoteagent.core.GitQuickActionKind
 import dev.remoteagent.core.Intent
@@ -66,8 +65,9 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
     val allFilesSelected = excludedFiles.isEmpty()
     val progress = actionId?.let { model.snapshot.gitAction(it) }
     val copy = pendingAction?.let { action ->
-        if (model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName(action))) {
-            model.snapshot.gitDefaultBranchActionCopy(cwd, actionName(action), action.includesCommit())
+        val actionName = action.name.lowercase()
+        if (model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName)) {
+            model.snapshot.gitDefaultBranchActionCopy(cwd, actionName, action.includesCommit())
         } else null
     }
 
@@ -97,31 +97,39 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
                     }
             },
         )
-        GitActionRows(
-            menu,
-            noneSelected = selectedFiles.isEmpty(),
-            onAction = { action ->
-                if (action == GitAction.OPEN_PR) {
-                    status?.pullRequestUrl?.let { url ->
-                        context.startActivity(AndroidIntent(AndroidIntent.ACTION_VIEW, Uri.parse(url)))
-                    }
-                } else {
-                    pendingAction = action
-                    confirmation = model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName(action))
-                    if (!confirmation)
-                        runGitAction(
-                            model,
-                            cwd,
-                            action,
-                            commitMessage,
-                            if (allFilesSelected) null else selectedFiles.map { it.path },
-                            false,
-                        ) {
-                            actionId = it
+        Column(Modifier.fillMaxWidth()) {
+            menu.forEach { item ->
+                DropdownMenuItem(
+                    text = { Text(item.label) },
+                    leadingIcon = { Icon(item.action.icon(), null) },
+                    onClick = {
+                        val action = item.action
+                        if (action == GitAction.OPEN_PR) {
+                            status?.pullRequestUrl?.let { url ->
+                                context.startActivity(AndroidIntent(AndroidIntent.ACTION_VIEW, Uri.parse(url)))
+                            }
+                        } else {
+                            pendingAction = action
+                            val actionName = action.name.lowercase()
+                            confirmation =
+                                model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName)
+                            if (!confirmation)
+                                runGitAction(
+                                    model,
+                                    cwd,
+                                    action,
+                                    commitMessage,
+                                    if (allFilesSelected) null else selectedFiles.map { it.path },
+                                    false,
+                                ) {
+                                    actionId = it
+                                }
                         }
-                }
-            },
-        )
+                    },
+                    enabled = !item.disabled && !(selectedFiles.isEmpty() && item.action.includesCommit()),
+                )
+            }
+        }
         TextField(
             value = commitMessage,
             onValueChange = { commitMessage = it },
@@ -216,6 +224,8 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
     }
 }
 
+// Branch and worktree controls keep each independent field and callback explicit.
+@Suppress("LongParameterList")
 @Composable
 private fun GitBranchSection(
     model: AndroidAppModel,
@@ -303,7 +313,12 @@ private fun GitBranchSection(
                                 Column {
                                     Text(ref.name)
                                     Text(
-                                        refDetail(ref, cwd),
+                                        when {
+                                            ref.current || ref.worktreePath == cwd -> "Checked out here"
+                                            ref.worktreePath != null -> "Checked out in ${ref.worktreePath}"
+                                            ref.isDefault -> "Default branch"
+                                            else -> "Local branch"
+                                        },
                                         style = AppTheme.caption,
                                         color = AppTheme.colors.foregroundMuted,
                                     )
@@ -329,15 +344,6 @@ private fun GitBranchSection(
         }
     }
 }
-
-private fun refDetail(ref: dev.remoteagent.core.GitRef, cwd: String): String =
-    when {
-        ref.current -> "Checked out here"
-        ref.worktreePath == cwd -> "Checked out here"
-        ref.worktreePath != null -> "Checked out in ${ref.worktreePath}"
-        ref.isDefault -> "Default branch"
-        else -> "Local branch"
-    }
 
 @Composable
 private fun GitStatusCard(status: dev.remoteagent.core.GitStatus?, onRefresh: () -> Unit) {
@@ -368,6 +374,8 @@ private fun GitStatusCard(status: dev.remoteagent.core.GitStatus?, onRefresh: ()
     }
 }
 
+// Selection editing keeps its state and callbacks explicit for Compose ownership.
+@Suppress("LongParameterList")
 @Composable
 private fun GitFileSelection(
     files: List<dev.remoteagent.core.GitFileChange>,
@@ -386,7 +394,8 @@ private fun GitFileSelection(
             Column(Modifier.weight(1f)) {
                 Text("Files", fontWeight = FontWeight.Bold)
                 Text(
-                    "${selected.size} selected · +${selected.sumOf { it.insertions }} / -${selected.sumOf { it.deletions }}",
+                    "${selected.size} selected · " +
+                        "+${selected.sumOf { it.insertions }} / -${selected.sumOf { it.deletions }}",
                     style = AppTheme.caption,
                     color = AppTheme.colors.foregroundMuted,
                 )
@@ -406,8 +415,7 @@ private fun GitFileSelection(
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                if (file.path in selectedPaths) Icons.Outlined.CheckCircle
-                                else Icons.Outlined.CheckCircle,
+                                Icons.Outlined.CheckCircle,
                                 null,
                                 tint =
                                     if (file.path in selectedPaths) AppTheme.colors.foregroundMuted
@@ -434,20 +442,6 @@ private fun GitFileSelection(
                     color = AppTheme.colors.foregroundMuted,
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun GitActionRows(items: List<GitActionMenuItem>, noneSelected: Boolean, onAction: (GitAction) -> Unit) {
-    Column(Modifier.fillMaxWidth()) {
-        items.forEach { item ->
-            DropdownMenuItem(
-                text = { Text(item.label) },
-                leadingIcon = { Icon(item.action.icon(), null) },
-                onClick = { onAction(item.action) },
-                enabled = !item.disabled && !(noneSelected && item.action.includesCommit()),
-            )
         }
     }
 }
@@ -513,6 +507,8 @@ private fun GitConfirmationDialog(
     )
 }
 
+// Action execution passes core facts and its completion callback directly.
+@Suppress("LongParameterList")
 private fun runGitAction(
     model: AndroidAppModel,
     cwd: String,
@@ -528,7 +524,7 @@ private fun runGitAction(
         Intent.RunVcsAction(
             id,
             cwd,
-            actionName(action),
+            action.name.lowercase(),
             commitMessage.trim().ifEmpty { null },
             featureBranch,
             filePaths,
@@ -537,16 +533,6 @@ private fun runGitAction(
         )
     )
 }
-
-private fun actionName(action: GitAction): String =
-    when (action) {
-        GitAction.COMMIT -> "commit"
-        GitAction.PUSH -> "push"
-        GitAction.CREATE_PR -> "create_pr"
-        GitAction.COMMIT_PUSH -> "commit_push"
-        GitAction.COMMIT_PUSH_PR -> "commit_push_pr"
-        GitAction.OPEN_PR -> "open_pr"
-    }
 
 private fun GitAction.includesCommit(): Boolean =
     this == GitAction.COMMIT || this == GitAction.COMMIT_PUSH || this == GitAction.COMMIT_PUSH_PR
@@ -561,13 +547,15 @@ private fun GitAction.icon() =
         GitAction.COMMIT_PUSH -> Icons.Outlined.ArrowUpward
     }
 
-private fun statusSummary(status: dev.remoteagent.core.GitStatus?): String {
-    if (status == null) return "Git status is unavailable."
-    if (!status.isRepo) return "This folder is not a Git repository."
-    val values = mutableListOf<String>()
-    if (status.hasWorkingTreeChanges) values += "${status.workingTree.size} changed"
-    if (status.aheadCount > 0uL) values += "${status.aheadCount} ahead"
-    if (status.behindCount > 0uL) values += "${status.behindCount} behind"
-    if (values.isEmpty()) values += if (status.hasUpstream) "Up to date" else "No upstream"
-    return values.joinToString(" · ")
-}
+private fun statusSummary(status: dev.remoteagent.core.GitStatus?): String =
+    when {
+        status == null -> "Git status is unavailable."
+        !status.isRepo -> "This folder is not a Git repository."
+        else ->
+            buildList {
+                if (status.hasWorkingTreeChanges) add("${status.workingTree.size} changed")
+                if (status.aheadCount > 0uL) add("${status.aheadCount} ahead")
+                if (status.behindCount > 0uL) add("${status.behindCount} behind")
+                if (isEmpty()) add(if (status.hasUpstream) "Up to date" else "No upstream")
+            }.joinToString(" · ")
+    }
