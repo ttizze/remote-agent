@@ -1,14 +1,12 @@
 mod app;
+mod appearance;
 mod browser;
 mod diff;
 mod platform;
 mod store_session;
 mod terminal;
 use futures_util::FutureExt;
-use gpui_kit::{
-    component::{Root, Theme, ThemeMode},
-    *,
-};
+use gpui_kit::{component::Root, *};
 const WINDOW_HEADER_HEIGHT: f32 = 44.;
 #[derive(Clone)]
 pub(crate) struct Runtime {
@@ -132,13 +130,12 @@ fn main() {
                 .boxed_local()
             })
             .detach();
-            gpui_kit::init(cx);
+            appearance::init(cx);
             cx.bind_keys([KeyBinding::new(
                 "ctrl-v",
                 gpui_kit::component::input::Paste,
                 Some("ChatComposer > Input"),
             )]);
-            Theme::change(ThemeMode::Dark, None, cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
