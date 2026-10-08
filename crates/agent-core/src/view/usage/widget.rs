@@ -1,4 +1,4 @@
-use agent_protocol::{models::ProviderInstance, operations::Account, provider::ProviderKind};
+use agent_protocol::{operations::Account, provider::ProviderKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -230,19 +230,23 @@ pub fn subscription_widget(
     }
 }
 
-pub fn configured_widget_providers(providers: &[ProviderInstance]) -> Vec<ProviderKind> {
-    providers
-        .iter()
-        .filter(|provider| {
-            provider.enabled
-                && provider.installed
-                && provider.unavailable_reason.as_deref() != Some("unsupported")
-        })
-        .map(|provider| match provider.driver {
-            agent_domain::Driver::Codex => ProviderKind::Codex,
-            agent_domain::Driver::Claude => ProviderKind::Claude,
-        })
-        .collect()
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn subscription_usage_widgets_json(
+    snapshots: Vec<std::sync::Arc<crate::state::Snapshot>>,
+    max_windows: u32,
+) -> String {
+    let mut environments = crate::environment::EnvironmentRegistry::default();
+    for snapshot in snapshots {
+        environments.update(snapshot);
+    }
+    let inputs = environments.usage_snapshot();
+    serde_json::to_string(&subscription_widget(
+        &inputs.accounts,
+        &inputs.configured_provider_kinds,
+        0,
+        max_windows as usize,
+    ))
+    .expect("widget display data serializes")
 }
 
 /// The OS supplies its layout and clock; shared rules select the displayed quotas.
@@ -356,6 +360,37 @@ mod tests {
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("private@"));
         assert!(!json.contains("subscription\""));
+    }
+    #[test]
+    fn native_publication_aggregates_hosts_and_removal_clears_the_os_snapshot() {
+        let snapshot = |host: &str, account: Account| {
+            std::sync::Arc::new(crate::state::Snapshot {
+                environment: Some(agent_protocol::models::EnvironmentDescriptor {
+                    environment_id: host.into(),
+                    label: host.into(),
+                    ..Default::default()
+                }),
+                accounts: Some(agent_protocol::operations::Accounts {
+                    accounts: vec![account],
+                    selected: Default::default(),
+                    error: None,
+                }),
+                ..Default::default()
+            })
+        };
+        let view: SubscriptionWidget = serde_json::from_str(&subscription_usage_widgets_json(
+            vec![
+                snapshot("host-a", account("one", 40, NOW)),
+                snapshot("host-b", account("two", 80, NOW)),
+            ],
+            6,
+        ))
+        .unwrap();
+        assert_eq!(view.entries[0].providers[0].detail, "2 accounts · pooled");
+        assert_eq!(view.entries[0].providers[0].windows[0].remaining, 40);
+        let view: SubscriptionWidget =
+            serde_json::from_str(&subscription_usage_widgets_json(vec![], 6)).unwrap();
+        assert!(view.entries[0].providers.is_empty());
     }
     #[test]
     fn reset_expires_without_inventing_refill_and_providers_expire_independently() {

@@ -107,6 +107,7 @@ final class BexAppViewModel: ObservableObject {
                 do { try await background?.shutdown() } catch { self?.notice = error.localizedDescription }
             }
             profiles = remaining
+            publishUsageWidget()
             try HostProfile.save(profiles)
             startBackgroundProfiles(selectedProfileId)
             screen = .profiles
@@ -195,12 +196,12 @@ final class BexAppViewModel: ObservableObject {
             defer { self?.backgroundTasks[profile.id] = nil }
             while !Task.isCancelled {
                 guard let self,
-                      self.profiles.contains(where: { $0.id == profile.id }),
-                      self.selectedProfileId != profile.id
+                      profiles.contains(where: { $0.id == profile.id }),
+                      selectedProfileId != profile.id
                 else { return }
                 do {
                     let owner: AgentStore
-                    if let existing = self.backgroundOwners[profile.id] {
+                    if let existing = backgroundOwners[profile.id] {
                         owner = existing
                     } else {
                         let created = try await AgentStore.offline(
@@ -213,10 +214,10 @@ final class BexAppViewModel: ObservableObject {
                             try? await created.shutdown()
                             return
                         }
-                        self.backgroundOwners[profile.id] = created
+                        backgroundOwners[profile.id] = created
                         owner = created
                     }
-                    self.publishEnvironment(profile, owner.snapshot())
+                    publishEnvironment(profile, owner.snapshot())
                     let identity = try DeviceIdentity.loadOrGenerate(profile.id)
                     try await owner.resume(connection: Connection(
                         ticket: profile.ticket,
@@ -224,22 +225,26 @@ final class BexAppViewModel: ObservableObject {
                         invitation: nil,
                         useRelays: true
                     ))
-                    self.publishEnvironment(profile, owner.snapshot())
+                    publishEnvironment(profile, owner.snapshot())
                     var previous = owner.snapshot()
-                    while !Task.isCancelled && self.selectedProfileId != profile.id {
+                    while !Task.isCancelled, selectedProfileId != profile.id {
                         _ = try await owner.nextSnapshot(previous: previous)
                         let latest = owner.snapshot()
-                        self.publishEnvironment(profile, latest)
-                        if !latest.connected() { break }
+                        publishEnvironment(profile, latest)
+                        if !latest.connected() {
+                            break
+                        }
                         previous = latest
                     }
                     delayNanoseconds = 250_000_000
                 } catch is CancellationError {
                     return
                 } catch {
-                    if self.notice == nil { self.notice = "\(profile.name): \(error.localizedDescription)" }
+                    if notice == nil {
+                        notice = "\(profile.name): \(error.localizedDescription)"
+                    }
                 }
-                guard !Task.isCancelled, self.selectedProfileId != profile.id else { return }
+                guard !Task.isCancelled, selectedProfileId != profile.id else { return }
                 try? await Task.sleep(nanoseconds: delayNanoseconds)
                 delayNanoseconds = delayNanoseconds >= 150_000_000_000
                     ? 300_000_000_000
@@ -272,6 +277,16 @@ final class BexAppViewModel: ObservableObject {
         )
         environments = (environments.filter { $0.profileId != profile.id } + [row])
             .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        publishUsageWidget()
+    }
+
+    private func publishUsageWidget() {
+        var snapshots = backgroundOwners.values.map { $0.snapshot() }
+        if let current = store?.snapshot() {
+            snapshots.append(current)
+        }
+        do { try usageWidget.publish(subscriptionUsageWidgetsJson(snapshots: snapshots, maxWindows: 6)) }
+        catch { notice = error.localizedDescription }
     }
 
     func preparePairing(_ contents: String) {
@@ -450,8 +465,6 @@ extension BexAppViewModel {
         if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
         }
-        do { try usageWidget.publish(next.subscriptionUsageWidgetJson(nowMs: 0, maxWindows: 6)) }
-        catch { notice = error.localizedDescription }
         if threadChanged {
             threadView = nil
             showScrollToEnd = false
