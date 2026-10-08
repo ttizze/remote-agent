@@ -35,6 +35,10 @@
         buildAvformat = true;
         buildAvresample = false;
         buildAvutil = true;
+        # The pinned FFmpeg 9.0 test suite compiles tests/pixelutils.c even
+        # for the small variant; keep the built-in utility enabled so checks
+        # and the runtime use the same configured subsystem.
+        withPixelutils = true;
         buildPostproc = false;
         buildSwresample = true;
         # H.264/MJPEG frames need pixel-format and size conversion before the
