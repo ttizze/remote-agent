@@ -78,7 +78,7 @@ struct PointerOverlay {
     released_at: Option<Instant>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 struct OverlayState {
     key: Option<KeyOverlay>,
     pointer: Option<PointerOverlay>,
