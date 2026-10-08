@@ -11,8 +11,6 @@ if [[ -n $bex_build_root ]]; then
         printf 'Build storage is unavailable: %s\n' "$bex_build_root" >&2
         exit 1
     fi
-    # Keep the shared compiler cache on the build volume for CoW restores.
-    export KACHE_CACHE_DIR="${KACHE_CACHE_DIR:-$bex_build_root/.kache}"
     if [[ ! -e $bex_root/target && ! -L $bex_root/target ]]; then
         bex_build_key=$(printf '%s\n' "$bex_root" | git hash-object --stdin)
         mkdir -p "$bex_build_root/$bex_build_key"
@@ -20,6 +18,12 @@ if [[ -n $bex_build_root ]]; then
         ln -sn "$bex_build_root/$bex_build_key" "$bex_root/target" ||
             [[ -L $bex_root/target && $(readlink "$bex_root/target") == "$bex_build_root/$bex_build_key" ]]
     fi
+fi
+# Cargo tags only target directories it creates; this wrapper creates them first.
+mkdir -p "$bex_root/target"
+if [[ ! -e $bex_root/target/CACHEDIR.TAG && ! -L $bex_root/target/CACHEDIR.TAG ]]; then
+    (set -o noclobber; printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' > "$bex_root/target/CACHEDIR.TAG") ||
+        [[ -f $bex_root/target/CACHEDIR.TAG && ! -L $bex_root/target/CACHEDIR.TAG ]]
 fi
 bex_seed_cargo=${CARGO_HOME:-$HOME/.cargo}
 export XDG_CACHE_HOME="$bex_root/target/tool-cache"

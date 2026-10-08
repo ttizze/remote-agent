@@ -53,7 +53,20 @@
             # CI already restores Cargo outputs.
             if [ -z "''${CI:-}" ]; then
               export RUSTC_WRAPPER="${kache}/bin/kache"
-              export KACHE_CACHE_DIR="''${KACHE_CACHE_DIR:-$HOME/${if pkgs.stdenv.hostPlatform.isDarwin then "Library/Caches/kache" else ".cache/kache"}}"
+              if [ -z "''${KACHE_CACHE_DIR:-}" ]; then
+                bex_kache_build_root=$(git config --path --get bex.buildRoot 2>/dev/null || true)
+                if [ -n "$bex_kache_build_root" ]; then
+                  if [ "''${bex_kache_build_root#/}" = "$bex_kache_build_root" ] || [ ! -d "$bex_kache_build_root" ]; then
+                    printf 'Build storage is unavailable: %s\n' "$bex_kache_build_root" >&2
+                    exit 1
+                  fi
+                  # Keep the shared compiler cache on the build volume for CoW restores.
+                  export KACHE_CACHE_DIR="$bex_kache_build_root/.kache"
+                else
+                  export KACHE_CACHE_DIR="$HOME/${if pkgs.stdenv.hostPlatform.isDarwin then "Library/Caches/kache" else ".cache/kache"}"
+                fi
+                unset bex_kache_build_root
+              fi
             fi
           '';
           androidSdk = (pkgs.androidenv.composeAndroidPackages {

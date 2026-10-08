@@ -1,5 +1,10 @@
 #![cfg(unix)]
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
+    process::Command,
+};
 use xtask::supervision;
 mod support;
 use support::Fixture;
@@ -43,6 +48,9 @@ async fn cli_discovers_worktrees_preserves_sources_and_rejects_failed_inspection
         &["worktree", "add", "--detach", worktree.to_str().unwrap()],
     );
     fixture.build(&worktree, &worktree.join("target")).await;
+    let external = fixture.root.join("build volume");
+    fs::rename(worktree.join("target"), &external).unwrap();
+    symlink(&external, worktree.join("target")).unwrap();
     for project in [&root, &worktree] {
         Fixture::age(&project.join("target/debug"), 4);
     }

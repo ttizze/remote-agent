@@ -206,7 +206,7 @@ Android CIは、固定したNix SDKとUbuntu 24.04でKotlinのチェック・ユ
 
 開発・テストビルドは、全変数のデバッグ情報を含めず、ファイル名・行番号付きバックトレースを保持します。デバッガーで変数が必要なら`CARGO_PROFILE_DEV_DEBUG=full`を指定してください。品質チェックではRustのインクリメンタルコンパイルを無効にし、通常のローカルビルドのインクリメンタル状態はKacheが管理します。
 
-`default`・`native`のNixシェルは、バージョンを固定したKacheをローカルRustビルドのラッパーとして使います。内容に基づく共有キャッシュで、Cargoのインデックス・ロック・ビルド出力を分離したままワークツリー間で対応するコンパイル結果を再利用します。Linux・macOSでは対応するRust実行ファイルやビルドスクリプトの実行結果もキャッシュし、頻繁に変わるクレートでは適応型インクリメンタル処理を使えます。`scripts/dev-env.sh kache stats --last-build`で再利用を確認し、`scripts/dev-env.sh kache explain`でミスの原因を調べられます。`KACHE_CACHE_DIR`で共有キャッシュの保存場所を指定できます。`bex.buildRoot`が設定されている場合、`scripts/dev-env.sh`は既定で`<buildRoot>/.kache`を使い、同じディスク上の出力をcopy-on-writeで復元できるようにします。それ以外ではmacOSの`~/Library/Caches/kache`、Linuxの`~/.cache/kache`を使います。`CI`が設定された環境ではこのラッパーを使わず、既存のCargoキャッシュを使います。
+`default`・`native`のNixシェルは、バージョンを固定したKacheをローカルRustビルドのラッパーとして使います。内容に基づく共有キャッシュで、Cargoのインデックス・ロック・ビルド出力を分離したままワークツリー間で対応するコンパイル結果を再利用します。Linux・macOSでは対応するRust実行ファイルやビルドスクリプトの実行結果もキャッシュし、頻繁に変わるクレートでは適応型インクリメンタル処理を使えます。`scripts/dev-env.sh kache stats --last-build`で再利用を確認し、`scripts/dev-env.sh kache explain`でミスの原因を調べられます。`KACHE_CACHE_DIR`で共有キャッシュの保存場所を指定できます。`bex.buildRoot`が設定されている場合、Nixシェルと`scripts/dev-env.sh`は既定で`<buildRoot>/.kache`を使い、同じディスク上の出力をcopy-on-writeで復元できるようにします。それ以外ではmacOSの`~/Library/Caches/kache`、Linuxの`~/.cache/kache`を使います。`CI`が設定された環境ではこのラッパーを使わず、既存のCargoキャッシュを使います。
 
 `just unit-tests`は、ネイティブバインディングを有効にしたRustワークスペースのライブラリ・バイナリテスト、単独agent-peerのCargoテスト、macOSのヘッドレスSwift Markdownテストを実行します。RustはNix固定のcargo-nextestでクレートをまたいで並行実行し、Swiftも並行で進めます。両方の結果を待って失敗を集計します。Androidには現在JVMユニットテストがなく、計装テストはCIで実行します。CIも結合・E2E確認の前に同じコマンド・Rust機能構成を使い、Nixのagent-peerパッケージも確認します。監視用実行ファイルはテスト前にビルドします。`agent-ffi/bindgen`はバインディング生成時だけ有効にしてください。ユニットテストはなく、ワークスペーステストに含めると不要な依存構成でネイティブライブラリを置き換えます。整理・接続診断・ネイティブテストはRustの`cargo xtask`で管理します。macOSのプロセス調査はOS付属の`lsof`、LinuxはNix版を使います。Swift Markdownテストは、ソース・バインディング・コンパイラー・SDK・ランナーが一致するときのみビルドを再利用し、毎回現在のRustライブラリへアサーションを実行します。iOS UIテストは初期化済みの空Simulatorを複製して隔離Hostと組み合わせ、`BEX_IOS_TEST_WORKERS=1`–`10`で並行数を指定できます。リポジトリ共通ロックで、ワークツリー・Cargo出力をまたぐiOS確認を直列化します。
 
@@ -214,7 +214,7 @@ Android CIは、固定したNix SDKとUbuntu 24.04でKotlinのチェック・ユ
 
 新規ワークツリーのビルド出力を外付けディスクへ置くには、マウント済みディスクにディレクトリを作り、`git config --local bex.buildRoot /absolute/path/to/builds`を設定します。このローカル設定は全ワークツリーで共有します。`scripts/dev-env.sh`は新しい`target`を外付け上の専用ディレクトリへのシンボリックリンクにし、Cargo・Xcode・生成バインディング・キャッシュの既存パスを維持します。既存`target`は移動しません。移す場合は使用していない間に移動して元の場所をリンクへ置き換えてください。指定ディレクトリは事前に存在する必要があり、ディスク取り外しなどで利用できなければコマンドは失敗します。`git config --local --unset bex.buildRoot`で設定を削除すると、その後の新規ワークツリーはローカル出力へ戻ります。
 
-完了した`just quality`は毎回、登録済みワークツリーの未使用Cargo出力を整理します。3日以上更新のないプロファイルを削除し、残りも未使用出力が合計32 GiB以下になるまで古い順に削除します。`scripts/dev-env.sh just clean-builds --dry-run`でJSONの計画を確認し、`--dry-run`なしで適用できます。通常の`target`と、その直下のCargoキャッシュを調べ、リンク先のキャッシュは追いません。
+完了した`just quality`は毎回、登録済みワークツリーの未使用Cargo出力を整理します。3日以上更新のないプロファイルを削除し、残りも未使用出力が合計32 GiB以下になるまで古い順に削除します。`scripts/dev-env.sh just clean-builds --dry-run`でJSONの計画を確認し、`--dry-run`なしで適用できます。各ワークツリーの`target`リンクを解決し、外付けビルド領域を含め、その場所と直下にあるタグ付きCargoキャッシュを調べます。内部のリンクは追いません。同じプロファイルは一度だけ集計し、参照するワークツリーのどれかが使用中なら保護します。
 
 整理はCargoのビルド・成果物ロックを保持し、ロックのinodeを維持します。稼働中バイナリ、使用中ワークツリー、ロック中ビルドは未使用容量に含めません。検証後の保持方針なので、使用中ビルドは一時的に容量を超えることがあります。削除できるのは認識済みのCargo `debug`・`release`出力のみです。バックアップ・検証記録はその外へ保存してください。アプリバンドル、`target/qa`、要約、ソースは保持し、整理したプロファイルは再ビルドで復元します。
 

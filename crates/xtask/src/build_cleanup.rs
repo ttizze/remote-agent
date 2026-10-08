@@ -38,7 +38,7 @@ struct Entry {
     path: PathBuf,
     bytes: Option<u64>,
     modified: f64,
-    owner: PathBuf,
+    owners: BTreeSet<PathBuf>,
     action: Action,
 }
 
@@ -88,7 +88,7 @@ fn directory(path: &Path) -> bool {
 async fn profiles(
     worktrees: &[PathBuf],
     cancel: &watch::Receiver<bool>,
-) -> Result<BTreeMap<PathBuf, PathBuf>> {
+) -> Result<BTreeMap<PathBuf, BTreeSet<PathBuf>>> {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let targets = command(
         &[rustc, "--print".into(), "target-list".into()],
@@ -100,12 +100,14 @@ async fn profiles(
         .lines()
         .map(OsString::from)
         .collect();
-    let mut found = BTreeMap::new();
+    let mut found = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
     for owner in worktrees {
         let target = owner.join("target");
-        if !directory(&target) {
+        if !target.is_dir() {
             continue;
         }
+        // Resolve only the worktree's target link. Nested links remain opaque.
+        let target = target.canonicalize()?;
         let mut roots = Vec::new();
         if cache_root(&target)? {
             roots.push(target.clone());
@@ -131,7 +133,10 @@ async fn profiles(
                         && directory(&path.join(".fingerprint"))
                         && LOCKS.iter().any(|lock| path.join(lock).is_file())
                     {
-                        found.insert(path.canonicalize()?, owner.clone());
+                        found
+                            .entry(path.canonicalize()?)
+                            .or_default()
+                            .insert(owner.clone());
                     }
                 }
             }
@@ -245,10 +250,13 @@ async fn open_paths(
     parse_open_paths(&ps, &lsof, worktrees, std::process::id())
 }
 
-fn in_use(path: &Path, owner: &Path, opened: &[(PathBuf, Option<PathBuf>)]) -> bool {
-    opened
-        .iter()
-        .any(|(opened, cwd_owner)| opened.starts_with(path) || cwd_owner.as_deref() == Some(owner))
+fn in_use(path: &Path, owners: &BTreeSet<PathBuf>, opened: &[(PathBuf, Option<PathBuf>)]) -> bool {
+    opened.iter().any(|(opened, cwd_owner)| {
+        opened.starts_with(path)
+            || cwd_owner
+                .as_ref()
+                .is_some_and(|owner| owners.contains(owner))
+    })
 }
 
 fn profile_locks(path: &Path) -> Result<Option<Vec<File>>> {
@@ -289,15 +297,15 @@ async fn prune(
         .collect::<std::io::Result<Vec<_>>>()?;
     let opened = open_paths(&worktrees, cancel).await?;
     let mut entries = Vec::new();
-    for (path, owner) in profiles(&worktrees, cancel).await? {
+    for (path, owners) in profiles(&worktrees, cancel).await? {
         let mut entry = Entry {
             path,
-            owner,
+            owners,
             bytes: None,
             modified: 0.0,
             action: Action::InUse,
         };
-        if !in_use(&entry.path, &entry.owner, &opened) {
+        if !in_use(&entry.path, &entry.owners, &opened) {
             if let Some(_locks) = profile_locks(&entry.path)? {
                 let (bytes, modified) = usage(&entry.path)?;
                 entry.bytes = Some(bytes);
@@ -325,7 +333,7 @@ async fn prune(
         };
         if in_use(
             &entry.path,
-            &entry.owner,
+            &entry.owners,
             &open_paths(&worktrees, cancel).await?,
         ) {
             remaining -= entry.bytes.take().unwrap();
@@ -473,8 +481,16 @@ mod tests {
         let opened =
             parse_open_paths(ps, lsof.as_bytes(), &[parent.clone(), nested.clone()], 3).unwrap();
         assert_eq!(opened.len(), 2);
-        assert!(!in_use(&parent.join("target/debug"), &parent, &opened));
-        assert!(in_use(&nested.join("target/debug"), &nested, &opened));
-        assert!(in_use(&nested, &parent, &opened));
+        assert!(!in_use(
+            &parent.join("target/debug"),
+            &BTreeSet::from([parent.clone()]),
+            &opened
+        ));
+        assert!(in_use(
+            &nested.join("target/debug"),
+            &BTreeSet::from([nested.clone()]),
+            &opened
+        ));
+        assert!(in_use(&nested, &BTreeSet::from([parent]), &opened));
     }
 }

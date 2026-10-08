@@ -230,20 +230,79 @@ async fn active_cargo_in_nested_target_is_not_cleaned() {
 }
 
 #[tokio::test]
-async fn external_symlink_and_untagged_nested_outputs_are_not_candidates() {
+async fn shared_linked_targets_protect_every_owner_running_executable_and_cargo_lock() {
+    let fixture = Fixture::new().await;
+    let first = fixture.project("first").await;
+    let second = fixture.project("second").await;
+    let target = fixture.root.join("build volume");
+    fs::rename(first.join("target"), &target).unwrap();
+    fs::remove_dir_all(second.join("target")).unwrap();
+    for root in [&first, &second] {
+        symlink(&target, root.join("target")).unwrap();
+    }
+    let profile = target.join("debug");
+    Fixture::age(&profile, 4);
+    let roots = [first.clone(), second.clone()];
+    let report = inspect(&roots, true, 0).await;
+    assert_eq!(report.entries.len(), 1);
+    assert_eq!(report.entries[0].path, profile);
+    assert_eq!(report.entries[0].owners, BTreeSet::from(roots.clone()));
+    assert_eq!(report.entries[0].action, Action::WouldClean);
+    let locks = profile_locks(&profile).unwrap().unwrap();
+    assert_eq!(
+        inspect(&roots, false, 0).await.entries[0].action,
+        Action::Locked
+    );
+    drop(locks);
+    for cwd in [&first, &second, &fixture.root] {
+        let mut command = Command::new(Fixture::executable(&first));
+        command
+            .arg("hold")
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped());
+        let mut process = Child::spawn(command).unwrap();
+        let mut stdin = process.take_stdin().unwrap();
+        assert_eq!(
+            inspect(&roots, false, 0).await.entries[0].action,
+            Action::InUse
+        );
+        Fixture::runs(&first);
+        Fixture::runs(&second);
+        stdin.write_all(b"\n").await.unwrap();
+        drop(stdin);
+        let (_sender, cancel) = watch::channel(false);
+        assert!(
+            process
+                .output(&cancel, Duration::from_secs(5), Duration::from_secs(10))
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let executable = Fixture::executable(&first);
+    await_cleaned(&roots, &executable).await;
+    assert!(first.join("target").is_symlink());
+    assert!(second.join("target").is_symlink());
+    fixture.build(&first, &first.join("target")).await;
+    Fixture::runs(&first);
+    Fixture::runs(&second);
+}
+
+#[tokio::test]
+async fn nested_symlinks_and_untagged_outputs_are_not_candidates() {
     let fixture = Fixture::new().await;
     let outside = fixture.project("outside").await;
     let root = fixture.root.join("inside");
-    fs::create_dir(&root).unwrap();
-    symlink(outside.join("target"), root.join("target")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+    symlink(outside.join("target"), root.join("target/linked")).unwrap();
     assert!(
         inspect(std::slice::from_ref(&root), false, 0)
             .await
             .entries
             .is_empty()
     );
-    fs::remove_file(root.join("target")).unwrap();
-    fs::create_dir(root.join("target")).unwrap();
+    fs::remove_file(root.join("target/linked")).unwrap();
     fs::remove_file(outside.join("target/CACHEDIR.TAG")).unwrap();
     fs::rename(outside.join("target"), root.join("target/unknown")).unwrap();
     assert!(
