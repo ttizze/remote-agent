@@ -14,8 +14,6 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private data class Frame(
         val payload: ByteArray,
         val encoding: String,
-        val width: Int,
-        val height: Int,
         val timestampUs: Long,
         val keyframe: Boolean,
     )
@@ -53,8 +51,6 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     fun submit(
         payload: ByteArray,
         encoding: String,
-        width: Int,
-        height: Int,
         sequence: ULong,
         timestampUs: ULong?,
         keyframe: Boolean,
@@ -73,8 +69,6 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             Frame(
                 payload = payload.copyOf(),
                 encoding = encoding,
-                width = width,
-                height = height,
                 timestampUs = timestampUs?.toLong() ?: sequence.toLong(),
                 keyframe = keyframe,
             ),
@@ -164,13 +158,8 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             }
             input.clear()
             input.put(payload)
-            val flags = if (frame.encoding == "avcc-description") {
-                MediaCodec.BUFFER_FLAG_CODEC_CONFIG
-            } else {
-                0
-            }
             runCatching {
-                decoder.queueInputBuffer(index, 0, payload.size, frame.timestampUs, flags)
+                decoder.queueInputBuffer(index, 0, payload.size, frame.timestampUs, 0)
             }.onFailure {
                 closeCodec()
             }

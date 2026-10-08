@@ -404,8 +404,6 @@ private fun DeviceH264Frame(
                 decoder.submit(
                     payload = frame.payload.toByteArray(),
                     encoding = frame.encoding,
-                    width = frame.width.toInt(),
-                    height = frame.height.toInt(),
                     sequence = frame.sequence,
                     timestampUs = frame.timestampUs,
                     keyframe = frame.keyframe,
