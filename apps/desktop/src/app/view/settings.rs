@@ -91,7 +91,10 @@ impl Desktop {
             ),
         };
         let (title, subtitle) = match self.settings_page {
-            SettingsPage::Models => ("モデル", "新しい会話で使うモデルの初期値を設定します。"),
+            SettingsPage::Models => (
+                "モデル",
+                "プロバイダごとの初期値と、新規チャットのモデルを設定します。",
+            ),
             SettingsPage::Agents => (
                 "エージェント",
                 "選択した環境のAIアカウントと使用量を管理します。",

@@ -28,66 +28,86 @@ fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
 }
 
 impl Desktop {
-    pub(super) fn default_model_settings(&self, cx: &Context<Self>) -> AnyElement {
-        let defaults = self
-            .snapshot
-            .model_defaults(self.settings_model_scope.clone());
+    fn default_model_picker(
+        &self,
+        provider: Option<ProviderKind>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let scope = self.settings_model_scope.clone();
+        let selected = match provider {
+            Some(provider) => {
+                self.snapshot
+                    .provider_model_defaults(scope.clone(), provider)
+                    .model
+            }
+            None => self.snapshot.model_defaults(scope.clone()).new_chat_model,
+        };
         let model = self
             .snapshot
-            .default_model(self.settings_model_scope.clone());
-        let label = defaults
-            .model
-            .as_ref()
-            .and(model.as_ref())
+            .models
+            .iter()
+            .find(|model| Some(&model.model) == selected.as_ref());
+        let label = model
             .map(|model| model.display_name.clone())
-            .or_else(|| defaults.model.as_ref().map(|model| model.id.clone()))
+            .or_else(|| selected.as_ref().map(|model| model.id.clone()))
             .unwrap_or_else(|| "自動".into());
-        let selected = defaults.model.clone();
-        let models = self.snapshot.models.clone();
+        let id = match provider {
+            Some(ProviderKind::Codex) => "default-model-Codex",
+            Some(ProviderKind::Claude) => "default-model-Claude",
+            None => "new-chat-default-model",
+        };
+        let choices: Vec<_> = std::iter::once(("自動".to_owned(), None))
+            .chain(
+                self.snapshot
+                    .models_matching(provider, String::new())
+                    .into_iter()
+                    .map(|model| {
+                        let name = match model.model.provider {
+                            ProviderKind::Codex => "Codex",
+                            ProviderKind::Claude => "Claude",
+                        };
+                        (
+                            format!("{name} · {}", model.display_name),
+                            Some(model.model),
+                        )
+                    }),
+            )
+            .collect();
         let entity = cx.entity().downgrade();
-        let scope = self.settings_model_scope.clone();
-        let model_picker = Button::new("default-model")
+        Button::new(id)
             .disabled(self.session.is_none())
             .label(label)
-            .accessibility_label("新しい会話のモデル")
-            .debug_selector(|| "default-model".into())
+            .accessibility_label(if provider.is_some() {
+                "プロバイダのデフォルトモデル"
+            } else {
+                "新しい会話のモデル"
+            })
+            .debug_selector(move || id.into())
             .ghost()
-            .when_some(model.as_ref(), |button, model| {
+            .when_some(model, |button, model| {
                 button.icon(provider_icon(model.model.provider))
             })
             .child(Icon::new(IconName::ChevronDown).size(px(14.)))
             .dropdown_menu(move |mut menu, _, _| {
-                let automatic = entity.clone();
-                let automatic_scope = scope.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("自動")
-                        .checked(selected.is_none())
-                        .on_click(move |_, _, cx| {
-                            let _ = automatic.update(cx, |s, cx| {
-                                s.dispatch(Intent::SelectDefaultModel {
-                                    scope: automatic_scope.clone(),
-                                    model: None,
-                                });
-                                cx.notify();
-                            });
-                        }),
-                );
-                for model in models.iter() {
-                    let value = model.model.clone();
+                for (label, value) in &choices {
                     let scope = scope.clone();
                     let entity = entity.clone();
-                    let provider = match model.model.provider {
-                        ProviderKind::Codex => "Codex",
-                        ProviderKind::Claude => "Claude",
-                    };
+                    let value = value.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(format!("{provider} · {}", model.display_name))
-                            .checked(selected.as_ref() == Some(&model.model))
+                        PopupMenuItem::new(label.clone())
+                            .checked(value == selected)
                             .on_click(move |_, _, cx| {
                                 let _ = entity.update(cx, |s, cx| {
-                                    s.dispatch(Intent::SelectDefaultModel {
-                                        scope: scope.clone(),
-                                        model: Some(value.clone()),
+                                    s.dispatch(match provider {
+                                        Some(provider) => Intent::SelectDefaultModel {
+                                            scope: scope.clone(),
+                                            provider,
+                                            model: value.clone(),
+                                        },
+                                        None => Intent::SelectNewChatModel {
+                                            scope: scope.clone(),
+                                            model: value.clone(),
+                                        },
                                     });
                                     cx.notify();
                                 });
@@ -95,22 +115,30 @@ impl Desktop {
                     );
                 }
                 menu
-            });
+            })
+            .into_any_element()
+    }
+
+    fn provider_model_settings(&self, provider: ProviderKind, cx: &Context<Self>) -> AnyElement {
+        let defaults = self
+            .snapshot
+            .provider_model_defaults(self.settings_model_scope.clone(), provider);
+        let model_picker = self.default_model_picker(Some(provider), cx);
         let mut controls = h_flex().gap_2().child(model_picker);
         let quick = self
             .snapshot
-            .default_model_controls(self.settings_model_scope.clone());
+            .default_model_controls(self.settings_model_scope.clone(), provider);
         if !quick.efforts.is_empty() {
             let efforts = quick.efforts.clone();
             let entity = cx.entity().downgrade();
             let effort = defaults.effort.clone();
             let scope = self.settings_model_scope.clone();
             controls = controls.child(
-                Button::new("default-model-effort")
+                Button::new(format!("default-model-effort-{provider:?}"))
                     .disabled(self.session.is_none())
                     .label(effort.clone().unwrap_or_else(|| "自動".into()))
-                    .accessibility_label("新しい会話の推論強度")
-                    .debug_selector(|| "default-model-effort".into())
+                    .accessibility_label("デフォルトの推論強度")
+                    .debug_selector(move || format!("default-model-effort-{provider:?}"))
                     .ghost()
                     .child(Icon::new(IconName::ChevronDown).size(px(14.)))
                     .dropdown_menu(move |mut menu, _, _| {
@@ -124,6 +152,7 @@ impl Desktop {
                                     .on_click(move |_, _, cx| {
                                         let _ = entity.update(cx, |s, cx| {
                                             s.dispatch(Intent::SelectDefaultEffort {
+                                                provider,
                                                 scope: scope.clone(),
                                                 effort: value.clone(),
                                             });
@@ -141,12 +170,12 @@ impl Desktop {
             let selected = defaults.service_tier.clone();
             let scope = self.settings_model_scope.clone();
             controls = controls.child(
-                Button::new("default-model-speed")
+                Button::new(format!("default-model-speed-{provider:?}"))
                     .disabled(self.session.is_none())
                     .label(if quick.fast { "高速" } else { "通常" })
                     .icon(fast_icon(quick.fast))
-                    .accessibility_label("新しい会話の速度")
-                    .debug_selector(|| "default-model-speed".into())
+                    .accessibility_label("デフォルトの速度")
+                    .debug_selector(move || format!("default-model-speed-{provider:?}"))
                     .ghost()
                     .child(Icon::new(IconName::ChevronDown).size(px(14.)))
                     .dropdown_menu(move |mut menu, _, _| {
@@ -163,6 +192,7 @@ impl Desktop {
                                     .on_click(move |_, _, cx| {
                                         let _ = entity.update(cx, |s, cx| {
                                             s.dispatch(Intent::SelectDefaultServiceTier {
+                                                provider,
                                                 scope: scope.clone(),
                                                 service_tier: value.clone(),
                                             });
@@ -175,27 +205,42 @@ impl Desktop {
                     }),
             );
         }
-        v_flex()
-            .gap_4()
-            .child(div().text_lg().font_semibold().child("新しい会話"))
+        h_flex()
+            .items_center()
+            .gap_5()
+            .p_4()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(rgb(0x2b2f35))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_5()
-                    .p_4()
-                    .rounded(px(14.))
-                    .border_1()
-                    .border_color(rgb(0x2b2f35))
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(match provider {
+                        ProviderKind::Codex => "Codex",
+                        ProviderKind::Claude => "Claude",
+                    })
                     .child(
-                        v_flex().flex_1().min_w_0().gap_1().child("モデル").child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x949ca8))
-                                .child("新しい会話で使うモデル・推論強度・速度の初期値です。"),
-                        ),
-                    )
-                    .child(controls),
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x949ca8))
+                            .child("このプロバイダで使うモデル・推論強度・速度の初期値です。"),
+                    ),
             )
+            .child(controls)
+            .into_any_element()
+    }
+
+    pub(super) fn default_model_settings(&self, cx: &Context<Self>) -> AnyElement {
+        v_flex().gap_4()
+            .child(div().text_lg().font_semibold().child("新しい会話"))
+            .child(h_flex().items_center().gap_5().p_4().rounded(px(14.)).border_1().border_color(rgb(0x2b2f35))
+                .child(v_flex().flex_1().min_w_0().gap_1().child("デフォルトモデル")
+                    .child(div().text_sm().text_color(rgb(0x949ca8)).child("新規チャットを開始するときのモデルです。自動はCodexのデフォルトを使います。")))
+                .child(self.default_model_picker(None, cx)))
+            .child(div().text_lg().font_semibold().child("プロバイダごとのデフォルト"))
+            .children([ProviderKind::Codex, ProviderKind::Claude].into_iter().map(|provider| self.provider_model_settings(provider, cx)))
             .child(
                 div()
                     .text_xs()
@@ -224,7 +269,7 @@ impl Desktop {
             )
             .children(
                 self.snapshot
-                    .model_error_messages(defaults.model.as_ref().map(|model| model.provider))
+                    .model_error_messages(None)
                     .into_iter()
                     .map(|error| {
                         div()
@@ -1437,9 +1482,13 @@ mod tests {
         for width in [1000., 1280.] {
             window.simulate_resize(gpui_kit::size(px(width), px(720.)));
             window.run_until_parked();
-            let model = window.debug_bounds("default-model").unwrap();
-            let effort = window.debug_bounds("default-model-effort").unwrap();
-            let speed = window.debug_bounds("default-model-speed").unwrap();
+            let new_chat = window.debug_bounds("new-chat-default-model").unwrap();
+            let claude = window.debug_bounds("default-model-Claude").unwrap();
+            let model = window.debug_bounds("default-model-Codex").unwrap();
+            let effort = window.debug_bounds("default-model-effort-Codex").unwrap();
+            let speed = window.debug_bounds("default-model-speed-Codex").unwrap();
+            assert!(new_chat.bottom() < model.top());
+            assert!(model.bottom() < claude.top());
             assert!(model.right() <= effort.left());
             assert!(effort.right() <= speed.left());
             assert_eq!(model.top(), speed.top());
@@ -1453,6 +1502,6 @@ mod tests {
             });
         });
         window.run_until_parked();
-        assert!(window.debug_bounds("default-model").is_none());
+        assert!(window.debug_bounds("default-model-Codex").is_none());
     }
 }

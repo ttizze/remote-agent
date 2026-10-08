@@ -186,6 +186,7 @@ mod tests {
             session.persist(path.clone(), updates, |_| Update::Error);
             store
                 .dispatch(Intent::SelectDefaultEffort {
+                    provider: agent_protocol::session::ProviderKind::Codex,
                     scope: agent_core::state::ModelDefaultsScope::Environment { id: "vm".into() },
                     effort: Some("high".into()),
                 })

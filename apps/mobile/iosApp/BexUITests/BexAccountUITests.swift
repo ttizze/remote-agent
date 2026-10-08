@@ -313,6 +313,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.buttons["model.choice.automatic"].waitForExistence(timeout: 10))
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
+        chooseIndependentNewChatModel(app, choice: choice)
         XCTAssertFalse(app.descendants(matching: .any)["model.error"].exists)
         let effort = app.buttons["model.sheet.effort"]
         XCTAssertTrue(effort.waitForExistence(timeout: 10)); effort.tap()
@@ -339,11 +340,29 @@ extension BexLaunchUITests {
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.settings"].tap()
         app.buttons["settings.models"].tap()
+        assertPersistedIndependentModelDefaults(app)
+    }
+
+    private func assertPersistedIndependentModelDefaults(_ app: XCUIApplication) {
         XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中")
         XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
         XCTAssertEqual(app.buttons["model.defaults.speed"].value as? String, "高速")
+        XCTAssertEqual(app.buttons["model.defaults.new-chat"].value as? String, "Fixture Model")
         app.buttons["model.choice.automatic"].tap()
         XCTAssertEqual(app.buttons["model.choice.automatic"].value as? String, "選択中")
+        XCTAssertEqual(app.buttons["model.defaults.new-chat"].value as? String, "Fixture Model")
+    }
+
+    private func chooseIndependentNewChatModel(_ app: XCUIApplication, choice: XCUIElement) {
+        let newChat = app.buttons["model.defaults.new-chat"]
+        XCTAssertTrue(newChat.exists); newChat.tap()
+        app.buttons["model.defaults.new-chat.fixture-model"].tap()
+        XCTAssertEqual(newChat.value as? String, "Fixture Model")
+        app.buttons["model.provider.claude"].tap()
+        XCTAssertEqual(app.buttons["model.choice.automatic"].value as? String, "選択中")
+        XCTAssertEqual(newChat.value as? String, "Fixture Model")
+        app.buttons["model.provider.codex"].tap()
+        XCTAssertEqual(choice.value as? String, "選択中")
     }
 
     private func switchFixtureAccount(_ app: XCUIApplication) {
