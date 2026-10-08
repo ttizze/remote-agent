@@ -22,9 +22,12 @@ Node version observed by the packaging job.
 The signed mobile and Apple distribution paths require repository secrets. The
 workflow intentionally fails with a named missing input when a scheduled run
 cannot prepare a keystore, signing certificate, provisioning profile, or
-App Store Connect/Play credential. No credential values are written to logs or
-checked-in files. Mobile store upload is limited to the trusted scheduled path
-or an explicitly requested manual run from `main`.
+App Store Connect/Play credential. The Apple setup scripts keep an explicitly
+empty-password keychain and temporary certificate material under a mode-700
+`RUNNER_TEMP` directory; no keychain-password secret is required. No credential
+values are written to logs or checked-in files. Mobile store upload is limited
+to the trusted scheduled path or an explicitly requested manual run from
+`main`.
 
 ## Naming audit
 

@@ -64,4 +64,5 @@ if scripts/release-metadata.sh --channel stable --version invalid >/dev/null 2>&
     echo 'invalid stable version unexpectedly succeeded' >&2
     exit 1
 fi
+scripts/signing-preflight-test.sh
 echo 'release metadata checks passed'
