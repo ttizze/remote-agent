@@ -195,13 +195,15 @@ pub fn environment_load_balancing_route(
     EnvironmentLoadBalancingEvaluationView {
         candidate_count: evaluation.candidate_count as u64,
         pending_resources: evaluation.pending_resources,
-        route: evaluation.route.map(|route| EnvironmentLoadBalancedRouteView {
-            environment_id: route.environment_id,
-            project_id: route.project_id,
-            provider_instance: route.provider_instance,
-            driver: route.driver,
-            model: route.model,
-        }),
+        route: evaluation
+            .route
+            .map(|route| EnvironmentLoadBalancedRouteView {
+                environment_id: route.environment_id,
+                project_id: route.project_id,
+                provider_instance: route.provider_instance,
+                driver: route.driver,
+                model: route.model,
+            }),
     }
 }
 
@@ -383,13 +385,21 @@ impl Snapshot {
         self.selected_thread
             .as_ref()
             .and_then(|thread| self.thread_row(thread))
-            .and_then(|row| row.pull_request_label.clone())
+            .and_then(|row| {
+                row.linked_pull_request
+                    .as_ref()
+                    .map(|pull_request| format!("#{}", pull_request.number))
+            })
     }
     pub fn selected_pull_request_url(&self) -> Option<String> {
         self.selected_thread
             .as_ref()
             .and_then(|thread| self.thread_row(thread))
-            .and_then(|row| row.pull_request_url.clone())
+            .and_then(|row| {
+                row.linked_pull_request
+                    .as_ref()
+                    .map(|pull_request| pull_request.url.clone())
+            })
     }
     pub fn current_directory(&self) -> String {
         self.cwd()

@@ -156,7 +156,7 @@ fn merge_accounts(
         let key = account_key(account);
         let is_selected = selected.get(&account.provider) == Some(&account.id);
         if let Some(index) = indexes.get(&key).copied() {
-            let previous = &mut merged[index];
+            let previous: &mut MergedAccount = &mut merged[index];
             let replace = usable(account)
                 && (!usable(&previous.account)
                     || fetched_at(account) > fetched_at(&previous.account));

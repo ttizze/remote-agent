@@ -47,11 +47,11 @@ pub fn resolve_project_settings(host: &HostSettings, project_id: Option<&str>) -
             host.default_runtime_mode,
         ),
         default_thread_env_mode: pick(
-            overrides.and_then(|project| project.default_thread_env_mode),
+            Some(overrides.and_then(|project| project.default_thread_env_mode)),
             host.default_thread_env_mode,
         ),
         worktree_submodules: pick(
-            overrides.and_then(|project| project.worktree_submodules),
+            Some(overrides.and_then(|project| project.worktree_submodules)),
             host.worktree_submodules,
         ),
         new_worktrees_start_from_origin: pick(
@@ -142,6 +142,9 @@ pub enum SettingChange {
     },
     DefaultThreadEnvMode {
         mode: Option<ThreadEnvMode>,
+    },
+    WorktreeSubmodules {
+        mode: Option<WorktreeSubmodules>,
     },
     NewWorktreesStartFromOrigin {
         on: bool,

@@ -273,6 +273,7 @@ pub(crate) fn aggregate(
     let mut output = buckets
         .into_iter()
         .map(|(key, bucket)| {
+            let cost_source = final_source(&bucket);
             let mut parts = key.split('\0');
             let day = parts.next().unwrap_or_default().to_owned();
             let hour = parts.next().unwrap_or_default();
@@ -302,7 +303,7 @@ pub(crate) fn aggregate(
                     .then(|| round(bucket.ultrafast_cost_usd)),
                 speed_premium_usd: (bucket.speed_premium_usd != 0.)
                     .then(|| round(bucket.speed_premium_usd)),
-                cost_source: final_source(&bucket),
+                cost_source,
                 records: bucket.records,
                 unpriced_records: bucket.unpriced_records,
                 sessions: bucket.sessions.len() as u64,

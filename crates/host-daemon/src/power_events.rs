@@ -140,7 +140,6 @@ async fn next_macos_suspend_lifecycle_event(
     let event = tokio::select! {
         _ = stop.cancelled() => {
             let _ = stop_tx.send(());
-            let _ = watcher.await;
             None
         }
         result = receive => result.ok().flatten(),

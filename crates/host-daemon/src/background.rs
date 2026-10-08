@@ -2,16 +2,16 @@
 //! trace diagnostics.  The domain crate supplies all decisions and views.
 use crate::power_events::next_suspend_lifecycle_event;
 use agent_domain::{
-    BackgroundActivityPolicy, BackgroundPolicySnapshot, BackgroundScope, BackgroundBooleanState,
-    HostPowerSnapshot, HostPowerSource, ResourceAggregate,
-    ResourceAttributionSnapshot, ResourceHealth, ResourceProcess, ResourceProcessCategory,
-    ResourceProcessIdentity, ResourceTelemetryIoSemantics, ResourceTelemetrySnapshot,
-    ResourceTelemetryHistory, ResourceHistoryBucket, ResourceProcessSummary, ResourceSourceHealth,
-    ResourceSourceStatus, Timestamp, TraceDiagnosticsAggregator, TraceDiagnosticsError,
-    TraceDiagnosticsErrorKind, TraceDiagnosticsResult, ClientActivityReport, ClientActivityLease,
-    compute_background_snapshot, host_power_constrained,
-    lease_may_run_scoped_work, remove_rpc_client, upsert_client_activity_lease,
+    BackgroundActivityPolicy, BackgroundBooleanState, BackgroundPolicySnapshot, BackgroundScope,
+    ClientActivityLease, ClientActivityReport, HostPowerSnapshot, HostPowerSource,
+    ResourceAggregate, ResourceAttributionSnapshot, ResourceHealth, ResourceHistoryBucket,
+    ResourceProcess, ResourceProcessCategory, ResourceProcessIdentity, ResourceProcessSummary,
+    ResourceSourceHealth, ResourceSourceStatus, ResourceTelemetryHistory,
+    ResourceTelemetryIoSemantics, ResourceTelemetrySnapshot, Timestamp, TraceDiagnosticsAggregator,
+    TraceDiagnosticsError, TraceDiagnosticsErrorKind, TraceDiagnosticsResult,
+    compute_background_snapshot, host_power_constrained, lease_may_run_scoped_work,
     normalize_resource_history_window, process_diagnostics, project_process_resource_history,
+    remove_rpc_client, upsert_client_activity_lease,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -125,9 +125,7 @@ impl HostPowerMonitor {
         let mut next = state.latest.clone();
         if matches!(
             next.source,
-            HostPowerSource::Unknown
-                | HostPowerSource::DesktopMain
-                | HostPowerSource::ElectronMain
+            HostPowerSource::Unknown | HostPowerSource::DesktopMain | HostPowerSource::ElectronMain
         ) {
             next.source = native_power_source();
         }
@@ -220,9 +218,7 @@ impl ResourceOwner {
             .desktop_processes_sampled_at
             .as_ref()
             .is_some_and(|sampled| {
-                sampled_at
-                    .millis()
-                    .saturating_sub(sampled.millis())
+                sampled_at.millis().saturating_sub(sampled.millis())
                     <= DESKTOP_POWER_HEALTH_TIMEOUT_MS
             })
         {
@@ -246,9 +242,7 @@ impl ResourceOwner {
             let Some(previous_process) = previous_processes.get(&process.identity.key()) else {
                 continue;
             };
-            let elapsed_ms = sampled_at
-                .millis()
-                .saturating_sub(*previous_at);
+            let elapsed_ms = sampled_at.millis().saturating_sub(*previous_at);
             if (1..=30_000).contains(&elapsed_ms) {
                 let cpu_delta = process
                     .cpu_time_ms
@@ -261,7 +255,8 @@ impl ResourceOwner {
                     .io_write_bytes
                     .saturating_sub(previous_process.io_write_bytes);
                 process.io_read_bytes_per_second = read_delta as f64 * 1_000.0 / elapsed_ms as f64;
-                process.io_write_bytes_per_second = write_delta as f64 * 1_000.0 / elapsed_ms as f64;
+                process.io_write_bytes_per_second =
+                    write_delta as f64 * 1_000.0 / elapsed_ms as f64;
             }
             process.first_seen_at = previous_process.first_seen_at.clone();
             process.peak_resident_bytes = process
@@ -317,15 +312,10 @@ impl ResourceOwner {
         state.snapshots.push_back(snapshot.clone());
         while state.snapshots.len() > RESOURCE_HISTORY_LIMIT
             || resource_history_entries(&state.snapshots) > RESOURCE_HISTORY_MAX_ENTRIES
-            || state
-                .snapshots
-                .front()
-                .is_some_and(|oldest| {
-                    sampled_at
-                        .millis()
-                        .saturating_sub(oldest.read_at.millis())
-                        > RESOURCE_HISTORY_MAX_AGE_MS
-                })
+            || state.snapshots.front().is_some_and(|oldest| {
+                sampled_at.millis().saturating_sub(oldest.read_at.millis())
+                    > RESOURCE_HISTORY_MAX_AGE_MS
+            })
             || resource_history_bytes(&state.snapshots) > RESOURCE_HISTORY_MAX_BYTES
         {
             state.snapshots.pop_front();
@@ -333,7 +323,12 @@ impl ResourceOwner {
         snapshot
     }
 
-    fn latest_history(&self, power: HostPowerSnapshot, window_ms: u64, bucket_ms: u64) -> ResourceTelemetryHistory {
+    fn latest_history(
+        &self,
+        power: HostPowerSnapshot,
+        window_ms: u64,
+        bucket_ms: u64,
+    ) -> ResourceTelemetryHistory {
         let (window_ms, bucket_ms) = normalize_resource_history_window(window_ms, bucket_ms);
         let snapshot = self.snapshot(power);
         let read_at_ms = snapshot.read_at.millis();
@@ -368,11 +363,7 @@ impl ResourceOwner {
                         .millis()
                         .saturating_sub(previous.read_at.millis());
                     (elapsed > 0).then(|| {
-                        (sample
-                            .read_at
-                            .millis()
-                            .saturating_sub(cutoff) as f64
-                            / elapsed as f64)
+                        (sample.read_at.millis().saturating_sub(cutoff) as f64 / elapsed as f64)
                             .clamp(0.0, 1.0)
                     })
                 })
@@ -399,9 +390,10 @@ impl ResourceOwner {
     fn host_resources(&self) -> agent_domain::HostResourcesSnapshot {
         let sampled_at = now();
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if let (Some(snapshot), Some(refreshed_at)) =
-            (state.host_resources.clone(), state.host_resources_refreshed_at)
-            && refreshed_at.elapsed() < Duration::from_secs(5)
+        if let (Some(snapshot), Some(refreshed_at)) = (
+            state.host_resources.clone(),
+            state.host_resources_refreshed_at,
+        ) && refreshed_at.elapsed() < Duration::from_secs(5)
         {
             return snapshot;
         }
@@ -445,8 +437,8 @@ impl ResourceOwner {
         }
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.desktop_processes = snapshot.desktop_processes.clone();
-        state.desktop_processes_sampled_at = (!state.desktop_processes.is_empty())
-            .then(|| snapshot.updated_at.clone());
+        state.desktop_processes_sampled_at =
+            (!state.desktop_processes.is_empty()).then(|| snapshot.updated_at.clone());
         let unavailable = snapshot.stale || !has_power_observation(snapshot);
         state.health.desktop.status = if unavailable {
             ResourceSourceStatus::Unavailable
@@ -454,9 +446,8 @@ impl ResourceOwner {
             ResourceSourceStatus::Healthy
         };
         state.health.desktop.last_sample_at = (!unavailable).then(|| snapshot.updated_at.clone());
-        state.health.desktop.last_error = unavailable.then(|| {
-            "The desktop publisher did not provide a fresh native observation.".into()
-        });
+        state.health.desktop.last_error = unavailable
+            .then(|| "The desktop publisher did not provide a fresh native observation.".into());
     }
 }
 
@@ -500,9 +491,7 @@ fn desktop_power_sample_is_fresh(snapshot: &HostPowerSnapshot, at: &Timestamp) -
         && !snapshot.stale
         && has_power_observation(snapshot)
         && snapshot.updated_at.millis() <= at.millis()
-        && at
-            .millis()
-            .saturating_sub(snapshot.updated_at.millis())
+        && at.millis().saturating_sub(snapshot.updated_at.millis())
             <= DESKTOP_POWER_HEALTH_TIMEOUT_MS
 }
 
@@ -528,13 +517,17 @@ fn sanitize_desktop_processes(
 }
 
 fn expire_desktop_health(health: &mut ResourceHealth, at: &Timestamp) {
-    if health.desktop.last_sample_at.as_ref().is_some_and(|sampled| {
-        at.millis().saturating_sub(sampled.millis()) > DESKTOP_POWER_HEALTH_TIMEOUT_MS
-    }) {
+    if health
+        .desktop
+        .last_sample_at
+        .as_ref()
+        .is_some_and(|sampled| {
+            at.millis().saturating_sub(sampled.millis()) > DESKTOP_POWER_HEALTH_TIMEOUT_MS
+        })
+    {
         health.desktop.status = ResourceSourceStatus::Unavailable;
-        health.desktop.last_error = Some(
-            "The desktop power publisher has not reported a fresh observation.".into(),
-        );
+        health.desktop.last_error =
+            Some("The desktop power publisher has not reported a fresh observation.".into());
     }
 }
 
@@ -623,7 +616,10 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
         };
     }
 
-    let previous_at = state.snapshots.back().map(|snapshot| snapshot.read_at.millis());
+    let previous_at = state
+        .snapshots
+        .back()
+        .map(|snapshot| snapshot.read_at.millis());
     let mut processes = Vec::with_capacity(selected.len());
     for pid in selected {
         let Some(process) = state.system.process(sysinfo::Pid::from_u32(pid)) else {
@@ -647,17 +643,12 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
                 previous_at
                     .and_then(|previous| {
                         let elapsed = at.millis().saturating_sub(previous);
-                        (elapsed > 0 && elapsed <= MAX_RESOURCE_DELTA_INTERVAL_MS).then(|| {
-                            (cpu_percent * elapsed as f64 / 100.0)
-                                .round()
-                                .max(0.0) as u64
-                        })
+                        (elapsed > 0 && elapsed <= MAX_RESOURCE_DELTA_INTERVAL_MS)
+                            .then(|| (cpu_percent * elapsed as f64 / 100.0).round().max(0.0) as u64)
                     })
                     .unwrap_or(0),
             );
-        state
-            .process_cpu_time_ms
-            .insert(identity_key, cpu_time_ms);
+        state.process_cpu_time_ms.insert(identity_key, cpu_time_ms);
         let raw_name = process.name().to_string_lossy();
         let name = if raw_name.is_empty() {
             "unknown".to_owned()
@@ -667,12 +658,14 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
         let command = if process.cmd().is_empty() {
             name.clone()
         } else {
-            bounded_text(&process
-                .cmd()
-                .iter()
-                .map(|part| part.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" "))
+            bounded_text(
+                &process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
         };
         let lower = command.to_ascii_lowercase();
         let category = process_category(pid, root_pid, &lower);
@@ -731,10 +724,12 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
     }
     bound_resource_processes(&mut processes, root_pid);
     state.process_cpu_time_ms.retain(|key, _| {
-        processes.iter().any(|process| process.identity.key() == *key)
+        processes
+            .iter()
+            .any(|process| process.identity.key() == *key)
     });
-    let inaccessible_process_count = selected_process_count(&rows, root_pid)
-        .saturating_sub(processes.len()) as u64;
+    let inaccessible_process_count =
+        selected_process_count(&rows, root_pid).saturating_sub(processes.len()) as u64;
     let (status, error) = if inaccessible_process_count > 0 {
         (
             ResourceSourceStatus::Degraded,
@@ -785,16 +780,20 @@ fn record_attribution(
     let component = bounded_text(component);
     let operation = bounded_text(operation);
     let key = (component.clone(), operation.clone());
-    let entry = entries.entry(key).or_insert_with(|| agent_domain::ResourceAttributionEntry {
-        component,
-        operation,
-        logical_read_bytes: 0,
-        logical_write_bytes: 0,
-        count: 0,
-        duration_ms: 0,
-    });
+    let entry = entries
+        .entry(key)
+        .or_insert_with(|| agent_domain::ResourceAttributionEntry {
+            component,
+            operation,
+            logical_read_bytes: 0,
+            logical_write_bytes: 0,
+            count: 0,
+            duration_ms: 0,
+        });
     entry.logical_read_bytes = entry.logical_read_bytes.saturating_add(logical_read_bytes);
-    entry.logical_write_bytes = entry.logical_write_bytes.saturating_add(logical_write_bytes);
+    entry.logical_write_bytes = entry
+        .logical_write_bytes
+        .saturating_add(logical_write_bytes);
     entry.count = entry.count.saturating_add(count);
     entry.duration_ms = entry.duration_ms.saturating_add(duration_ms);
     while entries.len() > RESOURCE_ATTRIBUTION_LIMIT {
@@ -813,10 +812,7 @@ fn record_attribution(
     }
 }
 
-fn attribution_snapshot(
-    state: &ResourceState,
-    read_at: Timestamp,
-) -> ResourceAttributionSnapshot {
+fn attribution_snapshot(state: &ResourceState, read_at: Timestamp) -> ResourceAttributionSnapshot {
     let mut entries = state.attribution.values().cloned().collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         right
@@ -846,13 +842,19 @@ fn resource_snapshot_bytes(snapshot: &ResourceTelemetrySnapshot) -> usize {
             .saturating_add(process.child_pids.len() * std::mem::size_of::<u32>())
             .saturating_add(256)
     });
-    let attribution_bytes = snapshot.attribution.entries.iter().fold(0usize, |total, entry| {
-        total
-            .saturating_add(entry.component.len())
-            .saturating_add(entry.operation.len())
-            .saturating_add(64)
-    });
-    process_bytes.saturating_add(attribution_bytes).saturating_add(512)
+    let attribution_bytes = snapshot
+        .attribution
+        .entries
+        .iter()
+        .fold(0usize, |total, entry| {
+            total
+                .saturating_add(entry.component.len())
+                .saturating_add(entry.operation.len())
+                .saturating_add(64)
+        });
+    process_bytes
+        .saturating_add(attribution_bytes)
+        .saturating_add(512)
 }
 
 fn resource_history_bytes(snapshots: &VecDeque<ResourceTelemetrySnapshot>) -> usize {
@@ -892,7 +894,10 @@ fn select_tracked_pids(rows: &[(u32, u32, u64)], root_pid: u32) -> BTreeSet<u32>
     let mut children = BTreeMap::<u32, Vec<(u32, u64)>>::new();
     let mut starts = BTreeMap::<u32, u64>::new();
     for (pid, ppid, start_time_ms) in rows {
-        children.entry(*ppid).or_default().push((*pid, *start_time_ms));
+        children
+            .entry(*ppid)
+            .or_default()
+            .push((*pid, *start_time_ms));
         starts.insert(*pid, *start_time_ms);
     }
     let Some(root_start) = starts.get(&root_pid).copied() else {
@@ -974,7 +979,9 @@ fn scale_history_delta(delta: u64, fraction: f64) -> u64 {
     if fraction >= 1.0 {
         return delta;
     }
-    (delta as f64 * fraction).round().clamp(0.0, u64::MAX as f64) as u64
+    (delta as f64 * fraction)
+        .round()
+        .clamp(0.0, u64::MAX as f64) as u64
 }
 
 fn history_sample(
@@ -995,8 +1002,8 @@ fn history_sample(
             .map(|process| (process.identity.key(), process))
             .collect::<BTreeMap<_, _>>()
     });
-    let mut io_read_bytes = 0;
-    let mut io_write_bytes = 0;
+    let mut io_read_bytes: u64 = 0;
+    let mut io_write_bytes: u64 = 0;
     let processes = current
         .processes
         .iter()
@@ -1004,21 +1011,30 @@ fn history_sample(
             let previous = previous_processes
                 .as_ref()
                 .and_then(|processes| processes.get(&process.identity.key()).copied());
-            let cpu_time_ms = scale_history_delta(history_delta(
-                process.cpu_time_ms,
-                previous.map(|process| process.cpu_time_ms),
-                elapsed_ms,
-            ), delta_fraction);
-            let io_read = scale_history_delta(history_delta(
-                process.io_read_bytes,
-                previous.map(|process| process.io_read_bytes),
-                elapsed_ms,
-            ), delta_fraction);
-            let io_write = scale_history_delta(history_delta(
-                process.io_write_bytes,
-                previous.map(|process| process.io_write_bytes),
-                elapsed_ms,
-            ), delta_fraction);
+            let cpu_time_ms = scale_history_delta(
+                history_delta(
+                    process.cpu_time_ms,
+                    previous.map(|process| process.cpu_time_ms),
+                    elapsed_ms,
+                ),
+                delta_fraction,
+            );
+            let io_read = scale_history_delta(
+                history_delta(
+                    process.io_read_bytes,
+                    previous.map(|process| process.io_read_bytes),
+                    elapsed_ms,
+                ),
+                delta_fraction,
+            );
+            let io_write = scale_history_delta(
+                history_delta(
+                    process.io_write_bytes,
+                    previous.map(|process| process.io_write_bytes),
+                    elapsed_ms,
+                ),
+                delta_fraction,
+            );
             if is_backend_category(process.category) {
                 io_read_bytes = io_read_bytes.saturating_add(io_read);
                 io_write_bytes = io_write_bytes.saturating_add(io_write);
@@ -1107,26 +1123,29 @@ fn process_history_summaries(samples: &[HistoryProcessSample]) -> Vec<ResourcePr
     let mut summaries = BTreeMap::<String, ResourceProcessSummary>::new();
     for sample in samples {
         let process = &sample.process;
-        let entry = summaries.entry(process.identity.key()).or_insert_with(|| ResourceProcessSummary {
-            identity: process.identity.clone(),
-            ppid: process.ppid,
-            depth: process.depth,
-            name: process.name.clone(),
-            command: process.command.clone(),
-            category: process.category,
-            first_seen_at: process.first_seen_at.clone(),
-            last_seen_at: process.last_seen_at.clone(),
-            current_cpu_percent: process.cpu_percent,
-            avg_cpu_percent: 0.0,
-            max_cpu_percent: process.cpu_percent,
-            cpu_time_ms: 0,
-            current_rss_bytes: process.resident_bytes,
-            peak_rss_bytes: process.resident_bytes,
-            io_read_bytes: 0,
-            io_write_bytes: 0,
-            io_semantics: process.io_semantics,
-            sample_count: 0,
-        });
+        let entry =
+            summaries
+                .entry(process.identity.key())
+                .or_insert_with(|| ResourceProcessSummary {
+                    identity: process.identity.clone(),
+                    ppid: process.ppid,
+                    depth: process.depth,
+                    name: process.name.clone(),
+                    command: process.command.clone(),
+                    category: process.category,
+                    first_seen_at: process.first_seen_at.clone(),
+                    last_seen_at: process.last_seen_at.clone(),
+                    current_cpu_percent: process.cpu_percent,
+                    avg_cpu_percent: 0.0,
+                    max_cpu_percent: process.cpu_percent,
+                    cpu_time_ms: 0,
+                    current_rss_bytes: process.resident_bytes,
+                    peak_rss_bytes: process.resident_bytes,
+                    io_read_bytes: 0,
+                    io_write_bytes: 0,
+                    io_semantics: process.io_semantics,
+                    sample_count: 0,
+                });
         entry.sample_count += 1;
         entry.avg_cpu_percent += process.cpu_percent;
         entry.current_cpu_percent = process.cpu_percent;
@@ -1153,16 +1172,24 @@ fn process_history_summaries(samples: &[HistoryProcessSample]) -> Vec<ResourcePr
     values
 }
 
-fn aggregate_values(processes: impl Iterator<Item = &ResourceProcess>) -> ResourceAggregate {
+fn aggregate_values<'a>(processes: impl Iterator<Item = &'a ResourceProcess>) -> ResourceAggregate {
     let mut aggregate = ResourceAggregate::default();
     for process in processes {
         aggregate.process_count += 1;
         aggregate.current_cpu_percent += process.cpu_percent;
         aggregate.cpu_time_ms = aggregate.cpu_time_ms.saturating_add(process.cpu_time_ms);
-        aggregate.current_rss_bytes = aggregate.current_rss_bytes.saturating_add(process.resident_bytes);
-        aggregate.peak_rss_bytes = aggregate.peak_rss_bytes.saturating_add(process.peak_resident_bytes);
-        aggregate.io_read_bytes = aggregate.io_read_bytes.saturating_add(process.io_read_bytes);
-        aggregate.io_write_bytes = aggregate.io_write_bytes.saturating_add(process.io_write_bytes);
+        aggregate.current_rss_bytes = aggregate
+            .current_rss_bytes
+            .saturating_add(process.resident_bytes);
+        aggregate.peak_rss_bytes = aggregate
+            .peak_rss_bytes
+            .saturating_add(process.peak_resident_bytes);
+        aggregate.io_read_bytes = aggregate
+            .io_read_bytes
+            .saturating_add(process.io_read_bytes);
+        aggregate.io_write_bytes = aggregate
+            .io_write_bytes
+            .saturating_add(process.io_write_bytes);
         aggregate.io_read_bytes_per_second += process.io_read_bytes_per_second;
         aggregate.io_write_bytes_per_second += process.io_write_bytes_per_second;
     }
@@ -1203,7 +1230,9 @@ fn update_lifecycle_counters(
         if let Some(previous) = previous.get(key) {
             let cpu_time_ms = process.cpu_time_ms.saturating_sub(previous.cpu_time_ms);
             let io_read_bytes = process.io_read_bytes.saturating_sub(previous.io_read_bytes);
-            let io_write_bytes = process.io_write_bytes.saturating_sub(previous.io_write_bytes);
+            let io_write_bytes = process
+                .io_write_bytes
+                .saturating_sub(previous.io_write_bytes);
             counters.all_processes.cpu_time_ms = counters
                 .all_processes
                 .cpu_time_ms
@@ -1330,7 +1359,10 @@ impl BackgroundOwner {
         self.policy.read().await.clone()
     }
 
-    pub(crate) async fn set_policy(&self, policy: BackgroundActivityPolicy) -> BackgroundPolicySnapshot {
+    pub(crate) async fn set_policy(
+        &self,
+        policy: BackgroundActivityPolicy,
+    ) -> BackgroundPolicySnapshot {
         let _mutation = self.mutation.lock().await;
         let policy = policy.normalized();
         *self.policy.write().await = policy.clone();
@@ -1371,10 +1403,8 @@ impl BackgroundOwner {
         // client-supplied tree into the Host's diagnostics snapshot. Bound
         // the accepted tree before retaining it in the power monitor too.
         if snapshot.source == HostPowerSource::DesktopMain {
-            snapshot.desktop_processes = sanitize_desktop_processes(
-                &snapshot.desktop_processes,
-                &snapshot.updated_at,
-            );
+            snapshot.desktop_processes =
+                sanitize_desktop_processes(&snapshot.desktop_processes, &snapshot.updated_at);
         } else {
             snapshot.desktop_processes.clear();
         }
@@ -1401,7 +1431,9 @@ impl BackgroundOwner {
 
     pub(crate) async fn has_demand(&self, scope: &BackgroundScope) -> bool {
         let snapshot = self.snapshot().await;
-        snapshot.active_scope_keys.contains(&agent_domain::scope_key(scope))
+        snapshot
+            .active_scope_keys
+            .contains(&agent_domain::scope_key(scope))
     }
 
     /// Returns whether a scope currently has a lease that may perform work.
@@ -1536,13 +1568,22 @@ impl BackgroundOwner {
         self.power.report(sampled).await
     }
 
-    pub(crate) async fn report_activity(&self, session: u64, input: agent_protocol::background::ReportClientActivity) -> Result<BackgroundPolicySnapshot, String> {
+    pub(crate) async fn report_activity(
+        &self,
+        session: u64,
+        input: agent_protocol::background::ReportClientActivity,
+    ) -> Result<BackgroundPolicySnapshot, String> {
         let _mutation = self.mutation.lock().await;
         let policy = self.policy().await;
         let now = now();
         let report = input.report;
         let lease = report
-            .lease_at(format!("session:{session}"), input.rpc_client_id, &policy, &now)
+            .lease_at(
+                format!("session:{session}"),
+                input.rpc_client_id,
+                &policy,
+                &now,
+            )
             .map_err(str::to_owned)?;
         let mut leases = self.leases.write().await;
         let next = upsert_client_activity_lease(&leases, lease, &now);
@@ -1551,7 +1592,11 @@ impl BackgroundOwner {
         Ok(self.publish().await)
     }
 
-    pub(crate) async fn remove_activity(&self, session: u64, rpc_client_id: u64) -> BackgroundPolicySnapshot {
+    pub(crate) async fn remove_activity(
+        &self,
+        session: u64,
+        rpc_client_id: u64,
+    ) -> BackgroundPolicySnapshot {
         let _mutation = self.mutation.lock().await;
         let mut leases = self.leases.write().await;
         let next = remove_rpc_client(&leases, &format!("session:{session}"), rpc_client_id);
@@ -1577,7 +1622,10 @@ impl BackgroundOwner {
     /// snapshot and later semantic changes form one ordered stream.
     pub(crate) async fn subscribe_with_snapshot(
         &self,
-    ) -> (broadcast::Receiver<BackgroundPolicySnapshot>, BackgroundPolicySnapshot) {
+    ) -> (
+        broadcast::Receiver<BackgroundPolicySnapshot>,
+        BackgroundPolicySnapshot,
+    ) {
         let _mutation = self.mutation.lock().await;
         let snapshot = self.snapshot().await;
         (self.changes.subscribe(), snapshot)
@@ -1633,20 +1681,29 @@ impl BackgroundOwner {
             std::process::id(),
             snapshot.read_at.clone(),
             &snapshot.processes,
-            snapshot.health.native.last_error.map(|message| {
-                agent_domain::ProcessDiagnosticsError { message }
-            }),
+            snapshot
+                .health
+                .native
+                .last_error
+                .map(|message| agent_domain::ProcessDiagnosticsError { message }),
         )
     }
 
-    pub(crate) async fn process_history(&self, window_ms: u64, bucket_ms: u64) -> agent_domain::ProcessResourceHistoryResult {
+    pub(crate) async fn process_history(
+        &self,
+        window_ms: u64,
+        bucket_ms: u64,
+    ) -> agent_domain::ProcessResourceHistoryResult {
         let history = self
             .sample_resource_history(self.power.snapshot().await, window_ms, bucket_ms)
             .await;
         project_process_resource_history(&history)
     }
 
-    pub(crate) async fn trace_diagnostics(&self, input: &agent_protocol::background::ReadTraceDiagnostics) -> Result<TraceDiagnosticsResult, String> {
+    pub(crate) async fn trace_diagnostics(
+        &self,
+        input: &agent_protocol::background::ReadTraceDiagnostics,
+    ) -> Result<TraceDiagnosticsResult, String> {
         let path = self.allowed_trace_path(&input.trace_file_path)?;
         let max_files = input.max_files.min(TRACE_MAX_FILES);
         let slow_span_threshold_ms = input.slow_span_threshold_ms.unwrap_or(1_000.0);
@@ -1672,8 +1729,8 @@ impl BackgroundOwner {
                     loop {
                         match lines.next_line().await {
                             Ok(Some(line)) => {
-                                logical_read_bytes = logical_read_bytes
-                                    .saturating_add(line.len() as u64);
+                                logical_read_bytes =
+                                    logical_read_bytes.saturating_add(line.len() as u64);
                                 aggregator.add_line(&line);
                             }
                             Ok(None) => break,
@@ -1681,7 +1738,9 @@ impl BackgroundOwner {
                                 if failure.is_none() {
                                     failure = Some(TraceDiagnosticsError {
                                         kind: TraceDiagnosticsErrorKind::TraceFileReadFailed,
-                                        message: format!("Failed to read local trace file '{scanned}'."),
+                                        message: format!(
+                                            "Failed to read local trace file '{scanned}'."
+                                        ),
                                     });
                                 }
                                 break;
@@ -1710,7 +1769,16 @@ impl BackgroundOwner {
                 trace_started.elapsed().as_millis() as u64,
             )
             .await;
-            return Ok(agent_domain::empty_trace_diagnostics(path.to_string_lossy(), paths, read_at, slow_span_threshold_ms, failure.unwrap_or(TraceDiagnosticsError { kind: TraceDiagnosticsErrorKind::TraceFileNotFound, message: "No local trace files were found.".into() })));
+            return Ok(agent_domain::empty_trace_diagnostics(
+                path.to_string_lossy(),
+                paths,
+                read_at,
+                slow_span_threshold_ms,
+                failure.unwrap_or(TraceDiagnosticsError {
+                    kind: TraceDiagnosticsErrorKind::TraceFileNotFound,
+                    message: "No local trace files were found.".into(),
+                }),
+            ));
         }
         let partial_failure = failure.as_ref().map(|_| true);
         self.record_attribution(
@@ -1722,17 +1790,31 @@ impl BackgroundOwner {
             trace_started.elapsed().as_millis() as u64,
         )
         .await;
-        Ok(aggregator.finish(path.to_string_lossy(), paths, read_at, failure, partial_failure))
+        Ok(aggregator.finish(
+            path.to_string_lossy(),
+            paths,
+            read_at,
+            failure,
+            partial_failure,
+        ))
     }
 
     fn allowed_trace_path(&self, requested: &str) -> Result<PathBuf, String> {
         let default = self.state_directory.join("logs/host.jsonl");
-        let path = if requested.trim().is_empty() { default } else { PathBuf::from(requested) };
-        let parent = path.parent().ok_or_else(|| "trace path has no parent".to_owned())?;
+        let path = if requested.trim().is_empty() {
+            default
+        } else {
+            PathBuf::from(requested)
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| "trace path has no parent".to_owned())?;
         let logs = self.state_directory.join("logs");
-        let parent = dunce::canonicalize(parent).map_err(|_| "trace path is unavailable".to_owned())?;
-        let logs = dunce::canonicalize(logs).map_err(|_| "trace directory is unavailable".to_owned())?;
-        if !parent.starts_with(logs) {
+        let parent =
+            dunce::canonicalize(parent).map_err(|_| "trace path is unavailable".to_owned())?;
+        let logs =
+            dunce::canonicalize(logs).map_err(|_| "trace directory is unavailable".to_owned())?;
+        if !parent.starts_with(&logs) {
             return Err("trace path must be inside the Host diagnostics directory".into());
         }
         if let Ok(canonical) = dunce::canonicalize(&path) {
@@ -1743,7 +1825,10 @@ impl BackgroundOwner {
         Ok(path)
     }
 
-    pub(crate) fn spawn(self: &Arc<Self>, stop: CancellationToken) -> tokio_util::task::AbortOnDropHandle<()> {
+    pub(crate) fn spawn(
+        self: &Arc<Self>,
+        stop: CancellationToken,
+    ) -> tokio_util::task::AbortOnDropHandle<()> {
         let owner = Arc::downgrade(self);
         let probe_stop = self.probe_stop.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
@@ -1865,7 +1950,7 @@ where
         .read_to_end(&mut output)
         .await
         .ok()?;
-    (output.len() <= POWER_COMMAND_OUTPUT_LIMIT).then_some(output)
+    (output.len() as u64 <= POWER_COMMAND_OUTPUT_LIMIT).then_some(output)
 }
 
 async fn stop_power_command(child: &mut tokio::process::Child) {
@@ -1920,10 +2005,7 @@ impl Drop for PowerReaderTasks {
     }
 }
 
-async fn wait_power_command(
-    child: &mut tokio::process::Child,
-    stop: &CancellationToken,
-) -> bool {
+async fn wait_power_command(child: &mut tokio::process::Child, stop: &CancellationToken) -> bool {
     let deadline = Instant::now() + POWER_COMMAND_TIMEOUT;
     loop {
         match child.try_wait() {
@@ -2097,7 +2179,9 @@ fn sample_linux_native_power() -> (bool, BackgroundBooleanState, Option<u8>) {
     (
         observed_power_supply,
         on_battery,
-        power_supply_entries.then(linux_speed_limit_percent).flatten(),
+        power_supply_entries
+            .then(linux_speed_limit_percent)
+            .flatten(),
     )
 }
 
@@ -2108,7 +2192,11 @@ fn linux_speed_limit_percent() -> Option<u8> {
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("cpu") || !name[3..].chars().all(|character| character.is_ascii_digit()) {
+        if !name.starts_with("cpu")
+            || !name[3..]
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
             continue;
         }
         let directory = entry.path().join("cpufreq");
@@ -2216,7 +2304,10 @@ fn parse_macos_low_power(output: &str) -> BackgroundBooleanState {
 }
 
 fn parse_boolean_state(value: &str) -> BackgroundBooleanState {
-    match value.trim().trim_matches(|character| character == '"' || character == '\'') {
+    match value
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'')
+    {
         "1" | "true" | "on" | "yes" | "Yes" => BackgroundBooleanState::True,
         "0" | "false" | "off" | "no" | "No" => BackgroundBooleanState::False,
         _ => BackgroundBooleanState::Unknown,
@@ -2242,16 +2333,18 @@ fn parse_macos_locked(output: &str) -> BackgroundBooleanState {
     if let Some(state) = parse_macos_xml_boolean(output, "CGSSessionScreenIsLocked") {
         return state;
     }
-    output.lines().find_map(|line| {
-        let (name, value) = line.split_once('=')?;
-        let name = name.trim();
-        if !(name.contains("CGSSessionScreenIsLocked") || name.contains("ScreenIsLocked")) {
-            return None;
-        }
-        let state = parse_boolean_state(value);
-        (state != BackgroundBooleanState::Unknown).then_some(state)
-    })
-    .unwrap_or(BackgroundBooleanState::Unknown)
+    output
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            let name = name.trim();
+            if !(name.contains("CGSSessionScreenIsLocked") || name.contains("ScreenIsLocked")) {
+                return None;
+            }
+            let state = parse_boolean_state(value);
+            (state != BackgroundBooleanState::Unknown).then_some(state)
+        })
+        .unwrap_or(BackgroundBooleanState::Unknown)
 }
 
 fn parse_macos_xml_boolean(output: &str, key: &str) -> Option<BackgroundBooleanState> {
@@ -2282,11 +2375,11 @@ fn sample_windows_native_power(probe: &mut PowerProbe) {
     use windows_sys::Win32::{
         System::{
             Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
-            SystemInformation::GetTickCount,
             StationsAndDesktops::{
-                CloseDesktop, GetUserObjectInformationW, OpenInputDesktop,
-                DESKTOP_SWITCHDESKTOP, HDESK, UOI_NAME,
+                CloseDesktop, DESKTOP_SWITCHDESKTOP, GetUserObjectInformationW, HDESK,
+                OpenInputDesktop, UOI_NAME,
             },
+            SystemInformation::GetTickCount,
         },
         UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
     };
@@ -2327,7 +2420,10 @@ fn sample_windows_native_power(probe: &mut PowerProbe) {
                 &mut needed,
             ) != 0
             {
-                let length = name.iter().position(|character| *character == 0).unwrap_or(name.len());
+                let length = name
+                    .iter()
+                    .position(|character| *character == 0)
+                    .unwrap_or(name.len());
                 probe.locked = parse_windows_input_desktop_name(&name[..length]);
                 probe.contact |= probe.locked != BackgroundBooleanState::Unknown;
             }
@@ -2385,13 +2481,35 @@ mod tests {
     async fn power_monitor_drops_heartbeats_and_rejects_old_reports() {
         let monitor = HostPowerMonitor::new();
         let at = now();
-        let initial = HostPowerSnapshot { stale: false, ..unknown_power(at.clone()) };
+        let initial = HostPowerSnapshot {
+            stale: false,
+            ..unknown_power(at.clone())
+        };
         assert!(monitor.report(initial.clone()).await);
         let heartbeat_at = Timestamp::from_millis(at.millis() + 1).unwrap();
-        assert!(!monitor.report(HostPowerSnapshot { idle_seconds: Some(10), updated_at: heartbeat_at.clone(), ..initial.clone() }).await);
+        assert!(
+            !monitor
+                .report(HostPowerSnapshot {
+                    idle_seconds: Some(10),
+                    updated_at: heartbeat_at.clone(),
+                    ..initial.clone()
+                })
+                .await
+        );
         assert_eq!(monitor.snapshot().await.updated_at, heartbeat_at);
-        assert!(!monitor.report(HostPowerSnapshot { locked: BackgroundBooleanState::True, updated_at: Timestamp::from_millis(at.millis() - 1).unwrap(), ..initial.clone() }).await);
-        assert_eq!(monitor.snapshot().await.locked, BackgroundBooleanState::Unknown);
+        assert!(
+            !monitor
+                .report(HostPowerSnapshot {
+                    locked: BackgroundBooleanState::True,
+                    updated_at: Timestamp::from_millis(at.millis() - 1).unwrap(),
+                    ..initial.clone()
+                })
+                .await
+        );
+        assert_eq!(
+            monitor.snapshot().await.locked,
+            BackgroundBooleanState::Unknown
+        );
     }
 
     #[tokio::test]
@@ -2407,7 +2525,11 @@ mod tests {
         assert!(monitor.report(initial).await);
 
         let suspended_at = Timestamp::from_millis(at.millis() + 1).unwrap();
-        assert!(monitor.report_lifecycle_at(true, suspended_at.clone()).await);
+        assert!(
+            monitor
+                .report_lifecycle_at(true, suspended_at.clone())
+                .await
+        );
         let suspended = monitor.snapshot().await;
         assert!(suspended.suspended);
         assert!(!suspended.stale);
@@ -2426,12 +2548,14 @@ mod tests {
         assert!(!monitor.report(awake_sample).await);
         assert!(monitor.snapshot().await.suspended);
 
-        assert!(monitor
-            .report_lifecycle_at(
-                false,
-                Timestamp::from_millis(suspended_at.millis() + 2).unwrap(),
-            )
-            .await);
+        assert!(
+            monitor
+                .report_lifecycle_at(
+                    false,
+                    Timestamp::from_millis(suspended_at.millis() + 2).unwrap(),
+                )
+                .await
+        );
         let resumed = monitor.snapshot().await;
         assert!(!resumed.suspended);
         assert!(!resumed.stale);
@@ -2465,7 +2589,10 @@ mod tests {
         };
         owner.report_power(snapshot, true).await;
         let telemetry = owner.resources.snapshot(owner.power.snapshot().await);
-        assert_eq!(telemetry.health.desktop.status, ResourceSourceStatus::Healthy);
+        assert_eq!(
+            telemetry.health.desktop.status,
+            ResourceSourceStatus::Healthy
+        );
         assert_eq!(telemetry.health.desktop.last_error, None);
     }
 
@@ -2481,14 +2608,20 @@ mod tests {
         };
         owner.power.report(host).await;
         owner
-            .report_power(HostPowerSnapshot {
-                source: HostPowerSource::DesktopMain,
-                stale: true,
-                updated_at: Timestamp::from_millis(at.millis() + 1).unwrap(),
-                ..unknown_power(at)
-            }, true)
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::DesktopMain,
+                    stale: true,
+                    updated_at: Timestamp::from_millis(at.millis() + 1).unwrap(),
+                    ..unknown_power(at)
+                },
+                true,
+            )
             .await;
-        assert_eq!(owner.power.snapshot().await.source, HostPowerSource::NodeLinux);
+        assert_eq!(
+            owner.power.snapshot().await.source,
+            HostPowerSource::NodeLinux
+        );
         assert!(!owner.power.snapshot().await.stale);
     }
 
@@ -2552,7 +2685,10 @@ mod tests {
         let stored = owner.power.snapshot().await;
         assert!(stored.updated_at.millis() >= now_before);
         assert!(stored.updated_at.millis() < now_before + 10_000);
-        assert_eq!(owner.resources.snapshot(stored).health.desktop.status, ResourceSourceStatus::Unavailable);
+        assert_eq!(
+            owner.resources.snapshot(stored).health.desktop.status,
+            ResourceSourceStatus::Unavailable
+        );
     }
 
     #[tokio::test]
@@ -2580,17 +2716,47 @@ mod tests {
         let owner = BackgroundOwner::new(std::env::temp_dir());
         let observed_at = now();
         let report = ClientActivityReport {
-            environment_id: None, client_id: "client".into(), client_kind: agent_domain::BackgroundClientKind::Web,
-            visible: true, focused: true, recently_interacted: true, app_state: Some(agent_domain::BackgroundAppState::Active),
-            low_power_mode: Some(BackgroundBooleanState::Unknown), battery_state: Some(agent_domain::BackgroundBatteryState::Unknown),
-            network_type: None, scopes: vec![BackgroundScope::Diagnostics], ttl_ms: Some(60_000), observed_at: observed_at.clone(),
+            environment_id: None,
+            client_id: "client".into(),
+            client_kind: agent_domain::BackgroundClientKind::Web,
+            visible: true,
+            focused: true,
+            recently_interacted: true,
+            app_state: Some(agent_domain::BackgroundAppState::Active),
+            low_power_mode: Some(BackgroundBooleanState::Unknown),
+            battery_state: Some(agent_domain::BackgroundBatteryState::Unknown),
+            network_type: None,
+            scopes: vec![BackgroundScope::Diagnostics],
+            ttl_ms: Some(60_000),
+            observed_at: observed_at.clone(),
         };
-        owner.report_activity(1, agent_protocol::background::ReportClientActivity { rpc_client_id: 4, report: report.clone() }).await.unwrap();
-        owner.report_activity(2, agent_protocol::background::ReportClientActivity { rpc_client_id: 4, report: report }).await.unwrap();
+        owner
+            .report_activity(
+                1,
+                agent_protocol::background::ReportClientActivity {
+                    rpc_client_id: 4,
+                    report: report.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        owner
+            .report_activity(
+                2,
+                agent_protocol::background::ReportClientActivity {
+                    rpc_client_id: 4,
+                    report: report,
+                },
+            )
+            .await
+            .unwrap();
         let snapshot = owner.remove_activity(1, 4).await;
         assert_eq!(snapshot.leases.len(), 1);
         assert_eq!(snapshot.leases[0].session_id, "session:2");
-        assert_eq!(owner.policy().await.profile, BackgroundActivityProfile::Balanced);
+        assert_eq!(
+            owner.policy().await.profile,
+            BackgroundActivityProfile::Balanced
+        );
     }
 
     #[tokio::test]
@@ -2643,7 +2809,9 @@ mod tests {
             battery_state: Some(agent_domain::BackgroundBatteryState::Full),
             network_type: None,
             scopes: vec![
-                BackgroundScope::VcsStatus { cwd: "/repo".into() },
+                BackgroundScope::VcsStatus {
+                    cwd: "/repo".into(),
+                },
                 BackgroundScope::ProviderStatus { instance_id: None },
                 BackgroundScope::Diagnostics,
             ],
@@ -2671,7 +2839,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let owner = BackgroundOwner::new(directory.path().to_owned());
         owner
-            .set_policy(BackgroundActivityPolicy::preset(BackgroundActivityProfile::Performance))
+            .set_policy(BackgroundActivityPolicy::preset(
+                BackgroundActivityProfile::Performance,
+            ))
             .await;
 
         let recovered = BackgroundOwner::new(directory.path().to_owned());
@@ -2697,18 +2867,22 @@ mod tests {
     fn native_process_probe_keeps_real_host_identity_and_capacity() {
         let owner = ResourceOwner::new();
         let snapshot = owner.snapshot(unknown_power(now()));
-        assert!(snapshot
-            .processes
-            .iter()
-            .any(|process| process.category == ResourceProcessCategory::Server));
+        assert!(
+            snapshot
+                .processes
+                .iter()
+                .any(|process| process.category == ResourceProcessCategory::Server)
+        );
         let resources = owner.host_resources();
         assert!(resources.usable_for_load_balancing());
         assert!(snapshot.health.scanned_process_count >= snapshot.processes.len() as u64);
         assert!(snapshot.processes.len() <= RESOURCE_PROCESS_LIMIT);
-        assert!(snapshot
-            .processes
-            .iter()
-            .all(|process| process.name.chars().count() <= RESOURCE_TEXT_LIMIT));
+        assert!(
+            snapshot
+                .processes
+                .iter()
+                .all(|process| process.name.chars().count() <= RESOURCE_TEXT_LIMIT)
+        );
         let history = owner.state.lock().unwrap();
         assert!(history.snapshots.len() <= RESOURCE_HISTORY_LIMIT);
         assert!(resource_history_entries(&history.snapshots) <= RESOURCE_HISTORY_MAX_ENTRIES);
@@ -2744,20 +2918,17 @@ mod tests {
             )
             .await;
         let telemetry = owner.resources.snapshot(owner.power.snapshot().await);
-        assert!(telemetry
-            .processes
-            .iter()
-            .any(|process| process.category == ResourceProcessCategory::Unknown));
+        assert!(
+            telemetry
+                .processes
+                .iter()
+                .any(|process| process.category == ResourceProcessCategory::Unknown)
+        );
     }
 
     #[test]
     fn process_tree_selection_rejects_reused_pid_identities() {
-        let rows = vec![
-            (10, 1, 100),
-            (11, 10, 90),
-            (12, 10, 101),
-            (13, 12, 102),
-        ];
+        let rows = vec![(10, 1, 100), (11, 10, 90), (12, 10, 101), (13, 12, 102)];
         let selected = select_tracked_pids(&rows, 10);
         assert_eq!(selected.into_iter().collect::<Vec<_>>(), vec![10, 12, 13]);
     }
@@ -2779,17 +2950,14 @@ mod tests {
     #[test]
     fn platform_power_parsers_keep_unknown_when_output_is_unavailable() {
         assert_eq!(
-            parse_macos_battery_state("Now drawing from 'AC Power'") ,
+            parse_macos_battery_state("Now drawing from 'AC Power'"),
             BackgroundBooleanState::False
         );
         assert_eq!(
             parse_macos_battery_state("unexpected"),
             BackgroundBooleanState::Unknown
         );
-        assert_eq!(
-            parse_macos_speed_limit("CPU_Speed_Limit = 65\n"),
-            Some(65)
-        );
+        assert_eq!(parse_macos_speed_limit("CPU_Speed_Limit = 65\n"), Some(65));
         assert_eq!(
             parse_macos_low_power("lowpowermode 1\n"),
             BackgroundBooleanState::True
@@ -2850,10 +3018,7 @@ mod tests {
             parse_windows_ac_line_status(0),
             BackgroundBooleanState::True
         );
-        assert_eq!(
-            parse_windows_system_status(1),
-            BackgroundBooleanState::True
-        );
+        assert_eq!(parse_windows_system_status(1), BackgroundBooleanState::True);
         assert_eq!(
             parse_windows_input_desktop_name(&[87, 105, 110, 108, 111, 103, 111, 110]),
             BackgroundBooleanState::True
@@ -2894,17 +3059,17 @@ mod tests {
     async fn power_command_cancellation_and_output_limits_cleanup_the_child() {
         let stop = CancellationToken::new();
         stop.cancel();
-        assert!(run_power_command("sh", &["-c", "printf ignored"], &stop)
-            .await
-            .is_none());
+        assert!(
+            run_power_command("sh", &["-c", "printf ignored"], &stop)
+                .await
+                .is_none()
+        );
 
         let stop = CancellationToken::new();
-        assert!(run_power_command(
-            "sh",
-            &["-c", "head -c 20000 /dev/zero"],
-            &stop,
-        )
-        .await
-        .is_none());
+        assert!(
+            run_power_command("sh", &["-c", "head -c 20000 /dev/zero"], &stop,)
+                .await
+                .is_none()
+        );
     }
 }

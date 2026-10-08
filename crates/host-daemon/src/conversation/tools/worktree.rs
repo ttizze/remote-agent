@@ -11,7 +11,7 @@ use agent_domain::{
     Command, DispatchMode, InteractionMode, MessageAuthor, MessageId, RuntimeMode, SendMessage,
 };
 use agent_protocol::workspace::{ListRefs, RefKind};
-use agent_runtime::{SetupRequest, SetupRun, SetupProgress, WorktreeRequest};
+use agent_runtime::{SetupProgress, SetupRequest, SetupRun, WorktreeRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -53,16 +53,18 @@ struct HandoffInput {
     continuation_prompt: Option<String>,
 }
 
-fn project_for(
-    tools: &AgentTools,
-    project: &str,
-) -> Result<agent_runtime::HostProject, ToolError> {
+fn project_for(tools: &AgentTools, project: &str) -> Result<agent_runtime::HostProject, ToolError> {
     tools
         .backend
         .projects()
         .into_iter()
         .find(|candidate| candidate.id == project)
-        .ok_or_else(|| failure("project_not_found", format!("Project '{project}' was not found.")))
+        .ok_or_else(|| {
+            failure(
+                "project_not_found",
+                format!("Project '{project}' was not found."),
+            )
+        })
 }
 
 fn nonempty(field: &str, value: &str) -> Result<String, ToolError> {
@@ -108,10 +110,7 @@ impl AgentTools {
         {
             return Err(invalid("query must be at most 256 characters"));
         }
-        if input
-            .limit
-            .is_some_and(|limit| !(1..=200).contains(&limit))
-        {
+        if input.limit.is_some_and(|limit| !(1..=200).contains(&limit)) {
             return Err(invalid("limit must be between 1 and 200"));
         }
         let caller = self.read_caller(scope).await?;
@@ -191,7 +190,10 @@ impl AgentTools {
         {
             return Err(failure(
                 "already_in_worktree",
-                format!("Thread '{}' is already attached to worktree '{path}'.", thread.id),
+                format!(
+                    "Thread '{}' is already attached to worktree '{path}'.",
+                    thread.id
+                ),
             ));
         }
         if thread.archived_at.is_some() {
@@ -216,11 +218,19 @@ impl AgentTools {
             .backend
             .vcs_status(project.root.clone())
             .await
-            .map_err(|error| failure("operation_failed", format!("Unable to read git status: {error}")))?;
+            .map_err(|error| {
+                failure(
+                    "operation_failed",
+                    format!("Unable to read git status: {error}"),
+                )
+            })?;
         if !local.is_repo {
             return Err(failure(
                 "invalid_request",
-                format!("Project workspace '{}' is not a git repository.", project.root),
+                format!(
+                    "Project workspace '{}' is not a git repository.",
+                    project.root
+                ),
             ));
         }
         let refs = self
@@ -234,21 +244,24 @@ impl AgentTools {
                 limit: Some(200),
             })
             .await
-            .map_err(|error| failure("operation_failed", format!("Unable to list branches: {error}")))?;
+            .map_err(|error| {
+                failure(
+                    "operation_failed",
+                    format!("Unable to list branches: {error}"),
+                )
+            })?;
         if refs.refs.iter().any(|reference| reference.name == branch) {
             return Err(failure(
                 "invalid_request",
                 format!("Branch '{branch}' already exists."),
             ));
         }
-        let base_ref = base_ref
-            .or_else(|| local.ref_name.clone())
-            .ok_or_else(|| {
-                failure(
-                    "invalid_request",
-                    "Could not determine the current branch (detached HEAD). Pass baseRef explicitly.",
-                )
-            })?;
+        let base_ref = base_ref.or_else(|| local.ref_name.clone()).ok_or_else(|| {
+            failure(
+                "invalid_request",
+                "Could not determine the current branch (detached HEAD). Pass baseRef explicitly.",
+            )
+        })?;
         let continuation_prompt = input
             .continuation_prompt
             .as_deref()
@@ -275,7 +288,12 @@ impl AgentTools {
                 input.path.clone(),
             )
             .await
-            .map_err(|error| failure("operation_failed", format!("Unable to create the worktree: {error}")))?;
+            .map_err(|error| {
+                failure(
+                    "operation_failed",
+                    format!("Unable to create the worktree: {error}"),
+                )
+            })?;
         let worktree_path = created.path;
         let branch = created.branch.unwrap_or(branch);
         let recheck = match self.read_caller(scope).await {
@@ -296,7 +314,10 @@ impl AgentTools {
                 .await;
             return Err(failure(
                 "already_in_worktree",
-                format!("Thread '{}' is already attached to worktree '{path}'.", thread.id),
+                format!(
+                    "Thread '{}' is already attached to worktree '{path}'.",
+                    thread.id
+                ),
             ));
         }
         if rechecked_thread.archived_at.is_some() {
@@ -350,6 +371,7 @@ impl AgentTools {
                         attachments: vec![],
                         selection: None,
                         mode: DispatchMode::QueueAfterActive,
+                        scheduled_task: None,
                         intent: None,
                         source_plan: None,
                         resolved_plan: None,
@@ -410,7 +432,10 @@ mod tests {
 
     #[test]
     fn handoff_fields_trim_and_reject_empty_values() {
-        assert_eq!(nonempty("branch", " feature/demo ").unwrap(), "feature/demo");
+        assert_eq!(
+            nonempty("branch", " feature/demo ").unwrap(),
+            "feature/demo"
+        );
         assert!(nonempty("branch", "  ").is_err());
     }
 }

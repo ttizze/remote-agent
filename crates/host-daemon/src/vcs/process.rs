@@ -46,7 +46,7 @@ pub(super) struct Execute<'a> {
     pub timeout: Option<Duration>,
     pub max_output_bytes: usize,
     /// Receives the output lines, and the hooks when `trace_hooks` is set.
-    pub progress: Option<&'a mut dyn FnMut(Progress)>,
+    pub progress: Option<&'a mut (dyn FnMut(Progress) + Send)>,
     pub trace_hooks: bool,
 }
 
@@ -113,7 +113,7 @@ impl HookTrace {
         })
     }
 
-    fn read(&mut self, progress: &mut dyn FnMut(Progress)) {
+    fn read(&mut self, progress: &mut (dyn FnMut(Progress) + Send)) {
         let Ok(contents) = std::fs::read(self.file.path()) else {
             return;
         };
@@ -130,7 +130,7 @@ impl HookTrace {
         }
     }
 
-    fn line(&mut self, line: &str, progress: &mut dyn FnMut(Progress)) {
+    fn line(&mut self, line: &str, progress: &mut (dyn FnMut(Progress) + Send)) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -251,23 +251,26 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let mut stdout_truncated = false;
     let mut status = None;
-    let mut collect = |stream: OutputStream, line: Vec<u8>, progress: &mut Option<&mut dyn FnMut(Progress)>| {
-        let buffer = match stream {
-            OutputStream::Stdout => &mut stdout,
-            OutputStream::Stderr => &mut stderr,
-        };
-        if buffer.len() + line.len() <= max_output_bytes {
-            buffer.extend_from_slice(&line);
-        } else if stream == OutputStream::Stdout {
-            stdout_truncated = true;
-        }
-        if let Some(progress) = progress.as_mut() {
-            let text = String::from_utf8_lossy(&line).trim_end().to_owned();
-            if !text.trim().is_empty() {
-                progress(Progress::Output { stream, line: text });
+    let mut collect =
+        |stream: OutputStream,
+         line: Vec<u8>,
+         progress: &mut Option<&mut (dyn FnMut(Progress) + Send)>| {
+            let buffer = match stream {
+                OutputStream::Stdout => &mut stdout,
+                OutputStream::Stderr => &mut stderr,
+            };
+            if buffer.len() + line.len() <= max_output_bytes {
+                buffer.extend_from_slice(&line);
+            } else if stream == OutputStream::Stdout {
+                stdout_truncated = true;
             }
-        }
-    };
+            if let Some(progress) = progress.as_mut() {
+                let text = String::from_utf8_lossy(&line).trim_end().to_owned();
+                if !text.trim().is_empty() {
+                    progress(Progress::Output { stream, line: text });
+                }
+            }
+        };
     let mut ticker = tokio::time::interval(TRACE_POLL);
     // Reads until both pipes close; the exit status may arrive first.
     loop {
@@ -377,8 +380,11 @@ mod tests {
         let hooks = cwd.join(".git").join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, "#!/bin/sh\necho checking formatting\necho lint >&2\nexit 0\n")
-            .unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho checking formatting\necho lint >&2\nexit 0\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -409,9 +415,15 @@ mod tests {
             })
             .collect();
         assert!(kinds.contains(&"start:pre-commit".to_owned()), "{kinds:?}");
-        assert!(kinds.contains(&"Stdout:checking formatting".to_owned()), "{kinds:?}");
+        assert!(
+            kinds.contains(&"Stdout:checking formatting".to_owned()),
+            "{kinds:?}"
+        );
         assert!(kinds.contains(&"Stderr:lint".to_owned()), "{kinds:?}");
-        assert!(kinds.contains(&"finish:pre-commit:Some(0)".to_owned()), "{kinds:?}");
+        assert!(
+            kinds.contains(&"finish:pre-commit:Some(0)".to_owned()),
+            "{kinds:?}"
+        );
     }
 
     #[tokio::test]

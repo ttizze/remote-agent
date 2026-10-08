@@ -409,7 +409,10 @@ impl HostRuntime {
             .into());
         }
         if matches!(message, Call::Awareness(_)) {
-            let cancel = self.service.cancellation(session)?;
+            let cancel = self
+                .service
+                .cancellation(session)
+                .map_err(anyhow::Error::msg)?;
             return Ok(self.service.awareness(self.environment.clone(), cancel));
         }
         let management = matches!(

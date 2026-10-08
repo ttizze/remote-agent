@@ -5,19 +5,18 @@ use super::{
     identity::Identity,
     resources::{ClaudeResources, CodexResources},
 };
-use crate::background::BackgroundOwner;
 use crate::ProjectStore;
-use crate::github::pulls::{GitHubPullRequestService, supports_github_host};
+use crate::background::BackgroundOwner;
 use crate::claude::control::ClaudeProgram;
 use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
     SharedResources, SupervisedSpawner, TextGenerator, tools::ModelCatalog,
 };
+use crate::github::pulls::{GitHubPullRequestService, supports_github_host};
 use agent_domain::{
     BackgroundKind, Command, DispatchMode, Driver, MessageAuthor, MessageId, Notification,
     NotificationOutcome, NotificationSource, PullRequestKey, PullRequestLink,
-    PullRequestLinkSource, SendMessage,
-    ThreadId, Timestamp, background_work_due,
+    PullRequestLinkSource, SendMessage, ThreadId, Timestamp, background_work_due,
 };
 use agent_domain::{RunStatus, RuntimeMode};
 use agent_protocol::{
@@ -26,10 +25,9 @@ use agent_protocol::{
         AwarenessSnapshot, EnvironmentDescriptor, UpdateTarget,
     },
     operations as op,
-    pull_requests as pr,
     protocol::{Body, Call, Response},
     provider::ProviderKind,
-    scheduled_tasks as st,
+    pull_requests as pr, scheduled_tasks as st,
 };
 use agent_runtime::{
     ImportHome, ImportSettings, OsFs, RuntimeConfig, ScanConfig, ScheduledTaskError,
@@ -141,12 +139,17 @@ struct HostResources {
     background_consumers_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
     provider_cache: tokio::sync::RwLock<Option<ProviderHealthCache>>,
     provider_refresh: tokio::sync::Mutex<()>,
+    devices: Arc<crate::device::DeviceService>,
+}
+
+enum WorktreeAccessGuard<'a> {
+    Read(tokio::sync::RwLockReadGuard<'a, ()>),
+    Write(tokio::sync::RwLockWriteGuard<'a, ()>),
 }
 
 struct ProviderHealthCache {
     refreshed_at: Timestamp,
     providers: Vec<agent_protocol::models::ProviderInstance>,
-    devices: Arc<crate::device::DeviceService>,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
@@ -216,8 +219,12 @@ impl HostRpcService {
             last_run_at: task.last_run_at,
             last_run_status: match task.last_run_status {
                 agent_runtime::ScheduledTaskRunStatus::Never => st::ScheduledTaskRunStatus::Never,
-                agent_runtime::ScheduledTaskRunStatus::Running => st::ScheduledTaskRunStatus::Running,
-                agent_runtime::ScheduledTaskRunStatus::Succeeded => st::ScheduledTaskRunStatus::Succeeded,
+                agent_runtime::ScheduledTaskRunStatus::Running => {
+                    st::ScheduledTaskRunStatus::Running
+                }
+                agent_runtime::ScheduledTaskRunStatus::Succeeded => {
+                    st::ScheduledTaskRunStatus::Succeeded
+                }
                 agent_runtime::ScheduledTaskRunStatus::Failed => st::ScheduledTaskRunStatus::Failed,
             },
             last_run_error: task.last_run_error,
@@ -225,10 +232,14 @@ impl HostRpcService {
         }
     }
 
-    fn runtime_workspace(workspace: &agent_protocol::conversation::WorkspaceStrategy) -> WorkspaceStrategy {
+    fn runtime_workspace(
+        workspace: &agent_protocol::conversation::WorkspaceStrategy,
+    ) -> WorkspaceStrategy {
         match workspace {
             agent_protocol::conversation::WorkspaceStrategy::Root { branch } => {
-                WorkspaceStrategy::Root { branch: branch.clone() }
+                WorkspaceStrategy::Root {
+                    branch: branch.clone(),
+                }
             }
             agent_protocol::conversation::WorkspaceStrategy::ExistingWorktree {
                 worktree_path,
@@ -249,7 +260,9 @@ impl HostRpcService {
         }
     }
 
-    fn wire_workspace(workspace: WorkspaceStrategy) -> agent_protocol::conversation::WorkspaceStrategy {
+    fn wire_workspace(
+        workspace: WorkspaceStrategy,
+    ) -> agent_protocol::conversation::WorkspaceStrategy {
         match workspace {
             WorkspaceStrategy::Root { branch } => {
                 agent_protocol::conversation::WorkspaceStrategy::Root { branch }
@@ -294,9 +307,10 @@ impl HostRpcService {
 
     fn scheduled_failure(error: ScheduledTaskError) -> Failure {
         match error {
-            ScheduledTaskError::NotFound(id) => {
-                Failure::new("scheduled_task_not_found", format!("Schedule task {id} not found."))
-            }
+            ScheduledTaskError::NotFound(id) => Failure::new(
+                "scheduled_task_not_found",
+                format!("Schedule task {id} not found."),
+            ),
             ScheduledTaskError::AlreadyRunning(id) => Failure::new(
                 "scheduled_task_already_running",
                 format!("Schedule task {id} is already running."),
@@ -329,9 +343,7 @@ impl HostRpcService {
             .map(Path::to_owned)
             .unwrap_or_else(|| PathBuf::from("."));
         let background = BackgroundOwner::new(state_directory);
-        let devices = crate::device::DeviceService::new(
-            projects.path().with_file_name("device"),
-        );
+        let devices = crate::device::DeviceService::new(projects.path().with_file_name("device"));
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -358,9 +370,7 @@ impl HostRpcService {
             text: OnceLock::new(),
             vcs: crate::vcs::VcsStatusBroadcaster::new(
                 crate::github::cli::GitHubCli::locate(),
-                Arc::new(move || {
-                    Duration::from_secs(interval.load(Ordering::Acquire))
-                }),
+                Arc::new(move || Duration::from_secs(interval.load(Ordering::Acquire))),
             ),
             source_control_auto_fetch_interval_seconds,
             shared,
@@ -610,9 +620,11 @@ impl HostRpcService {
                 .background
                 .spawn(self.inner.resources.background_stop.clone()),
         );
-        let _ = self.inner.resources.background_consumers_task.set(
-            self.spawn_background_consumers(),
-        );
+        let _ = self
+            .inner
+            .resources
+            .background_consumers_task
+            .set(self.spawn_background_consumers());
         if let Err(error) = self.inner.updater.acknowledge_current(UpdateTarget::Host) {
             tracing::warn!(
                 target: "bex",
@@ -665,7 +677,11 @@ impl HostRpcService {
                     let Some(workspace) = summary.workspace.clone() else {
                         continue;
                     };
-                    let Some(branch) = workspace.branch.as_deref().filter(|branch| !branch.trim().is_empty()) else {
+                    let Some(branch) = workspace
+                        .branch
+                        .as_deref()
+                        .filter(|branch| !branch.trim().is_empty())
+                    else {
                         continue;
                     };
                     let cwd = if workspace.cwd.trim().is_empty() {
@@ -708,8 +724,14 @@ impl HostRpcService {
                         (Some(current), Some(detected)) => {
                             current.key() == detected.key()
                                 && current.url == detected.url
-                                && current.snapshot.as_ref().and_then(|summary| summary.head_sha.as_deref())
-                                    == detected.snapshot.as_ref().and_then(|summary| summary.head_sha.as_deref())
+                                && current
+                                    .snapshot
+                                    .as_ref()
+                                    .and_then(|summary| summary.head_sha.as_deref())
+                                    == detected
+                                        .snapshot
+                                        .as_ref()
+                                        .and_then(|summary| summary.head_sha.as_deref())
                         }
                         _ => false,
                     };
@@ -842,6 +864,7 @@ impl HostRpcService {
                                             attachments: vec![],
                                             selection: None,
                                             mode: DispatchMode::QueueAfterActive,
+                                            scheduled_task: None,
                                             intent: None,
                                             source_plan: None,
                                             resolved_plan: None,
@@ -1024,7 +1047,8 @@ impl HostRpcService {
         })
     }
     pub async fn dispatch(&self, session: SessionId, call: &Call) -> Result<HostReply, String> {
-        self.dispatch_with_desktop_publisher(session, call, false).await
+        self.dispatch_with_desktop_publisher(session, call, false)
+            .await
     }
 
     pub(crate) async fn dispatch_from_peer(
@@ -1085,10 +1109,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.device_subscribe(params, cancel).await);
         }
-        Ok(Response::from_result(
-            self.request(session, call, desktop_publisher_allowed).await,
+        Ok(
+            Response::from_result(self.request(session, call, desktop_publisher_allowed).await)
+                .into(),
         )
-        .into())
     }
 
     /// The current policy snapshot, followed by semantic power or lease
@@ -1127,7 +1151,9 @@ impl HostRpcService {
         let broadcaster = self.inner.resources.vcs.clone();
         let (first, subscription) = match broadcaster.subscribe(&params.cwd).await {
             Ok(value) => value,
-            Err(error) => return Response::error("vcs_status_failed", &format!("{error:#}")).into(),
+            Err(error) => {
+                return Response::error("vcs_status_failed", &format!("{error:#}")).into();
+            }
         };
         let cwd = subscription.cwd().to_owned();
         let subscription = Arc::new(tokio::sync::Mutex::new(subscription));
@@ -1150,7 +1176,11 @@ impl HostRpcService {
                             Ok(change) if change.cwd == cwd => return Some(vec![change.event]),
                             Ok(_) => continue,
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                return broadcaster.snapshot_event(&cwd).await.ok().map(|event| vec![event]);
+                                return broadcaster
+                                    .snapshot_event(&cwd)
+                                    .await
+                                    .ok()
+                                    .map(|event| vec![event]);
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                         }
@@ -1172,9 +1202,12 @@ impl HostRpcService {
         let initial = agent_protocol::device::DeviceEvent::State(devices.state_async().await);
         crate::conversation::stream(
             std::collections::VecDeque::from([initial]),
-            agent_protocol::device::DeviceEvent::State(agent_protocol::device::DeviceServiceState::default()),
+            agent_protocol::device::DeviceEvent::State(
+                agent_protocol::device::DeviceServiceState::default(),
+            ),
             move || {
-                let (receiver, devices, thread) = (receiver.clone(), devices.clone(), thread.clone());
+                let (receiver, devices, thread) =
+                    (receiver.clone(), devices.clone(), thread.clone());
                 Box::pin(async move {
                     loop {
                         let result = {
@@ -1192,7 +1225,9 @@ impl HostRpcService {
                                     devices.state_async().await,
                                 )]);
                             }
-                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                return None;
+                            }
                             Err(_) => {
                                 let frames = devices.frames_for_thread(&thread).await;
                                 if !frames.is_empty() {
@@ -1629,7 +1664,12 @@ impl HostRpcService {
             move || {
                 let receiver = receiver.clone();
                 Box::pin(async move {
-                    receiver.lock().await.recv().await.map(|snapshot| vec![snapshot])
+                    receiver
+                        .lock()
+                        .await
+                        .recv()
+                        .await
+                        .map(|snapshot| vec![snapshot])
                 })
             },
             cancel,
@@ -1643,7 +1683,9 @@ impl HostRpcService {
     ) -> Result<Body, Failure> {
         let resources = &self.inner.resources;
         let _workspace = if matches!(request, Call::CloneRepository(_)) {
-            Some(resources.worktree_access.write().await)
+            Some(WorktreeAccessGuard::Write(
+                resources.worktree_access.write().await,
+            ))
         } else if matches!(
             request,
             Call::StartTerminal(_)
@@ -1653,1103 +1695,1130 @@ impl HostRpcService {
                 | Call::AttachmentPath(_)
                 | Call::ReviewWorkspace(_)
         ) {
-            Some(resources.worktree_access.read().await)
+            Some(WorktreeAccessGuard::Read(
+                resources.worktree_access.read().await,
+            ))
         } else {
             None
         };
-        let response =
-            match request {
-                Call::AddProject(params) => {
-                    let id = resources
-                        .shared
-                        .projects
-                        .store()
-                        .register(&crate::projects::expand_home(params.cwd.trim()))
-                        .await
-                        .map_err(|error| Failure::new("project_add_failed", error))?;
-                    if let Ok(conversation) = self.conversation() {
-                        conversation.project_added(&id).await;
-                    }
-                    id.into()
-                }
-                Call::UpdateProject(params) => {
-                    resources
-                        .shared
-                        .projects
-                        .update(
-                            &params.project_id,
-                            params.scripts.clone(),
-                            params.favicon_path.clone(),
-                        )
-                        .await
-                        .map_err(|error| Failure::new("project_update_failed", error))?;
-                    if let Ok(conversation) = self.conversation() {
-                        conversation.project_updated(&params.project_id).await;
-                    }
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::ListProjects(_) => self.projects().await?.into(),
-                Call::ProjectFavicon(params) => {
-                    match resources
-                        .shared
-                        .projects
-                        .favicon_source(&params.project_id)
-                        .await
-                    {
-                        None => None::<agent_protocol::models::ProjectFavicon>.into(),
-                        Some((root, saved)) => {
-                            let known_hash = params.known_hash.clone();
-                            tokio::task::spawn_blocking(move || {
-                                crate::favicon::read(&root, saved.as_deref(), known_hash.as_deref())
-                            })
-                            .await
-                            .map_err(|error| Failure::new("project_favicon_failed", error))?
-                            .map_err(|error| Failure::new("project_favicon_failed", error))?
-                            .into()
-                        }
-                    }
-                }
-                Call::ListAccounts(_)
-                | Call::SelectAccount(_)
-                | Call::LogoutAccount(_)
-                | Call::StartAccountLogin(_)
-                | Call::ReadAccountLogin(_)
-                | Call::SubmitAccountLogin(_)
-                | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
-                Call::ReadAccountUsage(params) => self
-                    .identity(params.provider)?
-                    .usage(&params.id)
-                    .await?
-                    .into(),
-                Call::ReadUsageSummary(params) => resources
-                    .usage
-                    .summary(params.input.clone(), self.usage_homes())
+        let response = match request {
+            Call::AddProject(params) => {
+                let id = resources
+                    .shared
+                    .projects
+                    .store()
+                    .register(&crate::projects::expand_home(params.cwd.trim()))
                     .await
-                    .map_err(|error| Failure::new("usage_read_failed", error))?
-                    .into(),
-                Call::RefreshUsageRates(_) => resources.usage.refresh_rates().await.into(),
-                Call::ConsumeResetCredit(params) => self
-                    .identity(params.provider)?
-                    .consume_reset_credit(&params.account_id, params.credit_id.as_deref())
-                    .await?
-                    .into(),
-                Call::ListProviders(_) => self.providers().await.into(),
-                Call::ProviderCommands(params) => self.provider_commands(params).await?.into(),
-                Call::SearchEntries(params) => resources
-                    .search
-                    .search(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("search_entries_failed", error))?
-                    .into(),
-                Call::ListPullRequests(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    let root = self.project_root(&params.project_id)?;
-                    let discovery = (params.repository.is_none() || params.host.is_none())
-                        .then(|| resources.pull_requests.discover(&root, false));
-                    let discovery = match discovery {
-                        Some(discovery) => Some(discovery.await),
-                        None => None,
-                    };
-                    let host = params
-                        .host
-                        .as_deref()
-                        .or_else(|| discovery.as_ref().and_then(|discovery| discovery.host.as_deref()));
-                    ensure_github_host(host)?;
-                    let repository = params.repository.clone().or_else(|| {
-                        discovery
-                            .as_ref()
-                            .and_then(|discovery| discovery.repository.clone())
-                    });
-                    let mut request = params.clone();
-                    request.host = host.map(str::to_owned);
-                    resources
-                        .pull_requests
-                        .list(
-                            &root,
-                            &request.project_id,
-                            &request,
-                            repository.as_deref(),
-                            host,
-                        )
-                        .await
-                        .map_err(|error| Failure::new("pull_request_list_failed", error))?
-                        .into()
+                    .map_err(|error| Failure::new("project_add_failed", error))?;
+                if let Ok(conversation) = self.conversation() {
+                    conversation.project_added(&id).await;
                 }
-                Call::GetPullRequest(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let root = self.project_root(&params.reference.project_id)?;
-                    resources
-                        .pull_requests
-                        .get(&root, &params.reference.project_id, &params.reference)
-                        .await
-                        .map_err(|error| Failure::new("pull_request_get_failed", error))?
-                        .into()
-                }
-                Call::GetPullRequestDiff(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let root = self.project_root(&params.reference.project_id)?;
-                    resources
-                        .pull_requests
-                        .diff(&root, params)
-                        .await
-                        .map_err(|error| Failure::new("pull_request_diff_failed", error))?
-                        .into()
-                }
-                Call::GetPullRequestDiffFileContents(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let root = self.project_root(&params.reference.project_id)?;
-                    resources
-                        .pull_requests
-                        .diff_file_contents(&root, params)
-                        .await
-                        .map_err(|error| Failure::new("pull_request_diff_file_contents_failed", error))?
-                        .into()
-                }
-                Call::GetPullRequestFile(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let root = self.project_root(&params.reference.project_id)?;
-                    resources
-                        .pull_requests
-                        .file(&root, &params.reference, &params.path, params.max_bytes as usize)
-                        .await
-                        .map_err(|error| Failure::new("pull_request_file_failed", error))?
-                        .into()
-                }
-                Call::GetPullRequestViewedFiles(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let viewed = resources
-                        .pull_requests
-                        .links
-                        .viewed_files(&params.reference.key(), params.limit as usize)
-                        .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
-                    pr::PullRequestViewedFiles {
-                        reference: params.reference.clone(),
-                        files: viewed
-                            .0
-                            .into_iter()
-                            .map(|(path, viewed)| pr::PullRequestViewedFile { path, viewed })
-                            .collect(),
-                        truncated: viewed.1,
-                    }
-                    .into()
-                }
-                Call::SetPullRequestFilesViewed(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let key = params.reference.key();
-                    let files = params
-                        .files
-                        .iter()
-                        .map(|file| (file.path.as_str(), file.viewed))
-                        .collect::<Vec<_>>();
-                    resources
-                        .pull_requests
-                        .links
-                        .set_viewed_files(&key, &files, timestamp_now().as_str())
-                        .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
-                    let viewed = resources
-                        .pull_requests
-                        .links
-                        .viewed_files(&key, 1_000)
-                        .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
-                    pr::PullRequestViewedFiles {
-                        reference: params.reference.clone(),
-                        files: viewed
-                            .0
-                            .into_iter()
-                            .map(|(path, viewed)| pr::PullRequestViewedFile { path, viewed })
-                            .collect(),
-                        truncated: viewed.1,
-                    }
-                    .into()
-                }
-                Call::LinkPullRequest(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(Some(&params.host))?;
-                    self.link_pull_request(params).await?.into()
-                }
-                Call::UnlinkPullRequest(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(Some(&params.host))?;
-                    self.unlink_pull_request(params).await?.into()
-                }
-                Call::SetPullRequestWatch(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(Some(&params.link.host))?;
-                    self.set_pull_request_watch(params).await?.into()
-                }
-                Call::PullRequestAction(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let root = self.project_root(&params.reference.project_id)?;
-                    if let Some(stack_number) = params.stack_number {
-                        resources
-                            .pull_requests
-                            .stack_action(
-                                &root,
-                                &params.reference,
-                                params.action,
-                                stack_number,
-                                params.expected_stack_heads.as_deref().unwrap_or(&[]),
-                                params.merge_method,
-                            )
-                            .await
-                            .map_err(|error| Failure::new("pull_request_stack_action_failed", error))?;
-                    } else {
-                        resources
-                            .pull_requests
-                            .action(
-                                &root,
-                                &params.reference,
-                                params.action,
-                                params.merge_method,
-                            )
-                            .await
-                            .map_err(|error| Failure::new("pull_request_action_failed", error))?;
-                    }
-                    let detail = resources
-                        .pull_requests
-                        .get(&root, &params.reference.project_id, &params.reference)
-                        .await
-                        .ok();
-                    pr::PullRequestOperation {
-                        reference: params.reference.clone(),
-                        detail,
-                        linked: vec![],
-                    }
-                    .into()
-                }
-                Call::SubmitPullRequestReview(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    ensure_github_host(params.reference.host.as_deref())?;
-                    let root = self.project_root(&params.reference.project_id)?;
-                    resources
-                        .pull_requests
-                        .review(&root, &params.reference, params.verdict, &params.body)
-                        .await
-                        .map_err(|error| Failure::new("pull_request_review_failed", error))?;
-                    let detail = resources
-                        .pull_requests
-                        .get(&root, &params.reference.project_id, &params.reference)
-                        .await
-                        .ok();
-                    pr::PullRequestOperation {
-                        reference: params.reference.clone(),
-                        detail,
-                        linked: vec![],
-                    }
-                    .into()
-                }
-                Call::SourceControlAuth(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    resources
-                        .pull_requests
-                        .auth(
-                            Path::new(params.cwd.as_deref().unwrap_or(".")),
-                            params.host.as_deref(),
-                            params.fresh,
-                        )
-                        .await
-                        .into()
-                }
-                Call::SourceControlDiscovery(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    resources
-                        .pull_requests
-                        .discover(Path::new(&params.cwd), params.fresh)
-                        .await
-                        .into()
-                }
-                Call::CloneRepository(params) => {
-                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
-                    resources
-                        .pull_requests
-                        .clone_repository(params)
-                        .await
-                        .map_err(|error| Failure::new("repository_clone_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::SearchContents(params) => resources
-                    .search
-                    .search_contents(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("search_contents_failed", error))?
-                    .into(),
-                Call::VcsStatus(params) => resources
-                    .vcs
-                    .get_status(&params.cwd)
-                    .await
-                    .map_err(|error| Failure::new("vcs_status_failed", error))?
-                    .into(),
-                Call::ListRefs(params) => crate::vcs::refs(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("vcs_refs_failed", error))?
-                    .into(),
-                Call::CreateRef(params) => {
-                    let result = crate::vcs::create_ref(params.clone())
-                        .await
-                        .map_err(|error| Failure::new("vcs_create_ref_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    result.into()
-                }
-                Call::SwitchRef(params) => {
-                    let result = crate::vcs::switch_ref(params.clone())
-                        .await
-                        .map_err(|error| Failure::new("vcs_switch_ref_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    result.into()
-                }
-                Call::DiffPreview(params) => crate::vcs::diff_preview(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("diff_preview_failed", error))?
-                    .into(),
-                Call::RefreshVcsStatus(params) => resources
-                    .vcs
-                    .refresh_status(&params.cwd)
-                    .await
-                    .map_err(|error| Failure::new("vcs_status_refresh_failed", error))?
-                    .into(),
-                Call::Pull(params) => {
-                    let result = crate::vcs::pull_current_branch(&params.cwd)
-                        .await
-                        .map_err(|error| Failure::new("vcs_pull_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    result.into()
-                }
-                Call::InitRepository(params) => {
-                    crate::vcs::init_repository(&params.cwd)
-                        .await
-                        .map_err(|error| Failure::new("vcs_init_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::CreateWorktree(params) => {
-                    let settings = resources
-                        .shared
-                        .worktrees
-                        .settings(None)
-                        .await
-                        .map_err(|error| Failure::new("vcs_worktree_settings_failed", error))?;
-                    let result = crate::vcs::create_worktree(params, &settings.worktree_directory)
-                        .await
-                        .map_err(|error| Failure::new("vcs_worktree_create_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    result.into()
-                }
-                Call::RemoveWorktreeCheckout(params) => {
-                    crate::vcs::remove_worktree(&params.cwd, &params.path, params.force)
-                        .await
-                        .map_err(|error| Failure::new("vcs_worktree_remove_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::ResolvePullRequest(params) => crate::vcs::resolve_pull_request(
-                    resources.vcs.github(),
-                    params,
-                )
-                .await
-                .map_err(|error| Failure::new("pull_request_resolve_failed", error))?
-                .into(),
-                Call::PreparePullRequestThread(params) => {
-                    let settings = resources
-                        .shared
-                        .worktrees
-                        .settings(None)
-                        .await
-                        .map_err(|error| Failure::new("vcs_worktree_settings_failed", error))?;
-                    let result = crate::vcs::prepare_pull_request_thread(
-                        resources.vcs.github(),
-                        params,
-                        &settings.worktree_directory,
+                id.into()
+            }
+            Call::UpdateProject(params) => {
+                resources
+                    .shared
+                    .projects
+                    .update(
+                        &params.project_id,
+                        params.scripts.clone(),
+                        params.favicon_path.clone(),
                     )
                     .await
-                    .map_err(|error| Failure::new("pull_request_checkout_failed", error))?;
-                    if let Some(thread) = params.thread_id.clone()
-                        && result.worktree_path.is_some()
-                        && result.is_on_pull_request_head
-                    {
-                        let project = resources
-                            .shared
-                            .projects
-                            .list()
-                            .into_iter()
-                            .filter(|project| {
-                                Path::new(&params.cwd).starts_with(Path::new(&project.root))
-                            })
-                            .max_by_key(|project| project.root.len());
-                        if let Some(project) = project {
-                            let cwd = result
-                                .worktree_path
-                                .clone()
-                                .unwrap_or_else(|| params.cwd.clone());
-                            let setup = crate::conversation::run_project_setup(
-                                &resources.shared,
-                                SetupRequest {
-                                    thread,
-                                    project: project.id,
-                                    project_root: project.root,
-                                    cwd,
-                                    observe: SetupProgress::new(|_| {}),
-                                },
-                            )
-                            .await;
-                            match setup {
-                                Ok(SetupRun::Started(started)) => {
-                                    if !started.run_async {
-                                        if let Some(completion) = started.completion {
-                                            if completion.await != Some(0) {
-                                                tracing::warn!(
-                                                    operation = "host.vcs.pull_request_setup",
-                                                    "pull request setup script did not complete successfully"
-                                                );
-                                            }
+                    .map_err(|error| Failure::new("project_update_failed", error))?;
+                if let Ok(conversation) = self.conversation() {
+                    conversation.project_updated(&params.project_id).await;
+                }
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::ListProjects(_) => self.projects().await?.into(),
+            Call::ProjectFavicon(params) => {
+                match resources
+                    .shared
+                    .projects
+                    .favicon_source(&params.project_id)
+                    .await
+                {
+                    None => None::<agent_protocol::models::ProjectFavicon>.into(),
+                    Some((root, saved)) => {
+                        let known_hash = params.known_hash.clone();
+                        tokio::task::spawn_blocking(move || {
+                            crate::favicon::read(&root, saved.as_deref(), known_hash.as_deref())
+                        })
+                        .await
+                        .map_err(|error| Failure::new("project_favicon_failed", error))?
+                        .map_err(|error| Failure::new("project_favicon_failed", error))?
+                        .into()
+                    }
+                }
+            }
+            Call::ListAccounts(_)
+            | Call::SelectAccount(_)
+            | Call::LogoutAccount(_)
+            | Call::StartAccountLogin(_)
+            | Call::ReadAccountLogin(_)
+            | Call::SubmitAccountLogin(_)
+            | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
+            Call::ReadAccountUsage(params) => self
+                .identity(params.provider)?
+                .usage(&params.id)
+                .await?
+                .into(),
+            Call::ReadUsageSummary(params) => resources
+                .usage
+                .summary(params.input.clone(), self.usage_homes())
+                .await
+                .map_err(|error| Failure::new("usage_read_failed", error))?
+                .into(),
+            Call::RefreshUsageRates(_) => resources.usage.refresh_rates().await.into(),
+            Call::ConsumeResetCredit(params) => self
+                .identity(params.provider)?
+                .consume_reset_credit(&params.account_id, params.credit_id.as_deref())
+                .await?
+                .into(),
+            Call::ListProviders(_) => self.providers().await.into(),
+            Call::ProviderCommands(params) => self.provider_commands(params).await?.into(),
+            Call::SearchEntries(params) => resources
+                .search
+                .search(params.clone())
+                .await
+                .map_err(|error| Failure::new("search_entries_failed", error))?
+                .into(),
+            Call::ListPullRequests(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let root = self.project_root(&params.project_id)?;
+                let discovery = (params.repository.is_none() || params.host.is_none())
+                    .then(|| resources.pull_requests.discover(&root, false));
+                let discovery = match discovery {
+                    Some(discovery) => Some(discovery.await),
+                    None => None,
+                };
+                let host = params.host.as_deref().or_else(|| {
+                    discovery
+                        .as_ref()
+                        .and_then(|discovery| discovery.host.as_deref())
+                });
+                ensure_github_host(host)?;
+                let repository = params.repository.clone().or_else(|| {
+                    discovery
+                        .as_ref()
+                        .and_then(|discovery| discovery.repository.clone())
+                });
+                let mut request = params.clone();
+                request.host = host.map(str::to_owned);
+                resources
+                    .pull_requests
+                    .list(
+                        &root,
+                        &request.project_id,
+                        &request,
+                        repository.as_deref(),
+                        host,
+                    )
+                    .await
+                    .map_err(|error| Failure::new("pull_request_list_failed", error))?
+                    .into()
+            }
+            Call::GetPullRequest(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let root = self.project_root(&params.reference.project_id)?;
+                resources
+                    .pull_requests
+                    .get(&root, &params.reference.project_id, &params.reference)
+                    .await
+                    .map_err(|error| Failure::new("pull_request_get_failed", error))?
+                    .into()
+            }
+            Call::GetPullRequestDiff(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let root = self.project_root(&params.reference.project_id)?;
+                resources
+                    .pull_requests
+                    .diff(&root, params)
+                    .await
+                    .map_err(|error| Failure::new("pull_request_diff_failed", error))?
+                    .into()
+            }
+            Call::GetPullRequestDiffFileContents(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let root = self.project_root(&params.reference.project_id)?;
+                resources
+                    .pull_requests
+                    .diff_file_contents(&root, params)
+                    .await
+                    .map_err(|error| Failure::new("pull_request_diff_file_contents_failed", error))?
+                    .into()
+            }
+            Call::GetPullRequestFile(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let root = self.project_root(&params.reference.project_id)?;
+                resources
+                    .pull_requests
+                    .file(
+                        &root,
+                        &params.reference,
+                        &params.path,
+                        params.max_bytes as usize,
+                    )
+                    .await
+                    .map_err(|error| Failure::new("pull_request_file_failed", error))?
+                    .into()
+            }
+            Call::GetPullRequestViewedFiles(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let viewed = resources
+                    .pull_requests
+                    .links
+                    .viewed_files(&params.reference.key(), params.limit as usize)
+                    .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
+                pr::PullRequestViewedFiles {
+                    reference: params.reference.clone(),
+                    files: viewed
+                        .0
+                        .into_iter()
+                        .map(|(path, viewed)| pr::PullRequestViewedFile { path, viewed })
+                        .collect(),
+                    truncated: viewed.1,
+                }
+                .into()
+            }
+            Call::SetPullRequestFilesViewed(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let key = params.reference.key();
+                let files = params
+                    .files
+                    .iter()
+                    .map(|file| (file.path.as_str(), file.viewed))
+                    .collect::<Vec<_>>();
+                resources
+                    .pull_requests
+                    .links
+                    .set_viewed_files(&key, &files, timestamp_now().as_str())
+                    .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
+                let viewed = resources
+                    .pull_requests
+                    .links
+                    .viewed_files(&key, 1_000)
+                    .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
+                pr::PullRequestViewedFiles {
+                    reference: params.reference.clone(),
+                    files: viewed
+                        .0
+                        .into_iter()
+                        .map(|(path, viewed)| pr::PullRequestViewedFile { path, viewed })
+                        .collect(),
+                    truncated: viewed.1,
+                }
+                .into()
+            }
+            Call::LinkPullRequest(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(Some(&params.host))?;
+                self.link_pull_request(params).await?.into()
+            }
+            Call::UnlinkPullRequest(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(Some(&params.host))?;
+                self.unlink_pull_request(params).await?.into()
+            }
+            Call::SetPullRequestWatch(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(Some(&params.link.host))?;
+                self.set_pull_request_watch(params).await?.into()
+            }
+            Call::PullRequestAction(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let root = self.project_root(&params.reference.project_id)?;
+                if let Some(stack_number) = params.stack_number {
+                    resources
+                        .pull_requests
+                        .stack_action(
+                            &root,
+                            &params.reference,
+                            params.action,
+                            stack_number,
+                            params.expected_stack_heads.as_deref().unwrap_or(&[]),
+                            params.merge_method,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("pull_request_stack_action_failed", error))?;
+                } else {
+                    resources
+                        .pull_requests
+                        .action(&root, &params.reference, params.action, params.merge_method)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_action_failed", error))?;
+                }
+                let detail = resources
+                    .pull_requests
+                    .get(&root, &params.reference.project_id, &params.reference)
+                    .await
+                    .ok();
+                pr::PullRequestOperation {
+                    reference: params.reference.clone(),
+                    detail,
+                    linked: vec![],
+                }
+                .into()
+            }
+            Call::SubmitPullRequestReview(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                ensure_github_host(params.reference.host.as_deref())?;
+                let root = self.project_root(&params.reference.project_id)?;
+                resources
+                    .pull_requests
+                    .review(&root, &params.reference, params.verdict, &params.body)
+                    .await
+                    .map_err(|error| Failure::new("pull_request_review_failed", error))?;
+                let detail = resources
+                    .pull_requests
+                    .get(&root, &params.reference.project_id, &params.reference)
+                    .await
+                    .ok();
+                pr::PullRequestOperation {
+                    reference: params.reference.clone(),
+                    detail,
+                    linked: vec![],
+                }
+                .into()
+            }
+            Call::SourceControlAuth(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                resources
+                    .pull_requests
+                    .auth(
+                        Path::new(params.cwd.as_deref().unwrap_or(".")),
+                        params.host.as_deref(),
+                        params.fresh,
+                    )
+                    .await
+                    .into()
+            }
+            Call::SourceControlDiscovery(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                resources
+                    .pull_requests
+                    .discover(Path::new(&params.cwd), params.fresh)
+                    .await
+                    .into()
+            }
+            Call::CloneRepository(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                resources
+                    .pull_requests
+                    .clone_repository(params)
+                    .await
+                    .map_err(|error| Failure::new("repository_clone_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::SearchContents(params) => resources
+                .search
+                .search_contents(params.clone())
+                .await
+                .map_err(|error| Failure::new("search_contents_failed", error))?
+                .into(),
+            Call::VcsStatus(params) => resources
+                .vcs
+                .get_status(&params.cwd)
+                .await
+                .map_err(|error| Failure::new("vcs_status_failed", error))?
+                .into(),
+            Call::ListRefs(params) => crate::vcs::refs(params.clone())
+                .await
+                .map_err(|error| Failure::new("vcs_refs_failed", error))?
+                .into(),
+            Call::CreateRef(params) => {
+                let result = crate::vcs::create_ref(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("vcs_create_ref_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                result.into()
+            }
+            Call::SwitchRef(params) => {
+                let result = crate::vcs::switch_ref(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("vcs_switch_ref_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                result.into()
+            }
+            Call::DiffPreview(params) => crate::vcs::diff_preview(params.clone())
+                .await
+                .map_err(|error| Failure::new("diff_preview_failed", error))?
+                .into(),
+            Call::RefreshVcsStatus(params) => resources
+                .vcs
+                .refresh_status(&params.cwd)
+                .await
+                .map_err(|error| Failure::new("vcs_status_refresh_failed", error))?
+                .into(),
+            Call::Pull(params) => {
+                let result = crate::vcs::pull_current_branch(&params.cwd)
+                    .await
+                    .map_err(|error| Failure::new("vcs_pull_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                result.into()
+            }
+            Call::InitRepository(params) => {
+                crate::vcs::init_repository(&params.cwd)
+                    .await
+                    .map_err(|error| Failure::new("vcs_init_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::CreateWorktree(params) => {
+                let settings = resources
+                    .shared
+                    .worktrees
+                    .settings(None)
+                    .await
+                    .map_err(|error| Failure::new("vcs_worktree_settings_failed", error))?;
+                let result = crate::vcs::create_worktree(params, &settings.worktree_directory)
+                    .await
+                    .map_err(|error| Failure::new("vcs_worktree_create_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                result.into()
+            }
+            Call::RemoveWorktreeCheckout(params) => {
+                crate::vcs::remove_worktree(&params.cwd, &params.path, params.force)
+                    .await
+                    .map_err(|error| Failure::new("vcs_worktree_remove_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::ResolvePullRequest(params) => {
+                crate::vcs::resolve_pull_request(resources.vcs.github(), params)
+                    .await
+                    .map_err(|error| Failure::new("pull_request_resolve_failed", error))?
+                    .into()
+            }
+            Call::PreparePullRequestThread(params) => {
+                let settings = resources
+                    .shared
+                    .worktrees
+                    .settings(None)
+                    .await
+                    .map_err(|error| Failure::new("vcs_worktree_settings_failed", error))?;
+                let result = crate::vcs::prepare_pull_request_thread(
+                    resources.vcs.github(),
+                    params,
+                    &settings.worktree_directory,
+                )
+                .await
+                .map_err(|error| Failure::new("pull_request_checkout_failed", error))?;
+                if let Some(thread) = params.thread_id.clone()
+                    && result.worktree_path.is_some()
+                    && result.is_on_pull_request_head
+                {
+                    let project = resources
+                        .shared
+                        .projects
+                        .list()
+                        .into_iter()
+                        .filter(|project| {
+                            Path::new(&params.cwd).starts_with(Path::new(&project.root))
+                        })
+                        .max_by_key(|project| project.root.len());
+                    if let Some(project) = project {
+                        let cwd = result
+                            .worktree_path
+                            .clone()
+                            .unwrap_or_else(|| params.cwd.clone());
+                        let setup = crate::conversation::run_project_setup(
+                            &resources.shared,
+                            SetupRequest {
+                                thread,
+                                project: project.id,
+                                project_root: project.root,
+                                cwd,
+                                observe: SetupProgress::new(|_| {}),
+                            },
+                        )
+                        .await;
+                        match setup {
+                            Ok(SetupRun::Started(started)) => {
+                                if !started.run_async {
+                                    if let Some(completion) = started.completion {
+                                        if completion.await != Some(0) {
+                                            tracing::warn!(
+                                                operation = "host.vcs.pull_request_setup",
+                                                "pull request setup script did not complete successfully"
+                                            );
                                         }
                                     }
                                 }
-                                Ok(SetupRun::NoScript) => {}
-                                Err(error) => tracing::warn!(
-                                    operation = "host.vcs.pull_request_setup",
-                                    message = %error,
-                                ),
                             }
+                            Ok(SetupRun::NoScript) => {}
+                            Err(error) => tracing::warn!(
+                                operation = "host.vcs.pull_request_setup",
+                                message = %error,
+                            ),
                         }
                     }
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    result.into()
                 }
-                Call::PublishRepository(params) => {
-                    let result = crate::vcs::publish(resources.vcs.github(), params)
-                        .await
-                        .map_err(|error| Failure::new("repository_publish_failed", error))?;
-                    resources.vcs.spawn_refresh(&params.cwd);
-                    result.into()
-                }
-                Call::ReadPermissionSettings(params) => {
-                    let _guard = resources.permission_settings_access.lock().await;
-                    match params.provider {
-                        ProviderKind::Codex => resources.codex.read_permissions().await?,
-                        ProviderKind::Claude => super::permissions::read_claude_permissions(
-                            &self.claude()?.native_home,
-                        )?,
+                resources.vcs.spawn_refresh(&params.cwd);
+                result.into()
+            }
+            Call::PublishRepository(params) => {
+                let result = crate::vcs::publish(resources.vcs.github(), params)
+                    .await
+                    .map_err(|error| Failure::new("repository_publish_failed", error))?;
+                resources.vcs.spawn_refresh(&params.cwd);
+                result.into()
+            }
+            Call::ReadPermissionSettings(params) => {
+                let _guard = resources.permission_settings_access.lock().await;
+                match params.provider {
+                    ProviderKind::Codex => resources.codex.read_permissions().await?,
+                    ProviderKind::Claude => {
+                        super::permissions::read_claude_permissions(&self.claude()?.native_home)?
                     }
+                }
+                .into()
+            }
+            Call::UpdatePermissionSettings(params) => {
+                let _guard = resources.permission_settings_access.lock().await;
+                match params.provider {
+                    ProviderKind::Codex => {
+                        resources
+                            .codex
+                            .update_permissions(params.mode, &params.version)
+                            .await?
+                    }
+                    ProviderKind::Claude => super::permissions::update_claude_permissions(
+                        &self.claude()?.native_home,
+                        params.mode,
+                        &params.version,
+                    )?,
+                }
+                .into()
+            }
+            Call::Browser(params) => {
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                let frame = browser
+                    .request(params)
+                    .await
+                    .map_err(|error| Failure::new("browser_failed", error))?;
+                frame.into()
+            }
+            Call::PreviewList(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                resources
+                    .preview_ports
+                    .set_terminal_owners(resources.shared.terminals.preview_process_owners());
+                let terminals = resources.shared.terminals.summaries_now();
+                let scan = resources
+                    .preview_ports
+                    .scan_snapshot(&params.configured_urls, &terminals)
+                    .await
+                    .map_err(|error| Failure::new("preview_scan_failed", error))?;
+                let mut result = resources.preview.list(&params.thread_id);
+                result.local_servers = scan.servers;
+                result.scanned_at = scan.scanned_at;
+                result.scanner_epoch = scan.epoch;
+                result.scanner_revision = scan.revision;
+                result.into()
+            }
+            Call::PreviewOpen(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                let url = params
+                    .url
+                    .as_deref()
+                    .map(agent_protocol::preview::normalize_preview_url)
+                    .transpose()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let frame = browser
+                    .open_preview_tab(
+                        &params.thread_id.to_string(),
+                        url.as_deref(),
+                        params.viewport,
+                        params.appearance,
+                        params.zoom,
+                        params.rendered_size,
+                    )
+                    .await
+                    .map_err(|error| Failure::new("preview_open_failed", error))?;
+                let session = resources
+                    .preview
+                    .open(
+                        params.thread_id.clone(),
+                        frame.tab_id.clone(),
+                        url.as_deref(),
+                        params.viewport,
+                        params.appearance,
+                        params.zoom,
+                    )
+                    .map_err(|error| Failure::new("preview_open_failed", error))?;
+                browser.report_preview_frame(&params.thread_id.to_string(), &frame);
+                resources
+                    .preview
+                    .get(&params.thread_id, &frame.tab_id)
+                    .unwrap_or(session)
                     .into()
-                }
-                Call::UpdatePermissionSettings(params) => {
-                    let _guard = resources.permission_settings_access.lock().await;
-                    match params.provider {
-                        ProviderKind::Codex => {
-                            resources
-                                .codex
-                                .update_permissions(params.mode, &params.version)
-                                .await?
-                        }
-                        ProviderKind::Claude => super::permissions::update_claude_permissions(
-                            &self.claude()?.native_home,
-                            params.mode,
-                            &params.version,
-                        )?,
-                    }
-                    .into()
-                }
-                Call::Browser(params) => {
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    let frame = browser
-                        .request(params)
-                        .await
-                        .map_err(|error| Failure::new("browser_failed", error))?;
-                    frame.into()
-                }
-                Call::PreviewList(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    resources
-                        .preview_ports
-                        .set_terminal_owners(resources.shared.terminals.preview_process_owners());
-                    let terminals = resources.shared.terminals.summaries_now();
-                    let scan = resources
-                        .preview_ports
-                        .scan_snapshot(&params.configured_urls, &terminals)
-                        .await
-                        .map_err(|error| Failure::new("preview_scan_failed", error))?;
-                    let mut result = resources.preview.list(&params.thread_id);
-                    result.local_servers = scan.servers;
-                    result.scanned_at = scan.scanned_at;
-                    result.scanner_epoch = scan.epoch;
-                    result.scanner_revision = scan.revision;
-                    result.into()
-                }
-                Call::PreviewOpen(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    let url = params
-                        .url
-                        .as_deref()
-                        .map(agent_protocol::preview::normalize_preview_url)
-                        .transpose()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let frame = browser
-                        .open_preview_tab(
-                            &params.thread_id.to_string(),
-                            url.as_deref(),
-                            params.viewport,
-                            params.appearance,
-                            params.zoom,
-                            params.rendered_size,
-                        )
-                        .await
-                        .map_err(|error| Failure::new("preview_open_failed", error))?;
-                    let session = resources
-                        .preview
-                        .open(
-                            params.thread_id.clone(),
-                            frame.tab_id.clone(),
-                            url.as_deref(),
-                            params.viewport,
-                            params.appearance,
-                            params.zoom,
-                        )
-                        .map_err(|error| Failure::new("preview_open_failed", error))?;
-                    browser.report_preview_frame(&params.thread_id.to_string(), &frame);
-                    resources
-                        .preview
-                        .get(&params.thread_id, &frame.tab_id)
-                        .unwrap_or(session)
-                        .into()
-                }
-                Call::PreviewNavigate(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let url = agent_protocol::preview::normalize_preview_url(&params.url)
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::SelectTab {
-                                id: params.tab_id.clone(),
-                            },
-                        })
-                        .await
-                        .map_err(|error| Failure::new("preview_navigation_failed", error))?;
-                    browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::Navigate { url: url.clone() },
-                        })
-                        .await
-                        .map_err(|error| Failure::new("preview_navigation_failed", error))?;
-                    resources
-                        .preview
-                        .navigate(&params.thread_id, &params.tab_id, &url)
-                        .map_err(|error| Failure::new("preview_navigation_failed", error))?
-                        .into()
-                }
-                Call::PreviewResize(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .resize_preview_tab(
-                            &params.thread_id.to_string(),
-                            &params.tab_id,
-                            params.viewport,
-                            params.rendered_size,
-                        )
-                        .await
-                        .map_err(|error| Failure::new("preview_resize_failed", error))?;
-                    resources
-                        .preview
-                        .resize(&params.thread_id, &params.tab_id, params.viewport)
-                        .map_err(|error| Failure::new("preview_resize_failed", error))?
-                        .into()
-                }
-                Call::PreviewSetAppearance(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .set_preview_appearance(
-                            &params.thread_id.to_string(),
-                            &params.tab_id,
-                            params.appearance,
-                        )
-                        .await
-                        .map_err(|error| Failure::new("preview_appearance_failed", error))?;
-                    resources
-                        .preview
-                        .appearance(&params.thread_id, &params.tab_id, params.appearance)
-                        .map_err(|error| Failure::new("preview_appearance_failed", error))?
-                        .into()
-                }
-                Call::PreviewSetZoom(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .set_preview_zoom(
-                            &params.thread_id.to_string(),
-                            &params.tab_id,
-                            params.zoom,
-                        )
-                        .await
-                        .map_err(|error| Failure::new("preview_zoom_failed", error))?;
-                    resources
-                        .preview
-                        .zoom(&params.thread_id, &params.tab_id, params.zoom)
-                        .map_err(|error| Failure::new("preview_zoom_failed", error))?
-                        .into()
-                }
-                Call::PreviewReportStatus(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    resources
-                        .preview
-                        .report_status(
-                            &params.thread_id,
-                            &params.tab_id,
-                            params.nav_status.clone(),
-                            params.can_go_back,
-                            params.can_go_forward,
-                        )
-                        .map_err(|error| Failure::new("preview_status_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::PreviewClose(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    let ids: Vec<String> = resources
-                        .preview
-                        .list(&params.thread_id)
-                        .sessions
-                        .into_iter()
-                        .filter(|session| {
-                            params
-                                .tab_id
-                                .as_deref()
-                                .is_none_or(|tab_id| tab_id == session.tab_id)
-                        })
-                        .map(|session| session.tab_id)
-                        .collect();
-                    for id in ids {
-                        browser
-                            .close_preview_tab(&params.thread_id.to_string(), &id)
-                            .await
-                            .map_err(|error| Failure::new("preview_close_failed", error))?;
-                    }
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::PreviewRefresh(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    resources
-                        .preview
-                        .refresh(&params.thread_id, &params.tab_id)
-                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::SelectTab {
-                                id: params.tab_id.clone(),
-                            },
-                        })
-                        .await
-                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::Reload,
-                        })
-                        .await
-                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::PreviewRecordingStart(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .start_preview_recording(&params.thread_id.to_string(), &params.tab_id)
-                        .await
-                        .map_err(|error| Failure::new("preview_recording_start_failed", error))?
-                        .into()
-                }
-                Call::PreviewRecordingStop(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    browser
-                        .stop_preview_recording(&params.thread_id.to_string(), &params.tab_id)
-                        .await
-                        .map_err(|error| Failure::new("preview_recording_stop_failed", error))?
-                        .into()
-                }
-                Call::DeviceList(params) => resources
-                    .devices
-                    .list(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_list_failed", error))?
-                    .into(),
-                Call::DeviceConfigure(params) => resources
-                    .devices
-                    .configure(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_configure_failed", error))?
-                    .into(),
-                Call::DeviceHosts(params) => resources
-                    .devices
-                    .update_hosts(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_hosts_failed", error))?
-                    .into(),
-                Call::DeviceOpen(params) => resources
-                    .devices
-                    .open(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_open_failed", error))?
-                    .into(),
-                Call::DeviceClose(params) => {
-                    resources
-                        .devices
-                        .close(params.clone())
-                        .await
-                        .map_err(|error| Failure::new("device_close_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::DeviceShutdown(params) => {
-                    resources
-                        .devices
-                        .shutdown(params.clone())
-                        .await
-                        .map_err(|error| Failure::new("device_shutdown_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::DeviceDetail(params) => resources
-                    .devices
-                    .detail(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_detail_failed", error))?
-                    .into(),
-                Call::DeviceAction(params) => resources
-                    .devices
-                    .action(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_action_failed", error))?
-                    .into(),
-                Call::DeviceScreenshot(params) => resources
-                    .devices
-                    .screenshot(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("device_screenshot_failed", error))?
-                    .into(),
-                Call::DeviceSubscribe(_) => unreachable!("device subscription is handled above"),
-                Call::ConnectionPerformance(params) => {
-                    let params = params.clone();
-                    tokio::task::spawn_blocking(move || {
-                        agent_transport::diagnostics::connection_performance(&params)
+            }
+            Call::PreviewNavigate(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let url = agent_protocol::preview::normalize_preview_url(&params.url)
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .request(&agent_protocol::browser::BrowserRequest {
+                        thread_id: params.thread_id.clone(),
+                        tab_id: params.tab_id.clone(),
+                        image_id: String::new(),
+                        action: agent_protocol::browser::BrowserAction::SelectTab {
+                            id: params.tab_id.clone(),
+                        },
                     })
                     .await
-                    .map_err(|error| Failure::new("diagnostic_write_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::ReadUpdateStatus(_)
-                | Call::CheckUpdate(_)
-                | Call::DownloadUpdate(_)
-                | Call::InstallUpdate(_)
-                | Call::SetUpdateChannel(_)
-                | Call::ReadNativeUpdate(_) => self.update(request).await?,
-                Call::ReadBackground(_) => resources.background.snapshot().await.into(),
-                Call::UpdateBackgroundPolicy(params) => resources
-                    .background
-                    .set_policy(params.policy.clone())
+                    .map_err(|error| Failure::new("preview_navigation_failed", error))?;
+                browser
+                    .request(&agent_protocol::browser::BrowserRequest {
+                        thread_id: params.thread_id.clone(),
+                        tab_id: params.tab_id.clone(),
+                        image_id: String::new(),
+                        action: agent_protocol::browser::BrowserAction::Navigate {
+                            url: url.clone(),
+                        },
+                    })
                     .await
-                    .into(),
-                Call::ReportClientActivity(params) => resources
-                    .background
-                    .report_activity(session, params.clone())
+                    .map_err(|error| Failure::new("preview_navigation_failed", error))?;
+                resources
+                    .preview
+                    .navigate(&params.thread_id, &params.tab_id, &url)
+                    .map_err(|error| Failure::new("preview_navigation_failed", error))?
+                    .into()
+            }
+            Call::PreviewResize(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .resize_preview_tab(
+                        &params.thread_id.to_string(),
+                        &params.tab_id,
+                        params.viewport,
+                        params.rendered_size,
+                    )
                     .await
-                    .map_err(|error| Failure::new("invalid_params", error))?
-                    .into(),
-                Call::ReportHostPowerState(params) => {
-                    resources
-                        .background
-                        .report_power(params.clone(), desktop_publisher_allowed)
-                        .await;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::RemoveClientActivity(params) => resources
-                    .background
-                    .remove_activity(session, params.rpc_client_id)
+                    .map_err(|error| Failure::new("preview_resize_failed", error))?;
+                resources
+                    .preview
+                    .resize(&params.thread_id, &params.tab_id, params.viewport)
+                    .map_err(|error| Failure::new("preview_resize_failed", error))?
+                    .into()
+            }
+            Call::PreviewSetAppearance(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .set_preview_appearance(
+                        &params.thread_id.to_string(),
+                        &params.tab_id,
+                        params.appearance,
+                    )
                     .await
-                    .into(),
-                Call::ReadHostResources(_) => resources.background.host_resources().await.into(),
-                Call::ReadProcessDiagnostics(_) => {
-                    resources.background.process_diagnostics().await.into()
-                }
-                Call::ReadProcessResourceHistory(params) => resources
-                    .background
-                    .process_history(params.window_ms, params.bucket_ms)
+                    .map_err(|error| Failure::new("preview_appearance_failed", error))?;
+                resources
+                    .preview
+                    .appearance(&params.thread_id, &params.tab_id, params.appearance)
+                    .map_err(|error| Failure::new("preview_appearance_failed", error))?
+                    .into()
+            }
+            Call::PreviewSetZoom(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .set_preview_zoom(&params.thread_id.to_string(), &params.tab_id, params.zoom)
                     .await
-                    .into(),
-                Call::ReadTraceDiagnostics(params) => resources
-                    .background
-                    .trace_diagnostics(params)
-                    .await
-                    .map_err(|error| Failure::new("diagnostics_unavailable", error))?
-                    .into(),
-                Call::SubscribeBackground(_) => {
-                    return Err(Failure::new(
-                        "stream_only",
-                        "background subscriptions must use a stream",
-                    ));
-                }
-                Call::ReadSettings(_) | Call::UpdateSettings(_) => {
-                    let update = match request {
-                        Call::UpdateSettings(settings) => Some((**settings).clone()),
-                        _ => None,
-                    };
-                    let changed = update.is_some();
-                    let settings = resources
-                        .shared
-                        .worktrees
-                        .host_settings(update)
+                    .map_err(|error| Failure::new("preview_zoom_failed", error))?;
+                resources
+                    .preview
+                    .zoom(&params.thread_id, &params.tab_id, params.zoom)
+                    .map_err(|error| Failure::new("preview_zoom_failed", error))?
+                    .into()
+            }
+            Call::PreviewReportStatus(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                resources
+                    .preview
+                    .report_status(
+                        &params.thread_id,
+                        &params.tab_id,
+                        params.nav_status.clone(),
+                        params.can_go_back,
+                        params.can_go_forward,
+                    )
+                    .map_err(|error| Failure::new("preview_status_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::PreviewClose(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                let ids: Vec<String> = resources
+                    .preview
+                    .list(&params.thread_id)
+                    .sessions
+                    .into_iter()
+                    .filter(|session| {
+                        params
+                            .tab_id
+                            .as_deref()
+                            .is_none_or(|tab_id| tab_id == session.tab_id)
+                    })
+                    .map(|session| session.tab_id)
+                    .collect();
+                for id in ids {
+                    browser
+                        .close_preview_tab(&params.thread_id.to_string(), &id)
                         .await
-                        .map_err(|error| Failure::new("settings_update_failed", error))?;
-                    let fetch_ms = settings
-                        .background_activity
-                        .resolved()
-                        .automatic_git_fetch_interval_ms;
-                    let fetch_seconds = if fetch_ms == 0 {
-                        0
-                    } else {
-                        fetch_ms.saturating_add(999) / 1_000
-                    };
-                    resources
-                        .source_control_auto_fetch_interval_seconds
-                        .store(fetch_seconds, Ordering::Release);
-                    let _ = self.cleanup_storage().await;
-                    if changed && let Ok(conversation) = self.conversation() {
-                        conversation.settings_changed();
-                    }
-                    if changed {
-                        resources.commands.clear();
-                    }
-                    settings.into()
+                        .map_err(|error| Failure::new("preview_close_failed", error))?;
                 }
-                Call::UpsertKeybinding(params) => (resources
-                    .keybindings
-                    .upsert(params.clone())
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::PreviewRefresh(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                resources
+                    .preview
+                    .refresh(&params.thread_id, &params.tab_id)
+                    .map_err(|error| Failure::new("preview_refresh_failed", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .request(&agent_protocol::browser::BrowserRequest {
+                        thread_id: params.thread_id.clone(),
+                        tab_id: params.tab_id.clone(),
+                        image_id: String::new(),
+                        action: agent_protocol::browser::BrowserAction::SelectTab {
+                            id: params.tab_id.clone(),
+                        },
+                    })
                     .await
-                    .map_err(|error| Failure::new("keybindings_update_failed", error))?)
+                    .map_err(|error| Failure::new("preview_refresh_failed", error))?;
+                browser
+                    .request(&agent_protocol::browser::BrowserRequest {
+                        thread_id: params.thread_id.clone(),
+                        tab_id: params.tab_id.clone(),
+                        image_id: String::new(),
+                        action: agent_protocol::browser::BrowserAction::Reload,
+                    })
+                    .await
+                    .map_err(|error| Failure::new("preview_refresh_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::PreviewRecordingStart(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .start_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                    .await
+                    .map_err(|error| Failure::new("preview_recording_start_failed", error))?
+                    .into()
+            }
+            Call::PreviewRecordingStop(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let browser = resources
+                    .browser
+                    .get()
+                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                browser
+                    .stop_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                    .await
+                    .map_err(|error| Failure::new("preview_recording_stop_failed", error))?
+                    .into()
+            }
+            Call::DeviceList(params) => resources
+                .devices
+                .list(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_list_failed", error))?
                 .into(),
-                Call::RemoveKeybinding(params) => (resources
-                    .keybindings
-                    .remove(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("keybindings_update_failed", error))?)
+            Call::DeviceConfigure(params) => resources
+                .devices
+                .configure(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_configure_failed", error))?
                 .into(),
-                Call::UpsertScheduledTask(params) => {
-                    params
-                        .validate()
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let task = self
-                        .conversation()?
-                        .runtime
-                        .scheduled_tasks()
-                        .upsert(Self::scheduled_input(params))
-                        .await
-                        .map_err(Self::scheduled_failure)?;
-                    Self::scheduled_task(task).into()
-                }
-                Call::ListScheduledTasks(_) => {
-                    let tasks = self
-                        .conversation()?
-                        .runtime
-                        .scheduled_tasks()
-                        .list()
-                        .await
-                        .map_err(|error| Failure::new("scheduled_tasks_unavailable", error))?;
-                    st::ScheduledTaskList {
-                        tasks: tasks.into_iter().map(Self::scheduled_task).collect(),
-                    }
-                    .into()
-                }
-                Call::SetScheduledTaskEnabled(params) => {
-                    let task = self
-                        .conversation()?
-                        .runtime
-                        .scheduled_tasks()
-                        .set_enabled(&params.id, params.enabled)
-                        .await
-                        .map_err(Self::scheduled_failure)?;
-                    Self::scheduled_task(task).into()
-                }
-                Call::DeleteScheduledTask(params) => {
-                    self.conversation()?
-                        .runtime
-                        .scheduled_tasks()
-                        .delete(&params.id)
-                        .await
-                        .map_err(|error| Failure::new("scheduled_task_failed", error))?;
-                    st::ScheduledTaskRef {
-                        id: params.id.clone(),
-                    }
-                    .into()
-                }
-                Call::RunScheduledTaskNow(params) => {
-                    let task = self
-                        .conversation()?
-                        .runtime
-                        .scheduled_tasks()
-                        .run_now(&params.id)
-                        .await
-                        .map_err(Self::scheduled_failure)?;
-                    Self::scheduled_task(task).into()
-                }
-                Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
-                    let update = if let Call::UpdateWorktreeSettings(settings) = request {
-                        Some(settings.clone())
-                    } else {
-                        None
-                    };
-                    (resources
-                        .shared
-                        .worktrees
-                        .settings(update)
-                        .await
-                        .map_err(|error| Failure::new("worktree_settings_failed", error))?)
-                    .into()
-                }
-                Call::ListWorktrees(_) => (self.worktree_list().await?).into(),
-                Call::RemoveWorktree(params) => {
-                    let _exclusive = resources.worktree_access.write().await;
-                    (self.remove_worktree(params.path.clone()).await?).into()
-                }
-                Call::StartTerminal(params) => (resources
+            Call::DeviceHosts(params) => resources
+                .devices
+                .update_hosts(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_hosts_failed", error))?
+                .into(),
+            Call::DeviceOpen(params) => resources
+                .devices
+                .open(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_open_failed", error))?
+                .into(),
+            Call::DeviceClose(params) => {
+                resources
+                    .devices
+                    .close(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_close_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::DeviceShutdown(params) => {
+                resources
+                    .devices
+                    .shutdown(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_shutdown_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::DeviceDetail(params) => resources
+                .devices
+                .detail(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_detail_failed", error))?
+                .into(),
+            Call::DeviceAction(params) => resources
+                .devices
+                .action(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_action_failed", error))?
+                .into(),
+            Call::DeviceScreenshot(params) => resources
+                .devices
+                .screenshot(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_screenshot_failed", error))?
+                .into(),
+            Call::DeviceSubscribe(_) => unreachable!("device subscription is handled above"),
+            Call::ConnectionPerformance(params) => {
+                let params = params.clone();
+                tokio::task::spawn_blocking(move || {
+                    agent_transport::diagnostics::connection_performance(&params)
+                })
+                .await
+                .map_err(|error| Failure::new("diagnostic_write_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::ReadUpdateStatus(_)
+            | Call::CheckUpdate(_)
+            | Call::DownloadUpdate(_)
+            | Call::InstallUpdate(_)
+            | Call::SetUpdateChannel(_)
+            | Call::ReadNativeUpdate(_) => self.update(request).await?,
+            Call::ReadBackground(_) => resources.background.snapshot().await.into(),
+            Call::UpdateBackgroundPolicy(params) => resources
+                .background
+                .set_policy(params.policy.clone())
+                .await
+                .into(),
+            Call::ReportClientActivity(params) => resources
+                .background
+                .report_activity(session, params.clone())
+                .await
+                .map_err(|error| Failure::new("invalid_params", error))?
+                .into(),
+            Call::ReportHostPowerState(params) => {
+                resources
+                    .background
+                    .report_power(params.clone(), desktop_publisher_allowed)
+                    .await;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::RemoveClientActivity(params) => resources
+                .background
+                .remove_activity(session, params.rpc_client_id)
+                .await
+                .into(),
+            Call::ReadHostResources(_) => resources.background.host_resources().await.into(),
+            Call::ReadProcessDiagnostics(_) => {
+                resources.background.process_diagnostics().await.into()
+            }
+            Call::ReadProcessResourceHistory(params) => resources
+                .background
+                .process_history(params.window_ms, params.bucket_ms)
+                .await
+                .into(),
+            Call::ReadTraceDiagnostics(params) => resources
+                .background
+                .trace_diagnostics(params)
+                .await
+                .map_err(|error| Failure::new("diagnostics_unavailable", error))?
+                .into(),
+            Call::SubscribeBackground(_) => {
+                return Err(Failure::new(
+                    "stream_only",
+                    "background subscriptions must use a stream",
+                ));
+            }
+            Call::ReadSettings(_) | Call::UpdateSettings(_) => {
+                let update = match request {
+                    Call::UpdateSettings(settings) => Some((**settings).clone()),
+                    _ => None,
+                };
+                let changed = update.is_some();
+                let settings = resources
                     .shared
-                    .terminals
-                    .attach(session, params)
+                    .worktrees
+                    .host_settings(update)
                     .await
-                    .map_err(|error| Failure::new("terminal_start_failed", error))?)
-                .into(),
-                Call::WriteTerminal(_)
-                | Call::ResizeTerminal(_)
-                | Call::KillTerminal(_)
-                | Call::DetachTerminal(_)
-                | Call::ClearTerminal(_)
-                | Call::RestartTerminal(_) => (resources
+                    .map_err(|error| Failure::new("settings_update_failed", error))?;
+                let fetch_ms = settings
+                    .background_activity
+                    .resolved()
+                    .automatic_git_fetch_interval_ms;
+                let fetch_seconds = if fetch_ms == 0 {
+                    0
+                } else {
+                    fetch_ms.saturating_add(999) / 1_000
+                };
+                resources
+                    .source_control_auto_fetch_interval_seconds
+                    .store(fetch_seconds, Ordering::Release);
+                let _ = self.cleanup_storage().await;
+                if changed && let Ok(conversation) = self.conversation() {
+                    conversation.settings_changed();
+                }
+                if changed {
+                    resources.commands.clear();
+                }
+                settings.into()
+            }
+            Call::UpsertKeybinding(params) => (resources
+                .keybindings
+                .upsert(params.clone())
+                .await
+                .map_err(|error| Failure::new("keybindings_update_failed", error))?)
+            .into(),
+            Call::RemoveKeybinding(params) => (resources
+                .keybindings
+                .remove(params.clone())
+                .await
+                .map_err(|error| Failure::new("keybindings_update_failed", error))?)
+            .into(),
+            Call::UpsertScheduledTask(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let task = self
+                    .conversation()?
+                    .runtime
+                    .scheduled_tasks()
+                    .upsert(Self::scheduled_input(params))
+                    .await
+                    .map_err(Self::scheduled_failure)?;
+                Self::scheduled_task(task).into()
+            }
+            Call::ListScheduledTasks(_) => {
+                let tasks = self
+                    .conversation()?
+                    .runtime
+                    .scheduled_tasks()
+                    .list()
+                    .await
+                    .map_err(|error| Failure::new("scheduled_tasks_unavailable", error))?;
+                st::ScheduledTaskList {
+                    tasks: tasks.into_iter().map(Self::scheduled_task).collect(),
+                }
+                .into()
+            }
+            Call::SetScheduledTaskEnabled(params) => {
+                let task = self
+                    .conversation()?
+                    .runtime
+                    .scheduled_tasks()
+                    .set_enabled(&params.id, params.enabled)
+                    .await
+                    .map_err(Self::scheduled_failure)?;
+                Self::scheduled_task(task).into()
+            }
+            Call::DeleteScheduledTask(params) => {
+                self.conversation()?
+                    .runtime
+                    .scheduled_tasks()
+                    .delete(&params.id)
+                    .await
+                    .map_err(|error| Failure::new("scheduled_task_failed", error))?;
+                st::ScheduledTaskRef {
+                    id: params.id.clone(),
+                }
+                .into()
+            }
+            Call::RunScheduledTaskNow(params) => {
+                let task = self
+                    .conversation()?
+                    .runtime
+                    .scheduled_tasks()
+                    .run_now(&params.id)
+                    .await
+                    .map_err(Self::scheduled_failure)?;
+                Self::scheduled_task(task).into()
+            }
+            Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
+                let update = if let Call::UpdateWorktreeSettings(settings) = request {
+                    Some(settings.clone())
+                } else {
+                    None
+                };
+                (resources
                     .shared
-                    .terminals
-                    .request(session, request)
+                    .worktrees
+                    .settings(update)
                     .await
-                    .map_err(|error| Failure::new("terminal_operation_failed", error))?)
-                .into(),
-                Call::PrepareDictation(params) => {
-                    resources
-                        .dictation
-                        .prepare(session, params.id.clone())
-                        .map_err(|error| Failure::new("dictation_failed", error))?;
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::CancelDictation(params) => {
-                    resources.dictation.cancel(session, &params.id);
-                    agent_protocol::models::Empty {}.into()
-                }
-                Call::Transcribe(params) => (resources
+                    .map_err(|error| Failure::new("worktree_settings_failed", error))?)
+                .into()
+            }
+            Call::ListWorktrees(_) => (self.worktree_list().await?).into(),
+            Call::RemoveWorktree(params) => {
+                let _exclusive = resources.worktree_access.write().await;
+                (self.remove_worktree(params.path.clone()).await?).into()
+            }
+            Call::StartTerminal(params) => (resources
+                .shared
+                .terminals
+                .attach(session, params)
+                .await
+                .map_err(|error| Failure::new("terminal_start_failed", error))?)
+            .into(),
+            Call::WriteTerminal(_)
+            | Call::ResizeTerminal(_)
+            | Call::KillTerminal(_)
+            | Call::DetachTerminal(_)
+            | Call::ClearTerminal(_)
+            | Call::RestartTerminal(_) => (resources
+                .shared
+                .terminals
+                .request(session, request)
+                .await
+                .map_err(|error| Failure::new("terminal_operation_failed", error))?)
+            .into(),
+            Call::PrepareDictation(params) => {
+                resources
                     .dictation
-                    .transcribe(session, params.preparation.as_deref(), &params.audio)
-                    .await
-                    .map_err(|error| Failure::new("dictation_failed", error))?)
-                .into(),
-                Call::ReviewWorkspace(params) => (crate::inspect_workspace(params.cwd.clone())
+                    .prepare(session, params.id.clone())
+                    .map_err(|error| Failure::new("dictation_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::CancelDictation(params) => {
+                resources.dictation.cancel(session, &params.id);
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::Transcribe(params) => (resources
+                .dictation
+                .transcribe(session, params.preparation.as_deref(), &params.audio)
+                .await
+                .map_err(|error| Failure::new("dictation_failed", error))?)
+            .into(),
+            Call::ReviewWorkspace(params) => {
+                (crate::inspect_workspace(params.cwd.clone())
                     .await
                     .map_err(|error| Failure::new("workspace_review_failed", error))?)
-                .into(),
-                Call::ListFiles(_)
-                | Call::ReadFile(_)
-                | Call::WriteFile(_)
-                | Call::Upload(_)
-                | Call::AttachmentPath(_)
-                | Call::Download(_)
-                | Call::ReadVisualization(_) => resources
-                    .shared
-                    .files
-                    .request(session, request.clone())
-                    .await
-                    .map_err(|error| Failure::new("file_operation_failed", error))?,
-                Call::SubscribeVcsStatus(_) | Call::RunStackedAction(_) => {
-                    return Err(Failure::new(
-                        "stream_dispatch_failed",
-                        "Git stream requests must be dispatched as streams.",
-                    ));
-                }
-                _ => {
-                    return Err(Failure::new(
-                        "method_not_found",
-                        format!("unregistered method: {}", request.method()),
-                    ));
-                }
-            };
+                .into()
+            }
+            Call::ListFiles(_)
+            | Call::ReadFile(_)
+            | Call::WriteFile(_)
+            | Call::Upload(_)
+            | Call::AttachmentPath(_)
+            | Call::Download(_)
+            | Call::ReadVisualization(_) => resources
+                .shared
+                .files
+                .request(session, request.clone())
+                .await
+                .map_err(|error| Failure::new("file_operation_failed", error))?,
+            Call::SubscribeVcsStatus(_) | Call::RunStackedAction(_) => {
+                return Err(Failure::new(
+                    "stream_dispatch_failed",
+                    "Git stream requests must be dispatched as streams.",
+                ));
+            }
+            _ => {
+                return Err(Failure::new(
+                    "method_not_found",
+                    format!("unregistered method: {}", request.method()),
+                ));
+            }
+        };
         Ok(response)
     }
     fn project_root(&self, project_id: &str) -> Result<PathBuf, Failure> {
@@ -2809,11 +2878,7 @@ impl HostRpcService {
         links.push(link.clone());
         if let Some(stack) = detail.summary.stack.as_ref() {
             for layer in &stack.layers {
-                let layer_key = PullRequestKey::new(
-                    &params.host,
-                    &params.repository,
-                    layer.number,
-                );
+                let layer_key = PullRequestKey::new(&params.host, &params.repository, layer.number);
                 if layer.number == params.number
                     || links.iter().any(|candidate| candidate.key() == layer_key)
                 {
@@ -3121,7 +3186,7 @@ impl HostRpcService {
             };
             browser + logs
         })
-        .await??;
+        .await?;
         if removed_files > 0 {
             tracing::info!(
                 removed = removed_files,
@@ -3361,9 +3426,7 @@ impl HostRpcService {
         }
         Ok(resources.commands.put(scan))
     }
-    fn spawn_background_consumers(
-        &self,
-    ) -> tokio_util::task::AbortOnDropHandle<()> {
+    fn spawn_background_consumers(&self) -> tokio_util::task::AbortOnDropHandle<()> {
         let service = self.clone();
         let stop = self.inner.resources.background_stop.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
@@ -3385,7 +3448,12 @@ impl HostRpcService {
                         &now,
                         policy.provider_health_refresh_interval_ms,
                     )
-                    && service.inner.resources.background.has_provider_status_demand().await
+                    && service
+                        .inner
+                        .resources
+                        .background
+                        .has_provider_status_demand()
+                        .await
                 {
                     // Record the attempt before starting the read. A failed
                     // provider probe therefore observes the configured cadence
@@ -3401,7 +3469,8 @@ impl HostRpcService {
                         .background
                         .demanded_vcs_workspaces()
                         .await;
-                    last_git_fetch.retain(|cwd, _| demanded.iter().any(|candidate| candidate == cwd));
+                    last_git_fetch
+                        .retain(|cwd, _| demanded.iter().any(|candidate| candidate == cwd));
                     for cwd in demanded {
                         if !background_work_due(
                             last_git_fetch.get(&cwd),
@@ -3417,14 +3486,19 @@ impl HostRpcService {
                             _ = stop.cancelled() => return,
                             result = refresh => result,
                         };
-                        service.inner.resources.background.record_attribution(
-                            "git",
-                            "remote.fetch",
-                            0,
-                            0,
-                            1,
-                            started.elapsed().as_millis() as u64,
-                        ).await;
+                        service
+                            .inner
+                            .resources
+                            .background
+                            .record_attribution(
+                                "git",
+                                "remote.fetch",
+                                0,
+                                0,
+                                1,
+                                started.elapsed().as_millis() as u64,
+                            )
+                            .await;
                         if let Err(error) = result {
                             tracing::debug!(target: "bex", operation = "host.vcs.background_refresh", cwd = %cwd, message = %error);
                         }
@@ -3433,11 +3507,7 @@ impl HostRpcService {
                     last_git_fetch.clear();
                 }
 
-                if background_work_due(
-                    last_resource_sample.as_ref(),
-                    &now,
-                    5_000,
-                ) {
+                if background_work_due(last_resource_sample.as_ref(), &now, 5_000) {
                     last_resource_sample = Some(now);
                     service
                         .inner
@@ -3465,14 +3535,18 @@ impl HostRpcService {
         let logical_read_bytes = serde_json::to_vec(&providers)
             .map(|value| value.len() as u64)
             .unwrap_or(0);
-        self.inner.resources.background.record_attribution(
-            "provider",
-            "health.refresh",
-            logical_read_bytes,
-            0,
-            1,
-            started.elapsed().as_millis() as u64,
-        ).await;
+        self.inner
+            .resources
+            .background
+            .record_attribution(
+                "provider",
+                "health.refresh",
+                logical_read_bytes,
+                0,
+                1,
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
         *self.inner.resources.provider_cache.write().await = Some(ProviderHealthCache {
             refreshed_at: Self::host_now(),
             providers: providers.clone(),
@@ -3574,7 +3648,7 @@ impl HostRpcService {
         let mut custom = Vec::new();
         for (id, config) in settings.provider_instances {
             let Some(base) = builtins
-                .get(&match config.driver {
+                .get(match config.driver {
                     Driver::Codex => "codex",
                     Driver::Claude => "claude",
                 })

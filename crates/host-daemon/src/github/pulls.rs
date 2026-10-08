@@ -1,23 +1,23 @@
 use super::cli::{
-    run_bounded_command, Budget, ChangeRequestState, GhError, GitHubCli, PullRequestRecord,
-    PullRequestListState as CliPullRequestListState, HEAD_BRANCH_PROBE_LIMIT,
-    decode_pull_request, decode_pull_request_entries, scoped_repository,
+    Budget, ChangeRequestState, GhError, GitHubCli, HEAD_BRANCH_PROBE_LIMIT,
+    PullRequestListState as CliPullRequestListState, PullRequestRecord, decode_pull_request,
+    decode_pull_request_entries, run_bounded_command, scoped_repository,
 };
-use base64::Engine as _;
 use agent_domain::{
-    PullRequestAction, PullRequestActor, PullRequestChecksState, PullRequestComment, PullRequestDetail,
-    PullRequestKey, PullRequestLink, PullRequestLinkSource, PullRequestMergeability,
-    PullRequestReviewDecision, PullRequestReviewThread, PullRequestState,
+    PullRequestAction, PullRequestActor, PullRequestChecksState, PullRequestComment,
+    PullRequestDetail, PullRequestKey, PullRequestLink, PullRequestLinkSource,
+    PullRequestMergeability, PullRequestReviewDecision, PullRequestReviewThread, PullRequestState,
     PullRequestSummary, Timestamp,
 };
 use agent_protocol::pull_requests::{
     CloneRepository, GetPullRequestDiff, GetPullRequestDiffFileContents, ListPullRequests,
     PullRequestDiff, PullRequestDiffChangeType, PullRequestDiffFile, PullRequestDiffFileContents,
-    PullRequestFile, PullRequestList, PullRequestListState, PullRequestRef,
-    PullRequestMergeMethod, PullRequestReviewVerdict, PullRequestStackHead, SourceControlAuth,
-    SourceControlDiscovery, SourceControlRepository,
+    PullRequestFile, PullRequestList, PullRequestListState, PullRequestMergeMethod, PullRequestRef,
+    PullRequestReviewVerdict, PullRequestStackHead, SourceControlAuth, SourceControlDiscovery,
+    SourceControlRepository,
 };
 use agent_runtime::PullRequestStore;
+use base64::Engine as _;
 use serde_json::Value;
 use std::{path::Path, time::Duration};
 
@@ -101,14 +101,18 @@ fn stack_rebase_query(processed: &[String]) -> String {
 
 fn repository_parts(repository: &str) -> Result<(&str, &str), GhError> {
     let Some((owner, name)) = repository.split_once('/') else {
-        return Err(GhError::Decode("GitHub returned an invalid repository reference."));
+        return Err(GhError::Decode(
+            "GitHub returned an invalid repository reference.",
+        ));
     };
     if owner.trim().is_empty()
         || name.trim().is_empty()
         || name.contains('/')
         || owner.contains('/')
     {
-        return Err(GhError::Decode("GitHub returned an invalid repository reference."));
+        return Err(GhError::Decode(
+            "GitHub returned an invalid repository reference.",
+        ));
     }
     Ok((owner, name))
 }
@@ -124,25 +128,29 @@ fn check_stack_permissions(value: &Value, numbers: &[u64]) -> Result<(), GhError
     let data = value
         .get("data")
         .and_then(Value::as_object)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
-    let repository = data
-        .get("repository")
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack permission response.",
+        ))?;
+    let repository = data.get("repository").ok_or(GhError::Decode(
+        "GitHub returned an unreadable stack permission response.",
+    ))?;
     let Some(repository) = repository.as_object() else {
         return Err(GhError::StackPermission);
     };
     for number in numbers {
         let key = format!("pr{number}");
-        let pull_request = repository
-            .get(&key)
-            .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+        let pull_request = repository.get(&key).ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack permission response.",
+        ))?;
         let Some(pull_request) = pull_request.as_object() else {
             return Err(GhError::StackPermission);
         };
         let maintainer_can_modify = pull_request
             .get("maintainerCanModify")
             .and_then(Value::as_bool)
-            .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+            .ok_or(GhError::Decode(
+                "GitHub returned an unreadable stack permission response.",
+            ))?;
         let Some(head_repository) = pull_request
             .get("headRepository")
             .and_then(Value::as_object)
@@ -183,11 +191,16 @@ fn reject_graphql_errors(value: &Value, message: &'static str) -> Result<(), GhE
 }
 
 fn decode_rebase_probe(value: &Value) -> Result<RebaseProbe, GhError> {
-    reject_graphql_errors(value, "GitHub returned an unreadable stack rebase response.")?;
+    reject_graphql_errors(
+        value,
+        "GitHub returned an unreadable stack rebase response.",
+    )?;
     let data = value
         .get("data")
         .and_then(Value::as_object)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase response.",
+        ))?;
     let processed = match data.get("processed") {
         None => None,
         Some(Value::Array(values)) => Some(
@@ -211,23 +224,31 @@ fn decode_rebase_probe(value: &Value) -> Result<RebaseProbe, GhError> {
     let repository = data
         .get("repository")
         .and_then(Value::as_object)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase response.",
+        ))?;
     let pull_request = repository
         .get("pullRequest")
         .and_then(Value::as_object)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase response.",
+        ))?;
     let id = pull_request
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase response.",
+        ))?;
     let head_sha = pull_request
         .get("headRefOid")
         .and_then(Value::as_str)
         .filter(|sha| !sha.trim().is_empty())
         .map(str::to_owned)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase response.",
+        ))?;
     let behind_by = pull_request
         .get("baseRef")
         .and_then(Value::as_object)
@@ -235,7 +256,9 @@ fn decode_rebase_probe(value: &Value) -> Result<RebaseProbe, GhError> {
         .and_then(Value::as_object)
         .and_then(|compare| compare.get("behindBy"))
         .and_then(Value::as_i64)
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase response.",
+        ))?;
     Ok(RebaseProbe {
         processed,
         id,
@@ -270,7 +293,9 @@ fn merge_status(value: &Value) -> Result<(&str, Option<&str>), GhError> {
         .get("status")
         .and_then(Value::as_str)
         .zip(value.get("details").and_then(Value::as_object))
-        .ok_or(GhError::Decode("GitHub returned an unreadable stack merge response."))?;
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack merge response.",
+        ))?;
     let uuid = merge
         .1
         .get("uuid")
@@ -288,9 +313,9 @@ struct DecodedDiffPage {
 }
 
 fn decode_diff_page(value: &Value, page: usize) -> Result<DecodedDiffPage, GhError> {
-    let entries = value
-        .as_array()
-        .ok_or(GhError::Decode("GitHub returned invalid pull request file JSON."))?;
+    let entries = value.as_array().ok_or(GhError::Decode(
+        "GitHub returned invalid pull request file JSON.",
+    ))?;
     let mut truncated = false;
     let mut remaining_patch_bytes = MAX_DIFF_PAGE_BYTES;
     let mut files = Vec::new();
@@ -337,11 +362,9 @@ fn decode_diff_page(value: &Value, page: usize) -> Result<DecodedDiffPage, GhErr
                     patch.to_owned()
                 }
             });
-        remaining_patch_bytes = remaining_patch_bytes
-            .saturating_sub(patch.as_ref().map_or(0, String::len));
-        if patch
-            .as_deref()
-            .is_none_or(|patch| patch.is_empty())
+        remaining_patch_bytes =
+            remaining_patch_bytes.saturating_sub(patch.as_ref().map_or(0, String::len));
+        if patch.as_deref().is_none_or(|patch| patch.is_empty())
             && additions.saturating_add(deletions) > 0
         {
             truncated = true;
@@ -351,7 +374,12 @@ fn decode_diff_page(value: &Value, page: usize) -> Result<DecodedDiffPage, GhErr
                 deletions,
             });
         }
-        patch_sections.push(diff_file_section(path, old_path.as_deref(), &status, patch.as_deref()));
+        patch_sections.push(diff_file_section(
+            path,
+            old_path.as_deref(),
+            &status,
+            patch.as_deref(),
+        ));
         files.push(PullRequestDiffFile {
             path: path.to_owned(),
             old_path,
@@ -418,7 +446,11 @@ impl GitHubPullRequestService {
             args.extend(["--repo", repository]);
         }
         args.extend(["--state", state, "--limit", &limit, "--json", PR_FIELDS]);
-        if let Some(query) = request.query.as_deref().filter(|query| !query.trim().is_empty()) {
+        if let Some(query) = request
+            .query
+            .as_deref()
+            .filter(|query| !query.trim().is_empty())
+        {
             args.extend(["--search", query]);
         }
         let value = cli.run_json(cwd, &args, Budget::default()).await?;
@@ -435,7 +467,14 @@ impl GitHubPullRequestService {
                 PullRequestListState::Closed => matches!(row.state, ChangeRequestState::Closed),
                 PullRequestListState::Merged => matches!(row.state, ChangeRequestState::Merged),
             })
-            .map(|row| summary_from_record(row, project_id, repo.unwrap_or_default(), observed_at.clone()))
+            .map(|row| {
+                summary_from_record(
+                    row,
+                    project_id,
+                    repo.unwrap_or_default(),
+                    observed_at.clone(),
+                )
+            })
             .collect();
         Ok(PullRequestList {
             entries,
@@ -477,14 +516,21 @@ impl GitHubPullRequestService {
                 pull_request_url_parts(&record.url)
                     .1
                     .as_deref()
-                    .is_some_and(|candidate| agent_domain::normalize_repository(candidate) == wanted)
+                    .is_some_and(|candidate| {
+                        agent_domain::normalize_repository(candidate) == wanted
+                    })
             })
         });
         let Some(record) = record else {
             return Ok(None);
         };
         let observed_at = now();
-        let summary = summary_from_record(record, project_id, repository.unwrap_or_default(), observed_at.clone());
+        let summary = summary_from_record(
+            record,
+            project_id,
+            repository.unwrap_or_default(),
+            observed_at.clone(),
+        );
         Ok(Some(PullRequestLink {
             host: summary.key.host.clone(),
             repository: summary.key.repository.clone(),
@@ -540,18 +586,24 @@ impl GitHubPullRequestService {
         summary.checks = checks(value.get("statusCheckRollup"));
         summary.checks_state = checks_state(value.get("statusCheckRollup"));
         summary.mergeability = mergeability(value.get("mergeable"));
-        summary.stack = self
-            .stack(cwd, reference)
-            .await
-            .unwrap_or(None);
+        summary.stack = self.stack(cwd, reference).await.unwrap_or(None);
         summary.labels = value
             .get("labels")
             .and_then(|value| value.as_array())
             .into_iter()
             .flatten()
-            .filter_map(|label| label.get("name").and_then(|name| name.as_str()).map(str::to_owned))
+            .filter_map(|label| {
+                label
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_owned)
+            })
             .collect();
-        let body = value.get("body").and_then(|value| value.as_str()).unwrap_or_default().to_owned();
+        let body = value
+            .get("body")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
         let review_threads = self
             .review_threads(cwd, reference)
             .await
@@ -652,7 +704,10 @@ impl GitHubPullRequestService {
                     .flatten()
                     .enumerate()
                     .filter_map(|(comment_index, value)| {
-                        let body = value.get("body").and_then(|value| value.as_str())?.to_owned();
+                        let body = value
+                            .get("body")
+                            .and_then(|value| value.as_str())?
+                            .to_owned();
                         let created_at = value
                             .get("createdAt")
                             .and_then(|value| value.as_str())
@@ -803,11 +858,15 @@ impl GitHubPullRequestService {
                 },
             )
             .await?;
-        let revisions = revision_output.stdout.trim_end().split('\t').collect::<Vec<_>>();
+        let revisions = revision_output
+            .stdout
+            .trim_end()
+            .split('\t')
+            .collect::<Vec<_>>();
         let base_ref = revisions.first().copied().unwrap_or_default();
         let head_ref = revisions.get(1).copied().unwrap_or_default();
-        let root_new_file = matches!(request.change_type, PullRequestDiffChangeType::New)
-            && base_ref.is_empty();
+        let root_new_file =
+            matches!(request.change_type, PullRequestDiffChangeType::New) && base_ref.is_empty();
         if revision_output.stdout_truncated
             || revision_output.stdout_invalid_utf8
             || revisions.len() != 2
@@ -819,7 +878,7 @@ impl GitHubPullRequestService {
                 "GitHub returned no usable diff file revisions.",
             ));
         }
-        let read_file = |revision: &str, path: &str| async move {
+        let read_file = |revision: String, path: String| async move {
             let encoded_path = path
                 .split('/')
                 .map(percent_encode_path_segment)
@@ -846,20 +905,23 @@ impl GitHubPullRequestService {
                     },
                 )
                 .await?;
-            if output.stdout_truncated || output.stdout_invalid_utf8 || output.stdout.contains('\0') {
-                return Err(GhError::Decode("GitHub diff file contents are unavailable."));
+            if output.stdout_truncated || output.stdout_invalid_utf8 || output.stdout.contains('\0')
+            {
+                return Err(GhError::Decode(
+                    "GitHub diff file contents are unavailable.",
+                ));
             }
             Ok::<String, GhError>(output.stdout)
         };
         let old_contents = if matches!(request.change_type, PullRequestDiffChangeType::New) {
             String::new()
         } else {
-            read_file(base_ref, &request.old_path).await?
+            read_file(base_ref.to_owned(), request.old_path.clone()).await?
         };
         let new_contents = if matches!(request.change_type, PullRequestDiffChangeType::Deleted) {
             String::new()
         } else {
-            read_file(head_ref, &request.new_path).await?
+            read_file(head_ref.to_owned(), request.new_path.clone()).await?
         };
         Ok(PullRequestDiffFileContents {
             old_contents,
@@ -879,7 +941,11 @@ impl GitHubPullRequestService {
         let host = reference.host.as_deref().unwrap_or("github.com");
         let value = match self
             .cli()?
-            .run_json(cwd, &["api", "--hostname", host, &endpoint], Budget::default())
+            .run_json(
+                cwd,
+                &["api", "--hostname", host, &endpoint],
+                Budget::default(),
+            )
             .await
         {
             Ok(value) => value,
@@ -893,7 +959,10 @@ impl GitHubPullRequestService {
         else {
             return Ok(None);
         };
-        let number = stack.get("number").and_then(|value| value.as_u64()).unwrap_or(0);
+        let number = stack
+            .get("number")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
         if number == 0 {
             return Ok(None);
         }
@@ -995,7 +1064,10 @@ impl GitHubPullRequestService {
                 },
             )
             .await?;
-        let encoded = value.get("content").and_then(|value| value.as_str()).unwrap_or_default();
+        let encoded = value
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
         let mut data = base64::engine::general_purpose::STANDARD
             .decode(encoded.replace('\n', ""))
             .unwrap_or_else(|_| encoded.as_bytes().to_vec());
@@ -1026,17 +1098,41 @@ impl GitHubPullRequestService {
             PullRequestMergeMethod::Rebase => "--rebase",
         };
         let args: Vec<&str> = match action {
-            PullRequestAction::Merge => vec!["pr", "merge", &number, "--repo", &repository, merge_method],
+            PullRequestAction::Merge => {
+                vec!["pr", "merge", &number, "--repo", &repository, merge_method]
+            }
             PullRequestAction::MarkReady => vec!["pr", "ready", &number, "--repo", &repository],
-            PullRequestAction::MarkDraft => vec!["pr", "ready", &number, "--repo", &repository, "--undo"],
+            PullRequestAction::MarkDraft => {
+                vec!["pr", "ready", &number, "--repo", &repository, "--undo"]
+            }
             PullRequestAction::Close => vec!["pr", "close", &number, "--repo", &repository],
             PullRequestAction::Reopen => vec!["pr", "reopen", &number, "--repo", &repository],
-            PullRequestAction::UpdateBranch => vec!["pr", "update-branch", &number, "--repo", &repository],
-            PullRequestAction::EnableAutoMerge => vec!["pr", "merge", &number, "--repo", &repository, "--auto", merge_method],
-            PullRequestAction::DisableAutoMerge => vec!["pr", "merge", &number, "--repo", &repository, "--disable-auto"],
+            PullRequestAction::UpdateBranch => {
+                vec!["pr", "update-branch", &number, "--repo", &repository]
+            }
+            PullRequestAction::EnableAutoMerge => vec![
+                "pr",
+                "merge",
+                &number,
+                "--repo",
+                &repository,
+                "--auto",
+                merge_method,
+            ],
+            PullRequestAction::DisableAutoMerge => vec![
+                "pr",
+                "merge",
+                &number,
+                "--repo",
+                &repository,
+                "--disable-auto",
+            ],
             PullRequestAction::Revert => vec!["pr", "revert", &number, "--repo", &repository],
         };
-        self.cli()?.run(cwd, &args, Budget::default()).await.map(|_| ())
+        self.cli()?
+            .run(cwd, &args, Budget::default())
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn stack_action(
@@ -1049,7 +1145,10 @@ impl GitHubPullRequestService {
         merge_method: Option<PullRequestMergeMethod>,
     ) -> Result<(), GhError> {
         ensure_github_reference(reference)?;
-        if !matches!(action, PullRequestAction::Merge | PullRequestAction::UpdateBranch) {
+        if !matches!(
+            action,
+            PullRequestAction::Merge | PullRequestAction::UpdateBranch
+        ) {
             return Err(GhError::StackUnsupported);
         }
         let stack = self
@@ -1062,8 +1161,7 @@ impl GitHubPullRequestService {
             .position(|layer| layer.number == reference.number)
             .ok_or(GhError::StackChanged)?;
         if stack.number != stack_number
-            || (action == PullRequestAction::UpdateBranch
-                && target_index + 1 != stack.layers.len())
+            || (action == PullRequestAction::UpdateBranch && target_index + 1 != stack.layers.len())
         {
             return Err(GhError::StackChanged);
         }
@@ -1086,17 +1184,18 @@ impl GitHubPullRequestService {
                 let Some(head_sha) = layer.head_sha.as_deref() else {
                     return true;
                 };
-                !expected_heads
-                    .iter()
-                    .any(|expected| {
-                        expected.number == layer.number
-                            && expected.head_sha.as_str() == head_sha
-                    })
+                !expected_heads.iter().any(|expected| {
+                    expected.number == layer.number && expected.head_sha.as_str() == head_sha
+                })
             })
         {
             return Err(GhError::StackChanged);
         }
-        if open.is_empty() || open.iter().any(|layer| layer.state != PullRequestState::Open) {
+        if open.is_empty()
+            || open
+                .iter()
+                .any(|layer| layer.state != PullRequestState::Open)
+        {
             return Err(GhError::StackUnsupported);
         }
         let host = reference.host.as_deref().unwrap_or("github.com");
@@ -1277,10 +1376,16 @@ impl GitHubPullRequestService {
                 "merged" | "enqueued" => return Ok(()),
                 "failed" => return Err(GhError::StackMergeRejected),
                 "pending" => {}
-                _ => return Err(GhError::Decode("GitHub returned an unreadable stack merge response.")),
+                _ => {
+                    return Err(GhError::Decode(
+                        "GitHub returned an unreadable stack merge response.",
+                    ));
+                }
             }
             let Some(uuid) = uuid else {
-                return Err(GhError::Decode("GitHub returned an unreadable stack merge response."));
+                return Err(GhError::Decode(
+                    "GitHub returned an unreadable stack merge response.",
+                ));
             };
             if tokio::time::Instant::now() >= deadline {
                 return Err(GhError::StackMergePending);
@@ -1314,7 +1419,8 @@ impl GitHubPullRequestService {
         let host = reference.host.as_deref().unwrap_or("github.com");
         let repository = scoped_repository(Some(host), &reference.repository);
         let number = reference.number.to_string();
-        let file = tempfile::NamedTempFile::new().map_err(|_| GhError::Command { exit_code: None })?;
+        let file =
+            tempfile::NamedTempFile::new().map_err(|_| GhError::Command { exit_code: None })?;
         std::fs::write(file.path(), body).map_err(|_| GhError::Command { exit_code: None })?;
         let body_path = file.path().to_string_lossy().into_owned();
         let verdict = match verdict {
@@ -1358,7 +1464,9 @@ impl GitHubPullRequestService {
                 host,
                 authenticated: false,
                 account: None,
-                message: Some("Authentication for this provider is not handled by the GitHub CLI.".into()),
+                message: Some(
+                    "Authentication for this provider is not handled by the GitHub CLI.".into(),
+                ),
                 stale: !fresh,
             };
         }
@@ -1402,16 +1510,12 @@ impl GitHubPullRequestService {
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             .filter(|branch| !branch.is_empty());
-        let (host, repository) = remote
-            .as_deref()
-            .map(parse_remote)
-            .unwrap_or((None, None));
+        let (host, repository) = remote.as_deref().map(parse_remote).unwrap_or((None, None));
         let provider = host.as_deref().map(source_control_provider);
-        let auth = (provider.as_deref() == Some("github"))
-            .then(|| self.auth(cwd, host.as_deref(), fresh));
-        let auth = match auth {
-            Some(auth) => Some(auth.await),
-            None => None,
+        let auth = if provider.as_deref() == Some("github") {
+            Some(self.auth(cwd, host.as_deref(), fresh).await)
+        } else {
+            None
         };
         let repository_info = if provider.as_deref() == Some("github") {
             if let (Some(repository), Some(cli)) = (repository.as_deref(), self.cli.as_ref()) {
@@ -1475,7 +1579,6 @@ impl GitHubPullRequestService {
             Err(super::cli::classify_failure(&output.stderr, status.code()))
         }
     }
-
 }
 
 fn truncate_text(value: &str, max_bytes: usize) -> String {
@@ -1538,7 +1641,12 @@ fn quote_git_patch_path(path: &str) -> String {
     }
 }
 
-fn diff_file_section(path: &str, old_path: Option<&str>, status: &str, patch: Option<&str>) -> String {
+fn diff_file_section(
+    path: &str,
+    old_path: Option<&str>,
+    status: &str,
+    patch: Option<&str>,
+) -> String {
     let old_path = (status == "renamed")
         .then_some(old_path.unwrap_or(path))
         .unwrap_or(path);
@@ -1578,13 +1686,28 @@ fn diff_file_section(path: &str, old_path: Option<&str>, status: &str, patch: Op
     section
 }
 
-fn summary_from_record(record: PullRequestRecord, project_id: &str, repository: &str, observed_at: Timestamp) -> PullRequestSummary {
+fn summary_from_record(
+    record: PullRequestRecord,
+    project_id: &str,
+    repository: &str,
+    observed_at: Timestamp,
+) -> PullRequestSummary {
     let (url_host, url_repository) = pull_request_url_parts(&record.url);
     let host = url_host.unwrap_or_else(|| "github.com".into());
     let repository = url_repository.as_deref().unwrap_or(repository);
-    let updated_at = record.updated_at.as_deref().and_then(|value| Timestamp::parse(value).ok()).unwrap_or_else(|| observed_at.clone());
-    let closed_at = record.closed_at.as_deref().and_then(|value| Timestamp::parse(value).ok());
-    let merged_at = record.merged_at.as_deref().and_then(|value| Timestamp::parse(value).ok());
+    let updated_at = record
+        .updated_at
+        .as_deref()
+        .and_then(|value| Timestamp::parse(value).ok())
+        .unwrap_or_else(|| observed_at.clone());
+    let closed_at = record
+        .closed_at
+        .as_deref()
+        .and_then(|value| Timestamp::parse(value).ok());
+    let merged_at = record
+        .merged_at
+        .as_deref()
+        .and_then(|value| Timestamp::parse(value).ok());
     let state = match record.state {
         ChangeRequestState::Open => PullRequestState::Open,
         ChangeRequestState::Closed => PullRequestState::Closed,
@@ -1605,7 +1728,13 @@ fn summary_from_record(record: PullRequestRecord, project_id: &str, repository: 
         merged_at,
         updated_at,
         observed_at,
-        author: record.head_repository_owner_login.map(|login| PullRequestActor { login, display_name: None, avatar_url: None }),
+        author: record
+            .head_repository_owner_login
+            .map(|login| PullRequestActor {
+                login,
+                display_name: None,
+                avatar_url: None,
+            }),
         additions: None,
         deletions: None,
         changed_files: None,
@@ -1629,8 +1758,7 @@ fn pull_request_url_parts(url: &str) -> (Option<String>, Option<String>) {
         .flatten()
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    let repository = (segments.len() >= 4
-        && segments[2].eq_ignore_ascii_case("pull"))
+    let repository = (segments.len() >= 4 && segments[2].eq_ignore_ascii_case("pull"))
         .then(|| format!("{}/{}", segments[0], segments[1]));
     (host, repository)
 }
@@ -1666,7 +1794,10 @@ fn comments(value: Option<&serde_json::Value>, fallback: Timestamp) -> Vec<PullR
         .flatten()
         .enumerate()
         .filter_map(|(index, value)| {
-            let body = value.get("body").and_then(|value| value.as_str())?.to_owned();
+            let body = value
+                .get("body")
+                .and_then(|value| value.as_str())?
+                .to_owned();
             let created_at = value
                 .get("createdAt")
                 .and_then(|value| value.as_str())
@@ -1685,7 +1816,10 @@ fn comments(value: Option<&serde_json::Value>, fallback: Timestamp) -> Vec<PullR
                     .get("updatedAt")
                     .and_then(|value| value.as_str())
                     .and_then(|value| Timestamp::parse(value).ok()),
-                url: value.get("url").and_then(|value| value.as_str()).map(str::to_owned),
+                url: value
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
             })
         })
         .collect()
@@ -1714,7 +1848,9 @@ fn checks_state(value: Option<&serde_json::Value>) -> PullRequestChecksState {
             .unwrap_or_default()
             .to_ascii_uppercase();
         match state.as_str() {
-            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" => return PullRequestChecksState::Failure,
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" => {
+                return PullRequestChecksState::Failure;
+            }
             "PENDING" | "IN_PROGRESS" | "QUEUED" => pending = true,
             _ => {}
         }
@@ -1753,7 +1889,9 @@ fn checks(value: Option<&serde_json::Value>) -> Vec<agent_domain::PullRequestChe
                 name,
                 state: match state.as_str() {
                     "SUCCESS" => PullRequestChecksState::Success,
-                    "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" => PullRequestChecksState::Failure,
+                    "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" => {
+                        PullRequestChecksState::Failure
+                    }
                     "PENDING" | "IN_PROGRESS" | "QUEUED" => PullRequestChecksState::Pending,
                     "NEUTRAL" => PullRequestChecksState::Neutral,
                     "SKIPPED" => PullRequestChecksState::Skipped,
@@ -1786,14 +1924,22 @@ fn mergeability(value: Option<&serde_json::Value>) -> PullRequestMergeability {
 }
 
 fn now() -> Timestamp {
-    Timestamp::from_millis(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as i64)).expect("the system clock is within the supported timestamp range")
+    Timestamp::from_millis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64),
+    )
+    .expect("the system clock is within the supported timestamp range")
 }
 
 fn parse_remote(remote: &str) -> (Option<String>, Option<String>) {
     if let Some((_, rest)) = remote.split_once('@')
         && let Some((host, path)) = rest.split_once(':')
     {
-        return (Some(host.to_ascii_lowercase()), normalize_repository_path(path));
+        return (
+            Some(host.to_ascii_lowercase()),
+            normalize_repository_path(path),
+        );
     }
     let Ok(url) = url::Url::parse(remote) else {
         return (None, None);
@@ -1873,7 +2019,11 @@ mod tests {
         assert_eq!(decoded.files.len(), DIFF_PAGE_SIZE);
         assert_eq!(decoded.next_cursor.as_deref(), Some("2"));
         assert!(!decoded.truncated);
-        assert!(decoded.patch.contains("diff --git a/src/file-0.rs b/src/file-0.rs"));
+        assert!(
+            decoded
+                .patch
+                .contains("diff --git a/src/file-0.rs b/src/file-0.rs")
+        );
 
         let omitted = decode_diff_page(
             &serde_json::json!([{
@@ -1903,10 +2053,26 @@ mod tests {
             1,
         )
         .unwrap();
-        assert!(decoded.patch.contains("new file mode 100644\n--- /dev/null\n+++ b/src/new.ts"));
-        assert!(decoded.patch.contains("deleted file mode 100644\n--- a/src/gone.ts\n+++ /dev/null"));
-        assert!(decoded.patch.contains("rename from src/old name.ts\nrename to src/new name.ts"));
-        assert!(decoded.patch.contains("diff --git \"a/tab\\tname.ts\" \"b/tab\\tname.ts\""));
+        assert!(
+            decoded
+                .patch
+                .contains("new file mode 100644\n--- /dev/null\n+++ b/src/new.ts")
+        );
+        assert!(
+            decoded
+                .patch
+                .contains("deleted file mode 100644\n--- a/src/gone.ts\n+++ /dev/null")
+        );
+        assert!(
+            decoded
+                .patch
+                .contains("rename from src/old name.ts\nrename to src/new name.ts")
+        );
+        assert!(
+            decoded
+                .patch
+                .contains("diff --git \"a/tab\\tname.ts\" \"b/tab\\tname.ts\"")
+        );
         assert_eq!(decoded.files[3].patch, None);
         assert!(!decoded.truncated);
     }
@@ -1917,11 +2083,20 @@ mod tests {
             {"name": "unit", "conclusion": "SUCCESS"},
             {"name": "lint", "conclusion": "FAILURE"}
         ]);
-        assert_eq!(checks_state(Some(&failure)), PullRequestChecksState::Failure);
+        assert_eq!(
+            checks_state(Some(&failure)),
+            PullRequestChecksState::Failure
+        );
         let pending = serde_json::json!([{"name": "unit", "status": "IN_PROGRESS"}]);
-        assert_eq!(checks_state(Some(&pending)), PullRequestChecksState::Pending);
+        assert_eq!(
+            checks_state(Some(&pending)),
+            PullRequestChecksState::Pending
+        );
         let success = serde_json::json!([{"name": "unit", "conclusion": "SUCCESS"}]);
-        assert_eq!(checks_state(Some(&success)), PullRequestChecksState::Success);
+        assert_eq!(
+            checks_state(Some(&success)),
+            PullRequestChecksState::Success
+        );
     }
 
     #[test]
@@ -1983,10 +2158,12 @@ mod tests {
             .unwrap(),
             "rebased"
         );
-        assert!(decode_rebase_mutation(&serde_json::json!({
-            "errors": [{"message": "permission denied"}]
-        }))
-        .is_err());
+        assert!(
+            decode_rebase_mutation(&serde_json::json!({
+                "errors": [{"message": "permission denied"}]
+            }))
+            .is_err()
+        );
     }
 
     // githubStackActions.test.ts: merge queue acceptance, later rejection, malformed responses,
@@ -2008,9 +2185,17 @@ mod tests {
         );
         assert_eq!(
             merge_status(&serde_json::json!({"status": "merged"})),
-            Err(GhError::Decode("GitHub returned an unreadable stack merge response."))
+            Err(GhError::Decode(
+                "GitHub returned an unreadable stack merge response."
+            ))
         );
-        assert_eq!(percent_encode_path_segment("operation/one"), "operation%2Fone");
-        assert_eq!(percent_encode_path_segment("docs/a?b#c"), "docs%2Fa%3Fb%23c");
+        assert_eq!(
+            percent_encode_path_segment("operation/one"),
+            "operation%2Fone"
+        );
+        assert_eq!(
+            percent_encode_path_segment("docs/a?b#c"),
+            "docs%2Fa%3Fb%23c"
+        );
     }
 }

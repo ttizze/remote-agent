@@ -5,10 +5,106 @@ use agent_protocol::{
     browser::*,
     diagnostics::*,
     operations::*,
+    preview::*,
     usage::{
         ExternalUsage, PriceOverride, ResetCredits, Resolution, WindowKind as UsageWindowKind,
     },
 };
+
+#[uniffi::remote(Enum)]
+enum PreviewAppearance {
+    System,
+    Light,
+    Dark,
+}
+#[uniffi::remote(Enum)]
+enum PreviewViewportPreset {
+    IphoneSe,
+    IphoneXr,
+    Iphone12Pro,
+    Iphone14ProMax,
+    Pixel7,
+    SamsungGalaxyS8Plus,
+    SamsungGalaxyS20Ultra,
+    IpadMini,
+    IpadAir,
+    IpadPro,
+    SurfacePro7,
+    SurfaceDuo,
+    GalaxyZFold5,
+    AsusZenbookFold,
+    SamsungGalaxyA5171,
+    NestHub,
+    NestHubMax,
+}
+#[uniffi::remote(Enum)]
+enum PreviewViewportSetting {
+    Fill,
+    Freeform {
+        width: u32,
+        height: u32,
+    },
+    Preset {
+        preset: PreviewViewportPreset,
+        width: u32,
+        height: u32,
+    },
+}
+#[uniffi::remote(Enum)]
+enum PreviewZoom {
+    X25,
+    X33,
+    X50,
+    X67,
+    X75,
+    X80,
+    X90,
+    X100,
+    X110,
+    X125,
+    X150,
+    X175,
+    X200,
+    X250,
+    X300,
+    X400,
+    X500,
+}
+#[uniffi::remote(Enum)]
+enum ResponseStreamingMode {
+    Turn,
+    Paragraph,
+}
+#[uniffi::remote(Enum)]
+enum ThreadEnvMode {
+    Local,
+    Worktree,
+}
+#[uniffi::remote(Enum)]
+enum WorktreeSubmodules {
+    Recursive,
+    TopLevel,
+    None,
+}
+#[uniffi::remote(Enum)]
+enum PullRequestMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+#[uniffi::remote(Enum)]
+enum SourceControlWritingStyleMode {
+    RepoConventions,
+    ConventionalCommits,
+    Custom,
+}
+#[uniffi::remote(Enum)]
+enum BackgroundActivityProfileSelection {
+    Balanced,
+    Performance,
+    BatterySaver,
+    Custom,
+}
 #[uniffi::remote(Enum)]
 enum UpdateChannel {
     Nightly,

@@ -1,7 +1,7 @@
 //! Owns the persistent BEX profile and conversation-scoped shared pages.
 mod cdp;
-mod recording;
 pub mod mcp;
+mod recording;
 
 use agent_protocol::browser::{
     BrowserAction, BrowserFrame, BrowserRequest, BrowserTab, HEIGHT, WIDTH,
@@ -295,8 +295,8 @@ impl Browser {
                 let _ = tokio::fs::remove_file(path).await;
             }
             done.send_replace(Some(result));
-            let externally_detached = monitor_external_detached
-                .load(std::sync::atomic::Ordering::Acquire);
+            let externally_detached =
+                monitor_external_detached.load(std::sync::atomic::Ordering::Acquire);
             if externally_detached {
                 let mut state = browser_state.lock().await;
                 forget_detached_preview_target(&mut state, &monitor_thread, &monitor_tab_id);
@@ -391,9 +391,7 @@ impl Browser {
         self.stop_preview_recording_with_timeout(
             thread,
             tab_id,
-            Duration::from_secs(
-                agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
-            ),
+            Duration::from_secs(agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS),
             None,
         )
         .await
@@ -408,9 +406,7 @@ impl Browser {
         self.stop_preview_recording_with_timeout(
             thread,
             tab_id,
-            Duration::from_secs(
-                agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
-            ),
+            Duration::from_secs(agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS),
             Some(request_cancel),
         )
         .await
@@ -496,7 +492,7 @@ impl Browser {
                 return Err(error);
             }
         }?;
-        result
+        Ok(result)
     }
 
     async fn completed_recording(&self, key: &RecordingKey) -> Option<RecordingArtifact> {
@@ -582,7 +578,9 @@ impl Browser {
     ) {
         let (cancel, abort) = {
             let mut recordings = self.recordings.lock().await;
-            let Some(active) = recordings.get_mut(key) else { return; };
+            let Some(active) = recordings.get_mut(key) else {
+                return;
+            };
             active.stopping = true;
             (active.cancel.clone(), active.abort.clone())
         };
@@ -609,7 +607,9 @@ impl Browser {
         match (tabs.next(), tabs.next()) {
             (Some(tab), None) => Ok(tab),
             (None, _) => Err("no Preview recording is active for this conversation".into()),
-            (Some(_), Some(_)) => Err("multiple Preview recordings are active; specify tab_id".into()),
+            (Some(_), Some(_)) => {
+                Err("multiple Preview recordings are active; specify tab_id".into())
+            }
         }
     }
 
@@ -641,11 +641,19 @@ impl Browser {
     }
     pub async fn shutdown(&self) {
         self.stop.cancel();
-        let keys = self.recordings.lock().await.keys().cloned().collect::<Vec<_>>();
+        let keys = self
+            .recordings
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         for key in keys {
             let (mut done, mut startup) = {
                 let mut recordings = self.recordings.lock().await;
-                let Some(active) = recordings.get_mut(&key) else { continue; };
+                let Some(active) = recordings.get_mut(&key) else {
+                    continue;
+                };
                 active.stopping = true;
                 (active.done.subscribe(), active.startup.subscribe())
             };
@@ -819,10 +827,8 @@ impl Browser {
         page.active = id.clone();
         page.viewports.insert(id.clone(), (width, height));
         page.preview_tabs.insert(page.active.clone());
-        page.preview_settings.insert(
-            page.active.clone(),
-            (appearance, zoom),
-        );
+        page.preview_settings
+            .insert(page.active.clone(), (appearance, zoom));
         let session = {
             let chrome = state.chrome.as_mut().unwrap();
             chrome.attach(&id, width, height).await?
@@ -833,7 +839,9 @@ impl Browser {
             chrome.set_zoom(&session, zoom).await?;
         }
         if let Some(url) = url {
-            let action = BrowserAction::Navigate { url: url.to_owned() };
+            let action = BrowserAction::Navigate {
+                url: url.to_owned(),
+            };
             Self::action(&mut state, thread, &action).await?;
         }
         Self::frame(&mut state, thread).await
@@ -920,7 +928,8 @@ impl Browser {
             let session = chrome.attach(&active, viewport.0, viewport.1).await?;
             chrome.set_appearance(&session, appearance).await?;
         }
-        state.pages
+        state
+            .pages
             .get_mut(thread)
             .unwrap()
             .preview_settings
@@ -951,7 +960,8 @@ impl Browser {
             let session = chrome.attach(&active, viewport.0, viewport.1).await?;
             chrome.set_zoom(&session, zoom).await?;
         }
-        state.pages
+        state
+            .pages
             .get_mut(thread)
             .unwrap()
             .preview_settings
@@ -1014,7 +1024,9 @@ impl Browser {
         if let Err(error) = close_result {
             return Err(match stop_result {
                 Some(Err(stop_error)) => {
-                    format!("closing Preview tab failed: {error}; recording stop failed: {stop_error}")
+                    format!(
+                        "closing Preview tab failed: {error}; recording stop failed: {stop_error}"
+                    )
                 }
                 _ => error,
             });
@@ -1074,13 +1086,10 @@ impl Browser {
                         .get(&target.target_id)
                         .copied()
                         .unwrap_or((WIDTH, HEIGHT));
-                    let (appearance, zoom) = settings
-                        .get(&target.target_id)
-                        .copied()
-                        .unwrap_or((
-                            agent_protocol::preview::PreviewAppearance::System,
-                            agent_protocol::preview::PreviewZoom::X100,
-                        ));
+                    let (appearance, zoom) = settings.get(&target.target_id).copied().unwrap_or((
+                        agent_protocol::preview::PreviewAppearance::System,
+                        agent_protocol::preview::PreviewZoom::X100,
+                    ));
                     agent_protocol::preview::PreviewSessionSnapshot {
                         thread_id: thread_id.clone(),
                         tab_id: target.target_id,
@@ -1121,11 +1130,13 @@ impl Browser {
             .await
             .iter()
             .filter(|((scope, _), _)| scope == thread)
-            .map(|((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
-                tab_id: tab_id.clone(),
-                recording: true,
-                started_at: Some(active.started_at.clone()),
-            })
+            .map(
+                |((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
+                    tab_id: tab_id.clone(),
+                    recording: true,
+                    started_at: Some(active.started_at.clone()),
+                },
+            )
             .collect();
         let (Some(preview), Some(preview_ports), Some(terminals)) = (
             self.preview.get(),
@@ -1166,9 +1177,7 @@ impl Browser {
             (page.active.clone(), page.viewport())
         };
         let chrome = state.chrome.as_mut().unwrap();
-        let session = chrome
-            .attach(&active, viewport.0, viewport.1)
-            .await?;
+        let session = chrome.attach(&active, viewport.0, viewport.1).await?;
         chrome.action(&session, action).await
     }
 
@@ -1214,9 +1223,7 @@ impl Browser {
             (page.active.clone(), page.viewport(), page.tabs.clone())
         };
         let chrome = state.chrome.as_mut().unwrap();
-        let session = chrome
-            .attach(&active, viewport.0, viewport.1)
-            .await?;
+        let session = chrome.attach(&active, viewport.0, viewport.1).await?;
         let image = chrome.screenshot(&session).await?;
         let image_id = base64::engine::general_purpose::STANDARD
             .encode(ring::digest::digest(&ring::digest::SHA256, &image));
@@ -1248,8 +1255,7 @@ fn forget_detached_preview_target(state: &mut State, thread: &str, tab_id: &str)
     let Some(page) = state.pages.get_mut(thread) else {
         return false;
     };
-    let known = page.tabs.iter().any(|id| id == tab_id)
-        || page.preview_tabs.contains(tab_id);
+    let known = page.tabs.iter().any(|id| id == tab_id) || page.preview_tabs.contains(tab_id);
     page.tabs.retain(|id| id != tab_id);
     page.viewports.remove(tab_id);
     page.preview_tabs.remove(tab_id);
@@ -1269,9 +1275,10 @@ fn prune_completed_recordings(
         let Some((key, index, _)) = artifacts
             .iter()
             .flat_map(|(key, entries)| {
-                entries.iter().enumerate().map(|(index, artifact)| {
-                    (key.clone(), index, artifact.created_at.clone())
-                })
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, artifact)| (key.clone(), index, artifact.created_at.clone()))
             })
             .min_by(|left, right| {
                 left.2

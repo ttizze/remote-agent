@@ -26,7 +26,9 @@ use agent_domain::{
     ApprovalDecision, Command, InteractionMode, MessageId, Plan, PlanRef, RunId, RuntimeRequestId,
     State, ThreadId, Timestamp,
 };
-use agent_protocol::{conversation as c, device as d, models as m, operations as op, pull_requests as pr};
+use agent_protocol::{
+    conversation as c, device as d, models as m, operations as op, pull_requests as pr,
+};
 use std::sync::Arc;
 
 pub(super) enum Next {
@@ -115,17 +117,37 @@ fn device_permission_decision(value: &str) -> Result<d::DevicePermissionDecision
 }
 fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, PeerError> {
     Ok(match action {
-        DeviceActionIntent::SetAppearance { dark } => d::DeviceActionKind::SetAppearance(
-            if dark { d::DeviceAppearance::Dark } else { d::DeviceAppearance::Light },
-        ),
-        DeviceActionIntent::SetTextSize { size } => d::DeviceActionKind::SetTextSize(device_text_size(&size)?),
-        DeviceActionIntent::SetToggle { setting, value } => d::DeviceActionKind::SetToggle { setting, value },
+        DeviceActionIntent::SetAppearance { dark } => d::DeviceActionKind::SetAppearance(if dark {
+            d::DeviceAppearance::Dark
+        } else {
+            d::DeviceAppearance::Light
+        }),
+        DeviceActionIntent::SetTextSize { size } => {
+            d::DeviceActionKind::SetTextSize(device_text_size(&size)?)
+        }
+        DeviceActionIntent::SetToggle { setting, value } => {
+            d::DeviceActionKind::SetToggle { setting, value }
+        }
         DeviceActionIntent::SetLiquidGlass { value } => d::DeviceActionKind::SetLiquidGlass(value),
-        DeviceActionIntent::SetColorFilter { filter } => d::DeviceActionKind::SetColorFilter(device_color_filter(&filter)?),
-        DeviceActionIntent::SetOrientation { orientation } => d::DeviceActionKind::SetOrientation(device_orientation(&orientation)?),
-        DeviceActionIntent::SetLocation { latitude, longitude } => d::DeviceActionKind::SetLocation { latitude, longitude },
+        DeviceActionIntent::SetColorFilter { filter } => {
+            d::DeviceActionKind::SetColorFilter(device_color_filter(&filter)?)
+        }
+        DeviceActionIntent::SetOrientation { orientation } => {
+            d::DeviceActionKind::SetOrientation(device_orientation(&orientation)?)
+        }
+        DeviceActionIntent::SetLocation {
+            latitude,
+            longitude,
+        } => d::DeviceActionKind::SetLocation {
+            latitude,
+            longitude,
+        },
         DeviceActionIntent::ClearLocation => d::DeviceActionKind::ClearLocation,
-        DeviceActionIntent::SetPermission { app_id, permission, decision } => d::DeviceActionKind::SetPermission {
+        DeviceActionIntent::SetPermission {
+            app_id,
+            permission,
+            decision,
+        } => d::DeviceActionKind::SetPermission {
             app_id,
             permission: device_permission(&permission)?,
             decision: device_permission_decision(&decision)?,
@@ -136,7 +158,8 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
         DeviceActionIntent::Shake => d::DeviceActionKind::Shake,
         DeviceActionIntent::SendPush { app_id, payload } => d::DeviceActionKind::SendPush {
             app_id,
-            payload: serde_json::from_str(&payload).map_err(|_| invalid("Push payload must be JSON"))?,
+            payload: serde_json::from_str(&payload)
+                .map_err(|_| invalid("Push payload must be JSON"))?,
         },
     })
 }
@@ -257,8 +280,8 @@ impl Owner {
                 let project_id = draft.project_id.clone();
                 self.select_thread(None);
                 self.state.open_new_thread_draft = Some(draft_key);
-                self.state.selected_project = project_id
-                    .filter(|project| project.as_str() != CHATS_PROJECT);
+                self.state.selected_project =
+                    project_id.filter(|project| project.as_str() != CHATS_PROJECT);
                 Next::Done
             }
             Intent::LeaveThread => {
@@ -548,8 +571,10 @@ impl Owner {
                         number,
                         url,
                         source: agent_domain::PullRequestLinkSource::Manual,
-                        linked_at: agent_domain::Timestamp::from_millis(super::owner::now_ms() as i64)
-                            .map_err(|error| invalid(error))?,
+                        linked_at: agent_domain::Timestamp::from_millis(
+                            super::owner::now_ms() as i64
+                        )
+                        .map_err(|error| invalid(error))?,
                         snapshot: None,
                         stack: None,
                         watch: None,
@@ -878,9 +903,7 @@ impl Owner {
                 weight,
             } => {
                 if !crate::view::load_balancing::PREFERENCE_WEIGHTS.contains(&weight) {
-                    return Err(invalid(
-                        "Load balancing weights must be 0, 25, 50, or 100.",
-                    ));
+                    return Err(invalid("Load balancing weights must be 0, 25, 50, or 100."));
                 }
                 self.state
                     .preferences
@@ -966,8 +989,10 @@ impl Owner {
             Intent::SetProviderInstances {
                 provider_instances_json,
             } => {
-                let provider_instances = serde_json::from_str(&provider_instances_json)
-                    .map_err(|error| invalid(format!("Invalid provider instance settings: {error}")))?;
+                let provider_instances =
+                    serde_json::from_str(&provider_instances_json).map_err(|error| {
+                        invalid(format!("Invalid provider instance settings: {error}"))
+                    })?;
                 crate::view::provider_instances::validate_map(&provider_instances)
                     .map_err(invalid)?;
                 Next::call(
@@ -1013,13 +1038,28 @@ impl Owner {
                     None => Next::Done,
                 }
             }
-            Intent::LoadBackgroundPolicy => {
-                Next::call(Call::ReadBackground(agent_protocol::background::ReadBackground {}), None)
-            }
+            Intent::LoadBackgroundPolicy => Next::call(
+                Call::ReadBackground(agent_protocol::background::ReadBackground {}),
+                None,
+            ),
             Intent::LoadDiagnostics { trace_file_path } => {
-                self.job(Call::ReadBackground(agent_protocol::background::ReadBackground {}), None, None);
-                self.job(Call::ReadHostResources(agent_protocol::background::ReadHostResources {}), None, None);
-                self.job(Call::ReadProcessDiagnostics(agent_protocol::background::ReadProcessDiagnostics {}), None, None);
+                self.job(
+                    Call::ReadBackground(agent_protocol::background::ReadBackground {}),
+                    None,
+                    None,
+                );
+                self.job(
+                    Call::ReadHostResources(agent_protocol::background::ReadHostResources {}),
+                    None,
+                    None,
+                );
+                self.job(
+                    Call::ReadProcessDiagnostics(
+                        agent_protocol::background::ReadProcessDiagnostics {},
+                    ),
+                    None,
+                    None,
+                );
                 self.job(
                     Call::ReadProcessResourceHistory(
                         agent_protocol::background::ReadProcessResourceHistory {
@@ -1043,13 +1083,13 @@ impl Owner {
             }
             Intent::SetBackgroundProfile { profile } => {
                 if self.state.background_policy.is_none() {
-                    return Next::Done;
+                    return Ok(Next::Done);
                 }
                 let profile = match profile.as_str() {
                     "balanced" => agent_domain::BackgroundActivityProfile::Balanced,
                     "performance" => agent_domain::BackgroundActivityProfile::Performance,
                     "battery-saver" => agent_domain::BackgroundActivityProfile::BatterySaver,
-                    _ => return Next::Done,
+                    _ => return Ok(Next::Done),
                 };
                 let policy = agent_domain::BackgroundActivityPolicy::preset(profile);
                 Next::call(
@@ -1061,7 +1101,7 @@ impl Owner {
             }
             Intent::SetAutomaticGitFetchInterval { seconds } => {
                 let Some(current) = self.state.background_policy.as_ref() else {
-                    return Next::Done;
+                    return Ok(Next::Done);
                 };
                 let mut policy = current.policy.clone();
                 policy.automatic_git_fetch_interval_ms = u64::from(seconds).saturating_mul(1_000);
@@ -1074,7 +1114,7 @@ impl Owner {
             }
             Intent::SetProviderHealthRefreshInterval { seconds } => {
                 let Some(current) = self.state.background_policy.as_ref() else {
-                    return Next::Done;
+                    return Ok(Next::Done);
                 };
                 let mut policy = current.policy.clone();
                 policy.provider_health_refresh_interval_ms =
@@ -1710,10 +1750,7 @@ impl Owner {
                 key = self.state.draft_key();
             }
         }
-        if key != self.state.draft_key()
-            && !self.state.drafts.contains_key(&key)
-            && !answer_draft
-        {
+        if key != self.state.draft_key() && !self.state.drafts.contains_key(&key) && !answer_draft {
             return Err(invalid("The attachment draft is no longer available"));
         }
         let mut draft = self.state.drafts.get(&key).cloned().unwrap_or_else(|| {
@@ -1914,16 +1951,14 @@ impl Owner {
                     use_regex,
                 };
                 request.validate().map_err(invalid)?;
-                self.state.sources.content_search.wanted = Some(
-                    crate::state::ContentSearchQuery {
-                        cwd,
-                        query,
-                        limit,
-                        case_sensitive,
-                        whole_word,
-                        use_regex,
-                    },
-                );
+                self.state.sources.content_search.wanted = Some(crate::state::ContentSearchQuery {
+                    cwd,
+                    query,
+                    limit,
+                    case_sensitive,
+                    whole_word,
+                    use_regex,
+                });
                 self.state.sources.content_search.in_flight = true;
                 self.state.sources.content_search.error = None;
                 Next::call(Call::SearchContents(request), None)
@@ -1986,9 +2021,9 @@ impl Owner {
                 self.subscribe_vcs_status(cwd);
                 Next::Done
             }
-            Intent::RefreshVcsStatus { cwd } => self.prepare_vcs_intent(
-                Intent::RefreshVcsStatus { cwd },
-            )?,
+            Intent::RefreshVcsStatus { cwd } => {
+                self.prepare_vcs_intent(Intent::RefreshVcsStatus { cwd })?
+            }
             intent @ Intent::LoadVcsRefs { .. }
             | intent @ Intent::SwitchVcsRef { .. }
             | intent @ Intent::CreateVcsRef { .. } => self.prepare_vcs_intent(intent)?,
@@ -2042,9 +2077,7 @@ impl Owner {
                 None,
             ),
             Intent::RunScheduledTaskNow { id } => Next::call(
-                Call::RunScheduledTaskNow(
-                    agent_protocol::scheduled_tasks::ScheduledTaskRef { id },
-                ),
+                Call::RunScheduledTaskNow(agent_protocol::scheduled_tasks::ScheduledTaskRef { id }),
                 None,
             ),
             Intent::LoadAccounts => Next::call(Call::ListAccounts(m::Empty {}), None),
@@ -2130,7 +2163,9 @@ impl Owner {
             }
             Intent::CreateInvitation => Next::call(Call::Invite(m::Empty {}), None),
             Intent::RevokeDevice { id } => Next::call(Call::Revoke(op::RevokeDevice { id }), None),
-            Intent::LoadDevices => Next::call(Call::DeviceList(d::DeviceListInput::default()), None),
+            Intent::LoadDevices => {
+                Next::call(Call::DeviceList(d::DeviceListInput::default()), None)
+            }
             Intent::ConfigureDevices {
                 enabled,
                 agent_access_enabled,
@@ -2267,11 +2302,15 @@ impl Owner {
                 rendered_height,
             } => {
                 let rendered_size = match (rendered_width, rendered_height) {
-                    (Some(width), Some(height)) => Some(
-                        agent_protocol::preview::PreviewRenderedViewportSize { width, height },
-                    ),
+                    (Some(width), Some(height)) => {
+                        Some(agent_protocol::preview::PreviewRenderedViewportSize { width, height })
+                    }
                     (None, None) => None,
-                    _ => return Err(invalid("measured preview viewport dimensions must be paired")),
+                    _ => {
+                        return Err(invalid(
+                            "measured preview viewport dimensions must be paired",
+                        ));
+                    }
                 };
                 let request = agent_protocol::preview::PreviewResize {
                     thread_id: self.selected()?,
@@ -2352,9 +2391,7 @@ fn parse_pull_request_action(value: &str) -> Result<agent_domain::PullRequestAct
     }
 }
 
-fn parse_pull_request_merge_method(
-    value: &str,
-) -> Result<pr::PullRequestMergeMethod, PeerError> {
+fn parse_pull_request_merge_method(value: &str) -> Result<pr::PullRequestMergeMethod, PeerError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "merge" => Ok(pr::PullRequestMergeMethod::Merge),
         "squash" => Ok(pr::PullRequestMergeMethod::Squash),
