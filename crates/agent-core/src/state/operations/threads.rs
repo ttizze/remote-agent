@@ -697,6 +697,13 @@ mod tests {
 
     #[tokio::test]
     async fn fleet_reads_coalesce_and_do_not_block_the_root_list_or_publish_after_closing() {
+        async fn read(reader: &mut host_fixture::Reader) -> host_fixture::Request {
+            tokio::time::timeout(std::time::Duration::from_secs(30), reader.read_request())
+                .await
+                .expect("fleet request was not sent")
+                .unwrap()
+                .unwrap()
+        }
         use serde_json::json;
         let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
         let snapshot = Snapshot {
@@ -720,7 +727,7 @@ mod tests {
         let store = crate::store::Store::new(peer, snapshot);
         let empty_list = json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false});
         for _ in 0..4 {
-            let request = reader.read_request().await.unwrap().unwrap();
+            let request = read(&mut reader).await;
             let result = match request["method"].as_str().unwrap() {
                 "host/session/list" => empty_list.clone(),
                 "host/account/list" => json!({"accounts":[],"selected":{}}),
@@ -751,7 +758,7 @@ mod tests {
         let first = store.dispatch(Intent::WatchAgents {
             thread_id: Some(parent.clone()),
         });
-        let request = reader.read_request().await.unwrap().unwrap();
+        let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/session/agents");
         assert_eq!(request["params"], json!({"threadId":parent}));
         let mut receipts = Vec::new();
@@ -765,7 +772,7 @@ mod tests {
             }));
         }
         let listing = store.dispatch(Intent::ListSessions(ListSessions::new(Default::default())));
-        let list_request = reader.read_request().await.unwrap().unwrap();
+        let list_request = read(&mut reader).await;
         assert_eq!(
             list_request["method"], "host/session/list",
             "fleet requests must coalesce while the first response is pending"
@@ -781,7 +788,7 @@ mod tests {
             store.snapshot().agent_panel().is_empty(),
             "a superseded fleet response must not publish stale rows"
         );
-        let latest = reader.read_request().await.unwrap().unwrap();
+        let latest = read(&mut reader).await;
         assert_eq!(latest["method"], "host/session/agents");
         store
             .dispatch(Intent::WatchAgents { thread_id: None })
@@ -798,7 +805,7 @@ mod tests {
         let watching = store.dispatch(Intent::WatchAgents {
             thread_id: Some(parent.clone()),
         });
-        let latest = reader.read_request().await.unwrap().unwrap();
+        let latest = read(&mut reader).await;
         writer.reply(&latest, json!({"result":[{"id":{"provider":"codex","id":"child"},"parentId":parent,"name":"Review","status":"running"}]})).await.unwrap();
         watching.await.unwrap();
         let after = store.snapshot();
@@ -813,7 +820,7 @@ mod tests {
         let first = store.dispatch(Intent::WatchAgents {
             thread_id: Some(parent.clone()),
         });
-        let request = reader.read_request().await.unwrap().unwrap();
+        let request = read(&mut reader).await;
         store
             .dispatch(Intent::WatchAgents { thread_id: None })
             .await
