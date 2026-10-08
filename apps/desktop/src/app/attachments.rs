@@ -101,15 +101,17 @@ impl Desktop {
         let snapshot_id = snapshot.id.clone();
         self.stage(draft_key, None, Some(snapshot_id), move || {
             let source_directory = staging_directory()?;
-            let source = source_directory.join(&snapshot.name);
-            std::fs::copy(&snapshot.path, &source)
-                .map_err(|error| format!("snapshot image could not be staged: {error}"))?;
-            let metadata_path = crate::platform::snapshot_metadata_path(&source);
-            let metadata = serde_json::to_vec(&snapshot.source)
-                .map_err(|error| format!("snapshot metadata could not be encoded: {error}"))?;
-            std::fs::write(&metadata_path, metadata)
-                .map_err(|error| format!("snapshot metadata could not be staged: {error}"))?;
-            let result = stage_paths(vec![source], &existing);
+            let result = (|| {
+                let source = source_directory.join(&snapshot.name);
+                std::fs::copy(&snapshot.path, &source)
+                    .map_err(|error| format!("snapshot image could not be staged: {error}"))?;
+                let metadata_path = crate::platform::snapshot_metadata_path(&source);
+                let metadata = serde_json::to_vec(&snapshot.source)
+                    .map_err(|error| format!("snapshot metadata could not be encoded: {error}"))?;
+                std::fs::write(&metadata_path, metadata)
+                    .map_err(|error| format!("snapshot metadata could not be staged: {error}"))?;
+                stage_paths(vec![source], &existing)
+            })();
             let _ = std::fs::remove_dir_all(source_directory);
             result
         });
@@ -215,7 +217,7 @@ impl Desktop {
                 if !files.is_empty() {
                     self.perform(Intent::AttachFiles { draft_key, files });
                 }
-                if let Some((flash, animations)) = snapshot_feedback {
+                if succeeded && let Some((flash, animations)) = snapshot_feedback {
                     self.snapshot_feedback(flash, animations, cx);
                 }
                 if let Some(id) = snapshot_id {

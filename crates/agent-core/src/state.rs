@@ -523,6 +523,10 @@ pub struct Snapshot {
     pub frozen_open_draft: Option<FrozenDraft>,
     /// The Host's provider instances and their models; `None` until listed.
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
+    /// Host-owned Agent Client Protocol registry state. Search and lifecycle
+    /// operations are asynchronous, so the client keeps the last successful
+    /// result while a newer request is in flight.
+    pub acp_registry: AcpRegistryState,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
     /// Provider commands, path search, refs and diff previews.
@@ -588,6 +592,20 @@ pub struct Snapshot {
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
     /// Host-owned simulator and emulator state for the Device surface.
     pub device: DeviceState,
+}
+
+/// The client projection of the Host's ACP registry operations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpRegistryState {
+    pub query: String,
+    pub results: Option<agent_protocol::operations::AcpRegistrySearchResult>,
+    pub search_pending: bool,
+    pub prepare_pending: Option<String>,
+    pub prepared: BTreeMap<String, agent_protocol::operations::PreparedAcpAgent>,
+    pub uninstall_pending: Option<String>,
+    pub probe_pending: Option<String>,
+    pub probes: BTreeMap<String, agent_protocol::operations::AcpProbeResult>,
+    pub error: Option<String>,
 }
 
 /// The device's fold of Host preview metadata. Pixels remain in the browser

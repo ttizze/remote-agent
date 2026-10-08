@@ -349,6 +349,35 @@ private struct ProviderAccountsPage: View {
                 Button("Sign in to Codex") { model.perform(.startLogin(provider: .codex)) }
                 Button("Sign in to Claude") { model.perform(.startLogin(provider: .claude)) }
             }
+            if !model.snapshot.providerAdvisories().isEmpty {
+                Section("Provider installations") {
+                    ForEach(model.snapshot.providerAdvisories(), id: \.instanceId) { advisory in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(advisory.displayName).font(AppTheme.font(16, weight: .medium))
+                                Spacer()
+                                Text(advisory.status).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if let current = advisory.currentVersion,
+                               let latest = advisory.latestVersion {
+                                Text("\(current) → \(latest)")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let message = advisory.message {
+                                Text(message).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if advisory.canUpdate {
+                                Button("Update provider") {
+                                    model.perform(.updateProvider(instance: advisory.instanceId, targetVersion: nil))
+                                    model.perform(.loadProviders)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+            }
             if let login = model.snapshot.accountLogin() {
                 AccountLoginSection(
                     login: login, providerName: login.provider == .codex ? "Codex" : "Claude", loginCode: $code,
@@ -369,7 +398,10 @@ private struct ProviderAccountsPage: View {
         .background(AppTheme.sheet)
         .navigationTitle("Provider accounts")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { model.perform(.loadAccounts) }
+        .onAppear {
+            model.perform(.loadAccounts)
+            model.perform(.loadProviders)
+        }
     }
 }
 

@@ -20,6 +20,7 @@ use gpui_kit::{
         h_flex,
         input::{Input, InputState, Textarea, TextareaState},
         menu::{DropdownMenu, PopupMenuItem},
+        notification::Notification,
         switch::Switch,
         v_flex,
     },
@@ -112,35 +113,88 @@ impl Desktop {
             .on_click(cx.listener(|view, _, window, cx| open(view, None, window, cx)));
         let mut rows = Vec::new();
         for (index, (instance_id, instance)) in instances.into_iter().enumerate() {
+            let live = self
+                .snapshot
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.iter().find(|provider| provider.instance == instance_id));
             let title = if instance.display_name.trim().is_empty() {
                 format!("{} ({instance_id})", driver_label(instance.driver))
             } else {
                 instance.display_name.clone()
             };
-            let detail = format!(
+            let mut detail = format!(
                 "{} · {} custom model{}{}",
                 driver_label(instance.driver),
                 instance.custom_models.len(),
                 if instance.custom_models.len() == 1 { "" } else { "s" },
                 if instance.enabled { "" } else { " · disabled" },
             );
+            let update_instance = live
+                .and_then(|provider| provider.version_advisory.as_ref())
+                .filter(|advisory| advisory.can_update)
+                .map(|_| instance_id.clone());
+            if let Some(advisory) = live.and_then(|provider| provider.version_advisory.as_ref()) {
+                let status = match advisory.status {
+                    agent_protocol::models::ProviderVersionAdvisoryStatus::Current => "up to date",
+                    agent_protocol::models::ProviderVersionAdvisoryStatus::BehindLatest => {
+                        "update available"
+                    }
+                    agent_protocol::models::ProviderVersionAdvisoryStatus::Unknown => "version unknown",
+                };
+                detail.push_str(&format!(" · {status}"));
+                if let Some(latest) = &advisory.latest_version {
+                    detail.push_str(&format!(" ({latest})"));
+                }
+            }
             let edit_id = instance_id.clone();
+            let mut controls = h_flex().gap(px(6.)).child(
+                Button::new(("provider-instance-edit", index))
+                    .outline()
+                    .xsmall()
+                    .label("Edit")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        open(view, Some(edit_id.clone()), window, cx)
+                    })),
+            );
+            if let Some(update_instance) = update_instance {
+                controls = controls.child(
+                    Button::new(("provider-instance-update", index))
+                        .outline()
+                        .xsmall()
+                        .label("Update")
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            let instance = update_instance.clone();
+                            view.perform_then(
+                                Intent::UpdateProvider {
+                                    instance,
+                                    target_version: None,
+                                },
+                                move |view, result, window, cx| match result {
+                                    Ok(_) => {
+                                        window.push_notification(
+                                            Notification::success("Provider update completed")
+                                                .title("Provider updated"),
+                                            cx,
+                                        );
+                                        view.perform(Intent::LoadProviders);
+                                    }
+                                    Err(error) => window.push_notification(
+                                        Notification::error(
+                                            agent_core::presentation::error::error_message(error),
+                                        )
+                                        .title("Provider update failed"),
+                                        cx,
+                                    ),
+                                },
+                            );
+                        })),
+                );
+            }
             rows.push(
                 Row::new(title)
                     .description(detail)
-                    .control(
-                        h_flex()
-                            .gap(px(6.))
-                            .child(
-                                Button::new(("provider-instance-edit", index))
-                                    .outline()
-                                    .xsmall()
-                                    .label("Edit")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        open(view, Some(edit_id.clone()), window, cx)
-                                    })),
-                            ),
-                    )
+                    .control(controls)
                     .render(),
             );
         }

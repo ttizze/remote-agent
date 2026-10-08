@@ -2,6 +2,7 @@
 //! (Project, General, Appearance, Keybindings, Providers, Connections,
 //! Archive).
 mod add_project;
+mod acp_registry;
 mod appearance;
 mod archived;
 mod general;
