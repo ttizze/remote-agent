@@ -211,7 +211,7 @@ impl Desktop {
             .p_4()
             .rounded(px(14.))
             .border_1()
-            .border_color(rgb(0x2b2f35))
+            .border_color(rgb(appearance::BORDER))
             .child(
                 v_flex()
                     .flex_1()
@@ -224,7 +224,7 @@ impl Desktop {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x949ca8))
+                            .text_color(rgb(appearance::MUTED))
                             .child("このプロバイダで使うモデル・推論強度・速度の初期値です。"),
                     ),
             )
@@ -235,16 +235,16 @@ impl Desktop {
     pub(super) fn default_model_settings(&self, cx: &Context<Self>) -> AnyElement {
         v_flex().gap_4()
             .child(div().text_lg().font_semibold().child("新しい会話"))
-            .child(h_flex().items_center().gap_5().p_4().rounded(px(14.)).border_1().border_color(rgb(0x2b2f35))
+            .child(h_flex().items_center().gap_5().p_4().rounded(px(14.)).border_1().border_color(rgb(appearance::BORDER))
                 .child(v_flex().flex_1().min_w_0().gap_1().child("デフォルトモデル")
-                    .child(div().text_sm().text_color(rgb(0x949ca8)).child("新規チャットを開始するときのモデルです。自動は利用可能なエージェントのデフォルトを使います。")))
+                    .child(div().text_sm().text_color(rgb(appearance::MUTED)).child("新規チャットを開始するときのモデルです。自動は利用可能なエージェントのデフォルトを使います。")))
                 .child(self.default_model_picker(None, cx)))
             .child(div().text_lg().font_semibold().child("プロバイダごとのデフォルト"))
             .children([ProviderKind::Codex, ProviderKind::Claude].into_iter().map(|provider| self.provider_model_settings(provider, cx)))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x949ca8))
+                    .text_color(rgb(appearance::MUTED))
                     .child("変更はこの端末に自動保存されます。会話ごとに変更できます。"),
             )
             .when(
@@ -290,9 +290,9 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         let opening = entity.clone();
         popover::Popover::new("model-controls")
-            .bg(rgb(0x171717))
+            .bg(rgb(appearance::SURFACE))
             .rounded(px(10.))
-            .border_color(rgb(0x282828))
+            .border_color(rgb(appearance::BORDER))
             // Open toward the conversation. Native terminal/browser views in
             // the right panel sit above GPUI's in-window popup layer.
             .anchor(Anchor::BottomRight)
@@ -405,9 +405,9 @@ impl Desktop {
                         .gap_2()
                         .p_3()
                         .rounded(px(10.))
-                        .when(!in_settings, |row| row.bg(rgb(0x333333)))
+                        .when(!in_settings, |row| row.bg(rgb(appearance::SELECTED)))
                         .when(in_settings, |row| {
-                            row.p_4().border_1().border_color(rgb(0x2b2f35))
+                            row.p_4().border_1().border_color(rgb(appearance::BORDER))
                         })
                         .child(
                             Button::new(format!("account-choice-{index}"))
@@ -436,7 +436,7 @@ impl Desktop {
                             row.child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0xa3a3a3))
+                                    .text_color(rgb(appearance::MUTED))
                                     .child(plan.to_uppercase()),
                             )
                         })
@@ -556,7 +556,7 @@ impl Desktop {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0xa3a3a3))
+                    .text_color(rgb(appearance::MUTED))
                     .child("アカウントの切替は、同じ接続先を使う端末にも反映されます。"),
             )
             .when(self.account_busy, |body| {
@@ -727,7 +727,7 @@ impl Desktop {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x949494))
+                    .text_color(rgb(appearance::MUTED))
                     .child("ログインが完了すると、自動で接続されます。"),
             )
             .when(!self.account_polling && !self.account_busy, |form| {
@@ -756,7 +756,7 @@ impl Desktop {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(0x949494))
+                                .text_color(rgb(appearance::MUTED))
                                 .child("ログイン中"),
                         )
                         .child(cancel),
@@ -765,8 +765,8 @@ impl Desktop {
                     form.p_3()
                         .rounded(px(8.))
                         .border_1()
-                        .border_color(rgb(0x303030))
-                        .bg(rgb(0x191919)),
+                        .border_color(rgb(appearance::BORDER))
+                        .bg(rgb(appearance::RAISED)),
                 )
                 .into_any_element(),
             None => form.child(cancel).into_any_element(),
@@ -778,7 +778,7 @@ fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) 
     let mut body = v_flex().w_full().gap_2().text_sm();
     let Some(usage) = usage else {
         return body
-            .text_color(rgb(0xa3a3a3))
+            .text_color(rgb(appearance::MUTED))
             .child("使用量は未取得です")
             .into_any_element();
     };
@@ -792,7 +792,7 @@ fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) 
                     .resets_at
                     .and_then(|at| chrono::DateTime::from_timestamp(at, 0)),
                 |body, at| {
-                    body.child(div().text_color(rgb(0xa3a3a3)).child(format!(
+                    body.child(div().text_color(rgb(appearance::MUTED)).child(format!(
                         "{} にリセット",
                         at.with_timezone(&chrono::Local).format("%m/%d %H:%M")
                     )))
@@ -803,7 +803,7 @@ fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) 
     body.when_some(
         chrono::DateTime::from_timestamp(usage.fetched_at, 0).filter(|_| usage.error.is_none()),
         |body, at| {
-            body.child(div().text_color(rgb(0xa3a3a3)).child(format!(
+            body.child(div().text_color(rgb(appearance::MUTED)).child(format!(
                 "{} 時点",
                 at.with_timezone(&chrono::Local).format("%H:%M")
             )))
@@ -867,7 +867,7 @@ impl Desktop {
             .gap_2()
             .pr_2()
             .border_r_1()
-            .border_color(rgb(0x282828));
+            .border_color(rgb(appearance::BORDER));
         for (value, label) in [
             (ProviderKind::Codex, "Codex"),
             (ProviderKind::Claude, "Claude"),
@@ -889,7 +889,9 @@ impl Desktop {
                     .h(px(44.))
                     .rounded(px(8.))
                     .selected(provider == Some(value))
-                    .when(provider == Some(value), |button| button.bg(rgb(0x262626)))
+                    .when(provider == Some(value), |button| {
+                        button.bg(rgb(appearance::SELECTED))
+                    })
                     .accessibility_label(label)
                     .tooltip(label)
                     .debug_selector(move || format!("model-agent-{label}"))
@@ -968,7 +970,7 @@ impl Desktop {
                 ),
         );
         body = body
-            .child(div().h(px(1.)).w_full().bg(rgb(0x282828)))
+            .child(div().h(px(1.)).w_full().bg(rgb(appearance::RAISED)))
             .child(
                 Input::new(&self.model_search)
                     .prefix(IconName::Search)
@@ -1006,7 +1008,7 @@ impl Desktop {
                     .px_2()
                     .disabled(disabled)
                     .selected(selected)
-                    .when(selected, |button| button.bg(rgb(0x222222)))
+                    .when(selected, |button| button.bg(rgb(appearance::RAISED)))
                     .child(
                         h_flex()
                             .w_full()
@@ -1025,7 +1027,7 @@ impl Desktop {
                                 row.child(
                                     Icon::new(IconName::Check)
                                         .size(px(20.))
-                                        .text_color(rgb(0x346bf1)),
+                                        .text_color(rgb(appearance::ACCENT)),
                                 )
                             }),
                     ),
@@ -1059,7 +1061,7 @@ impl Desktop {
                         h_flex()
                             .gap_3()
                             .border_t_1()
-                            .border_color(rgb(0x282828))
+                            .border_color(rgb(appearance::BORDER))
                             .child(self.effort_control("model-picker-effort", true, cx))
                             .child(self.fast_control("model-picker-speed", true, cx)),
                     )
@@ -1097,7 +1099,11 @@ impl Desktop {
             .tooltip(label)
             .debug_selector(move || id.into())
             .h(px(44.))
-            .text_color(if fast { rgb(0x78adff) } else { rgb(0x999999) })
+            .text_color(if fast {
+                rgb(0x78adff)
+            } else {
+                rgb(appearance::MUTED)
+            })
             .disabled(
                 !self.snapshot.connected
                     || self.account_busy
@@ -1222,7 +1228,7 @@ fn weekly_usage_view(windows: Vec<agent_protocol::operations::UsageWindow>) -> A
         .font_weight(FontWeight::NORMAL);
     if windows.is_empty() {
         return body
-            .text_color(rgb(0xa3a3a3))
+            .text_color(rgb(appearance::MUTED))
             .child("残量未取得")
             .into_any_element();
     }
@@ -1231,12 +1237,17 @@ fn weekly_usage_view(windows: Vec<agent_protocol::operations::UsageWindow>) -> A
             h_flex()
                 .w_full()
                 .gap_3()
-                .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("週間残量"))
-                .child(usage_bar(window.remaining_percent, rgb(0x346bf1)).flex_1())
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(appearance::MUTED))
+                        .child("週間残量"),
+                )
+                .child(usage_bar(window.remaining_percent, rgb(appearance::ACCENT)).flex_1())
                 .child(
                     div()
                         .line_height(px(20.))
-                        .text_color(rgb(0xa3a3a3))
+                        .text_color(rgb(appearance::MUTED))
                         .child(format!("{}%", window.remaining_percent)),
                 ),
         );
@@ -1263,7 +1274,7 @@ fn usage_bar(remaining_percent: u32, tint: Rgba) -> Div {
         .h(px(4.))
         .w_full()
         .rounded(px(4.))
-        .bg(rgb(0x474747))
+        .bg(rgb(appearance::BORDER))
         .child(
             div()
                 .h_full()
@@ -1313,7 +1324,7 @@ mod tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),
@@ -1464,7 +1475,7 @@ mod tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),

@@ -36,9 +36,9 @@ impl Desktop {
             .w_full()
             .rounded(px(12.))
             .border_1()
-            .border_color(rgb(0x383838))
+            .border_color(rgb(appearance::BORDER))
             .overflow_hidden()
-            .bg(rgb(0x191919))
+            .bg(rgb(appearance::RAISED))
             .child(
                 h_flex()
                     .id("review-summary")
@@ -49,14 +49,14 @@ impl Desktop {
                     }))
                     .gap_3()
                     .p_3()
-                    .bg(rgb(0x232323))
+                    .bg(rgb(appearance::RAISED))
                     .border_b_1()
-                    .border_color(rgb(0x383838))
+                    .border_color(rgb(appearance::BORDER))
                     .child(
                         div()
                             .p_2()
                             .rounded(px(9.))
-                            .bg(rgb(0x141414))
+                            .bg(rgb(appearance::RAISED))
                             .child(Icon::new(IconName::Replace).size_4()),
                     )
                     .child(
@@ -116,7 +116,7 @@ impl Desktop {
             )
             .when(files.len() > 3, |card| {
                 card.child(
-                    div().px_2().py_1().bg(rgb(0x232323)).child(
+                    div().px_2().py_1().bg(rgb(appearance::RAISED)).child(
                         self.button(
                             "expand-review-files",
                             if self.review_expanded {
@@ -256,12 +256,12 @@ impl Desktop {
                 .child(
                     Icon::new(IconName::FileText)
                         .size_8()
-                        .text_color(rgb(0x777777)),
+                        .text_color(rgb(appearance::MUTED)),
                 )
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x999999))
+                        .text_color(rgb(appearance::MUTED))
                         .child("ファイルを選択して編集"),
                 );
         }
@@ -307,7 +307,7 @@ impl Desktop {
                     .overflow_y_scroll()
                     .child(entries),
             )
-            .child(div().h(px(1.)).bg(rgb(0x303030)))
+            .child(div().h(px(1.)).bg(rgb(appearance::BORDER)))
             .child(editor)
             .into_any_element()
     }
@@ -356,7 +356,7 @@ impl Desktop {
                 .px_2()
                 .gap_1()
                 .border_b_1()
-                .border_color(rgb(0x303030))
+                .border_color(rgb(appearance::BORDER))
                 .child(Self::icon_button(
                     "panel-home",
                     IconName::LayoutDashboard,
@@ -417,7 +417,7 @@ impl Desktop {
                         .icon(icon.clone())
                         .w_full()
                         .h_10()
-                        .bg(rgb(0x232323))
+                        .bg(rgb(appearance::RAISED))
                         .disabled(
                             !matches!(panel, Panel::Browser | Panel::Agents)
                                 && (!self.snapshot.connected
