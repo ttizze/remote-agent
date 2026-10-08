@@ -24,6 +24,7 @@ struct ThreadListParams<'a> {
     pub sort_key: &'a str,
     pub sort_direction: &'a str,
     pub use_state_db_only: bool,
+    pub source_kinds: [&'static str; 6],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_term: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -590,6 +591,14 @@ impl Agent for Codex {
                     sort_key: "updated_at",
                     sort_direction: "desc",
                     use_state_db_only: true,
+                    source_kinds: [
+                        "cli",
+                        "vscode",
+                        "exec",
+                        "appServer",
+                        "unknown",
+                        "subAgentThreadSpawn",
+                    ],
                     search_term: (!search.trim().is_empty()).then_some(search),
                     cursor,
                 },

@@ -589,9 +589,15 @@ pub struct Capabilities {
     pub rename: bool,
     pub model_change: bool,
 }
+pub fn direct_input_unavailable_reason(can_accept_direct_input: Option<bool>) -> Option<String> {
+    (can_accept_direct_input == Some(false))
+        .then(|| "このサブエージェントの会話は閲覧専用です。親の会話から指示してください。".into())
+}
 pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
-    (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status == TurnStatus::Running))
-        .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
+    direct_input_unavailable_reason(thread.can_accept_direct_input).or_else(|| {
+        (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status == TurnStatus::Running))
+            .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

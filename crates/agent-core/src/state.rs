@@ -1026,6 +1026,16 @@ fn submission(
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     next.error = None;
+    if let Some(reason) = thread_id
+        .as_ref()
+        .and_then(|id| previous.conversations.get(id))
+        .and_then(|thread| {
+            crate::session::direct_input_unavailable_reason(thread.can_accept_direct_input)
+        })
+    {
+        next.error = Some(reason);
+        return (next, Vec::new());
+    }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.drafts, &draft_key) {
         if current.text == cleared.text {
@@ -1084,6 +1094,62 @@ fn submission(
         }),
     };
     (next, vec![effect])
+}
+
+#[cfg(test)]
+mod submission_tests {
+    use super::*;
+
+    #[rstest::rstest]
+    fn read_only_subagents_keep_drafts_without_dispatching_input(
+        #[values(None, Some(false), Some(true))] can_accept_direct_input: Option<bool>,
+    ) {
+        let id =
+            crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "child".into())
+                .unwrap();
+        let key = DraftKey::from(id.clone());
+        let snapshot = Snapshot {
+            conversations: Arc::new(
+                [(
+                    id.clone(),
+                    Arc::new(crate::models::Thread {
+                        id: Some(id.clone()),
+                        can_accept_direct_input,
+                        ..Default::default()
+                    }),
+                )]
+                .into(),
+            ),
+            drafts: Arc::new(
+                [(
+                    key.clone(),
+                    Arc::new(Draft {
+                        text: "Keep my draft".into(),
+                        ..Default::default()
+                    }),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let (next, effects) = reduce_intent(
+            &snapshot,
+            Intent::Submit {
+                thread_id: Some(id),
+                client_user_message_id: "input".into(),
+            },
+        );
+        if can_accept_direct_input == Some(false) {
+            assert_eq!(next.drafts[&key].text, "Keep my draft");
+            assert!(next.pending_submissions.is_empty());
+            assert!(effects.is_empty());
+            assert!(next.error.unwrap().contains("閲覧専用"));
+        } else {
+            assert!(next.drafts[&key].text.is_empty());
+            assert_eq!(next.pending_submissions.len(), 1);
+            assert_eq!(effects.len(), 1);
+        }
+    }
 }
 
 fn append_transcript(text: &mut String, transcript: &str) {

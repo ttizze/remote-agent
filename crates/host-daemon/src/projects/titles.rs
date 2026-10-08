@@ -10,6 +10,7 @@ pub(crate) struct TitleList<'a> {
     recent_projects: Vec<&'a str>,
     threads: HashMap<&'a str, Vec<Thread>>,
     chats: Vec<Thread>,
+    children: Vec<Thread>,
     project_limit: usize,
     chat_limit: usize,
     thread_limits: &'a BTreeMap<String, u32>,
@@ -25,6 +26,7 @@ impl<'a> TitleList<'a> {
             recent_projects: Vec::new(),
             threads: HashMap::new(),
             chats: Vec::new(),
+            children: Vec::new(),
             project_limit: params.project_limit.max(1) as usize,
             chat_limit: params.chat_limit.max(1) as usize,
             thread_limits: &params.project_thread_limits,
@@ -45,7 +47,10 @@ impl<'a> TitleList<'a> {
             .project_id
             .as_deref()
             .and_then(|id| self.known_projects.get(id).copied());
-        let target = if let Some(project_id) = project_id {
+        let target = if thread.parent_id.is_some() && !self.searching {
+            // Children accompany visible roots without consuming their limits.
+            &mut self.children
+        } else if let Some(project_id) = project_id {
             let position = match self.recent_projects.iter().position(|id| *id == project_id) {
                 Some(position) => position,
                 None => {
@@ -147,6 +152,28 @@ impl<'a> TitleList<'a> {
         let more_chats = self.chats.len() > self.chat_limit;
         self.chats.truncate(self.chat_limit);
         data.extend(self.chats);
+        let mut visible: HashSet<_> = data.iter().filter_map(|thread| thread.id.clone()).collect();
+        loop {
+            let before = visible.len();
+            for child in &self.children {
+                if child
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|id| visible.contains(id))
+                    && let Some(id) = &child.id
+                {
+                    visible.insert(id.clone());
+                }
+            }
+            if visible.len() == before {
+                break;
+            }
+        }
+        data.extend(
+            self.children
+                .into_iter()
+                .filter(|thread| thread.id.as_ref().is_some_and(|id| visible.contains(id))),
+        );
         ThreadList {
             provider_errors: None,
             data,
@@ -162,6 +189,45 @@ impl<'a> TitleList<'a> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    #[test]
+    fn children_follow_visible_roots_without_consuming_title_limits() {
+        let query = ListQuery {
+            chat_limit: 1,
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&[], &query);
+        for (id, parent) in [
+            ("grandchild", Some("child")),
+            ("hidden-child", Some("hidden")),
+            ("child", Some("root")),
+            ("root", None),
+            ("hidden", None),
+        ] {
+            list.push(thread(json!({"id":{"provider":"codex","id":id}, "parentId":parent.map(|id| json!({"provider":"codex","id":id})), "preview":format!("Title {id}")})));
+        }
+        let result = list.finish();
+        assert!(result.has_more_chats);
+        let ids: Vec<_> = result
+            .data
+            .iter()
+            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+            .collect();
+        assert_eq!(ids, ["root", "grandchild", "child"]);
+        assert!(result.data.iter().all(|thread| thread.name.is_some()
+            && thread.preview.is_none()
+            && thread.turns.is_none()));
+        let search = ListQuery {
+            search_term: "child".into(),
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&[], &search);
+        list.push(thread(json!({"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"},"name":"Matches"})));
+        assert_eq!(
+            list.finish().data.len(),
+            1,
+            "search matches remain visible without their parent"
+        );
+    }
     fn thread(value: Value) -> Thread {
         serde_json::from_value(value).unwrap()
     }

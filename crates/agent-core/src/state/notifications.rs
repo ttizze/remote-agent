@@ -22,7 +22,13 @@ pub(super) fn notification(
         }
         return (
             next,
-            if active {
+            if active
+                && previous.threads.as_ref().is_some_and(|list| {
+                    list.data
+                        .iter()
+                        .any(|thread| thread.id.as_ref() == Some(&session))
+                })
+            {
                 Vec::new()
             } else {
                 refresh_list(previous)
@@ -148,7 +154,7 @@ pub(super) fn session_update(
         && current.cwd.as_deref() == Some(&next.navigation.cwd);
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(&mut next, id);
-    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
+    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. } | crate::models::ItemBody::Subagent { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
     let mut effects = details;
     if completed || changed_metadata {
         effects.extend(refresh_list(previous));
@@ -168,4 +174,63 @@ pub(super) fn session_update(
         effects.extend(op::review_workspace(&mut next));
     }
     (next, effects)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{ProviderKind, SessionRef};
+
+    #[test]
+    fn running_subagents_refresh_the_list_without_waiting_for_completion() {
+        let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let subscription = uuid::Uuid::new_v4();
+        let snapshot = Snapshot {
+            connected: true,
+            threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
+                "data":[{"id":parent}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+            })).unwrap())),
+            subscriptions: Arc::new([(parent.clone(), subscription)].into()),
+            conversations: Arc::new([(parent.clone(), Arc::new(crate::models::Thread {
+                id: Some(parent.clone()),
+                turns: Some(vec![Arc::new(crate::models::Turn { id:"turn".into(), status:crate::models::TurnStatus::Running, items:Some(vec![]), ..Default::default() })]),
+                ..Default::default()
+            }))].into()),
+            ..Default::default()
+        };
+        for (session, expected_refreshes) in [(parent.clone(), 0), (child.clone(), 1)] {
+            let (next, effects) = notification(
+                &snapshot,
+                crate::protocol::Notification::Activity {
+                    session: session.clone(),
+                    active: true,
+                    finished: false,
+                },
+            );
+            assert_eq!(effects.len(), expected_refreshes);
+            assert!(next.activity.active[&session]);
+            assert_eq!(next.navigation, snapshot.navigation);
+        }
+        let item = serde_json::from_value(serde_json::json!({
+            "id":"spawn","status":"running","clientInputId":null,
+            "body":{"inline":{"body":{"subagent":{"tool":"spawnAgent","prompt":null,"model":null,"effort":null,"sender":parent,"receivers":[child],"states":[],"agentId":null,"result":null}}}}
+        })).unwrap();
+        let (next, effects) = session_update(
+            &snapshot,
+            crate::session::SessionUpdate {
+                subscription_id: subscription,
+                change: crate::session::SessionChange::Item {
+                    turn_id: "turn".into(),
+                    item: Arc::new(item),
+                },
+            },
+        );
+        assert_eq!(
+            effects.len(),
+            1,
+            "a spawn refreshes while the parent is still running"
+        );
+        assert_eq!(next.navigation, snapshot.navigation);
+    }
 }
