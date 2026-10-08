@@ -109,8 +109,8 @@ To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続�
 ## Build the clients
 
 ```sh
-# Mac (requires a signing certificate; BEX_CODE_SIGN_IDENTITY selects it)
-scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
+# Mac release (requires a signing certificate; BEX_CODE_SIGN_IDENTITY selects it)
+scripts/dev-env.sh just build-desktop-macos && open target/release/Bex.app
 
 # iPhone (iOS 26): build Simulator libraries, then open Xcode
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
@@ -122,8 +122,13 @@ scripts/dev-env.sh ./gradlew :apps:mobile:assembleDebug
 
 Rerun the iOS library build after changing Rust sources. Desktop drafts and logs use `BEX_STATE_DIR`; Host discovery may select a different credential directory. An isolated desktop requires both `BEX_ISOLATED_HOST=1` and `BEX_STATE_DIR`; use a separate Codex home or fixture executable as well so tests cannot read personal provider state.
 
-Run `scripts/dev-env.sh just dev` for a separate local Host with shared
-provider accounts and conversation history. Check active tasks and stop the old
+Use `scripts/dev-env.sh just check -p agent-core` for quick Rust feedback without
+generating executables; select the crate you changed with `-p`.
+Run `scripts/dev-env.sh just dev` to build `target/debug/Bex.app` and launch a
+separate local Host with shared provider accounts and conversation history.
+The Host and desktop use the same debug build; release bundles stay in
+`target/release/Bex.app`. Both Mac build recipes accept `dev` or `release` and
+default to `release`. Check active tasks and stop the old
 development Host before rebuilding; closing its window does not stop it. Avoid
 running the same conversation on both Hosts at once.
 
