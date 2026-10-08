@@ -67,4 +67,35 @@ class AndroidAppModelTest {
             Dispatchers.resetMain()
         }
     }
+
+    @Test
+    fun coldStartRemovalUsesTheRetainedHostPrincipalWithoutARegistrationCache() {
+        val context = RuntimeEnvironment.getApplication()
+        val expected = PushRegistrationStore.deviceId(context, "host-cold-start")
+        assertEquals(
+            expected,
+            pushDeviceIdForUnregister(context, "host-cold-start", null),
+        )
+    }
+
+    @Test
+    fun activityOverviewDeepLinkOpensTheHostsSurface() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val context = RuntimeEnvironment.getApplication()
+        val repository = AndroidMobileRepository(context)
+        repository.saveProfiles(listOf(HostProfile("overview-host", "Overview", "ticket")))
+        repository.selected = null
+        val model = AndroidAppModel(context)
+        val viewModels = ViewModelStore().apply { put("activity-overview", model) }
+        try {
+            model.openActivityOverviewDeepLink()
+            assertEquals(Route.Hosts, model.route)
+        } finally {
+            viewModels.clear()
+            runCurrent()
+            repository.saveProfiles(emptyList())
+            repository.selected = null
+            Dispatchers.resetMain()
+        }
+    }
 }

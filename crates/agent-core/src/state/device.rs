@@ -113,7 +113,10 @@ pub struct Preferences {
     pub notification_mode: crate::view::notifications::NotificationMode,
     /// Whether foreground thread events appear as in-app notices.
     pub in_app_notifications_enabled: bool,
-    /// Routes new threads across ready provider instances on this device.
+    /// Whether active agent work appears in the system Live Activity/ongoing
+    /// notification surface. Platform permission and tokens stay native.
+    pub live_activities_enabled: bool,
+    /// Routes new threads across matching ready environments on this device.
     pub load_balancing_enabled: bool,
     /// Integer weights by provider instance; omitted instances use 100.
     pub load_balancing_weights: BTreeMap<String, u8>,
@@ -135,6 +138,7 @@ impl Default for Preferences {
             usage: Default::default(),
             notification_mode: crate::view::notifications::NotificationMode::default(),
             in_app_notifications_enabled: true,
+            live_activities_enabled: true,
             load_balancing_enabled: false,
             load_balancing_weights: BTreeMap::new(),
             snapshot_capture: Default::default(),

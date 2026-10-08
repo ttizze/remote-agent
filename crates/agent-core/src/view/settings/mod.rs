@@ -65,6 +65,7 @@ pub enum SettingId {
     StartFromOrigin,
     NotificationMode,
     InAppNotifications,
+    LiveActivities,
     ProviderUpdateChecks,
     AgentBrowserAccess,
     ResponseStreaming,

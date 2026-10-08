@@ -4,6 +4,7 @@
 //! platform token, the presentation preferences, and enough routing metadata
 //! to open the correct thread when an operating-system notification is tapped.
 
+use agent_domain::{ActivityContentState, ActivityRecord};
 use serde::{Deserialize, Serialize};
 
 const MAX_DEVICE_ID_BYTES: usize = 128;
@@ -24,8 +25,10 @@ pub enum ApnsEnvironment {
     Production,
 }
 
-/// Presentation choices copied from the device's notification settings at
-/// registration time.  The Host never infers a user's choice from a token.
+/// Presentation choices stored with a Host-side device registration. Native
+/// clients pass provider capability and OS authorization facts; core combines
+/// those facts with the persisted Live Activities preference and the source's
+/// fixed per-event notification policy before constructing this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PushPreferences {
@@ -145,23 +148,32 @@ pub enum PushActivityPhase {
 }
 
 impl PushActivityPhase {
-    /// The short status shown by native widgets and notification extensions.
-    /// Keep this mapping in the wire crate so each client presents the same
-    /// awareness state without re-deriving Host decisions.
-    pub fn status(self) -> &'static str {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Stale)
+    }
+
+    pub const fn wire_name(self) -> &'static str {
         match self {
-            Self::Starting => "Connecting",
-            Self::Running => "Working",
-            Self::WaitingForApproval => "Approval",
-            Self::WaitingForInput => "Input",
-            Self::Completed => "Done",
-            Self::Failed => "Failed",
-            Self::Stale => "Waiting",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::WaitingForApproval => "waiting_for_approval",
+            Self::WaitingForInput => "waiting_for_input",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stale => "stale",
         }
     }
 
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Stale)
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "waiting_for_approval" => Self::WaitingForApproval,
+            "waiting_for_input" => Self::WaitingForInput,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            _ => Self::Stale,
+        }
     }
 }
 
@@ -212,32 +224,20 @@ pub struct PushContentState {
 }
 
 impl PushActivityEvent {
-    pub fn activity_item(&self, updated_at: String) -> PushActivityItem {
-        PushActivityItem {
+    pub fn activity_record(&self) -> ActivityRecord {
+        ActivityRecord {
             environment_id: self.host_id.clone(),
             thread_id: self.thread_id.clone(),
             project_title: self.project_title.clone(),
             thread_title: self.thread_title.clone(),
             model_title: self.model_title.clone(),
-            phase: self.phase,
-            status: self.phase.status().into(),
-            updated_at,
+            phase: self.phase.wire_name().into(),
+            headline: self.headline.clone(),
+            updated_at_ms: self.occurred_at_ms,
             deep_link: self.deep_link.clone(),
         }
     }
 
-    pub fn content_state(&self, updated_at: String) -> PushContentState {
-        PushContentState {
-            title: self.project_title.clone(),
-            subtitle: self.headline.clone(),
-            active_count: u32::from(!self.phase.is_terminal()),
-            updated_at: updated_at.clone(),
-            activities: vec![self.activity_item(updated_at)],
-        }
-    }
-}
-
-impl PushActivityEvent {
     pub fn notification_enabled(&self, preferences: PushPreferences) -> bool {
         preferences.notifications_enabled
             && match self.phase {
@@ -249,6 +249,32 @@ impl PushActivityEvent {
                 | PushActivityPhase::Running
                 | PushActivityPhase::Stale => false,
             }
+    }
+}
+
+impl From<ActivityContentState> for PushContentState {
+    fn from(value: ActivityContentState) -> Self {
+        Self {
+            title: value.title,
+            subtitle: value.subtitle,
+            active_count: value.active_count,
+            updated_at: value.updated_at,
+            activities: value
+                .activities
+                .into_iter()
+                .map(|item| PushActivityItem {
+                    environment_id: item.environment_id,
+                    thread_id: item.thread_id,
+                    project_title: item.project_title,
+                    thread_title: item.thread_title,
+                    model_title: item.model_title,
+                    phase: PushActivityPhase::from_wire(&item.phase),
+                    status: item.status,
+                    updated_at: item.updated_at,
+                    deep_link: item.deep_link,
+                })
+                .collect(),
+        }
     }
 }
 
@@ -360,7 +386,8 @@ mod tests {
             deep_link: "remoteagent://threads/host/thread".into(),
             occurred_at_ms: 123,
         };
-        let state = event.content_state("2026-10-08T00:00:00.000Z".into());
+        let state: PushContentState =
+            agent_domain::activity_content_state(&[event.activity_record()]).into();
         let json = serde_json::to_value(state).unwrap();
         assert_eq!(
             json,
@@ -368,7 +395,7 @@ mod tests {
                 "title": "Project",
                 "subtitle": "Input needed",
                 "activeCount": 1,
-                "updatedAt": "2026-10-08T00:00:00.000Z",
+                "updatedAt": "1970-01-01T00:00:00.123Z",
                 "activities": [{
                     "environmentId": "host",
                     "threadId": "thread",
@@ -377,7 +404,7 @@ mod tests {
                     "modelTitle": "Model",
                     "phase": "waiting_for_input",
                     "status": "Input",
-                    "updatedAt": "2026-10-08T00:00:00.000Z",
+                    "updatedAt": "1970-01-01T00:00:00.123Z",
                     "deepLink": "remoteagent://threads/host/thread"
                 }]
             })

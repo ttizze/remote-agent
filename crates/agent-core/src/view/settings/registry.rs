@@ -208,7 +208,11 @@ mod tests {
                 ),
                 (
                     "notifications".into(),
-                    vec![SettingId::NotificationMode, SettingId::InAppNotifications]
+                    vec![
+                        SettingId::NotificationMode,
+                        SettingId::InAppNotifications,
+                        SettingId::LiveActivities,
+                    ]
                 ),
             ]
         );
@@ -318,7 +322,11 @@ mod tests {
                 ),
                 (
                     "notifications".into(),
-                    vec![SettingId::NotificationMode, SettingId::InAppNotifications]
+                    vec![
+                        SettingId::NotificationMode,
+                        SettingId::InAppNotifications,
+                        SettingId::LiveActivities,
+                    ]
                 ),
             ]
         );

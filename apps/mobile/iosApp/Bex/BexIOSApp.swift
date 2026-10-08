@@ -24,6 +24,9 @@ struct BexIOSApp: App {
                             await pushCenter?.reconcileActivities(states: states)
                         }
                     }
+                    model.setPushDeviceIdProvider { [weak pushCenter] hostId in
+                        pushCenter?.deviceIdForPush(hostId: hostId)
+                    }
                     pushCenter.configure(
                         register: { [weak model] hostId, registration in
                             model?.registerPush(hostId: hostId, registration: registration)
@@ -33,7 +36,9 @@ struct BexIOSApp: App {
                         },
                         hostIds: { [weak model] in model?.pushHostIds() ?? [] },
                         visibleThread: { [weak model] in model?.visiblePushThreadDeepLink() },
-                        preferences: { [weak model] hostId in model?.pushPreferences(hostId: hostId) ?? .default },
+                        liveActivitiesEnabled: { [weak model] hostId in
+                            model?.liveActivitiesEnabled(hostId: hostId) ?? true
+                        },
                     )
                 }
                 .onChange(of: scenePhase) { _, phase in
@@ -59,11 +64,11 @@ struct BexIOSApp: App {
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
                         model.ingestIncomingShareHandoffs()
-                        pushCenter.refreshPreferences()
+                        pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                         model.connect(afterForeground: true)
                     case .active:
                         model.ingestIncomingShareHandoffs()
-                        pushCenter.refreshPreferences()
+                        pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                     default:
                         break
                     }

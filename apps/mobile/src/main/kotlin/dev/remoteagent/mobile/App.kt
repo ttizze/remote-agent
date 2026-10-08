@@ -81,6 +81,12 @@ private const val PERSISTENCE_QUEUE_CAPACITY = 8
 private const val MILLIS_PER_SECOND = 1000L
 private const val PERSISTENCE_DEBOUNCE_MILLIS = 250L
 
+internal fun pushDeviceIdForUnregister(
+    context: Context,
+    hostId: String,
+    registeredDeviceId: String?,
+): String = registeredDeviceId ?: PushRegistrationStore.deviceId(context, hostId)
+
 /** Screens of the native stack. Terminals exist only under a thread. */
 internal sealed interface Route {
     data object Hosts : Route
@@ -798,7 +804,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
         val previous = environmentSnapshots[profile.id]
-        val pushPreferencesChanged = previous?.preferences()?.notificationMode != next.preferences().notificationMode
+        val pushPreferencesChanged = previous?.preferences()?.liveActivitiesEnabled !=
+            next.preferences().liveActivitiesEnabled
         environmentSnapshots = environmentSnapshots + (profile.id to next)
         val row = EnvironmentRow(
             profileId = profile.id,
@@ -821,7 +828,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         )
         environments = (environments.filterNot { it.profileId == profile.id } + row)
             .sortedBy { it.label.lowercase() }
-        if (pushPreferencesChanged || pushRegistrations[profile.id] == null) registerPushForHost(profile.id)
+        if (pushPreferencesChanged) {
+            renderActivityAggregate(
+                context,
+                setActivityDeliveryEnabled(context, profile.id, next.preferences().liveActivitiesEnabled),
+            )
+        }
+        if (pushPreferencesChanged || pushRegistrations[profile.id] == null) {
+            registerPushForHost(profile.id, force = pushPreferencesChanged)
+        }
         publishUsageWidget()
         retryPendingLoadBalancedNewThread()
     }
@@ -999,8 +1014,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
-        val notificationModeChanged =
-            snapshot.preferences().notificationMode != next.preferences().notificationMode
         val becameUnavailable = snapshot.error() == null && next.error() != null
         if (
             becameUnavailable &&
@@ -1023,7 +1036,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         profileId?.let { id ->
             profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
         }
-        if (notificationModeChanged) refreshPushRegistration()
 
         val selected = next.selectedThreadId()
         val from = followingFrom
@@ -1122,7 +1134,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     /** Opens the host-aware activity overview used by grouped alerts. */
     internal fun openActivityOverviewDeepLink() {
         pendingPushThread = null
-        stack = if (profiles.isEmpty()) listOf(Route.Pairing) else listOf(Route.Home)
+        stack = if (profiles.isEmpty()) listOf(Route.Pairing) else listOf(Route.Hosts)
     }
 
     /** Widget/notification launches enter the real Usage screen before consumption. */
@@ -1153,15 +1165,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun refreshPushRegistration() {
-        val selectedPreferences = pushPreferences(profileId ?: "")
         reconcileActivityNotificationPreferences()
-        if (!selectedPreferences.notificationsEnabled) pushCapability = PushCapability.DisabledByPreference
         if (!FirebasePushBootstrap.ensure(context)) {
             pushCapability = PushCapability.UnsupportedUnconfigured
             deactivateRegisteredPush()
             return
         }
-        pushCapability = if (selectedPreferences.notificationsEnabled) PushCapability.Ready
+        pushCapability = if (PushNotificationCenter.notificationsEnabled(context)) PushCapability.Ready
         else PushCapability.DisabledByPreference
         val token = PushRegistrationStore.token(context)
         if (token == null) {
@@ -1175,38 +1185,27 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         var changed = false
         var aggregate: String? = null
         profiles.forEach { profile ->
-            if (!pushPreferences(profile.id).liveActivitiesEnabled) {
+            if (!liveActivitiesEnabled(profile.id)) {
                 changed = true
-                aggregate = removeActivityState(context, profile.id)
+                aggregate = setActivityDeliveryEnabled(context, profile.id, enabled = false)
             }
         }
-        if (!changed) return
-        renderActivityAggregate(aggregate)
-    }
-
-    private fun renderActivityAggregate(aggregate: String?) {
-        val presentation = aggregate?.let(::parseActivityPresentation)
-        if (presentation == null) {
-            PushNotificationCenter.cancelActivity(context)
-        } else {
-            PushNotificationCenter.showActivity(
-                context,
-                presentation.title,
-                presentation.body,
-                presentation.deepLink,
-                presentation.active,
-            )
+        if (!changed) {
+            renderActivitySnapshot(context, currentActivitySnapshot(context))
+            return
         }
+        renderActivityAggregate(context, aggregate)
     }
 
     private fun pushOwner(hostId: String): AgentStore? =
         if (hostId == profileId) owner else backgroundOwners[hostId]
 
-    private fun registerPushForHost(hostId: String) {
+    private fun registerPushForHost(hostId: String, force: Boolean = false) {
         if (profiles.none { it.id == hostId }) return
         val token = PushRegistrationStore.token(context) ?: return
-        if (!FirebasePushBootstrap.ensure(context)) return
-        val preferences = pushPreferences(hostId)
+        val pushAvailable = FirebasePushBootstrap.ensure(context)
+        if (!pushAvailable) return
+        val notificationsAuthorized = PushNotificationCenter.notificationsEnabled(context)
         val registration = PushDeviceRegistration(
             PushRegistrationStore.deviceId(context, hostId),
             "android",
@@ -1215,12 +1214,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             null,
             null,
             null,
-            preferences.notificationsEnabled,
-            preferences.notifyOnApproval,
-            preferences.notifyOnInput,
-            preferences.notifyOnCompletion,
-            preferences.notifyOnFailure,
-            preferences.liveActivitiesEnabled,
+            pushAvailable,
+            notificationsAuthorized,
+            notificationsAuthorized,
         )
         val changed = pushRegistrations[hostId] != registration
         if (changed) {
@@ -1230,7 +1226,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             registeredPushConfigurations.remove(hostId)
         }
         val store = pushOwner(hostId) ?: return
-        if (registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration) {
+        if (force) {
+            registeredPushOwners.remove(hostId)
+            registeredPushConfigurations.remove(hostId)
+        }
+        if (!force && registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration) {
             pendingPushActive[hostId]?.let { setPushActive(hostId, it.first, it.second) }
             return
         }
@@ -1242,13 +1242,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             ) {
                 registeredPushOwners[hostId] = store
                 registeredPushConfigurations[hostId] = registration
-                setPushActive(hostId, registration.deviceId, registration.preferencesActive())
             }
         }
     }
-
-    private fun PushDeviceRegistration.preferencesActive(): Boolean =
-        notificationsEnabled || liveActivitiesEnabled
 
     private fun dispatchPush(
         hostId: String,
@@ -1305,9 +1301,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }.onFailure { pushCapability = PushCapability.ProviderUnavailable }
     }
 
-    /** Core notification settings gate the OS prompt and provider registration. */
+    /** A configured Host gates the OS prompt and provider registration. */
     fun requestPushPermissionIfNeeded(request: () -> Unit) {
-        val wantsNotifications = profiles.any { profile -> notificationsOptedIn(profile.id) }
+        val wantsNotifications = profiles.isNotEmpty()
         if (!wantsNotifications) {
             if (pushRegistrations.isNotEmpty()) refreshPushRegistration()
             return
@@ -1325,37 +1321,25 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         request()
     }
 
-    /** The settings branch maps this to Snapshot.preferences().notificationMode. */
-    private fun notificationsOptedIn(hostId: String = profileId ?: ""): Boolean =
-        when ((if (hostId == profileId) snapshot else environmentSnapshots[hostId] ?: Snapshot.empty())
-            .preferences().notificationMode) {
-            dev.remoteagent.core.NotificationMode.NOTIFICATIONS,
-            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
-            else -> false
-        }
-
-    private fun pushPreferences(hostId: String): PushRegistrationPreferences {
-        val enabled = notificationsOptedIn(hostId) && PushNotificationCenter.notificationsEnabled(context)
-        return PushRegistrationPreferences(
-            notificationsEnabled = enabled,
-            notifyOnApproval = enabled,
-            notifyOnInput = enabled,
-            notifyOnCompletion = enabled,
-            notifyOnFailure = enabled,
-            // Android has no ActivityKit token; this flag enables the
-            // persistent ongoing FCM presentation while the user opted in.
-            liveActivitiesEnabled = enabled && PushRegistrationStore.liveActivitiesEnabled(context),
-        )
+    private fun liveActivitiesEnabled(hostId: String): Boolean {
+        val source = if (hostId == profileId) snapshot else environmentSnapshots[hostId] ?: Snapshot.empty()
+        // Android has no ActivityKit token; core owns this persistent ongoing
+        // activity preference for the FCM presentation.
+        return source.preferences().liveActivitiesEnabled
     }
 
     private fun unregisterPush(hostId: String): Job? {
-        val registration = pushRegistrations.remove(hostId) ?: return null
+        val deviceId = pushDeviceIdForUnregister(
+            context,
+            hostId,
+            pushRegistrations.remove(hostId)?.deviceId,
+        )
         pushGenerations[hostId] = (pushGenerations[hostId] ?: 0L) + 1L
         pendingPushActive.remove(hostId)
         registeredPushOwners.remove(hostId)
         registeredPushConfigurations.remove(hostId)
         val store = pushOwner(hostId) ?: return null
-        val receipt = runCatching { store.dispatch(Intent.UnregisterPushDevice(registration.deviceId)) }.getOrNull()
+        val receipt = runCatching { store.dispatch(Intent.UnregisterPushDevice(deviceId)) }.getOrNull()
             ?: return null
         return scope.launch { runCatching { receipt.wait() } }
     }

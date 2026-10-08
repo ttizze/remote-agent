@@ -1631,6 +1631,30 @@ pub enum AnswerEdit {
     Custom { text: String },
 }
 
+/// Device push registration data supplied by a native client. Provider
+/// credentials stay on the Host; this record contains only device tokens and
+/// platform capability facts needed by the Host's direct delivery resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PushDeviceRegistration {
+    pub device_id: String,
+    pub platform: String,
+    pub token: String,
+    pub live_activity_token: Option<String>,
+    pub push_to_start_token: Option<String>,
+    pub bundle_id: Option<String>,
+    pub apns_environment: Option<String>,
+    /// Whether the client can reach its configured push provider. This is a
+    /// platform/provider capability fact, not a persisted user preference.
+    pub push_available: bool,
+    /// The operating system's notification authorization state. Core combines
+    /// this with `push_available` for alert delivery.
+    pub notifications_authorized: bool,
+    /// Whether the platform currently permits its Live Activity/ongoing
+    /// activity surface. The persisted user preference is owned by core state
+    /// and is supplied separately when this record is mapped to the protocol.
+    pub live_activities_available: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceHostInput {
@@ -2310,7 +2334,11 @@ pub enum Intent {
     SetInAppNotificationsEnabled {
         enabled: bool,
     },
-    /// Enables weighted routing of new threads across provider instances.
+    /// Controls the persistent Live Activity/ongoing activity presentation.
+    SetLiveActivitiesEnabled {
+        enabled: bool,
+    },
+    /// Enables weighted routing of new threads across matching environments.
     SetLoadBalancingEnabled {
         enabled: bool,
     },
