@@ -1,7 +1,8 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
 use crate::{
-    conversation as c, models as m, operations as op, scheduled_tasks as st, vcs, workspace as w,
+    conversation as c, models as m, operations as op, pull_requests as pr,
+    scheduled_tasks as st, vcs, workspace as w,
 };
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
@@ -134,4 +135,19 @@ contracts! {
     SetScheduledTaskEnabled, "host/scheduledTasks/setEnabled" => (st::SetScheduledTaskEnabled, st::ScheduledTask) [clone],
     DeleteScheduledTask, "host/scheduledTasks/delete" => (st::ScheduledTaskRef, st::ScheduledTaskRef),
     RunScheduledTaskNow, "host/scheduledTasks/runNow" => (st::ScheduledTaskRef, st::ScheduledTask),
+    ListPullRequests, "host/pullRequests/list" => (pr::ListPullRequests, pr::PullRequestList) [clone],
+    GetPullRequest, "host/pullRequests/get" => (pr::GetPullRequest, agent_domain::PullRequestDetail) [clone],
+    GetPullRequestDiff, "host/pullRequests/diff" => (pr::GetPullRequestDiff, pr::PullRequestDiff) [clone],
+    GetPullRequestDiffFileContents, "host/pullRequests/diffFileContents" => (pr::GetPullRequestDiffFileContents, pr::PullRequestDiffFileContents) [clone],
+    GetPullRequestFile, "host/pullRequests/file" => (pr::GetPullRequestFile, pr::PullRequestFile) [clone],
+    GetPullRequestViewedFiles, "host/pullRequests/viewedFiles" => (pr::GetPullRequestViewedFiles, pr::PullRequestViewedFiles) [clone],
+    SetPullRequestFilesViewed, "host/pullRequests/setViewedFiles" => (pr::SetPullRequestFilesViewed, pr::PullRequestViewedFiles) [clone],
+    LinkPullRequest, "host/pullRequests/link" => (pr::LinkPullRequest, pr::PullRequestOperation) [clone],
+    UnlinkPullRequest, "host/pullRequests/unlink" => (pr::UnlinkPullRequest, pr::PullRequestOperation) [clone],
+    SetPullRequestWatch, "host/pullRequests/watch" => (pr::SetPullRequestWatch, pr::PullRequestOperation) [clone],
+    PullRequestAction, "host/pullRequests/action" => (pr::PullRequestActionRequest, pr::PullRequestOperation) [clone],
+    SubmitPullRequestReview, "host/pullRequests/review" => (pr::SubmitPullRequestReview, pr::PullRequestOperation) [clone],
+    SourceControlAuth, "host/sourceControl/auth" => (pr::SourceControlAuthRequest, pr::SourceControlAuth) [clone],
+    SourceControlDiscovery, "host/sourceControl/discovery" => (pr::SourceControlDiscoveryRequest, pr::SourceControlDiscovery) [clone],
+    CloneRepository, "host/sourceControl/clone" => (pr::CloneRepository, m::Empty) [clone],
 }

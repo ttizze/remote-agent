@@ -6,13 +6,20 @@ use super::{
     resources::{ClaudeResources, CodexResources},
 };
 use crate::ProjectStore;
+use crate::github::pulls::{GitHubPullRequestService, supports_github_host};
 use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
     SharedResources, SupervisedSpawner, TextGenerator, tools::ModelCatalog,
 };
-use agent_domain::Driver;
+use agent_domain::{
+    BackgroundKind, Command, DispatchMode, Driver, MessageAuthor, MessageId, Notification,
+    NotificationOutcome, NotificationSource, PullRequestKey, PullRequestLink,
+    PullRequestLinkSource, SendMessage,
+    ThreadId, Timestamp,
+};
 use agent_protocol::{
     operations as op,
+    pull_requests as pr,
     protocol::{Body, Call, Response},
     provider::ProviderKind,
     scheduled_tasks as st,
@@ -107,6 +114,8 @@ struct HostResources {
     search: crate::workspace_search::WorkspaceSearch,
     keybindings: Arc<crate::keybindings::Keybindings>,
     usage: crate::usage::UsageService,
+    pull_requests: Arc<GitHubPullRequestService>,
+    pull_request_watch_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
@@ -249,6 +258,9 @@ impl HostRpcService {
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
             projects.path().with_file_name("keybindings.json"),
         ));
+        let pull_requests = Arc::new(GitHubPullRequestService::new(
+            projects.path().with_file_name("pull-requests.sqlite"),
+        )?);
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -286,6 +298,8 @@ impl HostRpcService {
             search: Default::default(),
             keybindings,
             usage: crate::usage::UsageService::new(&state_path),
+            pull_requests,
+            pull_request_watch_task: OnceLock::new(),
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -467,7 +481,237 @@ impl HostRpcService {
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.start().await?;
         }
+        self.start_pull_request_watch();
         Ok(())
+    }
+
+    fn start_pull_request_watch(&self) {
+        if self.inner.resources.pull_request_watch_task.get().is_some() {
+            return;
+        }
+        let Some(conversation) = self.inner.resources.conversation.get().cloned() else {
+            return;
+        };
+        let service = self.inner.resources.pull_requests.clone();
+        let projects = self.inner.resources.shared.projects.clone();
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(agent_runtime::DEFAULT_WATCH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let now = timestamp_now();
+                // Resolve the checked-out branch for each persisted thread. A
+                // successful empty result clears only the automatic source;
+                // an unavailable CLI leaves the last result intact.
+                let branch_threads = match conversation.runtime.store().thread_shells() {
+                    Ok(threads) => threads,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "pull request branch discovery failed");
+                        vec![]
+                    }
+                };
+                for shell in branch_threads {
+                    let summary = shell.row.summary;
+                    let Some(workspace) = summary.workspace.clone() else {
+                        continue;
+                    };
+                    let Some(branch) = workspace.branch.as_deref().filter(|branch| !branch.trim().is_empty()) else {
+                        continue;
+                    };
+                    let cwd = if workspace.cwd.trim().is_empty() {
+                        let Some(project) = projects
+                            .list()
+                            .into_iter()
+                            .find(|project| project.id.as_str() == summary.project.as_str())
+                        else {
+                            continue;
+                        };
+                        project.root
+                    } else {
+                        workspace.cwd.clone()
+                    };
+                    let discovery = service.discover(Path::new(&cwd), false).await;
+                    let Some(host) = discovery.host.as_deref() else {
+                        continue;
+                    };
+                    if !supports_github_host(Some(host)) {
+                        continue;
+                    }
+                    let Ok(detected) = service
+                        .branch_pull_request(
+                            Path::new(&cwd),
+                            &summary.project,
+                            branch,
+                            discovery.repository.as_deref(),
+                            Some(host),
+                        )
+                        .await
+                    else {
+                        continue;
+                    };
+                    let current = summary
+                        .pull_requests
+                        .iter()
+                        .find(|link| link.source == PullRequestLinkSource::Agent);
+                    let same = match (current, detected.as_ref()) {
+                        (None, None) => true,
+                        (Some(current), Some(detected)) => {
+                            current.key() == detected.key()
+                                && current.url == detected.url
+                                && current.snapshot.as_ref().and_then(|summary| summary.head_sha.as_deref())
+                                    == detected.snapshot.as_ref().and_then(|summary| summary.head_sha.as_deref())
+                        }
+                        _ => false,
+                    };
+                    if same {
+                        continue;
+                    }
+                    let Ok(mut links) = service.links.links(&summary.id) else {
+                        continue;
+                    };
+                    links.retain(|link| link.source != PullRequestLinkSource::Agent);
+                    if let Some(detected) = detected.clone() {
+                        links.push(detected);
+                    }
+                    if service
+                        .links
+                        .sync_thread(&summary.id, &links, now.as_str())
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let _ = conversation
+                        .dispatch_host_command(
+                            summary.id.clone(),
+                            Command::ResolveBranchPullRequest { link: detected },
+                        )
+                        .await;
+                }
+                let watched = match service.links.watched_links() {
+                    Ok(watched) => watched,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "pull request watch store read failed");
+                        continue;
+                    }
+                };
+                for (thread, link) in watched {
+                    if !agent_runtime::watch_is_due(
+                        &link,
+                        &now,
+                        agent_runtime::DEFAULT_WATCH_INTERVAL,
+                    ) {
+                        continue;
+                    }
+                    let Some(project_id) = link
+                        .snapshot
+                        .as_ref()
+                        .and_then(|summary| summary.project.clone())
+                    else {
+                        continue;
+                    };
+                    let Some(project) = projects
+                        .list()
+                        .into_iter()
+                        .find(|project| project.id == project_id)
+                    else {
+                        continue;
+                    };
+                    let reference = pr::PullRequestRef {
+                        project_id,
+                        repository: link.repository.clone(),
+                        number: link.number,
+                        host: Some(link.host.clone()),
+                        allow_stale: false,
+                    };
+                    let Ok(detail) = service
+                        .get(Path::new(&project.root), &reference.project_id, &reference)
+                        .await
+                    else {
+                        continue;
+                    };
+                    let (links, wake) = agent_runtime::merge_pull_request_detail(
+                        std::slice::from_ref(&link),
+                        &detail,
+                        now.clone(),
+                    );
+                    let Some(updated) = links.into_iter().next() else {
+                        continue;
+                    };
+                    let mut updated_links = match service.links.links(&thread) {
+                        Ok(links) => links,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "pull request watch store read failed");
+                            continue;
+                        }
+                    };
+                    updated_links.retain(|candidate| candidate.key() != updated.key());
+                    updated_links.push(updated.clone());
+                    if service
+                        .links
+                        .sync_thread(&thread, &updated_links, now.as_str())
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let _ = conversation
+                        .dispatch_host_command(
+                            thread.clone(),
+                            Command::SyncPullRequestLink {
+                                link: updated.clone(),
+                            },
+                        )
+                        .await;
+                    if detail.summary.state == agent_domain::PullRequestState::Open {
+                        if let Some(wake) = wake.filter(|wake| !wake.text.trim().is_empty()) {
+                            let message_id = MessageId::new(format!(
+                                "pull-request-watch:{}",
+                                uuid::Uuid::new_v4()
+                            ))
+                            .expect("generated watch message ids are nonempty");
+                            let notification = Notification {
+                                source: NotificationSource::Native(BackgroundKind::Monitor),
+                                child_thread: None,
+                                outcome: if wake.failed {
+                                    NotificationOutcome::Failed
+                                } else {
+                                    NotificationOutcome::Updated
+                                },
+                                summary: wake.detail.clone(),
+                                detail: Some(wake.detail.clone()),
+                            };
+                            let _ = conversation
+                                .dispatch_host_command(
+                                    thread,
+                                    Command::PullRequestWake {
+                                        message: SendMessage {
+                                            context: None,
+                                            created_by: MessageAuthor::Agent,
+                                            creation_source: "pull-request-watch".into(),
+                                            id: message_id,
+                                            text: wake.text,
+                                            attachments: vec![],
+                                            selection: None,
+                                            mode: DispatchMode::QueueAfterActive,
+                                            intent: None,
+                                            source_plan: None,
+                                            resolved_plan: None,
+                                            continuation: None,
+                                            title_seed: None,
+                                        },
+                                        notification,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+        });
+        let _ = self
+            .inner
+            .resources
+            .pull_request_watch_task
+            .set(tokio_util::task::AbortOnDropHandle::new(task));
     }
     pub fn open_session(&self) -> HostSession {
         self.inner.connections.open_session()
@@ -749,7 +993,9 @@ impl HostRpcService {
     }
     async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
         let resources = &self.inner.resources;
-        let _workspace = if matches!(
+        let _workspace = if matches!(request, Call::CloneRepository(_)) {
+            Some(resources.worktree_access.write().await)
+        } else if matches!(
             request,
             Call::StartTerminal(_)
                 | Call::RestartTerminal(_)
@@ -846,6 +1092,243 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("search_entries_failed", error))?
                     .into(),
+                Call::ListPullRequests(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    let root = self.project_root(&params.project_id)?;
+                    let discovery = (params.repository.is_none() || params.host.is_none())
+                        .then(|| resources.pull_requests.discover(&root, false));
+                    let discovery = match discovery {
+                        Some(discovery) => Some(discovery.await),
+                        None => None,
+                    };
+                    let host = params
+                        .host
+                        .as_deref()
+                        .or_else(|| discovery.as_ref().and_then(|discovery| discovery.host.as_deref()));
+                    ensure_github_host(host)?;
+                    let repository = params.repository.clone().or_else(|| {
+                        discovery
+                            .as_ref()
+                            .and_then(|discovery| discovery.repository.clone())
+                    });
+                    let mut request = params.clone();
+                    request.host = host.map(str::to_owned);
+                    resources
+                        .pull_requests
+                        .list(
+                            &root,
+                            &request.project_id,
+                            &request,
+                            repository.as_deref(),
+                            host,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("pull_request_list_failed", error))?
+                        .into()
+                }
+                Call::GetPullRequest(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    resources
+                        .pull_requests
+                        .get(&root, &params.reference.project_id, &params.reference)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_get_failed", error))?
+                        .into()
+                }
+                Call::GetPullRequestDiff(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    resources
+                        .pull_requests
+                        .diff(&root, params)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_diff_failed", error))?
+                        .into()
+                }
+                Call::GetPullRequestDiffFileContents(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    resources
+                        .pull_requests
+                        .diff_file_contents(&root, params)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_diff_file_contents_failed", error))?
+                        .into()
+                }
+                Call::GetPullRequestFile(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    resources
+                        .pull_requests
+                        .file(&root, &params.reference, &params.path, params.max_bytes as usize)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_file_failed", error))?
+                        .into()
+                }
+                Call::GetPullRequestViewedFiles(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let viewed = resources
+                        .pull_requests
+                        .links
+                        .viewed_files(&params.reference.key(), params.limit as usize)
+                        .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
+                    pr::PullRequestViewedFiles {
+                        reference: params.reference.clone(),
+                        files: viewed
+                            .0
+                            .into_iter()
+                            .map(|(path, viewed)| pr::PullRequestViewedFile { path, viewed })
+                            .collect(),
+                        truncated: viewed.1,
+                    }
+                    .into()
+                }
+                Call::SetPullRequestFilesViewed(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let key = params.reference.key();
+                    let files = params
+                        .files
+                        .iter()
+                        .map(|file| (file.path.as_str(), file.viewed))
+                        .collect::<Vec<_>>();
+                    resources
+                        .pull_requests
+                        .links
+                        .set_viewed_files(&key, &files, timestamp_now().as_str())
+                        .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
+                    let viewed = resources
+                        .pull_requests
+                        .links
+                        .viewed_files(&key, 1_000)
+                        .map_err(|error| Failure::new("pull_request_viewed_files_failed", error))?;
+                    pr::PullRequestViewedFiles {
+                        reference: params.reference.clone(),
+                        files: viewed
+                            .0
+                            .into_iter()
+                            .map(|(path, viewed)| pr::PullRequestViewedFile { path, viewed })
+                            .collect(),
+                        truncated: viewed.1,
+                    }
+                    .into()
+                }
+                Call::LinkPullRequest(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(Some(&params.host))?;
+                    self.link_pull_request(params).await?.into()
+                }
+                Call::UnlinkPullRequest(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(Some(&params.host))?;
+                    self.unlink_pull_request(params).await?.into()
+                }
+                Call::SetPullRequestWatch(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(Some(&params.link.host))?;
+                    self.set_pull_request_watch(params).await?.into()
+                }
+                Call::PullRequestAction(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    if let Some(stack_number) = params.stack_number {
+                        resources
+                            .pull_requests
+                            .stack_action(
+                                &root,
+                                &params.reference,
+                                params.action,
+                                stack_number,
+                                params.expected_stack_heads.as_deref().unwrap_or(&[]),
+                                params.merge_method,
+                            )
+                            .await
+                            .map_err(|error| Failure::new("pull_request_stack_action_failed", error))?;
+                    } else {
+                        resources
+                            .pull_requests
+                            .action(
+                                &root,
+                                &params.reference,
+                                params.action,
+                                params.merge_method,
+                            )
+                            .await
+                            .map_err(|error| Failure::new("pull_request_action_failed", error))?;
+                    }
+                    let detail = resources
+                        .pull_requests
+                        .get(&root, &params.reference.project_id, &params.reference)
+                        .await
+                        .ok();
+                    pr::PullRequestOperation {
+                        reference: params.reference.clone(),
+                        detail,
+                        linked: vec![],
+                    }
+                    .into()
+                }
+                Call::SubmitPullRequestReview(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    resources
+                        .pull_requests
+                        .review(&root, &params.reference, params.verdict, &params.body)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_review_failed", error))?;
+                    let detail = resources
+                        .pull_requests
+                        .get(&root, &params.reference.project_id, &params.reference)
+                        .await
+                        .ok();
+                    pr::PullRequestOperation {
+                        reference: params.reference.clone(),
+                        detail,
+                        linked: vec![],
+                    }
+                    .into()
+                }
+                Call::SourceControlAuth(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    resources
+                        .pull_requests
+                        .auth(
+                            Path::new(params.cwd.as_deref().unwrap_or(".")),
+                            params.host.as_deref(),
+                            params.fresh,
+                        )
+                        .await
+                        .into()
+                }
+                Call::SourceControlDiscovery(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    resources
+                        .pull_requests
+                        .discover(Path::new(&params.cwd), params.fresh)
+                        .await
+                        .into()
+                }
+                Call::CloneRepository(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    resources
+                        .pull_requests
+                        .clone_repository(params)
+                        .await
+                        .map_err(|error| Failure::new("repository_clone_failed", error))?;
+                    agent_protocol::models::Empty {}.into()
+                }
                 Call::VcsStatus(params) => resources
                     .vcs
                     .get_status(&params.cwd)
@@ -1218,6 +1701,217 @@ impl HostRpcService {
             };
         Ok(response)
     }
+    fn project_root(&self, project_id: &str) -> Result<PathBuf, Failure> {
+        self.inner
+            .resources
+            .shared
+            .projects
+            .list()
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .map(|project| PathBuf::from(project.root))
+            .ok_or_else(|| Failure::new("project_not_found", project_id))
+    }
+
+    async fn link_pull_request(
+        &self,
+        params: &pr::LinkPullRequest,
+    ) -> Result<pr::PullRequestOperation, Failure> {
+        let resources = &self.inner.resources;
+        let root = self.project_root(&params.project_id)?;
+        let reference = pr::PullRequestRef {
+            project_id: params.project_id.clone(),
+            repository: params.repository.clone(),
+            number: params.number,
+            host: Some(params.host.clone()),
+            allow_stale: false,
+        };
+        let detail = resources
+            .pull_requests
+            .get(&root, &params.project_id, &reference)
+            .await
+            .map_err(|error| Failure::new("pull_request_get_failed", error))?;
+        let now = timestamp_now();
+        let link = PullRequestLink {
+            host: params.host.clone(),
+            repository: params.repository.clone(),
+            number: params.number,
+            url: params.url.clone(),
+            source: params.source,
+            linked_at: now.clone(),
+            snapshot: Some(detail.summary.clone()),
+            stack: detail.summary.stack.clone(),
+            watch: None,
+        };
+        let thread = ThreadId::new(params.thread_id.clone())
+            .map_err(|error| Failure::new("invalid_params", error))?;
+        let mut links = resources
+            .pull_requests
+            .links
+            .links(&thread)
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        let existing_keys = links
+            .iter()
+            .map(|candidate| candidate.key().canonical())
+            .collect::<std::collections::BTreeSet<_>>();
+        links.retain(|candidate| candidate.key() != link.key());
+        links.push(link.clone());
+        if let Some(stack) = detail.summary.stack.as_ref() {
+            for layer in &stack.layers {
+                let layer_key = PullRequestKey::new(
+                    &params.host,
+                    &params.repository,
+                    layer.number,
+                );
+                if layer.number == params.number
+                    || links.iter().any(|candidate| candidate.key() == layer_key)
+                {
+                    continue;
+                }
+                links.push(PullRequestLink {
+                    host: params.host.clone(),
+                    repository: params.repository.clone(),
+                    number: layer.number,
+                    url: agent_domain::github_browser_url(
+                        &params.host,
+                        &params.repository,
+                        layer.number,
+                    ),
+                    source: agent_domain::PullRequestLinkSource::Stack,
+                    linked_at: now.clone(),
+                    snapshot: None,
+                    stack: Some(stack.clone()),
+                    watch: None,
+                });
+            }
+        }
+        resources
+            .pull_requests
+            .links
+            .sync_thread(&thread, &links, now.as_str())
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        let conversation = self.conversation()?;
+        for linked in links.iter().filter(|candidate| {
+            candidate.key() == link.key()
+                || (candidate.source == agent_domain::PullRequestLinkSource::Stack
+                    && !existing_keys.contains(&candidate.key().canonical()))
+        }) {
+            conversation
+                .dispatch_host_command(
+                    thread.clone(),
+                    Command::LinkPullRequest {
+                        link: linked.clone(),
+                    },
+                )
+                .await
+                .map_err(|error| Failure::new("pull_request_link_failed", error))?;
+        }
+        Ok(pr::PullRequestOperation {
+            reference,
+            detail: Some(detail),
+            linked: links,
+        })
+    }
+
+    async fn unlink_pull_request(
+        &self,
+        params: &pr::UnlinkPullRequest,
+    ) -> Result<pr::PullRequestOperation, Failure> {
+        let resources = &self.inner.resources;
+        let thread = ThreadId::new(params.thread_id.clone())
+            .map_err(|error| Failure::new("invalid_params", error))?;
+        let key = params.key();
+        let mut links = resources
+            .pull_requests
+            .links
+            .links(&thread)
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        links.retain(|candidate| candidate.key() != key);
+        let now = timestamp_now();
+        resources
+            .pull_requests
+            .links
+            .sync_thread(&thread, &links, now.as_str())
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        self.conversation()?
+            .dispatch_host_command(thread, Command::UnlinkPullRequest { key: key.clone() })
+            .await
+            .map_err(|error| Failure::new("pull_request_unlink_failed", error))?;
+        Ok(pr::PullRequestOperation {
+            reference: pr::PullRequestRef {
+                project_id: params.project_id.clone(),
+                repository: key.repository,
+                number: key.number,
+                host: Some(key.host),
+                allow_stale: false,
+            },
+            detail: None,
+            linked: links,
+        })
+    }
+
+    async fn set_pull_request_watch(
+        &self,
+        params: &pr::SetPullRequestWatch,
+    ) -> Result<pr::PullRequestOperation, Failure> {
+        let resources = &self.inner.resources;
+        let thread = ThreadId::new(params.thread_id.clone())
+            .map_err(|error| Failure::new("invalid_params", error))?;
+        let key = params.link.key();
+        let now = timestamp_now();
+        let mut links = resources
+            .pull_requests
+            .links
+            .links(&thread)
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        let link = links.iter_mut().find(|candidate| candidate.key() == key);
+        let Some(link) = link else {
+            return Err(Failure::new("pull_request_not_linked", key.canonical()));
+        };
+        let head_sha = link
+            .snapshot
+            .as_ref()
+            .and_then(|summary| summary.head_sha.clone());
+        link.watch = params
+            .enabled
+            .then(|| agent_runtime::start_watch(now.clone(), head_sha));
+        resources
+            .pull_requests
+            .links
+            .set_watch(&thread, &key, link.watch.as_ref(), now.as_str())
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        resources
+            .pull_requests
+            .links
+            .sync_thread(&thread, &links, now.as_str())
+            .map_err(|error| Failure::new("pull_request_store_failed", error))?;
+        self.conversation()
+            .map_err(|error| Failure::new("conversation_unavailable", error))?
+            .dispatch_host_command(
+                thread,
+                Command::SetPullRequestWatch {
+                    key: key.clone(),
+                    watch: links
+                        .iter()
+                        .find(|candidate| candidate.key() == key)
+                        .and_then(|candidate| candidate.watch.clone()),
+                },
+            )
+            .await
+            .map_err(|error| Failure::new("pull_request_watch_failed", error))?;
+        Ok(pr::PullRequestOperation {
+            reference: pr::PullRequestRef {
+                project_id: params.project_id.clone(),
+                repository: key.repository,
+                number: key.number,
+                host: Some(key.host),
+                allow_stale: false,
+            },
+            detail: None,
+            linked: links,
+        })
+    }
+
     fn claude(&self) -> Result<&Arc<ClaudeResources>, Failure> {
         self.inner
             .resources
@@ -1573,4 +2267,24 @@ fn provider_key(provider: ProviderKind) -> String {
         ProviderKind::Claude => "claude",
     }
     .into()
+}
+
+fn timestamp_now() -> Timestamp {
+    Timestamp::from_millis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64),
+    )
+    .expect("the system clock is within the supported timestamp range")
+}
+
+fn ensure_github_host(host: Option<&str>) -> Result<(), Failure> {
+    if supports_github_host(host) {
+        Ok(())
+    } else {
+        Err(Failure::new(
+            "pull_request_provider_unsupported",
+            "Pull request operations are supported only for GitHub repositories.",
+        ))
+    }
 }

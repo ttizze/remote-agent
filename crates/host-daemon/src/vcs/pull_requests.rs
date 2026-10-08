@@ -396,6 +396,8 @@ pub(crate) async fn find_open_pr(
                 selector,
                 PullRequestListState::Open,
                 HEAD_BRANCH_PROBE_LIMIT,
+                None,
+                context.head_repository_name_with_owner.as_deref(),
             )
             .await
             .map_err(|error| provider_error("listChangeRequests", &error))?;
@@ -427,6 +429,8 @@ async fn find_latest_pr(
                 selector,
                 PullRequestListState::All,
                 HEAD_BRANCH_PROBE_LIMIT,
+                None,
+                context.head_repository_name_with_owner.as_deref(),
             )
             .await
             .map_err(|error| provider_error("listChangeRequests", &error))?;

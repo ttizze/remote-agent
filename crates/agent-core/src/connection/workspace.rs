@@ -25,7 +25,7 @@ use crate::{
     },
 };
 use agent_domain::{MessageId, Role, ThreadId};
-use agent_protocol::{conversation as c, workspace as w};
+use agent_protocol::{conversation as c, pull_requests as pr, workspace as w};
 use std::sync::Arc;
 
 /// How long the composer waits after typing before searching paths, and how
@@ -51,6 +51,34 @@ impl Owner {
             self.ensure_provider_commands(&draft.instance_id, &cwd);
         }
         let trigger = detect_composer_trigger(text, cursor);
+        if trigger
+            .as_ref()
+            .is_some_and(|trigger| trigger.kind == ComposerTriggerKind::PullRequest)
+        {
+            self.state.sources.entries.wanted = None;
+            self.state.sources.entries.due_at_ms = None;
+            if let Some(project_id) = self.state.selected_project.clone()
+                && self.state.connected
+                && !self.state.pull_requests.list_requested.contains(&project_id)
+            {
+                self.state.pull_requests.list_requested.insert(project_id.clone());
+                self.job(
+                    Call::ListPullRequests(pr::ListPullRequests {
+                        project_id,
+                        repository: None,
+                        host: None,
+                        state: pr::PullRequestListState::All,
+                        query: None,
+                        limit: 100,
+                        cursor: None,
+                        fresh: true,
+                    }),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
         let query = trigger
             .filter(|trigger| trigger.kind == ComposerTriggerKind::Path)
             .map(|trigger| trigger.query.trim().to_owned())

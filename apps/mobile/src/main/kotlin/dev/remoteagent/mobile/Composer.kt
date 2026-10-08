@@ -304,6 +304,7 @@ private fun menuItemIcon(item: ComposerCommandItem): ImageVector =
         is ComposerCommandTarget.Path ->
             if (target.directory) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile
         is ComposerCommandTarget.Thread -> Icons.Outlined.ChatBubbleOutline
+        is ComposerCommandTarget.PullRequest -> Icons.Outlined.CallMerge
     }
 
 private const val SLASH_SKILL_PREFIX = "skill:"

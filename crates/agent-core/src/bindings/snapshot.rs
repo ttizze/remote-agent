@@ -42,6 +42,18 @@ impl Snapshot {
     pub fn selected_project_id(&self) -> Option<String> {
         self.selected_project.clone()
     }
+    pub fn selected_pull_request_label(&self) -> Option<String> {
+        self.selected_thread
+            .as_ref()
+            .and_then(|thread| self.thread_row(thread))
+            .and_then(|row| row.pull_request_label.clone())
+    }
+    pub fn selected_pull_request_url(&self) -> Option<String> {
+        self.selected_thread
+            .as_ref()
+            .and_then(|thread| self.thread_row(thread))
+            .and_then(|row| row.pull_request_url.clone())
+    }
     pub fn current_directory(&self) -> String {
         self.cwd()
     }

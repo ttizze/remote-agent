@@ -531,6 +531,7 @@ impl Owner {
         if !applied.changed {
             return;
         }
+        self.reconcile_pull_request_links(location);
         if location == ShellLocation::Active
             && let Some(snapshot) = &self.state.shell.snapshot
         {
@@ -543,6 +544,35 @@ impl Owner {
         if location == ShellLocation::Active {
             self.refresh_project_icons();
             self.ensure_selected_vcs_status();
+        }
+    }
+
+    /// Shell rows are the durable projection seen by every native surface.
+    /// Keep the client operation cache aligned with them so a restarted client
+    /// can render link/watch controls before its next explicit RPC.
+    fn reconcile_pull_request_links(&mut self, location: ShellLocation) {
+        let rows = match location {
+            ShellLocation::Active => self
+                .state
+                .shell
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.threads.clone()),
+            ShellLocation::Archived => self
+                .state
+                .archived
+                .as_ref()
+                .and_then(|cache| cache.snapshot.as_ref())
+                .map(|snapshot| snapshot.threads.clone()),
+        };
+        let Some(rows) = rows else {
+            return;
+        };
+        for row in rows {
+            self.state
+                .pull_requests
+                .links_by_thread
+                .insert(row.id, row.pull_requests);
         }
     }
 

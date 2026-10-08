@@ -1135,3 +1135,76 @@ async fn startup_cancels_a_waiting_run_whose_capture_failed_for_good() {
     assert!(recovered.captures.is_empty());
     second.shutdown().await;
 }
+
+// PullRequestSyncReactor/ThreadSettlementService: a merged snapshot settles only
+// when the durable link crosses into `merged`; repeated terminal refreshes and
+// non-terminal refreshes do not re-run the Host setting hook.
+#[test]
+fn merged_pull_request_transition_is_single_shot() {
+    let at = at();
+    let key = agent_domain::PullRequestKey::new("github.com", "owner/repo", 7);
+    let summary = |state| agent_domain::PullRequestSummary {
+        key: key.clone(),
+        project: Some("project".into()),
+        url: "https://github.com/owner/repo/pull/7".into(),
+        title: "Change".into(),
+        state,
+        is_draft: false,
+        head_branch: "feature".into(),
+        head_sha: Some("head".into()),
+        base_branch: "main".into(),
+        opened_at: Some(at.clone()),
+        closed_at: (state == agent_domain::PullRequestState::Closed)
+            .then_some(at.clone()),
+        merged_at: (state == agent_domain::PullRequestState::Merged)
+            .then_some(at.clone()),
+        updated_at: at.clone(),
+        observed_at: at.clone(),
+        author: None,
+        additions: None,
+        deletions: None,
+        changed_files: None,
+        review_decision: agent_domain::PullRequestReviewDecision::Unknown,
+        checks_state: agent_domain::PullRequestChecksState::Unknown,
+        mergeability: agent_domain::PullRequestMergeability::Unknown,
+        checks: vec![],
+        labels: vec![],
+        stack: None,
+    };
+    let link = |state| agent_domain::PullRequestLink {
+        host: key.host.clone(),
+        repository: key.repository.clone(),
+        number: key.number,
+        url: "https://github.com/owner/repo/pull/7".into(),
+        source: agent_domain::PullRequestLinkSource::Manual,
+        linked_at: at.clone(),
+        snapshot: Some(summary(state)),
+        stack: None,
+        watch: None,
+    };
+    let before = Arc::new(State {
+        pull_requests: vec![link(agent_domain::PullRequestState::Open)],
+        ..State::default()
+    });
+    let merged = link(agent_domain::PullRequestState::Merged);
+    assert!(merged_pull_request_transition(
+        &Some(before.clone()),
+        &Command::SyncPullRequestLink {
+            link: merged.clone(),
+        }
+    ));
+    let after = Arc::new(State {
+        pull_requests: vec![merged.clone()],
+        ..State::default()
+    });
+    assert!(!merged_pull_request_transition(
+        &Some(after),
+        &Command::SyncPullRequestLink { link: merged }
+    ));
+    assert!(!merged_pull_request_transition(
+        &Some(before),
+        &Command::SyncPullRequestLink {
+            link: link(agent_domain::PullRequestState::Open),
+        }
+    ));
+}

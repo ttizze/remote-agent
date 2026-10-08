@@ -3,6 +3,7 @@
 mod details;
 mod diff;
 mod files;
+mod pull_requests;
 mod terminal_drawer;
 
 use super::{
@@ -35,14 +36,16 @@ pub(crate) enum PanelTab {
     Terminal,
     Files,
     Browser,
+    PullRequests,
 }
 impl PanelTab {
     /// The order the surface menus list them in.
-    const ALL: [PanelTab; 4] = [
+    const ALL: [PanelTab; 5] = [
         PanelTab::Browser,
         PanelTab::Terminal,
         PanelTab::Files,
         PanelTab::Diff,
+        PanelTab::PullRequests,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -50,6 +53,7 @@ impl PanelTab {
             PanelTab::Terminal => "Terminal",
             PanelTab::Files => "Files",
             PanelTab::Diff => "Diff",
+            PanelTab::PullRequests => "Pull requests",
         }
     }
     fn icon(self) -> &'static str {
@@ -58,6 +62,7 @@ impl PanelTab {
             PanelTab::Terminal => "square-terminal",
             PanelTab::Files => "files",
             PanelTab::Diff => "file-diff",
+            PanelTab::PullRequests => "git-pull-request",
         }
     }
     fn key(self) -> &'static str {
@@ -66,6 +71,7 @@ impl PanelTab {
             PanelTab::Terminal => "t",
             PanelTab::Files => "f",
             PanelTab::Diff => "d",
+            PanelTab::PullRequests => "p",
         }
     }
     fn unavailable_hint(self) -> &'static str {
@@ -73,6 +79,7 @@ impl PanelTab {
             PanelTab::Browser => "Only available in the desktop app.",
             PanelTab::Terminal | PanelTab::Files => "Available when a project is open.",
             PanelTab::Diff => "Available for Git repositories.",
+            PanelTab::PullRequests => "Available for GitHub repositories.",
         }
     }
 }
@@ -82,6 +89,7 @@ impl PanelTab {
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Surface {
     Diff,
+    PullRequests,
     Files,
     Browser {
         id: u64,
@@ -98,6 +106,7 @@ impl Surface {
     fn id(&self) -> String {
         match self {
             Surface::Diff => "diff".into(),
+            Surface::PullRequests => "pull-requests".into(),
             Surface::Files => "files".into(),
             Surface::Browser { id } => format!("browser:{id}"),
             Surface::Terminal { key, .. } => format!("terminal:{key}"),
@@ -106,6 +115,7 @@ impl Surface {
     fn kind(&self) -> PanelTab {
         match self {
             Surface::Diff => PanelTab::Diff,
+            Surface::PullRequests => PanelTab::PullRequests,
             Surface::Files => PanelTab::Files,
             Surface::Browser { .. } => PanelTab::Browser,
             Surface::Terminal { .. } => PanelTab::Terminal,
@@ -234,6 +244,7 @@ pub(crate) struct PanelState {
     files: files::FilesState,
     terminals: terminal_drawer::TerminalState,
     details: details::DetailsState,
+    pull_requests: pull_requests::PullRequestsState,
     _subscriptions: Vec<Subscription>,
 }
 impl PanelState {
@@ -249,6 +260,7 @@ impl PanelState {
             files: files::FilesState::new(window, cx, &mut subscriptions),
             terminals: terminal_drawer::TerminalState::default(),
             details: details::DetailsState::default(),
+            pull_requests: pull_requests::PullRequestsState::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -258,6 +270,7 @@ impl PanelState {
         self.diff.reset();
         self.files.reset();
         self.details = details::DetailsState::default();
+        self.pull_requests = pull_requests::PullRequestsState::default();
         for browser in self.browsers.values() {
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
         }
@@ -331,6 +344,7 @@ impl Desktop {
             }
             Some(Surface::Files) => self.render_files(window, cx),
             Some(Surface::Diff) => self.render_diff(window, cx),
+            Some(Surface::PullRequests) => self.render_pull_requests(window, cx),
         };
         let panel = v_flex()
             .id("right-panel")
@@ -552,11 +566,13 @@ impl Desktop {
         let has_folder = !self.snapshot.cwd().is_empty();
         let terminal = self.snapshot.terminal_available();
         let thread = self.snapshot.selected_thread.is_some();
+        let pull_requests = self.snapshot.selected_project.is_some() && self.snapshot.connected;
         move |tab| match tab {
             PanelTab::Browser => true,
             PanelTab::Terminal => terminal,
             PanelTab::Files => has_folder,
             PanelTab::Diff => thread,
+            PanelTab::PullRequests => pull_requests,
         }
     }
 
@@ -688,6 +704,7 @@ impl Desktop {
         self.sync_terminals(window, cx);
         self.sync_diff(cx);
         self.sync_files(window, cx);
+        self.sync_pull_requests();
         self.sync_browser(cx);
     }
 
@@ -720,6 +737,7 @@ impl Desktop {
         match tab {
             PanelTab::Diff => self.right_mut().upsert(Surface::Diff),
             PanelTab::Files => self.right_mut().upsert(Surface::Files),
+            PanelTab::PullRequests => self.right_mut().upsert(Surface::PullRequests),
             PanelTab::Browser => {
                 match crate::browser::Browser::new(
                     wry::WebViewBuilder::new(),

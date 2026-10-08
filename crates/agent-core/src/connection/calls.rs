@@ -6,7 +6,8 @@ use super::{
 };
 use crate::{peer::PeerError, protocol::Call, state::*};
 use agent_protocol::{
-    conversation as c, models as m, operations as op, scheduled_tasks as st, workspace as w,
+    conversation as c, models as m, operations as op, pull_requests as pr,
+    scheduled_tasks as st, workspace as w,
 };
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -51,6 +52,15 @@ pub(super) enum Reply {
     ResolvedPullRequest(agent_protocol::vcs::ResolvedPullRequestResult),
     PreparedPullRequestThread(agent_protocol::vcs::PreparedPullRequestThread),
     PublishedRepository(agent_protocol::vcs::PublishedRepository),
+    PullRequestList(pr::PullRequestList),
+    PullRequestDetail(agent_domain::PullRequestDetail),
+    PullRequestDiff(pr::PullRequestDiff),
+    PullRequestDiffFileContents(pr::PullRequestDiffFileContents),
+    PullRequestFile(pr::PullRequestFile),
+    PullRequestViewedFiles(pr::PullRequestViewedFiles),
+    PullRequestOperation(pr::PullRequestOperation),
+    PullRequestAuth(pr::SourceControlAuth),
+    PullRequestDiscovery(pr::SourceControlDiscovery),
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
@@ -96,6 +106,23 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::RunStackedAction(_) | Call::SubscribeVcsStatus(_) => Reply::Done,
         Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
         Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
+        Call::ListPullRequests(_) => Reply::PullRequestList(peer.request(call).await?),
+        Call::GetPullRequest(_) => Reply::PullRequestDetail(peer.request(call).await?),
+        Call::GetPullRequestDiff(_) => Reply::PullRequestDiff(peer.request(call).await?),
+        Call::GetPullRequestDiffFileContents(_) => {
+            Reply::PullRequestDiffFileContents(peer.request(call).await?)
+        }
+        Call::GetPullRequestFile(_) => Reply::PullRequestFile(peer.request(call).await?),
+        Call::GetPullRequestViewedFiles(_) | Call::SetPullRequestFilesViewed(_) => {
+            Reply::PullRequestViewedFiles(peer.request(call).await?)
+        }
+        Call::LinkPullRequest(_)
+        | Call::UnlinkPullRequest(_)
+        | Call::SetPullRequestWatch(_)
+        | Call::PullRequestAction(_)
+        | Call::SubmitPullRequestReview(_) => Reply::PullRequestOperation(peer.request(call).await?),
+        Call::SourceControlAuth(_) => Reply::PullRequestAuth(peer.request(call).await?),
+        Call::SourceControlDiscovery(_) => Reply::PullRequestDiscovery(peer.request(call).await?),
         Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
         Call::SwitchRef(_) | Call::CreateRef(_) => Reply::SwitchedRef(peer.request(call).await?),
         Call::UpsertKeybinding(_) | Call::RemoveKeybinding(_) => {
@@ -458,6 +485,12 @@ impl Owner {
                         self.diff_preview_finished(request, Err(&error), diff_generation)
                     }
                     Call::Search(params) => self.search_finished(&params.query, None),
+                    Call::ListPullRequests(request) => {
+                        self.state
+                            .pull_requests
+                            .list_requested
+                            .remove(&request.project_id);
+                    }
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
                     _ => {}
@@ -687,6 +720,97 @@ impl Owner {
                     }
                 }
             }
+            Reply::PullRequestList(list) => {
+                if let Call::ListPullRequests(request) = call {
+                    self.state
+                        .pull_requests
+                        .list_requested
+                        .remove(&request.project_id);
+                    self.state
+                        .pull_requests
+                        .by_project
+                        .insert(request.project_id.clone(), list.entries);
+                    self.state.pull_requests.selected_project = Some(request.project_id.clone());
+                }
+            }
+            Reply::PullRequestDetail(detail) => {
+                if let Call::GetPullRequest(request) = call {
+                    self.state
+                        .pull_requests
+                        .details
+                        .insert(request.reference.key().canonical(), detail);
+                }
+            }
+            Reply::PullRequestDiff(diff) => {
+                let key = diff.reference.key().canonical();
+                let append = matches!(call, Call::GetPullRequestDiff(request) if request.cursor.is_some());
+                if append {
+                    if let Some(previous) = self.state.pull_requests.diffs.get_mut(&key) {
+                        previous.files.extend(diff.files);
+                        previous.patch.push_str(&diff.patch);
+                        previous.truncated |= diff.truncated;
+                        previous.next_cursor = diff.next_cursor;
+                        if let Some(stats) = diff.omitted_file_stats {
+                            previous
+                                .omitted_file_stats
+                                .get_or_insert_with(Vec::new)
+                                .extend(stats);
+                        }
+                    } else {
+                        self.state.pull_requests.diffs.insert(key, diff);
+                    }
+                } else {
+                    let prefix = format!("{key}\0");
+                    self.state
+                        .pull_requests
+                        .diff_file_contents
+                        .retain(|context_key, _| !context_key.starts_with(&prefix));
+                    self.state.pull_requests.diffs.insert(key, diff);
+                }
+            }
+            Reply::PullRequestDiffFileContents(contents) => {
+                if let Call::GetPullRequestDiffFileContents(request) = call {
+                    let key = pull_request_diff_context_key(
+                        &request.reference.key(),
+                        &request.old_path,
+                        &request.new_path,
+                    );
+                    self.state
+                        .pull_requests
+                        .diff_file_contents
+                        .insert(key, contents);
+                }
+            }
+            Reply::PullRequestFile(file) => {
+                self.state
+                    .pull_requests
+                    .files
+                    .insert(format!("{}:{}", file.reference.key().canonical(), file.path), file);
+            }
+            Reply::PullRequestViewedFiles(viewed) => {
+                self.state
+                    .pull_requests
+                    .viewed_files
+                    .insert(viewed.reference.key().canonical(), viewed);
+            }
+            Reply::PullRequestOperation(operation) => {
+                if let Some(thread) = pull_request_operation_thread(call) {
+                    self.state
+                        .pull_requests
+                        .links_by_thread
+                        .insert(thread, operation.linked.clone());
+                }
+                if let Some(detail) = operation.detail {
+                    self.state
+                        .pull_requests
+                        .details
+                        .insert(operation.reference.key().canonical(), detail);
+                }
+            }
+            Reply::PullRequestAuth(auth) => self.state.pull_requests.auth = Some(auth),
+            Reply::PullRequestDiscovery(discovery) => {
+                self.state.pull_requests.discovery = Some(discovery)
+            }
             Reply::SwitchedRef(switched) => match call {
                 Call::SwitchRef(request) => {
                     self.switched_ref(request, switched);
@@ -754,4 +878,14 @@ impl Owner {
             _ => {}
         }
     }
+}
+
+fn pull_request_operation_thread(call: &Call) -> Option<agent_domain::ThreadId> {
+    let thread = match call {
+        Call::LinkPullRequest(request) => &request.thread_id,
+        Call::UnlinkPullRequest(request) => &request.thread_id,
+        Call::SetPullRequestWatch(request) => &request.thread_id,
+        _ => return None,
+    };
+    agent_domain::ThreadId::new(thread.clone()).ok()
 }

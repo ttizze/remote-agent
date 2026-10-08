@@ -565,7 +565,7 @@ async fn pull_request(
         return Err(ActionError::at(ActionPhase::Pr, "Push the branch with an upstream before creating a pull request."));
     }
     let default = github
-        .default_branch(cwd)
+        .default_branch_for_cwd(cwd)
         .await
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
         .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))

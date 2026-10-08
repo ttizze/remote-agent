@@ -6,6 +6,7 @@ mod codex_accounts;
 pub mod conversation;
 mod dictation;
 mod favicon;
+mod github;
 mod git;
 mod github;
 mod host_identity;

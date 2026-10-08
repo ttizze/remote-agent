@@ -26,7 +26,7 @@ use agent_domain::{
     ApprovalDecision, Command, InteractionMode, MessageId, Plan, PlanRef, RunId, RuntimeRequestId,
     State, ThreadId, Timestamp,
 };
-use agent_protocol::{conversation as c, models as m, operations as op};
+use agent_protocol::{conversation as c, models as m, operations as op, pull_requests as pr};
 use std::sync::Arc;
 
 pub(super) enum Next {
@@ -207,6 +207,285 @@ impl Owner {
                 self.search(query);
                 Next::Done
             }
+            Intent::LoadPullRequests {
+                project_id,
+                repository,
+                query,
+                include_closed,
+            } => Next::call(
+                Call::ListPullRequests(pr::ListPullRequests {
+                    project_id,
+                    repository,
+                    host: None,
+                    state: if include_closed {
+                        pr::PullRequestListState::All
+                    } else {
+                        pr::PullRequestListState::Open
+                    },
+                    query,
+                    limit: 100,
+                    cursor: None,
+                    fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequest {
+                project_id,
+                host,
+                repository,
+                number,
+            } => Next::call(
+                Call::GetPullRequest(pr::GetPullRequest {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestDiff {
+                project_id,
+                host,
+                repository,
+                number,
+                cursor,
+                commit,
+            } => Next::call(
+                Call::GetPullRequestDiff(pr::GetPullRequestDiff {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    cursor,
+                    commit,
+                    fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestDiffFileContents {
+                project_id,
+                host,
+                repository,
+                number,
+                commit,
+                change_type,
+                old_path,
+                new_path,
+            } => Next::call(
+                Call::GetPullRequestDiffFileContents(pr::GetPullRequestDiffFileContents {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    commit,
+                    change_type: match change_type {
+                        PullRequestDiffChangeTypeInput::Change => {
+                            pr::PullRequestDiffChangeType::Change
+                        }
+                        PullRequestDiffChangeTypeInput::RenamePure => {
+                            pr::PullRequestDiffChangeType::RenamePure
+                        }
+                        PullRequestDiffChangeTypeInput::RenameChanged => {
+                            pr::PullRequestDiffChangeType::RenameChanged
+                        }
+                        PullRequestDiffChangeTypeInput::New => pr::PullRequestDiffChangeType::New,
+                        PullRequestDiffChangeTypeInput::Deleted => {
+                            pr::PullRequestDiffChangeType::Deleted
+                        }
+                    },
+                    old_path,
+                    new_path,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestViewedFiles {
+                project_id,
+                host,
+                repository,
+                number,
+            } => Next::call(
+                Call::GetPullRequestViewedFiles(pr::GetPullRequestViewedFiles {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    limit: 1_000,
+                }),
+                None,
+            ),
+            Intent::SetPullRequestFilesViewed {
+                project_id,
+                host,
+                repository,
+                number,
+                files,
+            } => Next::call(
+                Call::SetPullRequestFilesViewed(pr::SetPullRequestFilesViewed {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    files: files
+                        .into_iter()
+                        .map(|file| pr::PullRequestViewedFile {
+                            path: file.path,
+                            viewed: file.viewed,
+                        })
+                        .collect(),
+                }),
+                None,
+            ),
+            Intent::PullRequestAction {
+                project_id,
+                host,
+                repository,
+                number,
+                action,
+                stack_number,
+                expected_stack_heads,
+                merge_method,
+            } => Next::call(
+                Call::PullRequestAction(pr::PullRequestActionRequest {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    action: parse_pull_request_action(&action)?,
+                    stack_number,
+                    expected_stack_heads: (!expected_stack_heads.is_empty()).then(|| {
+                        expected_stack_heads
+                            .into_iter()
+                            .map(|head| pr::PullRequestStackHead {
+                                number: head.number,
+                                head_sha: head.head_sha,
+                            })
+                            .collect()
+                    }),
+                    merge_method: merge_method
+                        .as_deref()
+                        .map(parse_pull_request_merge_method)
+                        .transpose()?,
+                }),
+                None,
+            ),
+            Intent::SubmitPullRequestReview {
+                project_id,
+                host,
+                repository,
+                number,
+                verdict,
+                body,
+            } => Next::call(
+                Call::SubmitPullRequestReview(pr::SubmitPullRequestReview {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    verdict: parse_pull_request_verdict(&verdict)?,
+                    body,
+                }),
+                None,
+            ),
+            Intent::LinkPullRequest {
+                thread_id,
+                project_id,
+                host,
+                repository,
+                number,
+                url,
+            } => Next::call(
+                Call::LinkPullRequest(pr::LinkPullRequest {
+                    thread_id,
+                    project_id,
+                    host,
+                    repository,
+                    number,
+                    url,
+                    source: agent_domain::PullRequestLinkSource::Manual,
+                    refresh: true,
+                }),
+                None,
+            ),
+            Intent::UnlinkPullRequest {
+                thread_id,
+                project_id,
+                host,
+                repository,
+                number,
+            } => Next::call(
+                Call::UnlinkPullRequest(pr::UnlinkPullRequest {
+                    thread_id,
+                    project_id,
+                    host,
+                    repository,
+                    number,
+                }),
+                None,
+            ),
+            Intent::SetPullRequestWatch {
+                thread_id,
+                project_id,
+                host,
+                repository,
+                number,
+                url,
+                enabled,
+            } => Next::call(
+                Call::SetPullRequestWatch(pr::SetPullRequestWatch {
+                    thread_id,
+                    project_id,
+                    link: agent_domain::PullRequestLink {
+                        host,
+                        repository,
+                        number,
+                        url,
+                        source: agent_domain::PullRequestLinkSource::Manual,
+                        linked_at: agent_domain::Timestamp::from_millis(super::owner::now_ms() as i64)
+                            .map_err(|error| invalid(error))?,
+                        snapshot: None,
+                        stack: None,
+                        watch: None,
+                    },
+                    enabled,
+                }),
+                None,
+            ),
+            Intent::LoadSourceControlAuth { cwd } => Next::call(
+                Call::SourceControlAuth(pr::SourceControlAuthRequest {
+                    host: None,
+                    cwd,
+                    fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadSourceControlDiscovery { cwd } => Next::call(
+                Call::SourceControlDiscovery(pr::SourceControlDiscoveryRequest {
+                    cwd,
+                    fresh: true,
+                }),
+                None,
+            ),
             Intent::ReorderPinned {
                 thread_id: moved,
                 before_thread_id,
@@ -1535,5 +1814,40 @@ impl Owner {
             }
             _ => unreachable!("conversation intents are prepared above"),
         })
+    }
+}
+
+fn parse_pull_request_action(value: &str) -> Result<agent_domain::PullRequestAction, PeerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "merge" => Ok(agent_domain::PullRequestAction::Merge),
+        "mark_ready" | "ready" => Ok(agent_domain::PullRequestAction::MarkReady),
+        "mark_draft" | "draft" => Ok(agent_domain::PullRequestAction::MarkDraft),
+        "close" => Ok(agent_domain::PullRequestAction::Close),
+        "reopen" => Ok(agent_domain::PullRequestAction::Reopen),
+        "update_branch" => Ok(agent_domain::PullRequestAction::UpdateBranch),
+        "enable_auto_merge" => Ok(agent_domain::PullRequestAction::EnableAutoMerge),
+        "disable_auto_merge" => Ok(agent_domain::PullRequestAction::DisableAutoMerge),
+        "revert" => Ok(agent_domain::PullRequestAction::Revert),
+        _ => Err(invalid("unknown pull request action")),
+    }
+}
+
+fn parse_pull_request_merge_method(
+    value: &str,
+) -> Result<pr::PullRequestMergeMethod, PeerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "merge" => Ok(pr::PullRequestMergeMethod::Merge),
+        "squash" => Ok(pr::PullRequestMergeMethod::Squash),
+        "rebase" => Ok(pr::PullRequestMergeMethod::Rebase),
+        _ => Err(invalid("unknown pull request merge method")),
+    }
+}
+
+fn parse_pull_request_verdict(value: &str) -> Result<pr::PullRequestReviewVerdict, PeerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "approve" => Ok(pr::PullRequestReviewVerdict::Approve),
+        "request_changes" | "changes" => Ok(pr::PullRequestReviewVerdict::RequestChanges),
+        "comment" => Ok(pr::PullRequestReviewVerdict::Comment),
+        _ => Err(invalid("unknown pull request review verdict")),
     }
 }

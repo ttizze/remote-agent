@@ -5,7 +5,8 @@ use crate::commands::outbox::Outbox;
 use crate::sync::{ShellCache, ShellStatus, ThreadSync};
 use agent_domain::{
     Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
-    ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+    ModelSelection, PullRequestDetail, PullRequestLink, PullRequestSummary, RunId, RuntimeMode,
+    State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
 };
 use agent_protocol::conversation::{SearchMatch, ShellSnapshot};
 use serde::{Deserialize, Serialize};
@@ -430,6 +431,64 @@ pub struct SearchRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PullRequestClientState {
+    pub by_project: BTreeMap<String, Vec<PullRequestSummary>>,
+    pub list_requested: BTreeSet<String>,
+    pub links_by_thread: BTreeMap<ThreadId, Vec<PullRequestLink>>,
+    pub details: BTreeMap<String, PullRequestDetail>,
+    pub diffs: BTreeMap<String, agent_protocol::pull_requests::PullRequestDiff>,
+    pub diff_file_contents:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestDiffFileContents>,
+    pub files: BTreeMap<String, agent_protocol::pull_requests::PullRequestFile>,
+    pub viewed_files:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
+    pub auth: Option<agent_protocol::pull_requests::SourceControlAuth>,
+    pub discovery: Option<agent_protocol::pull_requests::SourceControlDiscovery>,
+    pub selected_project: Option<String>,
+}
+
+/// A collision-free in-memory key for one file's old/new content within a
+/// pull-request diff. Git paths cannot contain NUL, so it is also a stable
+/// prefix for clearing all cached contexts when a fresh diff replaces it.
+pub(crate) fn pull_request_diff_context_key(
+    reference: &agent_domain::PullRequestKey,
+    old_path: &str,
+    new_path: &str,
+) -> String {
+    let canonical = reference.canonical();
+    format!(
+        "{canonical}\0{}:{old_path}\0{}:{new_path}",
+        old_path.len(),
+        new_path.len()
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestViewedFileInput {
+    pub path: String,
+    pub viewed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+#[serde(rename_all = "kebab-case")]
+pub enum PullRequestDiffChangeTypeInput {
+    Change,
+    RenamePure,
+    RenameChanged,
+    New,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestStackHeadInput {
+    pub number: u64,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     pub store_id: String,
@@ -466,6 +525,7 @@ pub struct Snapshot {
     pub sources: WorkspaceSources,
     /// Git status subscriptions and action progress.
     pub git: GitState,
+    pub pull_requests: PullRequestClientState,
     /// By project id.
     pub project_icons: BTreeMap<String, ProjectIconEntry>,
     /// What the Host's terminal metadata stream reports for every thread's
@@ -1092,6 +1152,99 @@ pub enum Intent {
         project_id: Option<String>,
     },
     Refresh,
+
+    // Pull requests and source control.
+    LoadPullRequests {
+        project_id: String,
+        repository: Option<String>,
+        query: Option<String>,
+        include_closed: bool,
+    },
+    LoadPullRequest {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    LoadPullRequestDiff {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        cursor: Option<String>,
+        commit: Option<String>,
+    },
+    LoadPullRequestDiffFileContents {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        commit: Option<String>,
+        change_type: PullRequestDiffChangeTypeInput,
+        old_path: String,
+        new_path: String,
+    },
+    LoadPullRequestViewedFiles {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestFilesViewed {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        files: Vec<PullRequestViewedFileInput>,
+    },
+    PullRequestAction {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        action: String,
+        stack_number: Option<u64>,
+        expected_stack_heads: Vec<PullRequestStackHeadInput>,
+        merge_method: Option<String>,
+    },
+    SubmitPullRequestReview {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        verdict: String,
+        body: String,
+    },
+    LinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+    },
+    UnlinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestWatch {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+        enabled: bool,
+    },
+    LoadSourceControlAuth {
+        cwd: Option<String>,
+    },
+    LoadSourceControlDiscovery {
+        cwd: String,
+    },
 
     // Composer.
     EditDraft {

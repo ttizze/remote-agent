@@ -131,7 +131,7 @@ async fn restore_pull_request_upstream(
         else {
             return;
         };
-        let urls = match github.repository_clone_urls(cwd, repository).await {
+        let urls = match github.repository_clone_urls(cwd, repository, None).await {
             Ok(urls) => urls,
             Err(error) => {
                 tracing::warn!(
