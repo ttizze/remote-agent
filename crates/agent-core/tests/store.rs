@@ -146,10 +146,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     let mut receipts = Vec::new();
     for index in 0..40 {
         receipts.push(if index == 10 || index == 20 {
-            store.dispatch(Intent::ExpandThreadList {
-                project_id: None,
-                projects: true,
-            })
+            store.dispatch(Intent::ExpandThreadList { project_id: None })
         } else {
             store.dispatch(Intent::ListSessions(op::ListSessions::new(
                 (*store.snapshot().list_query).clone(),
@@ -169,10 +166,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
         open_request["method"], "host/session/open",
         "refreshes must not fan out while the first list is pending"
     );
-    receipts.push(store.dispatch(Intent::ExpandThreadList {
-        project_id: None,
-        projects: true,
-    }));
+    receipts.push(store.dispatch(Intent::ExpandThreadList { project_id: None }));
     writer
         .reply(
             &open_request,
@@ -185,7 +179,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
         store.snapshot().subscriptions.contains_key(&id),
         "expanding projects must retain the in-flight conversation subscription"
     );
-    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"hasMore":false}})).await.unwrap();
     first.await.unwrap();
     assert!(
         store
@@ -199,13 +193,13 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     );
     let latest = read(&mut reader).await;
     assert_eq!(latest["method"], "host/session/list");
-    assert_eq!(latest["params"]["projectLimit"], 35);
+    assert_eq!(latest["params"]["limit"], 120);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), reader.read_request())
             .await
             .is_err()
     );
-    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"hasMore":false}})).await.unwrap();
     for receipt in receipts {
         receipt.await.unwrap();
     }
@@ -221,7 +215,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     )));
     let request = read(&mut reader).await;
     store.dispatch(Intent::ShowThreadList).await.unwrap();
-    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"hasMore":false}})).await.unwrap();
     refresh.await.unwrap();
     assert_eq!(
         store.snapshot().threads.as_ref().unwrap().projects[0].id,
@@ -252,7 +246,13 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
         list_request["method"], "host/session/list",
         "workspace refreshes must not fan out or block independent reads"
     );
-    writer.reply(&list_request, json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    writer
+        .reply(
+            &list_request,
+            json!({"result":{"data":[],"projects":[],"hasMore":false}}),
+        )
+        .await
+        .unwrap();
     listing.await.unwrap();
     writer
         .reply(&first_request, json!({"result":review()}))
@@ -433,14 +433,29 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
-            "host/session/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
-                .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
-            "host/account/list" => snapshot.account.accounts.as_ref().map(|accounts| json!(accounts)).unwrap_or_else(|| json!({"accounts":[],"selected":{}})),
+            "host/session/list" => snapshot
+                .threads
+                .as_ref()
+                .map(|threads| json!(threads))
+                .unwrap_or_else(|| json!({"data":[],"projects":[],"hasMore":false,})),
+            "host/account/list" => snapshot
+                .account
+                .accounts
+                .as_ref()
+                .map(|accounts| json!(accounts))
+                .unwrap_or_else(|| json!({"accounts":[],"selected":{}})),
             "host/account/usage" => json!({"windows":[],"fetchedAt":1,"error":null}),
-            "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+            "host/taskActivity/read" => {
+                json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+            }
             "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
-            "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
-            "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
+            "host/session/open" => {
+                json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]})
+            }
+            "host/workspace/review" => {
+                assert_eq!(request["params"]["cwd"], cwd);
+                review()
+            }
             method => panic!("unexpected connection request: {method}"),
         };
         writer
@@ -511,7 +526,13 @@ async fn read_after_reviews(
             continue;
         }
         if request["method"] == "host/session/list" {
-            writer.reply(&request, json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+            writer
+                .reply(
+                    &request,
+                    json!({"result":{"data":[],"projects":[],"hasMore":false,}}),
+                )
+                .await
+                .unwrap();
             continue;
         }
         if request["method"] != "host/workspace/review" {
@@ -1809,8 +1830,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         initial.threads = Some(Arc::new(
             serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/listed","name":"Selected task"}],
-                "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-            }))
+                "projects":[],"hasMore":false,}))
             .unwrap(),
         ));
         Arc::make_mut(&mut initial.drafts).insert(
@@ -1875,9 +1895,14 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         opening.await.unwrap();
         assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
         assert_eq!(store.snapshot().navigation.cwd, "/fixture");
-        writer.reply(&list_request, json!({"result":{
-                "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-            }})).await.unwrap();
+        writer
+            .reply(
+                &list_request,
+                json!({"result":{
+                "data":[],"projects":[],"hasMore":false,}}),
+            )
+            .await
+            .unwrap();
         refresh.await.unwrap();
         assert_eq!(
             store
@@ -2022,7 +2047,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
             .unwrap(),
         ),
     );
-    initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap()));
+    initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"hasMore":false,})).unwrap()));
     let (store, mut reader, mut writer) = setup(initial).await;
     writer.notify(json!({"method":"fixture/session/change","session":{"provider":"codex","id":"thread"},"change":{"turn":{"turn":{"id":"completed","status":"completed"},"completed":true}}})).await.unwrap();
     wait_for(&store, |snapshot| {
@@ -2092,7 +2117,7 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
             ..Default::default()
         })));
         let requested = store.snapshot();
-        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
+        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"hasMore":false,});
         writer
         .reply(&old_request, if failure {
             json!({"error":{"code":"provider_failed","message":"old search failed","delivery":"notSent"}})
@@ -2273,10 +2298,16 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
 #[tokio::test]
 async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
     let (store, mut reader, writer) = setup(Snapshot {
-        threads: Some(Arc::new(serde_json::from_value(json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap())),
-        list_query: Arc::new(agent_protocol::models::ListQuery { search_term:"created".into(), ..Default::default() }),
+        threads: Some(Arc::new(
+            serde_json::from_value(json!({"data":[],"projects":[],"hasMore":false,})).unwrap(),
+        )),
+        list_query: Arc::new(agent_protocol::models::ListQuery {
+            search_term: "created".into(),
+            ..Default::default()
+        }),
         ..authenticated_snapshot()
-    }).await;
+    })
+    .await;
     let server = tokio::spawn(async move {
         while let Some(request) =
             tokio::time::timeout(Duration::from_secs(2), reader.read_request())
@@ -2298,7 +2329,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                     } else {
                         json!([])
                     };
-                    json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                    json!({"data":data,"projects":[],"hasMore":false,})
                 }
                 "host/workspace/review" => review(),
                 other => panic!("unexpected method {other}"),
@@ -2521,7 +2552,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
                 let result = if opening["method"] == "host/workspace/review" {
                     review()
                 } else {
-                    json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                    json!({"data":[],"projects":[],"hasMore":false,})
                 };
                 writer
                     .reply(&opening, json!({"result":result}))
@@ -2774,7 +2805,7 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
             let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
             let store = Arc::new(Store::offline(Snapshot {
                 list_query: Arc::new(if mode == "zero-limits" {
-                    ListQuery { project_limit: 0, chat_limit: 0, ..Default::default() }
+                    ListQuery { limit: 0, ..Default::default() }
                 } else { ListQuery::default() }),
                 ..Default::default()
             }));
@@ -2792,11 +2823,10 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
             // cannot send this request and times out here.
             let initial = read(&mut reader).await;
             assert_eq!(initial["method"], "host/session/list");
-            assert_eq!(initial["params"]["projectLimit"], 5);
-            assert_eq!(initial["params"]["chatLimit"], 5);
+            assert_eq!(initial["params"]["limit"], 30);
             assert!(!store.snapshot().connected);
             assert!(store.snapshot().threads.is_none());
-            let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}});
+            let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"hasMore":false,}});
             if matches!(mode, "changed-query" | "rejected") {
                 writer.reply(&initial, titles("old")).await.unwrap();
             }
@@ -2970,7 +3000,7 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 for _ in 0..4 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
-                        "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"hasMore":false,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
@@ -3351,9 +3381,14 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
         pending.insert(request["method"].as_str().unwrap().to_owned(), request);
     }
     writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
-    writer.reply(&pending["host/session/list"], json!({"result":{
-        "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-    }})).await.unwrap();
+    writer
+        .reply(
+            &pending["host/session/list"],
+            json!({"result":{
+        "data":[],"projects":[],"hasMore":false,}}),
+        )
+        .await
+        .unwrap();
     wait_for(&store, |state| state.threads.is_some()).await;
     store
         .dispatch(Intent::NewChat { cwd: String::new() })
@@ -3427,7 +3462,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     );
     assert_eq!(
         requests["host/session/list"]["params"],
-        json!({"projectLimit":5,"chatLimit":5,"projectThreadLimits":{},"searchTerm":""})
+        json!({"limit":30,"searchTerm":""})
     );
     // Review completes first; the other automatic reads must remain current.
     for (method, result) in [
@@ -3446,7 +3481,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ),
         (
             "host/session/list",
-            json!({"data":[{"id":{"provider":"codex","id":"listed"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+            json!({"data":[{"id":{"provider":"codex","id":"listed"}}],"projects":[],"hasMore":false,}),
         ),
     ] {
         writer
@@ -3533,7 +3568,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             async move {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
-                        "host/session/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
@@ -4254,7 +4289,13 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
         pending.insert(request["method"].as_str().unwrap().to_owned(), request);
     }
     writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
-    writer.reply(&pending["host/session/list"],json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+    writer
+        .reply(
+            &pending["host/session/list"],
+            json!({"result":{"data":[],"projects":[],"hasMore":false,}}),
+        )
+        .await
+        .unwrap();
     writer
         .reply(
             &pending["host/account/list"],

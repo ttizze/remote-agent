@@ -39,8 +39,7 @@ class ThreadListTest {
                     {"id":{"provider":"claude","id":"pending-unread"},"name":"Pending unread worktree","worktreeStatus":"unmerged"},
                     {"id":{"provider":"claude","id":"running"},"name":"Claude conversation"}
                 ],
-                "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-            }"""
+                "projects":[],"hasMore":false}"""
                     ),
                 )
                 .put(

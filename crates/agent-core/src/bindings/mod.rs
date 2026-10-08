@@ -472,7 +472,7 @@ mod tests {
                 invitation: None, use_relays: false,
             };
             let cached = crate::state::Snapshot {
-                list_query: Arc::new(crate::models::ListQuery { project_limit: 15, chat_limit: 25, search_term: "retained search".into(), project_thread_limits: [("project".into(), 35)].into() }),
+                list_query: Arc::new(crate::models::ListQuery { limit: 60, search_term: "retained search".into() }),
                 navigation: Arc::new(crate::state::Navigation { thread_id: Some(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), ..Default::default() }),
                 ..Default::default()
             };
@@ -511,16 +511,14 @@ mod tests {
                 writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
                 writer.reply(&requests["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
                 let list = &requests["host/session/list"];
-                assert_eq!(list["params"]["projectLimit"], 15);
-                assert_eq!(list["params"]["chatLimit"], 25);
-                assert_eq!(list["params"]["projectThreadLimits"]["project"], 35);
+                assert_eq!(list["params"]["limit"], 60);
                 assert_eq!(list["params"]["searchTerm"], "retained search");
                 let open = &requests["host/session/open"];
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
                 writer.reply(open, json!({"result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
                 writer.reply(&requests["host/model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
-                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"hasMore":false,}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
             };
@@ -593,7 +591,7 @@ mod tests {
                             "host/diagnostics/connection" => json!({}),
                             "host/account/list" => json!({"accounts":[],"selected":{}}),
                             "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
-                            "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                            "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"hasMore":false,}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
                             "host/model/list" => json!({"data":[],"nextCursor":null}),
                             method => panic!("unexpected request: {method}"),
@@ -917,7 +915,7 @@ mod tests {
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
-                                "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                                "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"hasMore":false,}),
                                 "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[]}}}),
                                 "host/account/list" if round == 0 => json!({"accounts":[],"selected":{}}),
                                 "host/model/list" if round == 0 => json!({"data":[],"nextCursor":null}),

@@ -236,6 +236,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub threads: Option<Arc<ThreadList>>,
     #[serde(skip)]
+    pub expanded_projects: Arc<BTreeMap<String, u32>>,
+    #[serde(skip)]
+    pub project_threads: Arc<BTreeMap<String, Arc<ThreadList>>>,
+    #[serde(skip)]
     pub observed_agents: Option<crate::session::SessionRef>,
     #[serde(default)]
     pub models: Arc<Vec<Model>>,
@@ -264,6 +268,20 @@ pub struct Snapshot {
     pub error: Option<String>,
 }
 impl Snapshot {
+    pub(crate) fn listed_threads(&self) -> impl Iterator<Item = &Thread> {
+        self.threads
+            .iter()
+            .chain(self.project_threads.values())
+            .flat_map(|page| &page.data)
+    }
+
+    pub fn thread_metadata(&self, id: &crate::session::SessionRef) -> Option<&Thread> {
+        self.conversations.get(id).map(AsRef::as_ref).or_else(|| {
+            self.listed_threads()
+                .find(|thread| thread.id.as_ref() == Some(id))
+        })
+    }
+
     pub fn requests(&self) -> impl Iterator<Item = &Arc<Request>> {
         self.conversations
             .values()
@@ -405,7 +423,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ListAgents, AddProject, CreateSession,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ListProjectSessions, ListAgents, AddProject, CreateSession,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -507,13 +525,69 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
         }
 
-        Intent::ExpandThreadList { project_id, projects } => {
+        Intent::RefreshProject { project_id } => {
+            let Some(limit) = previous.expanded_projects.get(&project_id).copied() else {
+                return (next, Vec::new());
+            };
+            return prepare(previous, next, op::ListProjectSessions {
+                project_id,
+                limit,
+                search_term: previous.list_query.search_term.clone(),
+            });
+        }
+        Intent::SetProjectExpanded { project_id, expanded } => {
+            if previous.expanded_projects.contains_key(&project_id) == expanded {
+                return (next, Vec::new());
+            }
+            if expanded {
+                let Some(recent) = previous.threads.as_ref().filter(|page| {
+                    page.projects.iter().any(|project| project.id == project_id)
+                }) else {
+                    return (next, Vec::new());
+                };
+                Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), 5);
+                if let Some(page) = op::project_page(recent, &project_id, 5) {
+                    Arc::make_mut(&mut next.project_threads).insert(project_id, Arc::new(page));
+                    return (next, Vec::new());
+                }
+                let effects = if next.connected {
+                    vec![Effect::execute(op::ListProjectSessions {
+                        project_id,
+                        limit: 5,
+                        search_term: previous.list_query.search_term.clone(),
+                    })]
+                } else {
+                    Vec::new()
+                };
+                return (next, effects);
+            }
+            Arc::make_mut(&mut next.expanded_projects).remove(&project_id);
+            Arc::make_mut(&mut next.project_threads).remove(&project_id);
+            Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
+        }
+        Intent::ExpandThreadList { project_id } => {
+            if let Some(project_id) = project_id {
+                let Some(limit) = previous.expanded_projects.get(&project_id) else {
+                    return (next, Vec::new());
+                };
+                let limit = limit.saturating_add(10);
+                Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), limit);
+                if let Some(page) = previous.threads.as_ref().and_then(|recent| {
+                    op::project_page(recent, &project_id, limit)
+                }) {
+                    Arc::make_mut(&mut next.project_threads).insert(project_id.clone(), Arc::new(page));
+                    Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
+                    return (next, Vec::new());
+                }
+                return prepare(previous, next, op::ListProjectSessions {
+                    project_id,
+                    limit,
+                    search_term: previous.list_query.search_term.clone(),
+                });
+            }
             let mut query = (*previous.list_query).clone();
-            let limit = if let Some(id) = project_id {
-                query.project_thread_limits.entry(id).or_insert(5)
-            } else if projects { &mut query.project_limit } else { &mut query.chat_limit };
-            *limit = limit.saturating_add(10);
-            return prepare(previous, next, operations::ListSessions { query });
+            query.limit = query.limit.saturating_add(30);
+            return prepare(previous, next, op::ListSessions { query });
         }
 
         Intent::ShowThreadList => {
@@ -781,6 +855,8 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.terminals = Arc::default();
             next.observed_agents = None;
             next.task_activity = None;
+            next.expanded_projects = Arc::default();
+            next.project_threads = Arc::default();
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
                     drafts: std::mem::take(&mut next.drafts),
@@ -927,11 +1003,17 @@ fn reset_session(snapshot: &mut Snapshot) {
             }
         }
     }
-    if let Some(list) = &mut snapshot.threads
-        && list.data.iter().any(has_session_status)
-    {
-        for thread in &mut Arc::make_mut(list).data {
-            clear_session_status(thread);
+    if snapshot.listed_threads().any(has_session_status) {
+        for list in snapshot
+            .threads
+            .iter_mut()
+            .chain(Arc::make_mut(&mut snapshot.project_threads).values_mut())
+        {
+            if list.data.iter().any(has_session_status) {
+                for thread in &mut Arc::make_mut(list).data {
+                    clear_session_status(thread);
+                }
+            }
         }
     }
 }
@@ -1151,18 +1233,8 @@ fn submission(
         .as_ref()
         .and_then(|id| {
             previous
-                .conversations
-                .get(id)
+                .thread_metadata(id)
                 .map(|thread| thread.can_accept_direct_input)
-                .or_else(|| {
-                    previous
-                        .threads
-                        .as_ref()?
-                        .data
-                        .iter()
-                        .find(|thread| thread.id.as_ref() == Some(id))
-                        .map(|thread| thread.can_accept_direct_input)
-                })
         })
         .and_then(crate::session::direct_input_unavailable_reason)
     {
@@ -1253,9 +1325,7 @@ mod submission_tests {
             threads: Some(Arc::new(crate::models::ThreadList {
                 data: vec![thread],
                 projects: vec![],
-                more_project_ids: vec![],
-                has_more_chats: false,
-                has_more_projects: false,
+                has_more: false,
                 provider_errors: None,
             })),
             drafts: Arc::new(

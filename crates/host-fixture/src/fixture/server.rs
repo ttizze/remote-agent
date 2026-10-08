@@ -374,6 +374,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         term.is_empty() || thread.metadata.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
                             .or_else(|| thread.metadata.get("preview").and_then(Value::as_str)).unwrap_or("").to_lowercase().contains(&term)
                     }).filter(|thread| {
+                        let Some(kinds) = params["sourceKinds"].as_array().filter(|kinds| !kinds.is_empty()) else { return true; };
+                        let kind = if thread.metadata.get("parentThreadId").is_some_and(Value::is_string) {
+                            "subAgentThreadSpawn"
+                        } else { "cli" };
+                        kinds.iter().any(|value| value.as_str() == Some(kind))
+                    }).filter(|thread| {
                         let Some(ancestor) = params["ancestorThreadId"].as_str() else { return true; };
                         let mut parent = thread.metadata.get("parentThreadId").and_then(Value::as_str).map(str::to_owned);
                         let mut visited = HashSet::new();

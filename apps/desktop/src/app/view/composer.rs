@@ -155,25 +155,6 @@ impl Desktop {
                         );
                     }
                 }
-                if state
-                    .snapshot
-                    .threads
-                    .as_ref()
-                    .is_some_and(|page| page.has_more_projects)
-                {
-                    let target = entity.clone();
-                    menu = menu.item(PopupMenuItem::new("さらにプロジェクトを読み込む").on_click(
-                        move |_, _, cx| {
-                            let _ = target.update(cx, |s, cx| {
-                                s.dispatch(Intent::ExpandThreadList {
-                                    project_id: None,
-                                    projects: true,
-                                });
-                                cx.notify();
-                            });
-                        },
-                    ));
-                }
                 if state.remote.is_none() {
                     let target = entity.clone();
                     menu = menu.item(PopupMenuItem::new("別のフォルダを選択…").on_click(

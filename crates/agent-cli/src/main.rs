@@ -29,10 +29,8 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     List {
-        #[arg(long, default_value_t = 5)]
-        project_limit: u32,
-        #[arg(long, default_value_t = 5)]
-        chat_limit: u32,
+        #[arg(long, default_value_t = 30)]
+        limit: u32,
         #[arg(long, default_value = "")]
         search: String,
     },
@@ -69,16 +67,10 @@ async fn main() {
 async fn run(args: Args) -> anyhow::Result<()> {
     let mut snapshot = Snapshot::default();
     match &args.command {
-        Command::List {
-            project_limit,
-            chat_limit,
-            search,
-        } => {
+        Command::List { limit, search } => {
             snapshot.list_query = Arc::new(ListQuery {
-                project_limit: *project_limit,
-                chat_limit: *chat_limit,
+                limit: *limit,
                 search_term: search.clone(),
-                ..Default::default()
             })
         }
         Command::Send { thread_id, .. } => {

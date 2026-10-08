@@ -78,19 +78,19 @@ internal fun ThreadListScreen(
                 Button(onClick = { perform(Intent.ListSessions(ListSessions(query = query))) }) { Text("更新") }
             }
             OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
-            Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
         }
         list?.notice?.let { notice -> item { Text(notice) } }
-        projectThreads(list, openConversation, perform)
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("チャット", style = MaterialTheme.typography.titleMedium)
+                Text("最近のタスク", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { openConversation(Intent.NewChat("")) }) { Text("新規") }
             }
         }
-        items(threads.filter { it.projectId == null }, key = { it.id.listKey }) { SummaryRow(it, openConversation) }
-        if (list?.hasMoreChats == true)
-            item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, false)) }) { Text("もっと見る") } }
+        items(threads, key = { "recent:${it.id.listKey}" }) { SummaryRow(it, openConversation) }
+        if (list?.hasMore == true)
+            item { TextButton(onClick = { perform(Intent.ExpandThreadList(null)) }) { Text("もっと見る") } }
+        item { Text("プロジェクト", style = MaterialTheme.typography.headlineSmall) }
+        projectThreads(list, openConversation, perform)
         if (list != null && threads.isEmpty()) item { Text("タスクがありません。") }
     }
 }
@@ -129,12 +129,11 @@ private fun LazyListScope.projectThreads(
     perform: (Intent) -> Unit,
 ) {
     val projects = list?.projects.orEmpty()
-    val threads = list?.threads.orEmpty()
     projects.forEach { project ->
         item(key = "project:${project.id}") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(
-                    Modifier.weight(1f),
+                    Modifier.weight(1f).clickable { perform(Intent.SetProjectExpanded(project.id, !project.expanded)) },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -148,16 +147,27 @@ private fun LazyListScope.projectThreads(
                 }
             }
         }
-        items(threads.filter { it.projectId == project.id }, key = { it.id.listKey }) {
-            SummaryRow(it, openConversation)
-        }
-        if (project.id in list?.moreProjectIds.orEmpty())
-            item(key = "more:${project.id}") {
-                TextButton(onClick = { perform(Intent.ExpandThreadList(project.id, false)) }) { Text("もっと見る") }
+        if (project.expanded) {
+            if (project.loading) item(key = "loading:${project.id}") {
+                CircularProgressIndicator(Modifier.size(18.dp))
             }
+            project.error?.let { message ->
+                item(key = "error:${project.id}") {
+                    Text(message)
+                    TextButton(onClick = { perform(Intent.RefreshProject(project.id)) }) { Text("再試行") }
+                }
+            }
+            items(project.threads, key = { "project:${project.id}:${it.id.listKey}" }) {
+                SummaryRow(it, openConversation)
+            }
+            if (project.hasMore) item(key = "more:${project.id}") {
+                TextButton(
+                    onClick = { perform(Intent.ExpandThreadList(project.id)) },
+                    enabled = !project.loading,
+                ) { Text("もっと見る") }
+            }
+        }
     }
-    if (list?.hasMoreProjects == true)
-        item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, true)) }) { Text("もっと見る") } }
 }
 
 @Composable

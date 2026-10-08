@@ -47,8 +47,8 @@ use uuid::Uuid;
 
 use crate::host_rpc::{
     agent::{
-        Agent, AgentChange, AgentEvent, AnswerWrite, SessionPage, SessionSummary, SubmissionState,
-        emit,
+        Agent, AgentChange, AgentEvent, AnswerWrite, SessionListScope, SessionPage, SessionSummary,
+        SubmissionState, emit,
     },
     service::Failure,
 };
@@ -332,91 +332,35 @@ impl Claude {
         Ok(record)
     }
 
-    async fn list(&self, search: &str) -> anyhow::Result<Vec<SessionSummary>> {
+    async fn list(
+        &self,
+        search: &str,
+        cursor: Option<String>,
+        limit: u32,
+    ) -> anyhow::Result<SessionPage> {
         let home = self.native_home.clone();
-        let mut threads = tokio::task::spawn_blocking(move || {
-            history::files(&home)?
-                .into_iter()
-                .map(|path| {
-                    Ok(history::summary(&path).unwrap_or_else(|error| {
-                        let mut thread = Thread {
-                            id: path
-                                .file_stem()
-                                .and_then(|id| id.to_str())
-                                .map(|id| SessionRef {
-                                    provider: ProviderKind::Claude,
-                                    id: id.into(),
-                                }),
-                            name: Some("Claude履歴を読み取れません".into()),
-                            status: SessionStatus::Unknown,
-                            ..Default::default()
-                        };
-                        thread.history_read_state =
-                            Some(agent_protocol::session::HistoryReadState::new(
-                                agent_protocol::session::HistoryReadKind::Unavailable,
-                                vec![format!("{error:#}")],
-                            ));
-                        SessionSummary {
-                            thread,
-                            branch: None,
-                        }
-                    }))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()
-        })
-        .await??;
         let records: Vec<_> = self.records.lock().await.values().cloned().collect();
+        let mut running = Vec::new();
         for record in records {
             let record = record.lock().await;
             if record.running.is_some() {
-                let id = SessionRef {
-                    provider: ProviderKind::Claude,
-                    id: record.session_id.to_string(),
-                };
-                if let Some(summary) = threads
-                    .iter_mut()
-                    .find(|summary| summary.thread.id.as_ref() == Some(&id))
-                {
-                    summary.thread.status = SessionStatus::Running;
-                } else {
-                    threads.push(SessionSummary {
-                        thread: Thread {
-                            id: Some(SessionRef {
-                                provider: ProviderKind::Claude,
-                                id: record.session_id.to_string(),
-                            }),
-                            cwd: Some(record.cwd.clone()),
-                            status: SessionStatus::Running,
-                            ..Default::default()
-                        },
-                        branch: None,
-                    });
-                }
+                running.push(Thread {
+                    id: Some(SessionRef {
+                        provider: ProviderKind::Claude,
+                        id: record.session_id.to_string(),
+                    }),
+                    cwd: Some(record.cwd.clone()),
+                    status: SessionStatus::Running,
+                    updated_at: Some(now() as f64),
+                    ..Default::default()
+                });
             }
         }
-        let search = search.trim().to_lowercase();
-        threads.retain(|summary| {
-            let thread = &summary.thread;
-            search.is_empty()
-                || thread
-                    .name
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .contains(&search)
-                || thread
-                    .preview
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .contains(&search)
-        });
-        threads.sort_by(|left, right| {
-            updated_at(&right.thread)
-                .cmp(&updated_at(&left.thread))
-                .then_with(|| left.thread.id.cmp(&right.thread.id))
-        });
-        Ok(threads)
+        let search = search.to_owned();
+        tokio::task::spawn_blocking(move || {
+            history::list_page(&home, running, &search, cursor.as_deref(), limit)
+        })
+        .await?
     }
 
     /// Read native history on each open; the router overlays only owned execution.
@@ -1551,13 +1495,6 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
     Ok(content)
 }
 
-fn updated_at(thread: &Thread) -> u64 {
-    thread
-        .updated_at
-        .as_ref()
-        .map(|number| *number as u64)
-        .unwrap_or_default()
-}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1711,24 +1648,20 @@ impl Agent for Claude {
         &self,
         search: &str,
         cursor: Option<String>,
-        ancestor: Option<&str>,
+        scope: SessionListScope<'_>,
+        limit: u32,
     ) -> Result<SessionPage, Failure> {
-        if ancestor.is_some() {
+        if matches!(scope, SessionListScope::Descendants(_)) {
             return Ok(SessionPage {
                 data: vec![],
                 next_cursor: None,
             });
         }
-        if cursor.is_some() {
-            return Err(Failure::new("invalid_cursor", "unexpected session cursor"));
-        }
-        Ok(SessionPage {
-            data: Claude::list(self, search)
-                .await
-                .map_err(|e| Failure::new("session_list_failed", e))?,
-            next_cursor: None,
-        })
+        Claude::list(self, search, cursor, limit)
+            .await
+            .map_err(|e| Failure::new("session_list_failed", e))
     }
+
     async fn open(
         &self,
         id: &str,

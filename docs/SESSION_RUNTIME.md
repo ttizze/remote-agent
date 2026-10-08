@@ -45,13 +45,22 @@ Codex and Claude Code are the supported providers.
 
 ## Provider boundaries
 
-The task list reads root metadata, with one lookahead per displayed section.
-It does not enumerate descendants or calculate their Git status. Search also
-reads only root titles. Desktop observes `host/session/agents` only
-while the selected conversation's Agents panel is visible; core refreshes that
-fleet on connection and activity updates. Responses contain only identity,
-parent identity, name and status and update conversation metadata without
-replacing history. Mobile task-list restoration does not request this data.
+The current transport ALPN is `remote-agent/streams/6`; Host and clients must use
+the same request layout. The task list reads the newest 30 root titles with one lookahead, then stops.
+Project headers come from the Host-owned registry; old project contents are not
+part of initial completion. `host/project/sessions` reads the selected project's
+five titles on expansion, adding ten only on explicit pagination. Core owns open
+projects, applies their results separately and drops reads and late replies on
+collapse. Fresh recent rows can prove a project's page without another RPC.
+Project reads start after recent publication on resume and never hold its loading
+state. Icons and Git status are resolved only for returned tasks and their projects.
+Claude pages candidates by the same native file modification time already used
+for ordering, decoding only requested transcript metadata; search can continue
+through older candidates. Root title reads exclude native children, including
+search. Desktop observes `host/session/agents` only while the selected fleet panel
+is visible; fleet observations contain identity, parent, name and status without
+history, icons or Git work. Worktree safety checks use the separate all-session
+scope so active child sessions still prevent removal.
 
 Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong

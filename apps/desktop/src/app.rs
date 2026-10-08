@@ -217,7 +217,6 @@ pub(crate) struct Desktop {
     account_code: Entity<InputState>,
     account_busy: bool,
     account_polling: bool,
-    expanded_projects: HashSet<String>,
     expanded_items: HashSet<String>,
     expanded_work: HashMap<String, ActivityExpansion>,
     tab: Tab,
@@ -505,7 +504,6 @@ impl Desktop {
             account_code,
             account_busy: false,
             account_polling: false,
-            expanded_projects: HashSet::new(),
             expanded_items: HashSet::new(),
             expanded_work: HashMap::new(),
             tab: Tab::Chat,
@@ -917,11 +915,8 @@ impl Desktop {
         let navigated = previous.navigation.draft_key != self.snapshot.navigation.draft_key;
         let project_for_selected = |snapshot: &Snapshot| {
             snapshot
-                .threads
-                .as_ref()?
-                .data
-                .iter()
-                .find(|thread| thread.id == snapshot.navigation.thread_id)?
+                .thread_metadata(snapshot.navigation.thread_id.as_ref()?)
+                .filter(|thread| thread.parent_id.is_none())?
                 .project_id
                 .as_ref()
                 .cloned()
@@ -929,7 +924,10 @@ impl Desktop {
         if (navigated || project_for_selected(&previous) != project_for_selected(&self.snapshot))
             && let Some(project) = project_for_selected(&self.snapshot)
         {
-            self.expanded_projects.insert(project);
+            self.dispatch(Intent::SetProjectExpanded {
+                project_id: project,
+                expanded: true,
+            });
         }
         if navigated {
             self.selection
