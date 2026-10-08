@@ -29,11 +29,13 @@ import dev.remoteagent.core.ScheduledTaskDraft
 import dev.remoteagent.core.ScheduledTaskScheduleDraft
 import dev.remoteagent.core.ScheduledTaskWorkspaceDraft
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.TraitControl
 
 @Composable
 internal fun ScheduledTasksScreen(model: AndroidAppModel) {
     var selected by remember { mutableStateOf<String?>(null) }
     var draft by remember { mutableStateOf<ScheduledTaskDraft?>(null) }
+    var saveError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(model.snapshot.revision) {
         if (draft == null && selected != null) {
             draft = model.snapshot.scheduledTaskDraft(selected)
@@ -66,6 +68,7 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                                 if (selected == task.id) {
                                     selected = null
                                     draft = null
+                                    saveError = null
                                 }
                             }) {
                                 Text("Delete", color = AppTheme.colors.dangerForeground)
@@ -74,6 +77,7 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                         TextButton(onClick = {
                             selected = task.id
                             draft = model.snapshot.scheduledTaskDraft(task.id)
+                            saveError = null
                         }, modifier = Modifier.padding(horizontal = 12.dp)) {
                             Text("Edit")
                         }
@@ -81,6 +85,7 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                     TextButton(onClick = {
                         selected = null
                         draft = model.snapshot.scheduledTaskDraft(null)
+                        saveError = null
                     }) {
                         Text("New scheduled task")
                     }
@@ -92,6 +97,10 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                         model = model,
                         current = current,
                         snapshot = model.snapshot,
+                        taskMissing = selected != null
+                            && current.id == selected
+                            && model.snapshot.scheduledTasks().tasks.none { it.id == selected },
+                        saveError = saveError,
                         projects = model.snapshot.projects().map { it.id to it.name },
                         onChange = { draft = it },
                         onSave = {
@@ -100,6 +109,9 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                                     if (it.isSuccess) {
                                         selected = null
                                         draft = null
+                                        saveError = null
+                                    } else {
+                                        saveError = it.exceptionOrNull()?.message ?: "Could not save scheduled task."
                                     }
                                 }
                             }
@@ -116,6 +128,8 @@ private fun ScheduledTaskEditor(
     model: AndroidAppModel,
     current: ScheduledTaskDraft,
     snapshot: Snapshot,
+    taskMissing: Boolean,
+    saveError: String?,
     projects: List<Pair<String, String>>,
     onChange: (ScheduledTaskDraft) -> Unit,
     onSave: () -> Unit,
@@ -193,6 +207,72 @@ private fun ScheduledTaskEditor(
                     )
                 }
             }
+        }
+        val traits by rememberView(snapshot, current.instanceId, current.model, current.options) {
+            it.scheduledTaskTraits(current)
+        }
+        traits?.controls.orEmpty().forEach { control ->
+            when (control) {
+                is TraitControl.Select -> {
+                    Text(control.label, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    Row(
+                        Modifier.padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        control.choices.forEach { choice ->
+                            FilterChip(
+                                selected = choice.id == control.selected,
+                                onClick = {
+                                    onChange(snapshot.selectScheduledTaskTrait(current, control.id, choice.id))
+                                },
+                                label = { Text(choice.label) },
+                            )
+                        }
+                    }
+                }
+                is TraitControl.Toggle -> {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        Text(control.label, modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = control.on,
+                            onCheckedChange = {
+                                onChange(snapshot.toggleScheduledTaskTrait(current, control.id, it))
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        val runtimeChoices = snapshot.scheduledTaskRuntimeModes(current)
+        Text("Runtime", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+        Row(
+            Modifier.padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            runtimeChoices.forEach { choice ->
+                FilterChip(
+                    selected = current.runtimeMode == choice.mode,
+                    onClick = { onChange(current.copy(runtimeMode = choice.mode)) },
+                    label = { Text(choice.label) },
+                )
+            }
+        }
+        if (taskMissing) {
+            Text(
+                "This task was deleted elsewhere. Close this editor and start again.",
+                color = AppTheme.colors.dangerForeground,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+        saveError?.let {
+            Text(
+                it,
+                color = AppTheme.colors.dangerForeground,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
         val interval = current.schedule is ScheduledTaskScheduleDraft.Interval
         Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -346,6 +426,10 @@ private fun ScheduledTaskEditor(
             }
             is ScheduledTaskWorkspaceDraft.Root -> Unit
         }
-        TextButton(onClick = onSave, modifier = Modifier.padding(16.dp)) { Text("Save scheduled task") }
+        TextButton(
+            onClick = onSave,
+            enabled = !taskMissing,
+            modifier = Modifier.padding(16.dp),
+        ) { Text("Save scheduled task") }
     }
 }

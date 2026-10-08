@@ -498,13 +498,33 @@ impl Owner {
         let workspace = &mut self.state.workspace;
         match reply {
             Reply::Providers(providers) => {
-                if self.state.default_draft.model.is_empty()
+                let current_available = providers.iter().any(|instance| {
+                    instance.instance == self.state.default_draft.instance_id
+                        && instance.driver == self.state.default_draft.driver
+                        && instance.enabled
+                        && instance.installed
+                        && instance.unavailable_reason.is_none()
+                        && !matches!(
+                            instance.status,
+                            crate::models::ProviderStatus::Error
+                                | crate::models::ProviderStatus::Disabled
+                        )
+                        && instance
+                            .models
+                            .iter()
+                            .any(|model| model.slug == self.state.default_draft.model)
+                });
+                if (!current_available || self.state.default_draft.model.is_empty())
                     && let Some((instance, model)) = crate::view::models::default_model(&providers)
                 {
+                    let runtime_mode = self.state.default_draft.runtime_mode;
+                    let interaction_mode = self.state.default_draft.interaction_mode;
                     self.state.default_draft = Draft {
                         instance_id: instance.instance.clone(),
                         driver: instance.driver,
                         model: model.slug.clone(),
+                        runtime_mode,
+                        interaction_mode,
                         ..Draft::default()
                     };
                 }
