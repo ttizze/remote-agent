@@ -8,7 +8,7 @@ use operations as op;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -24,10 +24,16 @@ pub struct Draft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
 }
-/// Device preferences applied only when creating a new conversation draft.
+/// Device preferences for new chats and each provider, with independent choices.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ModelDefaults {
+    pub new_chat_model: Option<crate::models::ModelRef>,
+    pub providers: HashMap<crate::session::ProviderKind, ProviderModelDefaults>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ProviderModelDefaults {
     pub model: Option<crate::models::ModelRef>,
     pub effort: Option<String>,
     pub service_tier: Option<String>,
@@ -506,9 +512,13 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             next.epoch += 1;
             let key = DraftKey::Local { key: format!("new:{cwd}") };
             if !previous.drafts.contains_key(&key) {
-                let defaults = previous.model_defaults_for_cwd(&cwd);
+                let preferences = previous.model_defaults_for_cwd(&cwd);
+                let provider = preferences.new_chat_model.as_ref().map_or(
+                    crate::session::ProviderKind::Codex, |model| model.provider,
+                );
+                let defaults = preferences.providers.get(&provider).cloned().unwrap_or_default();
                 let mut draft = Draft {
-                    model: defaults.model,
+                    model: preferences.new_chat_model.or(defaults.model),
                     effort: defaults.effort,
                     service_tier: defaults.service_tier,
                     ..Default::default()
@@ -516,7 +526,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 if !previous.models.is_empty() {
                     let (model, effort, tier) = supported_settings(
                         draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
-                        None, &previous.models, !previous.model_errors.is_empty(),
+                        Some(provider), &previous.models, !previous.model_errors.is_empty(),
                     );
                     let settings = (model.cloned(), effort.map(str::to_owned), tier.map(str::to_owned));
                     (draft.model, draft.effort, draft.service_tier) = settings;
@@ -558,21 +568,29 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
         }
 
-        Intent::SelectDefaultModel { scope, model } => {
+        Intent::SelectNewChatModel { scope, model } => {
             let mut defaults = previous.model_defaults(scope.clone());
-            if defaults.model != model {
-                defaults = ModelDefaults { model, ..Default::default() };
+            defaults.new_chat_model = model;
+            set_model_defaults(&mut next, scope, defaults);
+        }
+        Intent::SelectDefaultModel { scope, provider, model } => {
+            if model.as_ref().is_none_or(|model| model.provider == provider) {
+                let mut defaults = previous.model_defaults(scope.clone());
+                let settings = defaults.providers.entry(provider).or_default();
+                if settings.model != model {
+                    *settings = ProviderModelDefaults { model, ..Default::default() };
+                }
+                set_model_defaults(&mut next, scope, defaults);
             }
+        }
+        Intent::SelectDefaultEffort { scope, provider, effort } => {
+            let mut defaults = previous.model_defaults(scope.clone());
+            defaults.providers.entry(provider).or_default().effort = effort;
             set_model_defaults(&mut next, scope, defaults);
         }
-        Intent::SelectDefaultEffort { scope, effort } => {
+        Intent::SelectDefaultServiceTier { scope, provider, service_tier } => {
             let mut defaults = previous.model_defaults(scope.clone());
-            defaults.effort = effort;
-            set_model_defaults(&mut next, scope, defaults);
-        }
-        Intent::SelectDefaultServiceTier { scope, service_tier } => {
-            let mut defaults = previous.model_defaults(scope.clone());
-            defaults.service_tier = service_tier;
+            defaults.providers.entry(provider).or_default().service_tier = service_tier;
             set_model_defaults(&mut next, scope, defaults);
         }
         Intent::InheritModelDefaults { scope } => {
@@ -624,8 +642,17 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let thread_id = match intent {
                 Intent::SelectModel { thread_id, model } => {
                     if draft.model.as_ref() != Some(&model) {
-                        draft.effort = None;
-                        draft.service_tier = None;
+                        if matches!(&thread_id, DraftKey::Local { .. })
+                            && draft.model.as_ref().is_none_or(|selected| selected.provider != model.provider)
+                        {
+                            let defaults = previous.model_defaults_for_cwd(&previous.navigation.cwd);
+                            let settings = defaults.providers.get(&model.provider);
+                            draft.effort = settings.and_then(|settings| settings.effort.clone());
+                            draft.service_tier = settings.and_then(|settings| settings.service_tier.clone());
+                        } else {
+                            draft.effort = None;
+                            draft.service_tier = None;
+                        }
                     }
                     draft.model = Some(model);
                     thread_id
@@ -1161,10 +1188,17 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::Sessio
     }
 }
 
-fn set_model_defaults(snapshot: &mut Snapshot, scope: ModelDefaultsScope, defaults: ModelDefaults) {
+fn set_model_defaults(
+    snapshot: &mut Snapshot,
+    scope: ModelDefaultsScope,
+    mut defaults: ModelDefaults,
+) {
+    defaults
+        .providers
+        .retain(|_, settings| *settings != ProviderModelDefaults::default());
     if scope == ModelDefaultsScope::Global {
         snapshot.model_defaults = defaults;
-    } else {
+    } else if snapshot.scoped_model_defaults.get(&scope) != Some(&defaults) {
         Arc::make_mut(&mut snapshot.scoped_model_defaults).insert(scope, defaults);
     }
 }
@@ -1210,3 +1244,7 @@ impl Snapshot {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "state/model_defaults_tests.rs"]
+mod model_defaults_tests;

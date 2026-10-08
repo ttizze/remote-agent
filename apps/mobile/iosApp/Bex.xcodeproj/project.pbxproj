@@ -55,6 +55,7 @@
 		C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000006 /* ConversationSideChat.swift */; };
 		CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */; };
 		B2E000270000000000000001 /* ConversationRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E000270000000000000002 /* ConversationRequest.swift */; };
+		C0DE00000000000000000501 /* ModelDefaultsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000502 /* ModelDefaultsControls.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -108,6 +109,7 @@
 		C0DE00000000000000000006 /* ConversationSideChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChat.swift; sourceTree = "<group>"; };
 		1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileEditor.swift; sourceTree = "<group>"; };
 		B2E000270000000000000002 /* ConversationRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRequest.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000502 /* ModelDefaultsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDefaultsControls.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -170,6 +172,7 @@
 				C0DE00000000000000000004 /* ConversationPresentation.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
+				C0DE00000000000000000502 /* ModelDefaultsControls.swift */,
 				C0DE00000000000000000402 /* AgentSettings.swift */,
 				C0DE00000000000000000203 /* AccountViews.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
@@ -322,6 +325,7 @@
 				C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
+				C0DE00000000000000000501 /* ModelDefaultsControls.swift in Sources */,
 				C0DE00000000000000000401 /* AgentSettings.swift in Sources */,
 				C0DE00000000000000000202 /* AccountViews.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,

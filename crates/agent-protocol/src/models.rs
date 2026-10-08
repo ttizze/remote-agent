@@ -227,13 +227,6 @@ pub struct Model {
     pub default_service_tier: Option<String>,
     pub is_default: Option<bool>,
 }
-pub fn provider_models(models: &[Model], provider: crate::session::ProviderKind) -> Vec<Model> {
-    models
-        .iter()
-        .filter(|model| model.model.provider == provider)
-        .cloned()
-        .collect()
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceTier {

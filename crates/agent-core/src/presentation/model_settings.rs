@@ -1,8 +1,8 @@
 //! Model-picker and quick-control decisions shared by native clients.
 use crate::{
-    models::{Model, ModelRef, provider_models},
+    models::{Model, ModelRef},
     session::ProviderKind,
-    state::{ModelDefaults, ModelDefaultsScope, Snapshot},
+    state::{ModelDefaults, ModelDefaultsScope, ProviderModelDefaults, Snapshot},
 };
 use agent_protocol::operations::UsageWindow;
 
@@ -119,29 +119,29 @@ impl Snapshot {
         choices
     }
 
-    pub fn default_model(&self, scope: ModelDefaultsScope) -> Option<Model> {
-        let defaults = self.model_defaults(scope);
-        let (model, _, _) = crate::state::supported_settings(
-            defaults.model.as_ref(),
-            defaults.effort.as_deref(),
-            defaults.service_tier.as_deref(),
-            None,
-            &self.models,
-            !self.model_errors.is_empty(),
-        );
-        self.models
-            .iter()
-            .find(|choice| Some(&choice.model) == model)
+    pub fn provider_model_defaults(
+        &self,
+        scope: ModelDefaultsScope,
+        provider: ProviderKind,
+    ) -> ProviderModelDefaults {
+        self.model_defaults(scope)
+            .providers
+            .get(&provider)
             .cloned()
+            .unwrap_or_default()
     }
 
-    pub fn default_model_controls(&self, scope: ModelDefaultsScope) -> ModelQuickControls {
-        let defaults = self.model_defaults(scope);
+    pub fn default_model_controls(
+        &self,
+        scope: ModelDefaultsScope,
+        provider: ProviderKind,
+    ) -> ModelQuickControls {
+        let defaults = self.provider_model_defaults(scope, provider);
         let (model, effort, tier) = crate::state::supported_settings(
             defaults.model.as_ref(),
             defaults.effort.as_deref(),
             defaults.service_tier.as_deref(),
-            None,
+            Some(provider),
             &self.models,
             !self.model_errors.is_empty(),
         );
@@ -181,17 +181,28 @@ impl Snapshot {
         thread_id: crate::state::DraftKey,
         provider: ProviderKind,
     ) -> Option<ModelRef> {
-        let models = provider_models(&self.models, provider);
         let saved = self
             .drafts
             .get(&thread_id)
             .and_then(|draft| draft.model.as_ref());
-        models
-            .iter()
-            .find(|model| Some(&model.model) == saved)
-            .or_else(|| models.iter().find(|model| model.is_default == Some(true)))
-            .or(models.first())
-            .map(|model| model.model.clone())
+        let defaults = self.model_defaults_for_cwd(&self.navigation.cwd);
+        let preferred = saved
+            .filter(|model| model.provider == provider)
+            .or_else(|| {
+                defaults
+                    .providers
+                    .get(&provider)
+                    .and_then(|settings| settings.model.as_ref())
+            });
+        let (model, _, _) = crate::state::supported_settings(
+            preferred,
+            None,
+            None,
+            Some(provider),
+            &self.models,
+            !self.model_errors.is_empty(),
+        );
+        model.cloned()
     }
 
     /// Keep every weekly bucket (including model-specific limits); never turn
