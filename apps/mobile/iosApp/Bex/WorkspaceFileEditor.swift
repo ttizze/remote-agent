@@ -39,7 +39,7 @@ struct FileEditorSheet: View {
                     perform(.editFile(path: entry.path, text: value)) { _, result in
                         acknowledged((try? result.get()) != nil)
                     }
-                }, content: { TextEditor(text: $0) }).id(entry.path).font(.body.monospaced())
+                }, content: { TextEditor(text: $0) }).id(entry.path).font(AppTheme.mono(13).monospaced())
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
                     .accessibilityIdentifier("file.editor")
                     .disabled(revision.isEmpty)

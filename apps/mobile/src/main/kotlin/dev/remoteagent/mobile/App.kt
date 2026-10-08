@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import dev.remoteagent.core.AgentStore
+import dev.remoteagent.core.ArtifactTemplate
 import dev.remoteagent.core.BrowserFrame
 import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.Connection
@@ -15,6 +16,7 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.appendArtifactTemplateUsePrompt
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.validateInvitation
@@ -66,7 +68,12 @@ internal sealed interface Route {
     /** `file` opens that file of the Files tab. */
     data class Workspace(val tab: WorkspaceTab, val file: String? = null, val line: ULong? = null) : Route
 
+    /** A resource-backed PDF preview; PDFs never enter the text file reader. */
+    data class Pdf(val file: String) : Route
+
     data class Settings(val projectId: String? = null) : Route
+
+    data object Appearance : Route
 
     data object Archived : Route
 }
@@ -108,6 +115,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         private set
 
     var composerText by mutableStateOf("")
+        private set
+
+    /** Counts requests to focus the composer with the cursor at the end of the draft. */
+    var composerFocusRequests by mutableIntStateOf(0)
         private set
 
     private var followingFrom: String? = null
@@ -196,6 +207,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 draftEdits.base = composerText
             }
         }
+    }
+
+    /** Adds the template's prompt to the draft and brings the composer up with the cursor after it. */
+    fun useArtifactTemplate(template: ArtifactTemplate) {
+        val next = appendArtifactTemplateUsePrompt(composerText, template)
+        if (next != composerText) editDraft(next)
+        composerFocusRequests += 1
     }
 
     fun navigate(next: Route, selection: Intent? = null) {

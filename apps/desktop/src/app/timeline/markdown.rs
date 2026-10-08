@@ -95,7 +95,7 @@ pub(super) fn chat_markdown(
                     .label("Use template")
                     .on_click(cx.listener(move |view, _, window, cx| {
                         let (draft, _) = view.editor_text_and_cursor(cx);
-                        let next = append_artifact_template_use_prompt(&draft, &template);
+                        let next = append_artifact_template_use_prompt(draft, template.clone());
                         view.replace_composer_text(next, window, cx);
                     }));
                 body = body.child(

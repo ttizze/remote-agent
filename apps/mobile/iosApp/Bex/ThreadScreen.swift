@@ -22,6 +22,8 @@ struct ThreadScreen: View {
     @State private var showingSettings = false
     @State private var forkingRun: String?
     @State private var openedFile: FileTarget?
+    @State private var openedPDF: FileTarget?
+    @State private var contextPreview: ContextChip?
     private let endId = "feed-end"
 
     var body: some View {
@@ -47,8 +49,23 @@ struct ThreadScreen: View {
         .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
         .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
         .sheet(item: $openedFile) { ThreadFileSheet(model: model, target: $0) }
+        .sheet(item: $openedPDF) { ThreadPDFSheet(model: model, target: $0) }
+        .sheet(isPresented: Binding(
+            get: { contextPreview != nil },
+            set: { if !$0 { contextPreview = nil } }
+        )) {
+            if let contextPreview {
+                ContextPreviewSheet(chip: contextPreview, openTerminal: {
+                    openContextTerminal(contextPreview.terminalId)
+                    self.contextPreview = nil
+                })
+            }
+        }
         .environment(\.markdownLinks, MarkdownLinkOpener(
-            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd, openFile: { openedFile = $0 }, loadFile: model.download
+            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd,
+            openFile: { openedFile = $0 },
+            openPDF: { openedPDF = $0 },
+            loadFile: model.download
         ))
         .sheet(isPresented: $showingSettings) {
             if let controls = model.threadView?.composer.controls {
@@ -119,7 +136,7 @@ struct ThreadScreen: View {
                 setupCard(view)
             }
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil).equatable()
+                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil)
                 if index == firstUserMessage {
                     setupCard(view)
                 }
@@ -192,8 +209,18 @@ struct ThreadScreen: View {
                 }
             },
             openThread: { model.openThread($0) },
-            download: model.downloadAttachment
+            openTerminal: openContextTerminal,
+            showContextPreview: { contextPreview = $0 },
+            download: model.downloadAttachment,
+            useArtifactTemplate: { model.useArtifactTemplate($0) }
         )
+    }
+
+    private func openContextTerminal(_ terminalId: String?) {
+        let resolved = terminalId
+            .flatMap { id in model.threadView?.terminals.first { $0.terminalId == id }?.terminalId }
+            ?? model.threadView?.terminals.first?.terminalId
+        routes.terminal(resolved)
     }
 
     @ToolbarContentBuilder

@@ -269,6 +269,27 @@ fn a_chip_whose_record_is_of_another_kind_or_lacks_its_attachment_is_unresolved(
 }
 
 #[test]
+fn terminal_message_chips_keep_the_target_and_selected_output() {
+    let text = "see [Terminal lines](context://v1/terminal/context-1)";
+    let context = context(vec![json!({
+        "version": 1,
+        "kind": "terminal",
+        "contextId": "context-1",
+        "label": "Terminal lines 2-3",
+        "terminalId": "term-2",
+        "terminalLabel": "Terminal 2",
+        "lineStart": 2,
+        "lineEnd": 3,
+        "text": "$ pwd\n/workspace\n$ git status",
+    })]);
+    let chip = &context_chips(text, Some(&context), &[], &[], ContextChipSurface::Message)[0];
+    assert_eq!(chip.kind, ContextChipKind::Terminal);
+    assert_eq!(chip.terminal_id.as_deref(), Some("term-2"));
+    assert_eq!(chip.preview_text.as_deref(), Some("$ pwd\n/workspace\n$ git status"));
+    assert_eq!(chip.details, ContextChipDetails::Popover);
+}
+
+#[test]
 fn presents_pull_requests_by_state_and_review_comments_with_details() {
     let text = "[#42](context://v1/review-comment/pr) [a.ts](context://v1/review-comment/rc)";
     let mut summary = pull_request_summary();

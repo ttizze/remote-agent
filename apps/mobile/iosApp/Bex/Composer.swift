@@ -62,6 +62,10 @@ struct Composer: View {
         }
         .onChange(of: model.selectedThreadId) { _, _ in cancelDictation() }
         .onChange(of: model.composerText) { _, _ in updateMenu() }
+        .onChange(of: model.composerFocusRequests) { _, _ in
+            focused = true
+            selection = TextSelection(insertionPoint: model.composerText.endIndex)
+        }
         .onChange(of: selection) { _, _ in updateMenu() }
         .onAppear(perform: updateMenu)
         .onDisappear(perform: cancelDictation)
@@ -250,8 +254,11 @@ struct Composer: View {
     private func updateMenu() {
         model.perform(.updateComposerMenu(text: model.composerText, cursor: cursor, layout: .mobile))
     }
+}
 
-    private func startDictation() {
+/// Recording a dictation and handing its audio to the Host.
+private extension Composer {
+    func startDictation() {
         let key = composer.draftKey
         let host = model.selectedProfileId
         dictation.start(started: { preparation = model.store?.prepareDictation() }, completion: { result in
@@ -269,7 +276,7 @@ struct Composer: View {
         })
     }
 
-    private func cancelDictation() {
+    func cancelDictation() {
         dictation.cancel()
         preparation = nil
     }

@@ -57,12 +57,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.AgentRoster
 import dev.remoteagent.core.CatalogFilter
 import dev.remoteagent.core.CatalogSheetItem
 import dev.remoteagent.core.CatalogSheetOptions
 import dev.remoteagent.core.CatalogSheetView
 import dev.remoteagent.core.ComposerView
+import dev.remoteagent.core.ContextChip
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.QueueAction
 import dev.remoteagent.core.QueueRowView
@@ -120,6 +122,31 @@ internal fun QueueSheet(model: AndroidAppModel, queue: QueueView, onDismiss: () 
             }
         }
         queue.rows.forEachIndexed { index, row -> QueueRow(model, queue, row, index, onDismiss) }
+    }
+}
+
+@Composable
+internal fun ContextPreviewSheet(
+    chip: ContextChip,
+    onClose: () -> Unit,
+    onOpenTerminal: (String?) -> Unit,
+) {
+    BottomSheet(onClose, chip.label, skipPartiallyExpanded = true) {
+        Text(
+            chip.previewText ?: "Context unavailable",
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+            style = AppTheme.body.copy(
+                fontFamily = AppTheme.mono,
+                fontSize = AppTheme.terminalFontSize.sp,
+            ),
+            color = AppTheme.colors.foreground,
+        )
+        TextButton(
+            onClick = { onOpenTerminal(chip.terminalId) },
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            Text("Open terminal", color = AppTheme.colors.primaryText)
+        }
     }
 }
 

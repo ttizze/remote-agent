@@ -280,6 +280,13 @@ fn positive(digits: Option<regex::Match<'_>>) -> Option<u64> {
     (value > 0).then_some(value)
 }
 
+/// Returns the one-based line target only when it fits the rendered file.
+/// Keeping this check in core lets native clients handle oversized Markdown
+/// line numbers without converting them to a platform integer first.
+pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
+    (line > 0 && line <= line_count).then_some(line)
+}
+
 pub fn split_file_path_position(path: &str, hash: &str) -> FilePathPosition {
     if let Some(suffix) = POSITION_SUFFIX.captures(path) {
         let start = suffix.get(0).expect("whole match").start();

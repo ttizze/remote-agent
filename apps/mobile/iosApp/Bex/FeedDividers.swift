@@ -89,11 +89,12 @@ struct LifecycleRowView: View {
 
 struct PlanCardView: View {
     let plan: PlanCard
+    let useArtifactTemplate: (ArtifactTemplate) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(plan.title).font(AppTheme.font(14, weight: .bold))
-            ConversationMarkdown(source: plan.displayedMarkdown)
+            ConversationMarkdown(source: plan.displayedMarkdown, useArtifactTemplate: useArtifactTemplate)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -7,7 +7,11 @@ struct FeedActions {
     let toggle: (WritableKeyPath<TimelineDisclosure, [String]>, String) -> Void
     let fork: (String) -> Void
     let openThread: (String) -> Void
+    let openTerminal: (String?) -> Void
+    let showContextPreview: (ContextChip) -> Void
     let download: (String, String) async throws -> URL
+    /// "Use template" on an artifact card adds its prompt to the draft.
+    let useArtifactTemplate: (ArtifactTemplate) -> Void
 }
 
 struct FeedRowView: View, Equatable {
@@ -39,19 +43,21 @@ struct FeedRowView: View, Equatable {
         case let .userMessage(message):
             UserBubble(
                 text: message.text, attachments: message.attachments, createdAt: row.createdAt,
-                badge: message.badge, attribution: message.decorations.attribution, actions: actions
+                context: message.context, badge: message.badge, attribution: message.decorations.attribution,
+                actions: actions
             )
             .modifier(EntryFade(createdAt: row.createdAt, rises: true))
         case let .pendingMessage(message):
             UserBubble(
                 text: message.text, attachments: message.attachments, createdAt: nil,
-                badge: nil, attribution: nil, actions: actions
+                context: message.context, badge: nil, attribution: nil, actions: actions
             )
             .modifier(EntryFade(createdAt: row.createdAt, rises: true))
         case let .assistantMessage(message):
             VStack(alignment: .leading, spacing: 3.5) {
                 if !message.text.isEmpty {
-                    ConversationMarkdown(source: message.text).padding(.horizontal, 3.5)
+                    ConversationMarkdown(source: message.text, useArtifactTemplate: actions.useArtifactTemplate)
+                        .padding(.horizontal, 3.5)
                 }
                 if !message.attachments.isEmpty {
                     MessageAttachments(attachments: message.attachments, download: actions.download)
@@ -115,7 +121,7 @@ private struct WorkFeedRow: View {
         case let .handoff(divider):
             HandoffRow(divider: divider)
         case let .proposedPlan(plan):
-            PlanCardView(plan: plan)
+            PlanCardView(plan: plan, useArtifactTemplate: actions.useArtifactTemplate)
         case .worktreeSetup, .userMessage, .pendingMessage, .assistantMessage, .assistantMeta:
             EmptyView()
         }
@@ -126,11 +132,14 @@ struct UserBubble: View {
     let text: String
     let attachments: [Attachment]
     let createdAt: Int64?
+    let context: MessageContext?
     let badge: IntentBadge?
     let attribution: AgentAttribution?
     let actions: FeedActions
 
     var body: some View {
+        let chips = mobileMessageContextChips(text: text, context: context, attachments: attachments)
+        let source = mobileMessageMarkdown(text: text, context: context)
         VStack(alignment: .trailing, spacing: 3.5) {
             if let attribution {
                 Button(attribution.label) {
@@ -146,7 +155,9 @@ struct UserBubble: View {
                     MessageAttachments(attachments: attachments, download: actions.download)
                 }
                 if !text.isEmpty {
-                    Text(text).font(AppTheme.font(16)).lineSpacing(4).textSelection(.enabled)
+                    ConversationMarkdown(source: source, openContext: { href in
+                        openContext(href, chips: chips, actions: actions)
+                    })
                         .foregroundStyle(AppTheme.text)
                 }
             }
@@ -169,6 +180,23 @@ struct UserBubble: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func openContext(_ href: String, chips: [ContextChip], actions: FeedActions) {
+        guard let id = href.split(separator: "/").last.map(String.init),
+              let chip = chips.first(where: { $0.contextId == id }) else { return }
+        switch chip.kind {
+        case .thread:
+            if let thread = chip.threadId { actions.openThread(thread) }
+        case .terminal:
+            if let preview = chip.previewText, !preview.isEmpty {
+                actions.showContextPreview(chip)
+            } else {
+                actions.openTerminal(chip.terminalId)
+            }
+        default:
+            break
+        }
     }
 }
 

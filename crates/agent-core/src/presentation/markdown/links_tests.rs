@@ -669,3 +669,11 @@ fn a_tapped_link_opens_workspace_files_host_files_or_the_web() {
         MarkdownLinkAction::Nothing
     );
 }
+
+#[test]
+fn rejects_oversized_markdown_line_targets_before_native_conversion() {
+    assert_eq!(markdown_line_target(1, 1), Some(1));
+    assert_eq!(markdown_line_target(2, 1), None);
+    assert_eq!(markdown_line_target(u64::MAX, 1_000_000), None);
+    assert_eq!(markdown_line_target(u64::MAX, u64::MAX), Some(u64::MAX));
+}
