@@ -40,6 +40,7 @@ use agent_core::{
     },
 };
 use agent_protocol::models::RemoteHost;
+use futures_util::future::join_all;
 use gpui_kit::{
     component::{
         Sizable, WindowExt, h_flex,
@@ -205,6 +206,7 @@ pub(crate) struct Desktop {
     pending_load_balanced_new_thread: Option<PendingLoadBalancedNewThread>,
     load_balancing_attempt_generation: u64,
     load_balancing_refresh_requested: bool,
+    browser_profile_removal_generation: u64,
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
@@ -519,6 +521,7 @@ impl Desktop {
             pending_load_balanced_new_thread: None,
             load_balancing_attempt_generation: 0,
             load_balancing_refresh_requested: false,
+            browser_profile_removal_generation: 0,
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
@@ -910,6 +913,147 @@ impl Desktop {
             // is disconnected; the selected Store persists the scoped key.
             self.perform(intent);
         }
+    }
+
+    /// Clears a browser profile in every connected Host before removing the
+    /// device-owned profile row. The core plan owns validation and completion
+    /// decisions; this owner only supplies the Store for each environment and
+    /// commits the existing removal intent after every receipt succeeds.
+    pub(crate) fn remove_browser_profile(
+        &mut self,
+        profile_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_profile_removal_generation =
+            self.browser_profile_removal_generation.wrapping_add(1);
+        let generation = self.browser_profile_removal_generation;
+        let profiles = self.snapshot.preferences.browser.resolved().profiles;
+        let mut environment_ids = BTreeSet::new();
+        for snapshot in self.environment_registry.snapshots() {
+            if snapshot.connected
+                && let Some(environment) = snapshot.environment.as_ref()
+            {
+                environment_ids.insert(environment.environment_id.clone());
+            }
+        }
+        let mut stores = BTreeMap::new();
+        if let Some(session) = &self.session {
+            let snapshot = session.store.snapshot();
+            if snapshot.connected
+                && let Some(environment_id) = snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+            {
+                environment_ids.insert(environment_id.clone());
+                stores.insert(environment_id, session.store.clone());
+            }
+        }
+        for session in self.background_sessions.values() {
+            let snapshot = session.store.snapshot();
+            if snapshot.connected
+                && let Some(environment_id) = snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+            {
+                environment_ids.insert(environment_id.clone());
+                stores.insert(environment_id, session.store.clone());
+            }
+        }
+        let environment_ids = environment_ids.into_iter().collect::<Vec<_>>();
+        let plan = match agent_core::view::browser::begin_browser_profile_removal(
+            &profiles,
+            profile_id,
+            environment_ids,
+            generation,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.show_error(&error, window, cx);
+                return;
+            }
+        };
+        let missing = plan
+            .environment_ids
+            .iter()
+            .filter(|environment_id| !stores.contains_key(*environment_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            self.show_error(
+                "A connected Host is not ready to clear this browser profile; try again.",
+                window,
+                cx,
+            );
+            return;
+        }
+        let targets = plan
+            .environment_ids
+            .iter()
+            .filter_map(|environment_id| {
+                stores
+                    .get(environment_id)
+                    .map(|store| (environment_id.clone(), store.clone()))
+            })
+            .collect::<Vec<_>>();
+        let removal_profile_id = plan.profile_id.clone();
+        self.spawn_task(
+            async move {
+                let cleared = join_all(targets.into_iter().map(|(environment_id, store)| {
+                    let profile_id = removal_profile_id.clone();
+                    async move {
+                        let result = store
+                            .dispatch(Intent::PreviewClearProfileData { profile_id })
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|result| {
+                                result.map(|_| ()).map_err(|error| error.to_string())
+                            });
+                        (environment_id, result)
+                    }
+                }))
+                .await;
+                let mut cleared_environment_ids = Vec::new();
+                let mut failed = false;
+                for (environment_id, result) in cleared {
+                    if result.is_ok() {
+                        cleared_environment_ids.push(environment_id);
+                    } else {
+                        failed = true;
+                    }
+                }
+                let decision = agent_core::view::browser::browser_profile_removal_decision(
+                    &plan,
+                    generation,
+                    &cleared_environment_ids,
+                    failed,
+                );
+                (plan, decision)
+            },
+            move |view, (plan, decision), window, cx| {
+                if view.browser_profile_removal_generation != generation {
+                    return;
+                }
+                match decision {
+                    agent_core::view::browser::BrowserProfileRemovalDecision::Ready => {
+                        view.perform(Intent::RemoveBrowserProfile {
+                            profile_id: plan.profile_id,
+                        });
+                    }
+                    agent_core::view::browser::BrowserProfileRemovalDecision::Failed => {
+                        view.show_error(
+                            "Browser profile data could not be cleared on every connected Host; the profile was kept.",
+                            window,
+                            cx,
+                        );
+                    }
+                    agent_core::view::browser::BrowserProfileRemovalDecision::Pending
+                    | agent_core::view::browser::BrowserProfileRemovalDecision::Stale => {}
+                }
+            },
+        );
     }
 
     /// Sends an intent and runs `done` once it resolves.

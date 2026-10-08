@@ -95,6 +95,43 @@ pub fn validate_invitation(invitation: Invitation, now: u64) -> Result<String, A
     Ok(ticket.node_id().to_string())
 }
 
+/// Begins the shared browser profile removal workflow. Native clients pass
+/// the resolved profile list and connected environment ids; the core owner
+/// validates the target set before any Host clear request is dispatched.
+#[uniffi::export]
+pub fn begin_browser_profile_removal(
+    profiles: Vec<crate::view::browser::BrowserProfile>,
+    profile_id: String,
+    environment_ids: Vec<String>,
+    generation: u64,
+) -> Result<crate::view::browser::BrowserProfileRemovalPlan, AgentError> {
+    crate::view::browser::begin_browser_profile_removal(
+        &profiles,
+        profile_id,
+        environment_ids,
+        generation,
+    )
+    .map_err(error)
+}
+
+/// Folds one environment clear receipt. A stale generation is reported to
+/// native owners so they can discard a late completion without mutating the
+/// current BrowserSettings row.
+#[uniffi::export]
+pub fn browser_profile_removal_decision(
+    plan: crate::view::browser::BrowserProfileRemovalPlan,
+    callback_generation: u64,
+    cleared_environment_ids: Vec<String>,
+    failed: bool,
+) -> crate::view::browser::BrowserProfileRemovalDecision {
+    crate::view::browser::browser_profile_removal_decision(
+        &plan,
+        callback_generation,
+        &cleared_environment_ids,
+        failed,
+    )
+}
+
 #[derive(uniffi::Object)]
 pub struct AgentStore {
     store: crate::connection::Store,

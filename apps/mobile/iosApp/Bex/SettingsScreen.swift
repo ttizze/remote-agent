@@ -714,7 +714,8 @@ private struct SettingRowView: View {
                     model: model,
                     profiles: profiles,
                     defaultProfileId: defaultProfileId,
-                    onDefault: { apply(.choice(id: $0)) }
+                    onDefault: { apply(.choice(id: $0)) },
+                    onRemove: model.removeBrowserProfile
                 )
             }
             if row.resettable, let intent = model.snapshot.settingReset(scope: scope, row: row) {
@@ -848,6 +849,7 @@ private struct BrowserProfilesView: View {
     let profiles: [BrowserProfile]
     let defaultProfileId: String
     let onDefault: (String) -> Void
+    let onRemove: (String) -> Void
     @State private var editingId: String?
     @State private var editingName = ""
     @State private var newName = ""
@@ -855,13 +857,15 @@ private struct BrowserProfilesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(profiles, id: \.id) { profile in
-                let builtIn = profile.id == "default"
+                let builtIn = profile.id == "default" || profile.id == "incognito"
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(profile.name).foregroundStyle(AppTheme.text)
                         Spacer()
-                        Button(profile.id == defaultProfileId ? "Default" : "Use") {
-                            onDefault(profile.id)
+                        if profile.id != "incognito" {
+                            Button(profile.id == defaultProfileId ? "Default" : "Use") {
+                                onDefault(profile.id)
+                            }
                         }
                         if !builtIn {
                             Button("Rename") {
@@ -870,7 +874,7 @@ private struct BrowserProfilesView: View {
                             }
                             .foregroundStyle(AppTheme.primary)
                             Button("Remove", role: .destructive) {
-                                model.perform(.removeBrowserProfile(profileId: profile.id))
+                                onRemove(profile.id)
                             }
                         }
                     }
@@ -901,7 +905,7 @@ private struct BrowserProfilesView: View {
                     ))
                     newName = ""
                 }
-                .disabled(profiles.count >= 25)
+                .disabled(profiles.filter { $0.id != "default" && $0.id != "incognito" }.count >= 24)
             }
         }
     }
