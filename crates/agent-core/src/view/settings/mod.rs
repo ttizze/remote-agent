@@ -78,6 +78,8 @@ pub enum SettingId {
     StorageWorktreeOnMerge,
     StorageWorktreeOnDelete,
     StorageWorktreeUnchanged,
+    StorageBrowserArtifactsAfterDays,
+    StorageLogsAfterDays,
 }
 
 /// Where a project page's value comes from.

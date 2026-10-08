@@ -218,6 +218,10 @@ pub(super) struct Owner {
     pub observed_list: Option<ObservedList>,
     /// The thread whose setup "Work locally" is cancelling.
     pub work_locally: Option<ThreadId>,
+    /// A selected thread's folded stream has changed but its configured
+    /// publication boundary has not arrived yet.
+    stream_publish_pending: bool,
+    stream_publish_deferred: bool,
 }
 
 pub(super) type ObservedList = (Arc<ShellCache>, Arc<crate::commands::outbox::Outbox>, bool);
@@ -275,6 +279,8 @@ impl Owner {
             dictations: BTreeMap::new(),
             observed_list: None,
             work_locally: None,
+            stream_publish_pending: false,
+            stream_publish_deferred: false,
         };
         if let Some(thread) = owner.state.selected_thread.clone() {
             owner.open_thread(&thread);
@@ -530,6 +536,7 @@ impl Owner {
     }
 
     pub async fn handle(&mut self, event: Event) {
+        self.stream_publish_deferred = false;
         match event {
             Event::Intent(intent, complete) => self.intent(intent, complete),
             Event::AppActive => self.app_became_active(),
@@ -613,6 +620,10 @@ impl Owner {
             }
             _ => {}
         }
+        if self.stream_publish_deferred && self.stream_publish_pending {
+            return;
+        }
+        self.stream_publish_pending = false;
         self.publish();
     }
 

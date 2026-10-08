@@ -188,6 +188,12 @@ pub enum SettingChange {
     StorageWorktreeUnchanged {
         on: bool,
     },
+    StorageBrowserArtifactsAfterDays {
+        days: Option<u32>,
+    },
+    StorageLogsAfterDays {
+        days: Option<u32>,
+    },
     /// A project follows the Host's value again.
     Inherit {
         key: ProjectSettingKey,
@@ -341,6 +347,24 @@ pub fn plan_settings_update(
                     ..Default::default()
                 })
             }
+            SettingChange::StorageBrowserArtifactsAfterDays { days } => {
+                patch.storage_cleanup = Some(agent_protocol::models::StorageCleanupPatch {
+                    browser_artifacts_after_days: Some(match days {
+                        Some(days) => agent_protocol::models::Nullable::Value(*days),
+                        None => agent_protocol::models::Nullable::Null,
+                    }),
+                    ..Default::default()
+                })
+            }
+            SettingChange::StorageLogsAfterDays { days } => {
+                patch.storage_cleanup = Some(agent_protocol::models::StorageCleanupPatch {
+                    logs_after_days: Some(match days {
+                        Some(days) => agent_protocol::models::Nullable::Value(*days),
+                        None => agent_protocol::models::Nullable::Null,
+                    }),
+                    ..Default::default()
+                })
+            }
             SettingChange::Inherit { .. } => return None,
         },
         SettingsScope::Project { project_id } => {
@@ -404,6 +428,8 @@ pub fn plan_settings_update(
                 | SettingChange::StorageWorktreeOnMerge { .. }
                 | SettingChange::StorageWorktreeOnDelete { .. }
                 | SettingChange::StorageWorktreeUnchanged { .. } => return None,
+                SettingChange::StorageBrowserArtifactsAfterDays { .. }
+                | SettingChange::StorageLogsAfterDays { .. } => return None,
             }
             patch = project_patch(project_id, overrides);
         }
@@ -614,6 +640,26 @@ mod tests {
             })
         );
         assert!(host.patched(&storage).storage_cleanup.worktree_on_merge);
+        let browser = plan_settings_update(
+            &SettingsScope::Host,
+            &SettingChange::StorageBrowserArtifactsAfterDays { days: Some(21) },
+        )
+        .unwrap();
+        assert_eq!(
+            host.patched(&browser)
+                .storage_cleanup
+                .browser_artifacts_after_days,
+            Some(21)
+        );
+        let logs = plan_settings_update(
+            &SettingsScope::Host,
+            &SettingChange::StorageLogsAfterDays { days: Some(45) },
+        )
+        .unwrap();
+        assert_eq!(
+            host.patched(&logs).storage_cleanup.logs_after_days,
+            Some(45)
+        );
         let project_patch = plan_settings_update(
             &project("p"),
             &SettingChange::ResponseStreamingMode {

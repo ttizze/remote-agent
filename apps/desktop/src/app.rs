@@ -26,6 +26,7 @@ use agent_core::{
     connection::{Outcome, StoreOptions},
     state::{Intent, Snapshot},
     view::{
+        command_palette::{self, CommandPaletteItem, CommandPaletteItemKind},
         new_thread::NewThreadView,
         sidebar::{SidebarOptions, SidebarView},
         thread::{ThreadView, ThreadViewOptions},
@@ -35,7 +36,7 @@ use agent_core::{
 };
 use agent_protocol::models::RemoteHost;
 use gpui_kit::{
-    component::{WindowExt, h_flex, notification::Notification, v_flex},
+    component::{WindowExt, h_flex, menu::PopupMenuItem, notification::Notification, v_flex},
     prelude::FluentBuilder,
     *,
 };
@@ -583,6 +584,10 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> bool {
         let keystroke = &event.keystroke;
+        if keystroke.key == "k" && (keystroke.modifiers.platform || keystroke.modifiers.control) {
+            self.open_command_palette(window, cx);
+            return true;
+        }
         if keystroke.key == "escape" && self.cancel_sweep(window, cx) {
             return true;
         }
@@ -598,6 +603,73 @@ impl Desktop {
             return false;
         };
         self.run_command(&command, window, cx)
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut items = vec![
+            CommandPaletteItem {
+                key: "action:new".into(),
+                kind: CommandPaletteItemKind::Action,
+                title: "New thread".into(),
+                detail: Some("Start a conversation".into()),
+                search_terms: vec!["chat".into()],
+            },
+            CommandPaletteItem {
+                key: "action:settings".into(),
+                kind: CommandPaletteItemKind::Action,
+                title: "Open settings".into(),
+                detail: None,
+                search_terms: vec!["preferences".into()],
+            },
+            CommandPaletteItem {
+                key: "action:sidebar".into(),
+                kind: CommandPaletteItemKind::Action,
+                title: "Toggle sidebar".into(),
+                detail: None,
+                search_terms: vec!["navigation".into()],
+            },
+        ];
+        items.extend(self.views.sidebar.rows().map(|row| CommandPaletteItem {
+            key: format!("thread:{}", row.id),
+            kind: CommandPaletteItemKind::Thread,
+            title: row.title.clone(),
+            detail: row.project_name.clone(),
+            search_terms: vec![row.branch.clone().unwrap_or_default()],
+        }));
+        let items = command_palette::filter(&items, "", &Default::default());
+        let owner = cx.entity().downgrade();
+        self.open_menu(
+            point(px(240.), px(72.)),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                menu = menu.label("Command palette").min_w(px(320.));
+                for item in items {
+                    let key = item.key;
+                    let title = item.title;
+                    let owner = owner.clone();
+                    menu = menu.item(PopupMenuItem::new(title).on_click(move |_, window, cx| {
+                        let key = key.clone();
+                        let _ = owner.update(cx, |view, cx| {
+                            view.close_menu(cx);
+                            match key.strip_prefix("thread:") {
+                                Some(thread) => view.open_thread(thread.to_owned(), cx),
+                                None if key == "action:new" => view.new_thread(None, cx),
+                                None if key == "action:settings" => {
+                                    view.open_settings(settings::SettingsPage::General, window, cx)
+                                }
+                                None if key == "action:sidebar" => {
+                                    view.sidebar_hidden = !view.sidebar_hidden;
+                                    cx.notify();
+                                }
+                                _ => {}
+                            }
+                        });
+                    }));
+                }
+                menu
+            },
+        );
     }
 
     /// Where focus is, as the keymap's `when` clauses read it.

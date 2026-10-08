@@ -272,6 +272,8 @@ mod tests {
                     vec![
                         SettingId::StorageWorktreeAfterDays,
                         SettingId::StorageWorktreeOnMerge,
+                        SettingId::StorageBrowserArtifactsAfterDays,
+                        SettingId::StorageLogsAfterDays,
                         SettingId::StorageWorktreeOnDelete,
                         SettingId::StorageWorktreeUnchanged
                     ]

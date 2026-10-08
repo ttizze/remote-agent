@@ -69,7 +69,7 @@ pub(crate) struct ProviderPrograms {
 
 /// The browser bridge's MCP server for a thread, when the browser is enabled.
 pub(crate) type BrowserConfig =
-    Arc<dyn Fn(&ThreadId) -> Option<Result<Value, String>> + Send + Sync>;
+    Arc<dyn Fn(&ThreadId, Option<&str>) -> Option<Result<Value, String>> + Send + Sync>;
 
 pub(crate) struct ProviderHost {
     pub(crate) spawner: Arc<dyn Spawner>,
@@ -116,12 +116,21 @@ impl ProviderHost {
         Ok(PathBuf::from(cwd))
     }
 
-    fn mcp_servers(&self, key: &SessionKey) -> Result<BTreeMap<String, Value>, String> {
+    async fn mcp_servers(&self, key: &SessionKey) -> Result<BTreeMap<String, Value>, String> {
         let mut servers = BTreeMap::from([(
             tools::SERVER_NAME.to_owned(),
             self.tools.provider_config(&key.thread, &key.instance)?,
         )]);
-        if let Some(browser) = (self.browser)(&key.thread) {
+        let project = if let Some(runtime) = self.runtime.get().and_then(Weak::upgrade) {
+            runtime
+                .state(&key.thread)
+                .await
+                .ok()
+                .and_then(|state| state.state.thread.map(|thread| thread.project))
+        } else {
+            None
+        };
+        if let Some(browser) = (self.browser)(&key.thread, project.as_deref()) {
             servers.insert("browser".into(), browser?);
         }
         Ok(servers)
@@ -196,7 +205,7 @@ impl SessionHost for ProviderHost {
     fn codex_context(&self, target: LaunchTarget) -> BoxFuture<'_, Result<WireContext, String>> {
         Box::pin(async move {
             let cwd = self.cwd(&target).await?;
-            let servers = self.mcp_servers(&target.key)?;
+            let servers = self.mcp_servers(&target.key).await?;
             let omit_service_tier = match &self.programs.codex_accounts {
                 Some(accounts) => accounts.shares_tokens().await,
                 None => false,
@@ -237,7 +246,7 @@ impl SessionHost for ProviderHost {
             let cwd = self.cwd(&target).await?;
             // The app's tools are pre-approved, and a waiting tool may block for
             // up to an hour.
-            let mut mcp_servers = self.mcp_servers(&target.key)?;
+            let mut mcp_servers = self.mcp_servers(&target.key).await?;
             for server in mcp_servers.values_mut() {
                 server["timeout"] = json!(CLAUDE_MCP_TOOL_TIMEOUT_MS);
             }

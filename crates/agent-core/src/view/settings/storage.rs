@@ -11,6 +11,8 @@ pub(super) const SECTION: Section = Section {
     ids: &[
         SettingId::StorageWorktreeAfterDays,
         SettingId::StorageWorktreeOnMerge,
+        SettingId::StorageBrowserArtifactsAfterDays,
+        SettingId::StorageLogsAfterDays,
         SettingId::StorageWorktreeOnDelete,
         SettingId::StorageWorktreeUnchanged,
     ],
@@ -41,6 +43,35 @@ pub(super) const SECTION: Section = Section {
                         on: host.storage_cleanup.worktree_on_merge,
                     },
                 ),
+                super::SettingsRow {
+                    resettable: host.storage_cleanup.browser_artifacts_after_days.is_some(),
+                    ..row(
+                        SettingId::StorageBrowserArtifactsAfterDays,
+                        "Remove browser artifacts after days",
+                        Some("Leave empty to keep saved browser artifacts."),
+                        SettingControl::Number {
+                            value: host
+                                .storage_cleanup
+                                .browser_artifacts_after_days
+                                .unwrap_or(30),
+                            min: agent_protocol::models::MIN_RETENTION_DAYS,
+                            max: agent_protocol::models::MAX_RETENTION_DAYS,
+                        },
+                    )
+                },
+                super::SettingsRow {
+                    resettable: host.storage_cleanup.logs_after_days.is_some(),
+                    ..row(
+                        SettingId::StorageLogsAfterDays,
+                        "Remove logs after days",
+                        Some("Leave empty to keep diagnostic logs."),
+                        SettingControl::Number {
+                            value: host.storage_cleanup.logs_after_days.unwrap_or(30),
+                            min: agent_protocol::models::MIN_RETENTION_DAYS,
+                            max: agent_protocol::models::MAX_RETENTION_DAYS,
+                        },
+                    )
+                },
                 row(
                     SettingId::StorageWorktreeOnDelete,
                     "Remove deleted-thread worktrees",
@@ -86,6 +117,28 @@ pub(super) const SECTION: Section = Section {
             scope,
             SettingChange::StorageWorktreeUnchanged { on: *on },
         )),
+        (SettingId::StorageBrowserArtifactsAfterDays, SettingValue::Number { value }) => {
+            (agent_protocol::models::MIN_RETENTION_DAYS
+                ..=agent_protocol::models::MAX_RETENTION_DAYS)
+                .contains(value)
+                .then(|| {
+                    update(
+                        scope,
+                        SettingChange::StorageBrowserArtifactsAfterDays { days: Some(*value) },
+                    )
+                })
+        }
+        (SettingId::StorageLogsAfterDays, SettingValue::Number { value }) => {
+            (agent_protocol::models::MIN_RETENTION_DAYS
+                ..=agent_protocol::models::MAX_RETENTION_DAYS)
+                .contains(value)
+                .then(|| {
+                    update(
+                        scope,
+                        SettingChange::StorageLogsAfterDays { days: Some(*value) },
+                    )
+                })
+        }
         _ => None,
     },
     reset: |id| match id {
@@ -110,6 +163,14 @@ pub(super) const SECTION: Section = Section {
             SettingChange::StorageWorktreeUnchanged {
                 on: HostSettings::default().storage_cleanup.worktree_unchanged,
             },
+        )),
+        SettingId::StorageBrowserArtifactsAfterDays => Some(update(
+            &SettingsScope::Host,
+            SettingChange::StorageBrowserArtifactsAfterDays { days: None },
+        )),
+        SettingId::StorageLogsAfterDays => Some(update(
+            &SettingsScope::Host,
+            SettingChange::StorageLogsAfterDays { days: None },
         )),
         _ => None,
     },

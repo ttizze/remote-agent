@@ -1,6 +1,7 @@
 //! Host I/O the runtime's effect executors, recovery and launch depend on.
 use agent_domain::{
-    Attachment, CheckpointFile, RunId, ThreadId, WorktreeSetupStageId, WorktreeSetupStageStatus,
+    Attachment, CheckpointFile, ModelSelection, RunId, ThreadId, WorktreeSetupStageId,
+    WorktreeSetupStageStatus,
 };
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,15 @@ impl Default for ConversationSettings {
     }
 }
 
+/// The explicit values a Host supplies to a one-shot text generation call.
+/// Keeping these on the request lets the runtime apply the resolved project
+/// settings without handing a mutable settings document to an executor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextGenerationSettings {
+    pub model: Option<ModelSelection>,
+    pub instructions: Option<String>,
+}
+
 /// One structured text generation call (thread titles).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextGenerationRequest {
@@ -137,6 +147,8 @@ pub struct TextGenerationRequest {
     pub cwd: String,
     pub prompt: String,
     pub attachments: Vec<Attachment>,
+    pub model: Option<ModelSelection>,
+    pub instructions: Option<String>,
     /// JSON Schema of the expected output object.
     pub output_schema: serde_json::Value,
 }
@@ -165,6 +177,10 @@ pub trait HostOperations: Send + Sync {
     /// How launches into `project` name the worktree branches they generate.
     fn branch_naming(&self, _project: &str) -> agent_domain::BranchNaming {
         agent_domain::BranchNaming::default()
+    }
+    /// The resolved model and extra instructions for a one-shot text call.
+    fn text_generation_settings(&self, _project: &str, _operation: &str) -> TextGenerationSettings {
+        TextGenerationSettings::default()
     }
     /// Renames the branch checked out at `cwd` from `old` to `new`, or, unless
     /// `exact`, to the first of `new`, `new-1` … `new-100` no branch has.

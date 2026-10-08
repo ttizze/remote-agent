@@ -4,6 +4,40 @@ import Combine
 import Security
 import SwiftUI
 import UIKit
+import UserNotifications
+
+enum LocalNotifications {
+    private static var authorized: Bool?
+
+    private static func schedule(title: String, body: String, sound: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = sound ? .default : nil
+        content.badge = 1
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: "bex.local.\(UUID().uuidString)", content: content, trigger: trigger
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    static func deliver(title: String, body: String, sound: Bool) {
+        if authorized == true {
+            schedule(title: title, body: body, sound: sound)
+            return
+        }
+        guard authorized == nil else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) {
+            granted, _ in
+            DispatchQueue.main.async {
+                Self.authorized = granted
+                guard granted else { return }
+                Self.schedule(title: title, body: body, sound: sound)
+            }
+        }
+    }
+}
 
 /// Where each Host's state lives; core keeps the state file written. The model
 /// preferences every Host shares stay in the app's defaults.

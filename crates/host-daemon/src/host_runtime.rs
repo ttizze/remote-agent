@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -51,15 +51,38 @@ impl HostRuntime {
         let service = self.service.clone();
         let maintenance_stop = shutdown.clone();
         let maintenance = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut next_cleanup = Instant::now();
+            let mut next_fetch = Instant::now();
+            let mut next_health = Instant::now();
             loop {
                 tokio::select! {
                     biased;
                     _ = maintenance_stop.cancelled() => break,
                     _ = interval.tick() => {
-                        if let Err(error) = service.cleanup_merged_worktrees().await {
-                            tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
+                        let now = Instant::now();
+                        let activity = service.background_activity();
+                        let fetch = activity.automatic_git_fetch_interval_ms > 0
+                            && now >= next_fetch;
+                        let health = activity.provider_health_refresh_interval_ms > 0
+                            && now >= next_health;
+                        if fetch {
+                            next_fetch = now + Duration::from_millis(activity.automatic_git_fetch_interval_ms);
+                        }
+                        if health {
+                            next_health = now + Duration::from_millis(activity.provider_health_refresh_interval_ms);
+                        }
+                        if fetch || health {
+                            if let Err(error) = service.background_activity_tick(fetch, health).await {
+                                tracing::warn!(target: "bex", operation = "host.background_activity", message = %error);
+                            }
+                        }
+                        if now >= next_cleanup {
+                            next_cleanup = now + Duration::from_secs(60);
+                            if let Err(error) = service.cleanup_merged_worktrees().await {
+                                tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
+                            }
                         }
                     }
                 }

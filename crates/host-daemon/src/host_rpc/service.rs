@@ -23,11 +23,13 @@ use futures_util::future::BoxFuture;
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, SystemTime},
 };
 
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
@@ -111,6 +113,32 @@ impl ModelCatalog for ServiceModels {
             Ok(HostRpcService { inner }.providers().await)
         })
     }
+}
+
+fn cleanup_old_files(root: &Path, days: u32) -> usize {
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(u64::from(days) * 86_400))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut removed = 0;
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            removed += cleanup_old_files(&path, days);
+            let _ = fs::remove_dir(&path);
+        } else if metadata.is_file()
+            && metadata.modified().is_ok_and(|modified| modified <= cutoff)
+            && fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 impl ClaudeCredentials for ClaudeResources {
@@ -286,14 +314,18 @@ impl HostRpcService {
                     claude,
                 },
                 spawner: Arc::new(SupervisedSpawner),
-                browser: Arc::new(move |thread| {
+                browser: Arc::new(move |thread, project| {
                     let resources = browser.upgrade()?;
-                    if !resources
-                        .shared
-                        .worktrees
-                        .latest_host_settings()
-                        .enable_agent_browser_access
-                    {
+                    let settings = resources.shared.worktrees.latest_host_settings();
+                    let enabled = project
+                        .and_then(|project| {
+                            settings
+                                .project_overrides
+                                .get(project)
+                                .and_then(|overrides| overrides.enable_agent_browser_access)
+                        })
+                        .unwrap_or(settings.enable_agent_browser_access);
+                    if !enabled {
                         return None;
                     }
                     let browser = resources.browser.get()?;
@@ -831,6 +863,22 @@ impl HostRpcService {
 
     async fn cleanup_storage(&self) -> anyhow::Result<()> {
         let entries = self.worktree_list().await?;
+        let settings = self.inner.resources.shared.worktrees.latest_host_settings();
+        let project_rules = self
+            .inner
+            .resources
+            .shared
+            .projects
+            .list()
+            .into_iter()
+            .filter_map(|project| {
+                settings
+                    .project_overrides
+                    .get(&project.id)
+                    .and_then(|overrides| overrides.worktree_cleanup.clone())
+                    .map(|rules| (project.root, rules))
+            })
+            .collect::<HashMap<_, _>>();
         let protected: HashSet<String> = entries
             .iter()
             .filter(|entry| entry.blocked_reason.is_some())
@@ -848,10 +896,46 @@ impl HostRpcService {
             .resources
             .shared
             .worktrees
-            .cleanup_storage(&protected, live_threads.as_ref())
+            .cleanup_storage(&protected, live_threads.as_ref(), &project_rules)
             .await?;
         if removed > 0 {
             tracing::info!(removed, "cleaned stored worktrees");
+        }
+        let storage = settings.storage_cleanup;
+        let browser_root = self
+            .inner
+            .resources
+            .browser
+            .get()
+            .map(|browser| browser.profile().join("artifacts"));
+        let logs_root = self
+            .inner
+            .resources
+            .shared
+            .projects
+            .store()
+            .path()
+            .parent()
+            .map(|parent| parent.join("logs"));
+        let browser_days = storage.browser_artifacts_after_days;
+        let logs_days = storage.logs_after_days;
+        let removed_files = tokio::task::spawn_blocking(move || {
+            let browser = match (browser_root, browser_days) {
+                (Some(root), Some(days)) => cleanup_old_files(&root, days),
+                _ => 0,
+            };
+            let logs = match (logs_root, logs_days) {
+                (Some(root), Some(days)) => cleanup_old_files(&root, days),
+                _ => 0,
+            };
+            browser + logs
+        })
+        .await??;
+        if removed_files > 0 {
+            tracing::info!(
+                removed = removed_files,
+                "cleaned stored browser artifacts and logs"
+            );
         }
         Ok(())
     }
@@ -885,6 +969,49 @@ impl HostRpcService {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn background_activity_tick(
+        &self,
+        fetch_origins: bool,
+        refresh_providers: bool,
+    ) -> anyhow::Result<()> {
+        if fetch_origins {
+            let project_roots = self
+                .inner
+                .resources
+                .shared
+                .projects
+                .list()
+                .into_iter()
+                .map(|project| project.root)
+                .collect();
+            let fetched = self
+                .inner
+                .resources
+                .shared
+                .worktrees
+                .fetch_origins(project_roots)
+                .await?;
+            if fetched > 0 {
+                tracing::debug!(fetched, "refreshed managed Git remotes");
+            }
+        }
+        if refresh_providers {
+            let providers = self.providers().await;
+            tracing::debug!(providers = providers.len(), "refreshed provider health");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn background_activity(&self) -> agent_protocol::models::ResolvedBackgroundActivity {
+        self.inner
+            .resources
+            .shared
+            .worktrees
+            .latest_host_settings()
+            .background_activity
+            .resolved()
     }
 
     async fn projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {

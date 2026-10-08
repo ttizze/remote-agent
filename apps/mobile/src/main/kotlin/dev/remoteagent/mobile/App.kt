@@ -15,6 +15,7 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.ShareContent
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.validateInvitation
@@ -186,6 +187,33 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         perform(Intent.NewThreadOnBranch(projectId, branch, worktreePath))
         stack = stack + Route.NewTask
     }
+
+    fun newThreadFromShortcut() {
+        draftEdits.reset()
+        perform(Intent.NewThread(snapshot.selectedProjectId()))
+        stack = stack + Route.NewTask
+    }
+
+    fun importShare(text: String, urls: List<String> = emptyList()) {
+        perform(Intent.ImportShare(ShareContent(text = text, urls = urls)))
+        if (route != Route.NewTask && route !is Route.Thread) {
+            stack = stack + Route.NewTask
+        }
+    }
+
+    fun notificationsEnabled(): Boolean =
+        when (snapshot.preferences().notificationMode) {
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS,
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
+            else -> false
+        }
+
+    private fun notificationSoundEnabled(): Boolean =
+        when (snapshot.preferences().notificationMode) {
+            dev.remoteagent.core.NotificationMode.SOUND,
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
+            else -> false
+        }
 
     fun editDraft(text: String) {
         composerText = text
@@ -417,6 +445,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     /** Foreground: subscriptions resume from their cursors and the connection is checked. */
     fun foreground() {
+        appInBackground = false
         owner?.appBecameActive()
         connect()
     }
@@ -476,6 +505,19 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
+        val becameUnavailable = snapshot.error() == null && next.error() != null
+        if (
+            becameUnavailable &&
+                appInBackground &&
+                (notificationsEnabled() || notificationSoundEnabled())
+        ) {
+            LocalNotifications.deliver(
+                context,
+                "Bex needs your attention",
+                next.error() ?: "The Host reported an error.",
+                notificationSoundEnabled(),
+            )
+        }
         val name = next.hostName()
         if (name != null && profiles.any { it.id == profileId && it.name != name }) {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
@@ -513,9 +555,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     /** Counts the app's moves to the background, which end a dictation. */
     var backgrounds by mutableIntStateOf(0)
         private set
+    private var appInBackground = false
 
     /** The app left the foreground: everything the store holds reaches storage. */
     fun background() {
+        appInBackground = true
         backgrounds += 1
         persist()
         val store = owner ?: return

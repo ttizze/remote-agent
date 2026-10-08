@@ -30,6 +30,7 @@ pub mod share;
 pub mod shortcuts;
 pub mod sidebar;
 pub mod snooze;
+pub mod streaming;
 pub mod terminals;
 pub mod thread;
 pub mod thread_arrangement;

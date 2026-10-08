@@ -74,6 +74,25 @@ final class BexAppViewModel: ObservableObject {
         }
     }
 
+    func handleShortcut() {
+        screen = .threads
+        perform(.newThread(projectId: snapshot.selectedProjectId()))
+    }
+
+    func handleSurfaceURL(_ url: URL) {
+        guard url.scheme == "remote-agent" else { return }
+        if url.host == "new" {
+            handleShortcut()
+            return
+        }
+        guard url.host == "share" else { return }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let text = query.filter { $0.name == "text" }.compactMap(\.value).joined(separator: "\n")
+        let urls = query.filter { $0.name == "url" }.compactMap(\.value)
+        perform(.importShare(content: ShareContent(text: text, urls: urls)))
+        screen = .threads
+    }
+
     func removeProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do {
@@ -330,8 +349,21 @@ extension BexAppViewModel {
             profiles[index].name = name
             do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
         }
+        let becameUnavailable = snapshot.error() == nil && next.error() != nil
         if snapshot.error() != next.error() {
             notice = next.error()
+        }
+        if becameUnavailable && UIApplication.shared.applicationState != .active {
+            let mode = next.preferences().notificationMode
+            let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
+            let soundEnabled = mode == .sound || mode == .notificationsAndSound
+            if notificationsEnabled || soundEnabled {
+                LocalNotifications.deliver(
+                    title: "Bex needs your attention",
+                    body: next.error() ?? "The Host reported an error.",
+                    sound: soundEnabled
+                )
+            }
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next

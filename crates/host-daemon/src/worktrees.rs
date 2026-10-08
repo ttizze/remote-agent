@@ -151,23 +151,20 @@ impl Worktrees {
         &self,
         protected: &HashSet<String>,
         live_threads: Option<&HashSet<String>>,
+        project_rules: &HashMap<String, agent_protocol::models::WorktreeCleanup>,
     ) -> Result<usize> {
         let protected = protected.clone();
         let live_threads = live_threads.cloned();
+        let project_rules = project_rules.clone();
         self.locked(move |path| {
             let mut state = read(path)?;
-            let rules = match &state.host.worktree_cleanup {
-                Some(agent_protocol::models::WorktreeCleanup::Off) => return Ok(0),
-                Some(agent_protocol::models::WorktreeCleanup::Custom { rules }) => rules.clone(),
-                None => state.host.storage_cleanup.worktree_rules(),
+            let host_rules = match &state.host.worktree_cleanup {
+                Some(agent_protocol::models::WorktreeCleanup::Off) => None,
+                Some(agent_protocol::models::WorktreeCleanup::Custom { rules }) => {
+                    Some(rules.clone())
+                }
+                None => Some(state.host.storage_cleanup.worktree_rules()),
             };
-            if !rules.worktree_on_merge
-                && !rules.worktree_on_delete
-                && !rules.worktree_unchanged
-                && rules.worktree_after_days.is_none()
-            {
-                return Ok(0);
-            }
             let candidates = state
                 .workspace_roots
                 .iter()
@@ -176,6 +173,20 @@ impl Worktrees {
                 .collect::<Vec<_>>();
             let mut removed = 0;
             for (target, project) in candidates {
+                let Some(rules) = (match project_rules.get(&project) {
+                    Some(agent_protocol::models::WorktreeCleanup::Off) => None,
+                    Some(agent_protocol::models::WorktreeCleanup::Custom { rules }) => Some(rules),
+                    None => host_rules.as_ref(),
+                }) else {
+                    continue;
+                };
+                if !rules.worktree_on_merge
+                    && !rules.worktree_on_delete
+                    && !rules.worktree_unchanged
+                    && rules.worktree_after_days.is_none()
+                {
+                    continue;
+                }
                 let status = directory_status(Path::new(&target), None, None, None)?;
                 let old = rules
                     .worktree_after_days
@@ -206,6 +217,38 @@ impl Worktrees {
                 save(path, &state)?;
             }
             Ok(removed)
+        })
+        .await
+    }
+
+    /// Refreshes remotes for each repository that owns a managed checkout.
+    /// This is deliberately separate from new-thread's fast-forward pull so a
+    /// background refresh never changes a user's branch or working tree.
+    pub(crate) async fn fetch_origins(&self, project_roots: Vec<String>) -> Result<usize> {
+        self.locked(move |path| {
+            let state = read(path)?;
+            let mut projects = state
+                .workspace_roots
+                .values()
+                .map(PathBuf::from)
+                .collect::<HashSet<_>>();
+            projects.extend(project_roots.into_iter().map(PathBuf::from));
+            let mut fetched = 0;
+            for project in projects {
+                if !project.is_dir() || !has_origin(&project) {
+                    continue;
+                }
+                match fetch_all_origins(&project) {
+                    Ok(()) => fetched += 1,
+                    Err(error) => tracing::warn!(
+                        target: "bex",
+                        project = %project.display(),
+                        message = %error,
+                        "background Git fetch failed"
+                    ),
+                }
+            }
+            Ok(fetched)
         })
         .await
     }
@@ -478,6 +521,30 @@ fn automatic_pull(cwd: &Path, cancel: &CancellationToken) -> Result<bool> {
     crate::git::cancellable(cwd, &["pull", "--ff-only"], cancel)
         .context("automatic pull before creating a worktree failed")?;
     Ok(true)
+}
+
+fn has_origin(cwd: &Path) -> bool {
+    crate::git::output(cwd, &["remote", "get-url", "origin"]).is_ok()
+}
+
+fn fetch_all_origins(cwd: &Path) -> Result<()> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["fetch", "--quiet", "--end-of-options", "origin"])
+        .current_dir(cwd)
+        .env("LC_ALL", "C")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_ASKPASS", "")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("SSH_ASKPASS", "")
+        .env("SSH_ASKPASS_REQUIRE", "never");
+    let output = command.output().context("background Git fetch failed")?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = fetch_failure_detail(&String::from_utf8_lossy(&output.stderr))
+        .unwrap_or("git fetch origin failed");
+    Err(anyhow!("Git background fetch failed: {detail}"))
 }
 
 fn storage_eligible(
