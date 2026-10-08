@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -68,12 +71,20 @@ impl Prepared {
 pub(crate) struct Dictation {
     backend: Result<Arc<CodexAppServer>, String>,
     prepared: Mutex<HashMap<SessionId, Prepared>>,
+    active_transcriptions: AtomicUsize,
+}
+struct ActiveTranscription<'a>(&'a AtomicUsize);
+impl Drop for ActiveTranscription<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
 }
 impl Dictation {
     pub(crate) fn new(backend: Result<Arc<CodexAppServer>, String>) -> Self {
         Self {
             backend,
             prepared: Default::default(),
+            active_transcriptions: Default::default(),
         }
     }
     pub(crate) fn prepare(&self, session: SessionId, id: String) -> Result<(), String> {
@@ -111,6 +122,18 @@ impl Dictation {
     pub(crate) fn close_session(&self, session: SessionId) {
         self.prepared.lock().unwrap().remove(&session);
     }
+    /// A prepared connection is the Host-side half of a device recording. It
+    /// stays present while the client records and is released only when the
+    /// recording is cancelled or submitted, so an update handoff must wait for
+    /// it to settle.
+    pub(crate) fn has_active_tasks(&self) -> bool {
+        self.active_transcriptions.load(Ordering::Acquire) != 0
+            || self
+                .prepared
+                .try_lock()
+                .map(|prepared| !prepared.is_empty())
+                .unwrap_or(true)
+    }
     fn take_preparation(&self, session: SessionId, id: Option<&str>) -> Option<Prepared> {
         let mut prepared = self.prepared.lock().unwrap();
         if id.is_some_and(|id| prepared.get(&session).is_some_and(|entry| entry.id == id)) {
@@ -125,6 +148,8 @@ impl Dictation {
         preparation: Option<&str>,
         audio: &[u8],
     ) -> Result<agent_protocol::operations::Transcription, String> {
+        self.active_transcriptions.fetch_add(1, Ordering::AcqRel);
+        let _active = ActiveTranscription(&self.active_transcriptions);
         let prepared = self.take_preparation(session, preparation);
         let app_server = self
             .backend
@@ -655,6 +680,7 @@ mod tests {
                 Prepared::new(format!("recording-{session}"), std::future::pending()),
             );
         }
+        assert!(dictation.has_active_tasks());
         dictation.cancel(1, "old-recording");
         assert!(dictation.take_preparation(2, Some("recording-1")).is_none());
         assert!(dictation.take_preparation(1, None).is_none());
@@ -669,6 +695,14 @@ mod tests {
             "recording-2"
         );
         assert!(dictation.prepared.lock().unwrap().is_empty());
+        assert!(!dictation.has_active_tasks());
+        dictation
+            .active_transcriptions
+            .fetch_add(1, Ordering::AcqRel);
+        let active_transcription = ActiveTranscription(&dictation.active_transcriptions);
+        assert!(dictation.has_active_tasks());
+        drop(active_transcription);
+        assert!(!dictation.has_active_tasks());
         dictation.prepared.lock().unwrap().insert(
             3,
             Prepared::new("last-recording".into(), std::future::pending()),

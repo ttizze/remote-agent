@@ -1,0 +1,15 @@
+GCC runtime license notice
+
+The pinned Nixpkgs Linux runtime closure contains the GCC 15.3.0 runtime
+library output. Its Nixpkgs license metadata is GNU General Public License
+version 3 or later (GPL-3.0-or-later); GCC runtime components may also carry
+the GCC Runtime Library Exception.
+
+License text:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+Pinned source:
+https://gcc.gnu.org/releases/gcc-15.3.0/
+
+This is a provenance notice; the complete license text and applicable runtime
+exception are available at the URLs above.

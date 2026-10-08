@@ -181,6 +181,11 @@ impl HostRuntime {
     ) -> Result<()> {
         let node = incoming.node_id();
         let establish = async {
+            let _gate = self
+                .service
+                .acquire_handoff_gate(false)
+                .await
+                .map_err(anyhow::Error::msg)?;
             let record = self.credentials.record.lock().await;
             if record.trust.allowed.contains(&node) {
                 let connection = scopeguard::guard(incoming.authorize(&record.trust)?, |session| {
@@ -337,7 +342,13 @@ impl HostRuntime {
                         IncomingRequest::Blob(stream) => {
                             if transfers.len() >= 16 { continue; }
                             let service = self.service.clone();
-                            transfers.spawn(async move { service.files().transfer(id, stream).await });
+                            transfers.spawn(async move {
+                                let _gate = service
+                                    .acquire_handoff_gate(false)
+                                    .await
+                                    .map_err(anyhow::Error::msg)?;
+                                service.files().transfer(id, stream).await
+                            });
                         }
                         IncomingRequest::Close => break Ok(()),
                     }
@@ -395,6 +406,11 @@ impl HostRuntime {
             .into());
         }
         if let Call::RegisterAwareness(registration) = message {
+            let _gate = self
+                .service
+                .acquire_handoff_gate(false)
+                .await
+                .map_err(anyhow::Error::msg)?;
             let result = self
                 .service
                 .register_awareness(session, registration.clone())
@@ -432,6 +448,24 @@ impl HostRuntime {
                 | Call::RemoveRemote(_)
         );
         if management {
+            let _management_gate = match message {
+                Call::Pair(_)
+                | Call::HostStatus(_)
+                | Call::Invite(_)
+                | Call::Revoke(_)
+                | Call::ListRemotes(_)
+                | Call::RegisterRemote(_)
+                | Call::RemoveRemote(_) => Some(
+                    self.service
+                        .acquire_handoff_gate(matches!(
+                            message,
+                            Call::HostStatus(_) | Call::ListRemotes(_)
+                        ))
+                        .await
+                        .map_err(anyhow::Error::msg)?,
+                ),
+                _ => None,
+            };
             let result = if matches!(message, Call::Pair(_)) {
                 // Only authorized sessions reach dispatch; the invitation was
                 // already consumed at the transport gate.

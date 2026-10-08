@@ -28,4 +28,5 @@ if ($LASTEXITCODE -ne 0 -or $encoders -notmatch 'libvpx-vp9') {
 # and the upstream license/readme files beside the shipped executable.
 "AGENT_FFMPEG_EXECUTABLE=$($executable.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 "AGENT_FFMPEG_RUNTIME_DIR=$($executable.Directory.Parent.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+"AGENT_FFMPEG_COMPONENT=ffmpeg-$version-essentials_build" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 "FFMPEG_WINDOWS_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

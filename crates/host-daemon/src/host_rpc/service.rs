@@ -898,6 +898,14 @@ impl HostRpcService {
         if self.inner.updater.has_active_operations() {
             return true;
         }
+        if self.inner.resources.dictation.has_active_tasks() {
+            return true;
+        }
+        if let Some(browser) = self.inner.resources.browser.get()
+            && browser.has_active_tasks()
+        {
+            return true;
+        }
         if let Some(conversation) = self.inner.resources.conversation.get() {
             let threads = match conversation.runtime.store().thread_shells() {
                 Ok(threads) => threads,
@@ -958,6 +966,16 @@ impl HostRpcService {
     }
     pub(crate) fn handoff_is_draining(&self) -> bool {
         self.inner.handoff_draining.load(Ordering::Acquire)
+    }
+    pub(crate) async fn acquire_handoff_gate(
+        &self,
+        allow_during_drain: bool,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let gate = self.inner.handoff_gate.lock().await;
+        if !allow_during_drain && self.handoff_is_draining() {
+            return Err("Host is waiting for its installed update to start".into());
+        }
+        Ok(gate)
     }
     pub fn open_session(&self) -> HostSession {
         self.inner.connections.open_session()
@@ -1071,9 +1089,10 @@ impl HostRpcService {
         call: &Call,
         desktop_publisher_allowed: bool,
     ) -> Result<HostReply, String> {
-        if self.inner.handoff_draining.load(Ordering::Acquire) {
-            return Err("Host is waiting for its installed update to start".into());
-        }
+        // Admission and handoff share this gate. Holding it across the owner
+        // operation closes the window between the idle probe and starting a
+        // browser, conversation, terminal, or dictation task.
+        let _gate = self.acquire_handoff_gate(false).await?;
         self.inner.connections.ensure_session(session)?;
         if let Some(conversation) = self.inner.resources.conversation.get() {
             let cancel = self.inner.connections.cancellation(session)?;

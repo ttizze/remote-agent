@@ -1,0 +1,13 @@
+FFmpeg runtime license notice
+
+The pinned FFmpeg runtime source set includes code under the GNU Lesser General
+Public License, version 3 or later (LGPL-3.0-or-later).
+
+License text:
+https://www.gnu.org/licenses/lgpl-3.0.txt
+
+Upstream source:
+https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+
+This is a provenance notice; the complete license text is available at the URL
+above and is shipped with the artifact's legal notices.

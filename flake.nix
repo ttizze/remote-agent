@@ -7,6 +7,41 @@
 
   outputs = { nixpkgs, rust-overlay, ... }:
     let
+      # Preview only needs the libvpx VP9 encoder. Keep the release runtime
+      # reviewable: a small shared FFmpeg output avoids shipping the full Nix
+      # codec/filter closure and lets the staging script enumerate every copied
+      # library against third_party/ffmpeg/components.tsv.
+      ffmpegRuntime = pkgs: pkgs.ffmpeg.override {
+        ffmpegVariant = "small";
+        withHeadlessDeps = false;
+        withSmallDeps = false;
+        withFullDeps = false;
+        withVpx = true;
+        withGPL = true;
+        withVersion3 = true;
+        withNetwork = false;
+        withStatic = false;
+        withShared = true;
+        withSmallBuild = true;
+        buildFfmpeg = true;
+        buildFfplay = false;
+        buildFfprobe = false;
+        buildQtFaststart = false;
+        buildAvcodec = true;
+        buildAvdevice = false;
+        buildAvfilter = true;
+        buildAvformat = true;
+        buildAvresample = false;
+        buildAvutil = true;
+        buildPostproc = false;
+        buildSwresample = true;
+        buildSwscale = false;
+        withDocumentation = false;
+        withHtmlDoc = false;
+        withManPages = false;
+        withPodDoc = false;
+        withTxtDoc = false;
+      };
       supportedSystems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
       forEachSystem = function:
         nixpkgs.lib.genAttrs supportedSystems (system:
@@ -22,7 +57,7 @@
     {
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
-        ffmpeg = pkgs.ffmpeg;
+        ffmpeg = ffmpegRuntime pkgs;
         kani = pkgs.callPackage ./tools/kani/package.nix { };
         kache = pkgs.callPackage ./tools/kache/package.nix { };
       });
@@ -96,7 +131,7 @@
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
             NEXTEST_VERSION = pkgs.cargo-nextest.version;
-            packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ffmpeg ]
+            packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs (ffmpegRuntime pkgs) ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 patchelf
                 lsof
@@ -127,7 +162,7 @@
               kache
               cargo-mutants
               cargo-nextest
-              ffmpeg
+              (ffmpegRuntime pkgs)
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               lsof
               gradle

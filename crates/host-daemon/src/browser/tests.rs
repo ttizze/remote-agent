@@ -34,14 +34,16 @@ async fn recording_completion_is_replayable_after_startup_receiver_drops() {
         Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
     >(None);
     drop(startup_receiver);
-    done.send_replace(Some(Ok(agent_protocol::preview::PreviewRecordingArtifact {
-        id: "browser-recording-test".into(),
-        tab_id: "tab".into(),
-        path: "/tmp/browser-recording-test.webm".into(),
-        mime_type: "video/webm;codecs=vp9".into(),
-        size_bytes: 1,
-        created_at: "2026-01-01T00:00:00Z".into(),
-    })));
+    done.send_replace(Some(Ok(
+        agent_protocol::preview::PreviewRecordingArtifact {
+            id: "browser-recording-test".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/browser-recording-test.webm".into(),
+            mime_type: "video/webm;codecs=vp9".into(),
+            size_bytes: 1,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        },
+    )));
     let mut late_receiver = done.subscribe();
 
     let result = wait_for_recording_completion(&mut late_receiver)
@@ -59,7 +61,10 @@ async fn stop_waits_for_startup_before_cancelling_capture() {
     assert!(!waiting.is_finished());
 
     startup.send_replace(RecordingStartupState::Started);
-    assert_eq!(waiting.await.unwrap().unwrap(), RecordingStartupState::Started);
+    assert_eq!(
+        waiting.await.unwrap().unwrap(),
+        RecordingStartupState::Started
+    );
 }
 
 #[tokio::test]
@@ -110,8 +115,14 @@ fn completed_recording_retention_is_global_across_open_preview_tabs() {
 
     assert_eq!(artifacts.len(), MAX_RETAINED_RECORDINGS);
     assert_eq!(removed.len(), 2);
-    assert_eq!(removed[0], std::path::PathBuf::from("/tmp/recording-0.webm"));
-    assert_eq!(removed[1], std::path::PathBuf::from("/tmp/recording-1.webm"));
+    assert_eq!(
+        removed[0],
+        std::path::PathBuf::from("/tmp/recording-0.webm")
+    );
+    assert_eq!(
+        removed[1],
+        std::path::PathBuf::from("/tmp/recording-1.webm")
+    );
 }
 
 #[test]
@@ -124,12 +135,9 @@ fn detached_preview_target_cleanup_removes_host_page_metadata() {
             active: "tab".into(),
             viewports: [("tab".into(), (800, 600))].into_iter().collect(),
             preview_tabs: ["tab".into()].into_iter().collect(),
-            preview_settings: [("tab".into(), (
-                PreviewAppearance::System,
-                PreviewZoom::X100,
-            ))]
-            .into_iter()
-            .collect(),
+            preview_settings: [("tab".into(), (PreviewAppearance::System, PreviewZoom::X100))]
+                .into_iter()
+                .collect(),
         },
     );
 
@@ -157,6 +165,50 @@ fn request(thread: &ThreadId, frame: &BrowserFrame, action: BrowserAction) -> Br
         image_id: frame.image_id.clone(),
         action,
     }
+}
+
+#[tokio::test]
+async fn browser_reports_an_in_flight_action_or_recording_as_busy() {
+    let bridge_directory = tempfile::tempdir().unwrap();
+    let recording_path = bridge_directory.path().join("recording.webm");
+    let browser = Browser {
+        profile: bridge_directory.path().join("profile"),
+        executable: "fixture-browser".into(),
+        state: tokio::sync::Mutex::new(State::default()),
+        recordings: Default::default(),
+        recording_artifacts: Default::default(),
+        stop: Default::default(),
+        bridge_directory,
+        preview: Default::default(),
+        preview_ports: Default::default(),
+        terminals: Default::default(),
+    };
+    assert!(!browser.has_active_tasks());
+    let state = browser.state.try_lock().unwrap();
+    assert!(browser.has_active_tasks());
+    drop(state);
+    assert!(!browser.has_active_tasks());
+
+    let (startup, _) = tokio::sync::watch::channel(RecordingStartupState::Started);
+    let (done, _) = tokio::sync::watch::channel::<Option<Result<RecordingArtifact, String>>>(None);
+    let task = tokio::spawn(std::future::pending::<()>());
+    browser.recordings.lock().await.insert(
+        ("thread".into(), "tab".into()),
+        ActiveRecording {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            abort: task.abort_handle(),
+            artifact_path: recording_path,
+            startup,
+            done,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            stopping: false,
+        },
+    );
+    assert!(browser.has_active_tasks());
+    browser.recordings.lock().await.clear();
+    task.abort();
+    let _ = task.await;
+    assert!(!browser.has_active_tasks());
 }
 
 /// Exercises only a temporary BEX profile and a local, deterministic web fixture.

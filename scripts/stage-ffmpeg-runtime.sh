@@ -53,23 +53,77 @@ license_dir=${AGENT_FFMPEG_LICENSE_DIR:-$project_root/third_party/ffmpeg}
     echo "FFmpeg license inventory directory does not exist: $license_dir" >&2
     exit 1
 }
+license_inventory_file=${AGENT_FFMPEG_LICENSE_INVENTORY:-$project_root/third_party/ffmpeg/components.tsv}
+[[ -f $license_inventory_file ]] || {
+    echo "FFmpeg component license inventory does not exist: $license_inventory_file" >&2
+    exit 1
+}
+
+component_inventory_normalized=$license_inventory_file
+declare -A component_license_seen=()
+while IFS=$'\t' read -r component license spdx source_url; do
+    [[ -n $component || -n $license || -n $spdx || -n $source_url ]] || continue
+    [[ $component == \#* ]] && continue
+    [[ -n $component && -n $license && -n $spdx && -n $source_url ]] || {
+        echo "invalid FFmpeg component license inventory row" >&2
+        exit 1
+    }
+    [[ $source_url == https://* ]] || {
+        echo "FFmpeg component source must use HTTPS: $component" >&2
+        exit 1
+    }
+    [[ $license != /* && $license != *..* ]] || {
+        echo "FFmpeg component license path escapes its inventory directory: $component" >&2
+        exit 1
+    }
+    inventory_key="$component|$license"
+    [[ ${component_license_seen[$inventory_key]+yes} ]] && {
+        echo "duplicate FFmpeg component license inventory row: $inventory_key" >&2
+        exit 1
+    }
+    component_license_seen[$inventory_key]=yes
+done < "$license_inventory_file"
 
 declare -a license_roots=()
+declare -a license_root_components=()
 declare -A license_root_seen=()
 add_license_root() {
-    local candidate=$1 canonical
+    local candidate=$1 component=$2 canonical key
     [[ -d $candidate ]] || return 0
     canonical=$(cd "$candidate" && pwd -P)
-    [[ ${license_root_seen[$canonical]+yes} ]] && return 0
-    license_root_seen[$canonical]=yes
+    key="$canonical|$component"
+    [[ ${license_root_seen[$key]+yes} ]] && return 0
+    license_root_seen[$key]=yes
     license_roots+=("$canonical")
+    license_root_components+=("$component")
+}
+component_name_for() {
+    local path=$1 rest root_name
+    case "$path" in
+        */nix/store/*)
+            rest=${path#*/nix/store/}
+            root_name=${rest%%/*}
+            if [[ $root_name =~ ^[a-z0-9]{20,32}-(.+)$ ]]; then
+                root_name=${BASH_REMATCH[1]}
+            fi
+            printf '%s\n' "$root_name"
+            ;;
+        *)
+            printf '%s\n' "${AGENT_FFMPEG_COMPONENT:-$(basename "$path")}"
+            ;;
+    esac
 }
 package_root_for() {
-    local dependency=$1 rest
+    local dependency=$1 rest prefix
     case "$dependency" in
-        /nix/store/*/*)
-            rest=${dependency#/nix/store/}
-            printf '/nix/store/%s\n' "${rest%%/*}"
+        */nix/store/*/*)
+            rest=${dependency#*/nix/store/}
+            prefix=${dependency%%/nix/store/*}
+            if [[ -n $prefix ]]; then
+                printf '%s/nix/store/%s\n' "$prefix" "${rest%%/*}"
+            else
+                printf '/nix/store/%s\n' "${rest%%/*}"
+            fi
             ;;
         *)
             printf '%s\n' "$runtime_dir"
@@ -82,8 +136,7 @@ is_system_linux_path() {
         *) return 1 ;;
     esac
 }
-add_license_root "$runtime_dir"
-add_license_root "$license_dir"
+add_license_root "$runtime_dir" "$(component_name_for "$runtime_dir")"
 
 version_output=$({ "$source" -hide_banner -version 2>&1 || true; } | sed -n '1p')
 [[ $version_output == ffmpeg\ version\ * ]] || {
@@ -155,7 +208,8 @@ if [[ $platform == linux ]]; then
                 copied_linux_names[$dependency_name]=$dependency
             fi
             if ! is_system_linux_path "$dependency"; then
-                add_license_root "$(package_root_for "$dependency")"
+                package_root=$(package_root_for "$dependency")
+                add_license_root "$package_root" "$(component_name_for "$package_root")"
             fi
             queue+=("$dependency")
         done < <(awk '
@@ -277,7 +331,8 @@ else
             copied_macos_names[$dependency_name]=$original
         fi
         if ! is_system_macos_path "$original"; then
-            add_license_root "$(package_root_for "$original")"
+            package_root=$(package_root_for "$original")
+            add_license_root "$package_root" "$(component_name_for "$package_root")"
         fi
         while IFS= read -r dependency; do
             [[ -n $dependency && $dependency != "$original" ]] || continue
@@ -304,32 +359,68 @@ else
     stage_macos_file "$source"
 fi
 
-license_candidates="$temporary/.license-files"
-: > "$license_candidates"
+license_records="$temporary/.license-records"
+: > "$license_records"
+register_license() {
+    local component=$1 spdx=$2 source_url=$3 license=$4 key
+    [[ -s $license ]] || {
+        echo "FFmpeg license file is empty or missing: $license" >&2
+        exit 1
+    }
+    key="$component|$license"
+    grep -Fqx "$key" "$temporary/.license-record-keys" 2>/dev/null && return 0
+    printf '%s\n' "$key" >> "$temporary/.license-record-keys"
+    printf '%s\t%s\t%s\t%s\n' "$component" "$spdx" "$source_url" "$license" >> "$license_records"
+}
+: > "$temporary/.license-record-keys"
 license_root_index=0
-for root in "${license_roots[@]}"; do
+for root_index in "${!license_roots[@]}"; do
+    root=${license_roots[$root_index]}
+    component=${license_root_components[$root_index]}
     license_root_index=$((license_root_index + 1))
     root_candidates="$temporary/.license-root-$license_root_index"
     find "$root" -maxdepth 6 -type f \( \
         -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'COPYRIGHT*' \
-    \) -print > "$root_candidates"
-    [[ -s $root_candidates ]] || {
-        echo "FFmpeg runtime component at $root has no license or copying file" >&2
+    \) -print | LC_ALL=C sort > "$root_candidates"
+    mapped_rows="$temporary/.license-map-$license_root_index"
+    awk -F '\t' -v wanted="$component" '$1 == wanted { print }' \
+        "$component_inventory_normalized" > "$mapped_rows"
+    if [[ -s $mapped_rows ]]; then
+        while IFS=$'\t' read -r mapped_component mapped_license mapped_spdx mapped_source; do
+            mapped_path="$license_dir/$mapped_license"
+            [[ -f $mapped_path ]] || {
+                echo "mapped FFmpeg license is missing for $mapped_component: $mapped_path" >&2
+                exit 1
+            }
+            register_license "$mapped_component" "$mapped_spdx" "$mapped_source" "$mapped_path"
+        done < "$mapped_rows"
+        continue
+    fi
+    if [[ -s $root_candidates ]]; then
+        echo "runtime component has license files but no pinned inventory mapping: $component ($root)" >&2
         exit 1
-    }
-    cat "$root_candidates" >> "$license_candidates"
+    fi
+    echo "unknown unlicensed FFmpeg runtime component: $component ($root)" >&2
+    exit 1
 done
-LC_ALL=C sort -u "$license_candidates" -o "$license_candidates"
+[[ -s $license_records ]] || {
+    echo "FFmpeg runtime at $runtime_dir has no license or copying file" >&2
+    exit 1
+}
+LC_ALL=C sort -u "$license_records" -o "$license_records"
 license_count=0
 license_inventory=()
-while IFS= read -r license; do
+license_manifest_records="$temporary/.license-manifest-records"
+: > "$license_manifest_records"
+while IFS=$'\t' read -r component spdx source_url license; do
     [[ -n $license ]] || continue
     license_name=$(basename "$license")
     license_count=$((license_count + 1))
     staged_name=$(printf 'FFMPEG-LICENSE-%03d-%s' "$license_count" "$license_name")
     cp -L "$license" "$temporary/$staged_name"
     license_inventory+=("$staged_name")
-done < "$license_candidates"
+    printf '%s\t%s\t%s\t%s\n' "$component" "$spdx" "$source_url" "$staged_name" >> "$license_manifest_records"
+done < "$license_records"
 (( license_count > 0 )) || {
     echo "FFmpeg runtime at $runtime_dir has no license or copying file" >&2
     exit 1
@@ -348,6 +439,15 @@ executable_name=ffmpeg
     printf 'license_files='
     (IFS=,; printf '%s' "${license_inventory[*]}")
     printf '\n'
+    license_record_index=0
+    while IFS=$'\t' read -r component spdx source_url staged_name; do
+        [[ -n $staged_name ]] || continue
+        license_record_index=$((license_record_index + 1))
+        printf 'license.%d.component=%s\n' "$license_record_index" "$component"
+        printf 'license.%d.spdx=%s\n' "$license_record_index" "$spdx"
+        printf 'license.%d.source=%s\n' "$license_record_index" "$source_url"
+        printf 'license.%d.file=%s\n' "$license_record_index" "$staged_name"
+    done < "$license_manifest_records"
     printf 'dependencies='
     find "$temporary/lib" -maxdepth 1 -type f -print \
         | sed "s#^$temporary/##" | LC_ALL=C sort | paste -sd, -
