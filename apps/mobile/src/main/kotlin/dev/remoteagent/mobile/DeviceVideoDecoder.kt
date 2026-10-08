@@ -223,12 +223,15 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             }
             input.clear()
             input.put(payload)
+            var queued = false
             runCatching {
                 decoder.queueInputBuffer(index, 0, payload.size, frame.timestampUs, 0)
+                queued = true
             }.onFailure {
                 closeCodec()
             }
             pending.removeFirst()
+            if (!queued || codec == null) return
             if (frame.keyframe) needsKeyframe = false
             drainOutput(decoder)
             if (codec == null) return
