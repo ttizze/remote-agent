@@ -503,12 +503,16 @@ impl HostRpcService {
         cancel: tokio_util::sync::CancellationToken,
     ) -> HostReply {
         let resources = &self.inner.resources;
-        let (first, receiver) = crate::vcs::start_action(
+        let (first, receiver) = match crate::vcs::start_action(
             params.clone(),
             resources.vcs.github().cloned(),
             resources.text.get().cloned(),
             resources.vcs.clone(),
-        );
+            cancel.clone(),
+        ) {
+            Ok(action) => action,
+            Err(error) => return Response::error("vcs_action_unavailable", &error).into(),
+        };
         let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
         let empty = agent_protocol::vcs::ActionProgressEvent {
             action_id: params.action_id.clone(),
