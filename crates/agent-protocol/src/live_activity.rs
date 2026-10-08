@@ -54,8 +54,7 @@ pub struct LiveActivityRegistration {
 }
 
 /// Counts keep the system surface bounded even with hundreds of active tasks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TaskActivitySummary {
     pub running: u32,
     pub waiting: u32,
