@@ -145,6 +145,21 @@ impl Store {
         receiver
     }
 
+    /// Applies the native owner's current client-global preference payload to
+    /// this cached Store while retaining its Host/project-local state.
+    pub fn apply_client_preferences(&self, bytes: Vec<u8>) -> Receipt {
+        let (sender, receiver) = oneshot::channel();
+        if let Err(error) = self
+            .inner
+            .intents
+            .send(Event::ClientPreferences(bytes, sender))
+            && let Event::ClientPreferences(_, complete) = error.0
+        {
+            let _ = complete.send(Err(invalid("Host store is unavailable")));
+        }
+        receiver
+    }
+
     /// Publishes the desktop's locally sampled host power state through the
     /// same ordered owner queue as user initiated Host calls.
     pub fn report_host_power(

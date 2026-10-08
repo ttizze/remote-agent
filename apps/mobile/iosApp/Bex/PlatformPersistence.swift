@@ -34,12 +34,9 @@ enum SnapshotFiles {
         UserDefaults.standard.data(forKey: "bex.orchestration-model-defaults") ?? Data()
     }
 
-    static func saveModelPreferences(_ snapshot: AgentCore.Snapshot) async throws {
+    static func saveModelPreferences(_ data: Data) async throws {
         try await Task.detached(priority: .utility) {
-            try UserDefaults.standard.set(
-                snapshot.serializeModelPreferences(),
-                forKey: "bex.orchestration-model-defaults"
-            )
+            UserDefaults.standard.set(data, forKey: "bex.orchestration-model-defaults")
         }.value
     }
 }

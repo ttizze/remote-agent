@@ -1,7 +1,8 @@
 //! Device-owned state core keeps in one file per Host: drafts, navigation,
-//! settings, commands the Host has not confirmed, and the last Host identity
-//! needed to render environment views while offline. Conversation data lives
-//! in the disk cache.
+//! commands the Host has not confirmed, and the last Host identity needed to
+//! render environment views while offline. Client preferences are shared by
+//! every Host and are stored separately. Conversation data lives in the disk
+//! cache.
 use crate::commands::{build::FollowUpBehavior, outbox::Outbox};
 use crate::models::EnvironmentDescriptor;
 use crate::state::{Draft, PendingRollback, Preferences, Shared, Snapshot};
@@ -24,14 +25,17 @@ pub const STATE_RETRY_MS: u64 = 1_000;
 #[derive(Default, Serialize, Deserialize)]
 struct LocalState {
     drafts: BTreeMap<String, Draft>,
-    default_draft: Draft,
     follow_up: FollowUpBehavior,
     selected_thread: Option<ThreadId>,
     selected_project: Option<String>,
     open_new_thread_draft: Option<String>,
     outbox: Outbox,
     rollbacks: BTreeMap<CommandId, PendingRollback>,
-    preferences: Preferences,
+    /// These values describe the Host/project state that must remain scoped
+    /// to this device-state file. Client-global preferences are stored in the
+    /// separate model-preferences payload.
+    last_run_scripts: BTreeMap<String, String>,
+    resume_compaction_dismissed: BTreeSet<String>,
     stash: PromptStash,
     /// The last authenticated Host identity, retained for offline environment views.
     #[serde(default)]
@@ -41,14 +45,14 @@ struct LocalState {
 pub(crate) fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&LocalState {
         drafts: (*snapshot.drafts).clone(),
-        default_draft: snapshot.default_draft.user_defaults(),
         follow_up: snapshot.follow_up,
         selected_thread: snapshot.selected_thread.clone(),
         selected_project: snapshot.selected_project.clone(),
         open_new_thread_draft: snapshot.open_new_thread_draft.clone(),
         outbox: snapshot.outbox.persisted(),
         rollbacks: snapshot.rollbacks.clone(),
-        preferences: snapshot.preferences.clone(),
+        last_run_scripts: snapshot.preferences.last_run_scripts.clone(),
+        resume_compaction_dismissed: snapshot.preferences.resume_compaction_dismissed.clone(),
         stash: (*snapshot.stash).clone(),
         environment: snapshot.environment.clone(),
     })
@@ -60,34 +64,65 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     } else {
         serde_json::from_slice(bytes)?
     };
+    let mut preferences = Preferences::default();
+    preferences.last_run_scripts = local.last_run_scripts;
+    preferences.resume_compaction_dismissed = local.resume_compaction_dismissed;
     Ok(Snapshot {
         drafts: local.drafts.into(),
-        default_draft: local.default_draft.user_defaults(),
+        default_draft: Snapshot::default().default_draft,
         follow_up: local.follow_up,
         selected_thread: local.selected_thread,
         selected_project: local.selected_project,
         open_new_thread_draft: local.open_new_thread_draft,
         outbox: Arc::new(local.outbox),
         rollbacks: local.rollbacks,
-        preferences: local.preferences,
+        preferences,
         stash: local.stash.into(),
         environment: local.environment,
         ..Snapshot::default()
     })
 }
 
-pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&snapshot.default_draft.user_defaults())
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClientPreferences {
+    default_draft: Draft,
+    preferences: Preferences,
 }
 
-/// The device state saved at `path` with the model `defaults` every Host
+/// Serializes the client-global preferences shared by every Host store.
+/// Host/project state is deliberately excluded from this payload.
+pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&ClientPreferences {
+        default_draft: snapshot.default_draft.user_defaults(),
+        preferences: snapshot.preferences.clone(),
+    })
+}
+
+/// Applies an explicit client-global preference payload while retaining the
+/// local Host/project values already held by `snapshot`.
+pub fn apply_model_preferences(
+    snapshot: &mut Snapshot,
+    bytes: &[u8],
+) -> Result<(), serde_json::Error> {
+    let client: ClientPreferences = serde_json::from_slice(bytes)?;
+    let last_run_scripts = std::mem::take(&mut snapshot.preferences.last_run_scripts);
+    let resume_compaction_dismissed =
+        std::mem::take(&mut snapshot.preferences.resume_compaction_dismissed);
+    snapshot.default_draft = client.default_draft.user_defaults();
+    snapshot.preferences = client.preferences;
+    snapshot.preferences.last_run_scripts = last_run_scripts;
+    snapshot.preferences.resume_compaction_dismissed = resume_compaction_dismissed;
+    Ok(())
+}
+
+/// The device state saved at `path` with the client preferences every Host
 /// shares; a missing file is a new device.
-pub fn load(path: &Path, defaults: &[u8]) -> Snapshot {
+pub fn load(path: &Path, client_preferences: &[u8]) -> Snapshot {
     let saved = match fs::read(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(vec![]),
         read => read,
     };
-    recover(saved.ok().as_deref(), defaults)
+    recover(saved.ok().as_deref(), client_preferences)
 }
 
 /// Replaces the device state file once the new bytes reach storage.
@@ -120,7 +155,7 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Decodes independent device-owned components; a damaged or unreadable file
 /// must not lock out a Host.
-fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
+fn recover(saved: Option<&[u8]>, client_preferences: &[u8]) -> Snapshot {
     let mut state = saved
         .and_then(|bytes| decode(bytes).ok())
         .unwrap_or_else(|| Snapshot {
@@ -128,9 +163,9 @@ fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
             error: Some("Saved device state could not be read. Device drafts were reset.".into()),
             ..Default::default()
         });
-    if !defaults.is_empty() {
-        match serde_json::from_slice::<Draft>(defaults) {
-            Ok(draft) => state.default_draft = draft.user_defaults(),
+    if !client_preferences.is_empty() {
+        match apply_model_preferences(&mut state, client_preferences) {
+            Ok(()) => {}
             Err(_) => {
                 state.error =
                     Some("Saved model preferences could not be read. Choose a model again.".into())
@@ -155,13 +190,13 @@ struct Saved {
     drafts: Shared<BTreeMap<String, Draft>>,
     outbox: Arc<Outbox>,
     stash: Shared<PromptStash>,
-    default_draft: Draft,
     follow_up: FollowUpBehavior,
     selected_thread: Option<ThreadId>,
     selected_project: Option<String>,
     open_new_thread_draft: Option<String>,
     rollbacks: BTreeMap<CommandId, PendingRollback>,
-    preferences: Preferences,
+    last_run_scripts: BTreeMap<String, String>,
+    resume_compaction_dismissed: BTreeSet<String>,
     environment: Option<EnvironmentDescriptor>,
 }
 impl Saved {
@@ -170,13 +205,13 @@ impl Saved {
             drafts: snapshot.drafts.clone(),
             outbox: snapshot.outbox.clone(),
             stash: snapshot.stash.clone(),
-            default_draft: snapshot.default_draft.user_defaults(),
             follow_up: snapshot.follow_up,
             selected_thread: snapshot.selected_thread.clone(),
             selected_project: snapshot.selected_project.clone(),
             open_new_thread_draft: snapshot.open_new_thread_draft.clone(),
             rollbacks: snapshot.rollbacks.clone(),
-            preferences: snapshot.preferences.clone(),
+            last_run_scripts: snapshot.preferences.last_run_scripts.clone(),
+            resume_compaction_dismissed: snapshot.preferences.resume_compaction_dismissed.clone(),
             environment: snapshot.environment.clone(),
         }
     }
@@ -184,13 +219,13 @@ impl Saved {
         self.drafts.shares_storage(&other.drafts)
             && Arc::ptr_eq(&self.outbox, &other.outbox)
             && self.stash.shares_storage(&other.stash)
-            && self.default_draft == other.default_draft
             && self.follow_up == other.follow_up
             && self.selected_thread == other.selected_thread
             && self.selected_project == other.selected_project
             && self.open_new_thread_draft == other.open_new_thread_draft
             && self.rollbacks == other.rollbacks
-            && self.preferences == other.preferences
+            && self.last_run_scripts == other.last_run_scripts
+            && self.resume_compaction_dismissed == other.resume_compaction_dismissed
             && self.environment == other.environment
     }
 }
@@ -323,7 +358,7 @@ mod tests {
         );
         let recovered = recover(Some(&encode(&state).unwrap()), b"broken preferences");
         assert_eq!(recovered.drafts["thread"].text, "keep me");
-        assert_eq!(recovered.default_draft.model, "valid model");
+        assert_ne!(recovered.default_draft.model, "valid model");
         assert!(recovered.error.is_some());
         let preferences = encode_model_preferences(&state).unwrap();
         let recovered = recover(Some(b"broken state"), &preferences);
@@ -333,6 +368,73 @@ mod tests {
         let unreadable = load(directory.path(), &preferences);
         assert_eq!(unreadable.default_draft.model, "valid model");
         assert!(unreadable.error.is_some());
+    }
+
+    #[test]
+    fn client_preferences_are_shared_without_replacing_host_local_state() {
+        let mut first = Snapshot::default();
+        first.default_draft.model = "shared-model".into();
+        first.preferences.notification_mode =
+            crate::view::notifications::NotificationMode::Notifications;
+        first
+            .preferences
+            .last_run_scripts
+            .insert("project-a".into(), "script-a".into());
+        let bytes = encode_model_preferences(&first).unwrap();
+
+        let mut second = Snapshot::default();
+        second.default_draft.model = "stale-model".into();
+        second
+            .preferences
+            .last_run_scripts
+            .insert("project-b".into(), "script-b".into());
+        second
+            .preferences
+            .resume_compaction_dismissed
+            .insert("claude".into());
+        apply_model_preferences(&mut second, &bytes).unwrap();
+
+        assert_eq!(second.default_draft.model, "shared-model");
+        assert_eq!(
+            second.preferences.notification_mode,
+            crate::view::notifications::NotificationMode::Notifications
+        );
+        assert_eq!(
+            second.preferences.last_run_scripts.get("project-b"),
+            Some(&"script-b".to_owned())
+        );
+        assert!(
+            second
+                .preferences
+                .resume_compaction_dismissed
+                .contains("claude")
+        );
+        assert!(
+            !second
+                .preferences
+                .last_run_scripts
+                .contains_key("project-a")
+        );
+    }
+
+    #[test]
+    fn host_state_does_not_replicate_client_preferences() {
+        let mut state = Snapshot::default();
+        state.preferences.notification_mode =
+            crate::view::notifications::NotificationMode::Notifications;
+        state
+            .preferences
+            .last_run_scripts
+            .insert("project".into(), "script".into());
+
+        let local = String::from_utf8(encode(&state).unwrap()).unwrap();
+        assert!(local.contains("last_run_scripts"));
+        assert!(!local.contains("notification_mode"));
+        assert!(!local.contains("default_draft"));
+
+        let shared = String::from_utf8(encode_model_preferences(&state).unwrap()).unwrap();
+        assert!(shared.contains("notification_mode"));
+        assert!(!shared.contains("last_run_scripts"));
     }
 
     #[test]
@@ -506,5 +608,18 @@ mod tests {
     #[test]
     fn a_new_device_defaults_to_queueing_follow_ups() {
         assert_eq!(decode(&[]).unwrap().follow_up, FollowUpBehavior::Queue);
+    }
+
+    #[test]
+    fn global_client_preference_changes_do_not_schedule_host_state_writes() {
+        let state = Snapshot::default();
+        let mut writer = StateWriter::restored(&state);
+        writer.observe(&state, 0);
+        let mut changed = state.clone();
+        changed.preferences.notification_mode =
+            crate::view::notifications::NotificationMode::Notifications;
+        writer.observe(&changed, 1);
+        assert_eq!(writer.next_due(), None);
+        assert!(!writer.changed());
     }
 }

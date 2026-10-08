@@ -85,6 +85,7 @@ extension BexAppViewModel {
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
+        synchronizeClientPreferences(next)
         if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
         }
@@ -177,13 +178,24 @@ extension BexAppViewModel {
     /// Saves the model preferences every Host shares; the store writes its own state.
     func persist() {
         guard let owner = store else { return }
-        let current = owner.snapshot()
+        synchronizeClientPreferences(owner.snapshot())
+    }
+
+    private func synchronizeClientPreferences(_ source: AgentCore.Snapshot) {
+        guard let data = try? source.serializeModelPreferences(), data != clientPreferencesData else {
+            return
+        }
+        clientPreferencesData = data
         let previous = persistenceWrite
         persistenceWrite = Task { [weak self] in
             await previous?.value
             do {
-                try await SnapshotFiles.saveModelPreferences(current)
+                try await SnapshotFiles.saveModelPreferences(data)
             } catch { self?.notice = error.localizedDescription }
+        }
+        for owner in backgroundOwners.values {
+            guard let receipt = try? owner.applyClientPreferences(preferences: data) else { continue }
+            Task { _ = try? await receipt.wait() }
         }
     }
 

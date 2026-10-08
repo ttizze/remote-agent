@@ -990,6 +990,40 @@ async fn a_burst_of_input_over_the_stream_channel_capacity_keeps_every_edit() {
 }
 
 #[tokio::test]
+async fn cached_store_applies_current_client_preferences_without_losing_host_state() {
+    let mut source = Snapshot::default();
+    source.default_draft.model = "current-model".into();
+    source.preferences.notification_mode =
+        crate::view::notifications::NotificationMode::Notifications;
+    let bytes = crate::persistence::encode_model_preferences(&source).unwrap();
+
+    let mut cached = Snapshot::default();
+    cached.default_draft.model = "stale-model".into();
+    cached
+        .preferences
+        .last_run_scripts
+        .insert("project".into(), "host-script".into());
+    let store = Store::offline(cached, options());
+    store
+        .apply_client_preferences(bytes)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let current = store.snapshot();
+    assert_eq!(current.default_draft.model, "current-model");
+    assert_eq!(
+        current.preferences.notification_mode,
+        crate::view::notifications::NotificationMode::Notifications
+    );
+    assert_eq!(
+        current.preferences.last_run_scripts.get("project"),
+        Some(&"host-script".to_owned())
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_closes_snapshot_waiters_and_preserves_local_edits() {
     let store = Store::offline(Snapshot::default(), options());
     store
@@ -2182,8 +2216,10 @@ fn preferences_change_on_the_device_and_survive_a_restart() {
     ] {
         owner.prepare(intent).unwrap();
     }
-    let restored =
+    let mut restored =
         crate::persistence::decode(&crate::persistence::encode(&owner.state).unwrap()).unwrap();
+    let preferences = crate::persistence::encode_model_preferences(&owner.state).unwrap();
+    crate::persistence::apply_model_preferences(&mut restored, &preferences).unwrap();
     assert_eq!(restored.preferences, owner.state.preferences);
     assert!(restored.preferences.working_section);
     assert!(!restored.preferences.diff_ignore_whitespace);
@@ -2221,9 +2257,14 @@ fn browser_preferences_validate_persist_and_project_a_safe_default() {
         owner.state.preferences.browser.resolved().profile_id,
         crate::view::browser::DEFAULT_BROWSER_PROFILE_ID
     );
-    let restored =
+    let mut restored =
         crate::persistence::decode(&crate::persistence::encode(&owner.state).unwrap()).unwrap();
-    assert_eq!(restored.preferences.browser, owner.state.preferences.browser);
+    let preferences = crate::persistence::encode_model_preferences(&owner.state).unwrap();
+    crate::persistence::apply_model_preferences(&mut restored, &preferences).unwrap();
+    assert_eq!(
+        restored.preferences.browser,
+        owner.state.preferences.browser
+    );
 
     assert!(owner
         .prepare(Intent::SetBrowserRecordingFrameRate { frame_rate: 59 })

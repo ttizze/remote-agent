@@ -136,6 +136,7 @@ pub(super) enum Written {
 
 pub(super) enum Event {
     Intent(Intent, Waiter),
+    ClientPreferences(Vec<u8>, Waiter),
     ReportHostPower(agent_protocol::background::HostPowerSnapshot, Waiter),
     AppActive,
     Attach {
@@ -629,6 +630,12 @@ impl Owner {
         self.stream_publish_deferred = false;
         match event {
             Event::Intent(intent, complete) => self.intent(intent, complete),
+            Event::ClientPreferences(bytes, complete) => {
+                let result = crate::persistence::apply_model_preferences(&mut self.state, &bytes)
+                    .map(|()| Outcome::Applied)
+                    .map_err(invalid);
+                let _ = complete.send(result);
+            }
             Event::ReportHostPower(snapshot, complete) => {
                 self.job(Call::ReportHostPowerState(snapshot), Some(complete), None)
             }

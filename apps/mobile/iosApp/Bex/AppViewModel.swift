@@ -72,6 +72,7 @@ final class BexAppViewModel: ObservableObject {
     var observation: Task<Void, Never>?
     var persistence: Task<Void, Never>?
     var persistenceWrite: Task<Void, Never>?
+    var clientPreferencesData = SnapshotFiles.modelDefaults()
     var connection: Task<Void, Never>?
     var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     var operations: [UUID: Task<Void, Never>] = [:]

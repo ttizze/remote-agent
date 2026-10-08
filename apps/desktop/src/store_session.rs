@@ -1,8 +1,73 @@
 use crate::Runtime;
 use agent_core::{connection::Store, state::Snapshot};
 use gpui_kit::Context;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tokio::{sync::watch, task::JoinHandle};
+
+#[derive(Clone)]
+pub(crate) struct ClientPreferences {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl ClientPreferences {
+    pub(crate) fn from_disk() -> Self {
+        let bytes = crate::platform::state_dir()
+            .ok()
+            .map(|directory| {
+                std::fs::read(directory.join("model-preferences.json")).unwrap_or_default()
+            })
+            .unwrap_or_default();
+        Self {
+            bytes: Arc::new(Mutex::new(bytes)),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_path(path: PathBuf) -> Self {
+        Self {
+            bytes: Arc::new(Mutex::new(std::fs::read(path).unwrap_or_default())),
+        }
+    }
+
+    pub(crate) fn current(&self) -> Vec<u8> {
+        self.bytes
+            .lock()
+            .map(|bytes| bytes.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn replace(&self, bytes: Vec<u8>) -> bool {
+        let Ok(mut current) = self.bytes.lock() else {
+            return false;
+        };
+        if *current == bytes {
+            return false;
+        }
+        *current = bytes;
+        true
+    }
+
+    async fn write_current(&self, path: &PathBuf, bytes: &[u8]) -> anyhow::Result<bool> {
+        let shared = self.bytes.clone();
+        let path = path.clone();
+        let bytes = bytes.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let current = shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("client preferences lock was poisoned"))?;
+            if *current != bytes {
+                return Ok(false);
+            }
+            host_daemon::platform::save_private_bytes(&path, &bytes)?;
+            Ok(true)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
+    }
+}
 
 /// Owns a view's connection, snapshot subscription and final persistence flush.
 /// Dropping a replaced or undelivered session also closes its Store.
@@ -65,11 +130,12 @@ impl StoreSession {
         }
     }
 
-    /// Keeps the model preferences every Host shares saved at `path`; the
-    /// Store writes its own device state.
+    /// Keeps the selected client's shared preferences saved at `path`; the
+    /// Store writes its own Host-scoped device state.
     pub(crate) fn persist<E: Send + 'static>(
         &mut self,
         path: PathBuf,
+        client_preferences: ClientPreferences,
         updates: async_channel::Sender<E>,
         failure: impl Fn(String) -> E + Send + 'static,
     ) {
@@ -78,22 +144,28 @@ impl StoreSession {
         self.persistence = Some(send);
         self.persistence_task = Some(self.runtime.closing.spawn_on(
             async move {
+                let current = client_preferences.current();
+                if !current.is_empty() && current != saved {
+                    let result = client_preferences.write_current(&path, &current).await;
+                    match result {
+                        Ok(true) => saved = current,
+                        Ok(false) => {}
+                        Err(error) => {
+                            let _ = updates.send(failure(format!("{error:#}"))).await;
+                        }
+                    }
+                }
                 while receive.changed().await.is_ok() {
                     let snapshot = receive.borrow_and_update().clone();
                     let preferences = agent_core::persistence::encode_model_preferences(&snapshot)
                         .unwrap_or_default();
-                    if preferences == saved {
+                    if preferences == saved || preferences != client_preferences.current() {
                         continue;
                     }
-                    let (path, bytes) = (path.clone(), preferences.clone());
-                    let result = tokio::task::spawn_blocking(move || {
-                        host_daemon::platform::save_private_bytes(&path, &bytes)
-                    })
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(|result| result);
+                    let result = client_preferences.write_current(&path, &preferences).await;
                     match result {
-                        Ok(()) => saved = preferences,
+                        Ok(true) => saved = preferences,
+                        Ok(false) => {}
                         Err(error) => {
                             let _ = updates.send(failure(format!("{error:#}"))).await;
                         }
@@ -182,7 +254,10 @@ mod tests {
             let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
             };
-            session.persist(path.clone(), updates, |_| Update::Error);
+            let client_preferences = ClientPreferences::from_path(path.clone());
+            session.persist(path.clone(), client_preferences.clone(), updates, |_| {
+                Update::Error
+            });
             store
                 .dispatch(Intent::SetRuntimeMode {
                     mode: agent_domain::RuntimeMode::Auto,
@@ -198,6 +273,9 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            client_preferences.replace(
+                agent_core::persistence::encode_model_preferences(&store.snapshot()).unwrap(),
+            );
             // No UI snapshot/save notification is needed for the final flush.
             drop(session);
             runtime.closing.close();
@@ -222,6 +300,12 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("model-preferences.json");
             std::fs::create_dir(&path).unwrap();
+            let client_preferences = ClientPreferences {
+                bytes: Arc::new(Mutex::new(
+                    agent_core::persistence::encode_model_preferences(&Snapshot::default())
+                        .unwrap(),
+                )),
+            };
             let runtime = runtime();
             let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));
             let (updates, incoming) = async_channel::unbounded();
@@ -235,7 +319,9 @@ mod tests {
             let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
             };
-            session.persist(path.clone(), updates, |_| Update::Error);
+            session.persist(path.clone(), client_preferences.clone(), updates, |_| {
+                Update::Error
+            });
             store
                 .dispatch(Intent::SetRuntimeMode {
                     mode: agent_domain::RuntimeMode::Auto,
@@ -253,6 +339,9 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            client_preferences.replace(
+                agent_core::persistence::encode_model_preferences(&store.snapshot()).unwrap(),
+            );
             session.save(store.snapshot());
             drop(session);
             runtime.closing.close();
@@ -269,6 +358,57 @@ mod tests {
         })
         .await
         .expect("persistence recovery stalled");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_session_cannot_overwrite_newer_client_preferences() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let state_file = directory.path().join("device.json");
+            let path = directory.path().join("model-preferences.json");
+            let mut old = Snapshot::default();
+            old.default_draft.model = "old-model".into();
+            let old_bytes = agent_core::persistence::encode_model_preferences(&old).unwrap();
+            std::fs::write(&path, &old_bytes).unwrap();
+            let client_preferences = ClientPreferences::from_path(path.clone());
+            let mut current = old.clone();
+            current.default_draft.model = "new-model".into();
+            let current_bytes =
+                agent_core::persistence::encode_model_preferences(&current).unwrap();
+            assert!(client_preferences.replace(current_bytes));
+
+            let runtime = runtime();
+            let store = Arc::new(Store::offline(
+                old,
+                agent_core::connection::StoreOptions {
+                    state_file: Some(state_file.clone()),
+                    ..Default::default()
+                },
+            ));
+            let (updates, incoming) = async_channel::unbounded();
+            let publish = tokio::spawn(StoreSession::publish(
+                Ok(store.clone()),
+                runtime.clone(),
+                updates.clone(),
+                Update::Connected,
+                |_| Update::Snapshot,
+            ));
+            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
+                panic!("missing session")
+            };
+            session.persist(path.clone(), client_preferences, updates, |_| Update::Error);
+            session.save(store.snapshot());
+            drop(session);
+            runtime.closing.close();
+            runtime.closing.wait().await;
+            publish.await.unwrap();
+
+            let persisted = std::fs::read(&path).unwrap();
+            let restored = agent_core::persistence::load(&state_file, &persisted);
+            assert_eq!(restored.default_draft.model, "new-model");
+        })
+        .await
+        .expect("session close stalled");
     }
 
     #[tokio::test]

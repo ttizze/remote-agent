@@ -439,6 +439,20 @@ impl AgentStore {
         }))
     }
 
+    /// Applies the native owner's current client-global settings to this
+    /// cached Store without replacing its Host/project-local state.
+    pub fn apply_client_preferences(
+        &self,
+        preferences: Vec<u8>,
+    ) -> Result<Arc<Receipt>, AgentError> {
+        let receipt = self.store.apply_client_preferences(preferences);
+        Ok(Arc::new(Receipt {
+            result: Mutex::new(Some(Box::pin(async move {
+                receipt.await.map_err(error)?.map_err(error)
+            }))),
+        }))
+    }
+
     pub async fn shutdown(&self) -> Result<(), AgentError> {
         let result = self.store.close().await.map_err(error);
         if let Some(cached) = self.endpoint.lock().await.take() {

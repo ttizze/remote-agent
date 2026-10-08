@@ -39,10 +39,11 @@ extension BexAppViewModel {
         do {
             let owner = try await AgentStore.offline(
                 stateFile: SnapshotFiles.stateFile(id),
-                modelDefaults: SnapshotFiles.modelDefaults(),
+                modelDefaults: clientPreferencesData,
                 cacheDirectory: SnapshotFiles.cacheDirectory(id),
                 diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id)
             )
+            await applyClientPreferences(to: owner)
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
             store = owner
             owner.recordConnectionEvent(
@@ -125,7 +126,7 @@ extension BexAppViewModel {
         } else {
             let created = try await AgentStore.offline(
                 stateFile: SnapshotFiles.stateFile(profile.id),
-                modelDefaults: SnapshotFiles.modelDefaults(),
+                modelDefaults: clientPreferencesData,
                 cacheDirectory: SnapshotFiles.cacheDirectory(profile.id),
                 diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(profile.id)
             )
@@ -136,6 +137,7 @@ extension BexAppViewModel {
             backgroundOwners[profile.id] = created
             owner = created
         }
+        await applyClientPreferences(to: owner)
         registerPushIfReady(profile.id)
         publishEnvironment(profile, owner.snapshot())
         let identity = try DeviceIdentity.loadOrGenerate(profile.id)
@@ -158,12 +160,22 @@ extension BexAppViewModel {
         }
     }
 
+    private func applyClientPreferences(to owner: AgentStore) async {
+        guard !clientPreferencesData.isEmpty,
+              let receipt = try? owner.applyClientPreferences(preferences: clientPreferencesData)
+        else { return }
+        _ = try? await receipt.wait()
+    }
+
     func publishEnvironment(_ profile: HostProfile, _ next: AgentCore.Snapshot) {
         let previous = environmentSnapshots[profile.id]
         let pushPreferencesChanged = previous?.preferences().liveActivitiesEnabled
             != next.preferences().liveActivitiesEnabled
         environmentSnapshots[profile.id] = next
         if let previous {
+            if previous.connected(), !next.connected(), let environmentId = previous.environmentId() {
+                LocalNotifications.removeEnvironment(environmentId)
+            }
             deliverAttentionEvents(previous: previous, current: next)
         }
         let row = EnvironmentRow(
@@ -226,10 +238,11 @@ extension BexAppViewModel {
                 identity: DeviceIdentity.loadOrGenerate(id),
                 invitation: invitation.invitation,
                 useRelays: true
-            ), stateFile: SnapshotFiles.stateFile(id), modelDefaults: SnapshotFiles.modelDefaults(),
+            ), stateFile: SnapshotFiles.stateFile(id), modelDefaults: clientPreferencesData,
             cacheDirectory: SnapshotFiles.cacheDirectory(id),
             diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
             guard !Task.isCancelled else { try? await owner.shutdown(); return }
+            await applyClientPreferences(to: owner)
             let old = detachStore()
             publish(AgentCore.Snapshot.empty())
             profiles.removeAll { $0.id == id }

@@ -22,7 +22,10 @@ pub(crate) fn ui_word_wrap() -> bool {
     ui::appearance().word_wrap
 }
 
-use crate::{Runtime, platform, store_session::StoreSession};
+use crate::{
+    Runtime, platform,
+    store_session::{ClientPreferences, StoreSession},
+};
 use agent_core::{
     connection::{Outcome, StoreOptions},
     environment::{
@@ -71,15 +74,11 @@ enum Update {
     Snapshot(Arc<Snapshot>),
     EnvironmentConnected {
         profile_id: String,
-        result: Result<(StoreSession, PathBuf), String>,
+        result: Result<StoreSession, String>,
     },
     EnvironmentSnapshot {
         profile_id: String,
         snapshot: Arc<Snapshot>,
-    },
-    EnvironmentPersistenceError {
-        profile_id: String,
-        error: String,
     },
     Views(Box<Views>),
     Completed(Option<Done>, Result<Outcome, String>),
@@ -187,6 +186,10 @@ pub(crate) struct Desktop {
     pub(crate) environment_registry: EnvironmentRegistry,
     pub(crate) views: Arc<Views>,
     pub(crate) runtime: Runtime,
+    /// The selected Store owns writes, while this current value seeds every
+    /// cached Host Store. Keeping it outside per-Host snapshots prevents a
+    /// late offline Store from resurrecting stale client preferences.
+    client_preferences: ClientPreferences,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
     pub(crate) connecting: bool,
@@ -377,11 +380,14 @@ pub(crate) fn bind_keys(cx: &mut App) {
     )]);
 }
 
-fn load_store_state(name: &str) -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
+fn load_store_state(
+    name: &str,
+    client_preferences: &ClientPreferences,
+) -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
     let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
     let state_file = directory.join(format!("device-{name}.json"));
     let path = directory.join("model-preferences.json");
-    let preferences = std::fs::read(&path).unwrap_or_default();
+    let preferences = client_preferences.current();
     let snapshot = agent_core::persistence::load(&state_file, &preferences);
     let options = StoreOptions {
         cache_directory: Some(directory.join("cache").join(name)),
@@ -400,9 +406,7 @@ impl Desktop {
             while let Ok((epoch, update)) = incoming.recv().await {
                 let environment_update = matches!(
                     &update,
-                    Update::EnvironmentConnected { .. }
-                        | Update::EnvironmentSnapshot { .. }
-                        | Update::EnvironmentPersistenceError { .. }
+                    Update::EnvironmentConnected { .. } | Update::EnvironmentSnapshot { .. }
                 );
                 if view
                     .update_in(cx, |view, window, cx| {
@@ -481,6 +485,7 @@ impl Desktop {
                 ui::now_ms(),
             )),
             runtime,
+            client_preferences: ClientPreferences::from_disk(),
             environment_registry: EnvironmentRegistry::default(),
             updates,
             epoch: 0,
@@ -578,6 +583,7 @@ impl Desktop {
         let epoch = self.epoch;
         let runtime = self.runtime.clone();
         let connections = runtime.connections.clone();
+        let client_preferences = self.client_preferences.clone();
         let ticket = self.remote.as_ref().map(|r| r.ticket.clone());
         let name = self
             .remote
@@ -585,7 +591,7 @@ impl Desktop {
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "local".into());
         self.runtime.handle.spawn(async move {
-            let state = load_store_state(&name);
+            let state = load_store_state(&name, &client_preferences);
             match state {
                 Err(error) => {
                     let _ = updates
@@ -614,9 +620,10 @@ impl Desktop {
                         runtime.clone(),
                         tx,
                         move |result| {
-                            Update::Connected(result.map(|session| {
-                                (session, path.clone(), local_host_supervised)
-                            }))
+                            Update::Connected(
+                                result
+                                    .map(|session| (session, path.clone(), local_host_supervised)),
+                            )
                         },
                         Update::Snapshot,
                     )
@@ -737,8 +744,9 @@ impl Desktop {
         let epoch = self.epoch;
         let runtime = self.runtime.clone();
         let connections = runtime.connections.clone();
+        let client_preferences = self.client_preferences.clone();
         self.runtime.handle.spawn(async move {
-            let (path, snapshot, options) = match load_store_state(&profile_id) {
+            let (_, snapshot, options) = match load_store_state(&profile_id, &client_preferences) {
                 Ok(state) => state,
                 Err(error) => {
                     let _ = updates
@@ -785,7 +793,7 @@ impl Desktop {
                 tx,
                 move |result| Update::EnvironmentConnected {
                     profile_id: connected_profile,
-                    result: result.map(|session| (session, path.clone())),
+                    result,
                 },
                 move |snapshot| Update::EnvironmentSnapshot {
                     profile_id: snapshot_profile,
@@ -1202,7 +1210,12 @@ impl Desktop {
                         }
                     }
                 });
-                session.persist(path, tx, Update::PersistenceError);
+                session.persist(
+                    path,
+                    self.client_preferences.clone(),
+                    tx,
+                    Update::PersistenceError,
+                );
                 self.snapshot = session.store.snapshot();
                 self.last_host_power_report_ms = None;
                 self.last_host_power = self
@@ -1212,6 +1225,10 @@ impl Desktop {
                     .map(|snapshot| snapshot.host_power.clone());
                 self.local_host_supervised = local_host_supervised;
                 self.session = Some(session);
+                self.synchronize_client_preferences();
+                if let Some(session) = &self.session {
+                    session.save(self.snapshot.clone());
+                }
                 let profile_id = self
                     .remote
                     .as_ref()
@@ -1255,10 +1272,9 @@ impl Desktop {
                 }
                 self.background_connecting.remove(&profile_id);
                 match result {
-                    Ok((mut session, path)) => {
+                    Ok(mut session) => {
                         self.background_retry_at.remove(&profile_id);
                         let updates = self.updates.clone();
-                        let profile_for_errors = profile_id.clone();
                         let (tx, rx) = async_channel::bounded(4);
                         let epoch = self.epoch;
                         self.runtime.handle.spawn(async move {
@@ -1266,12 +1282,6 @@ impl Desktop {
                                 if updates.send((epoch, event)).await.is_err() {
                                     break;
                                 }
-                            }
-                        });
-                        session.persist(path, tx, move |error| {
-                            Update::EnvironmentPersistenceError {
-                                profile_id: profile_for_errors.clone(),
-                                error,
                             }
                         });
                         let snapshot = session.store.snapshot();
@@ -1367,17 +1377,6 @@ impl Desktop {
                 self.generation += 1;
                 self.schedule_views(cx);
             }
-            Update::EnvironmentPersistenceError { profile_id, error } => {
-                if !self
-                    .snapshot
-                    .remote_hosts
-                    .iter()
-                    .any(|remote| remote.id == profile_id)
-                {
-                    return;
-                }
-                self.show_error(&format!("Environment {profile_id}: {error}"), window, cx);
-            }
             Update::Snapshot(snapshot) => {
                 if !snapshot.accepts_after(&self.snapshot) {
                     return;
@@ -1398,6 +1397,7 @@ impl Desktop {
                     self.last_host_power = Some(power);
                 }
                 self.snapshot = snapshot;
+                self.synchronize_client_preferences();
                 if let Some(session) = &self.session {
                     session.save(self.snapshot.clone());
                 }
@@ -1420,6 +1420,7 @@ impl Desktop {
                     if snapshot.accepts_after(&self.snapshot) {
                         self.snapshot = snapshot;
                     }
+                    self.synchronize_client_preferences();
                     session.save(self.snapshot.clone());
                 }
                 match (&result, done.is_some()) {
@@ -1570,6 +1571,7 @@ impl Desktop {
     }
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.synchronize_client_preferences();
         self.deliver_snapshot_notifications(window, cx);
         self.start_background_connections(cx);
         if self.remote.is_some()
@@ -1590,6 +1592,25 @@ impl Desktop {
         self.sync_settings(window, cx);
         self.offer_onboarding_import(window, cx);
         self.schedule_views(cx);
+    }
+
+    /// Publishes the selected Host's client-global preferences to the single
+    /// native cache and every live background Store. Background snapshots stay
+    /// Host-scoped, so an older Store cannot overwrite the current version or
+    /// become the source for a later Host switch.
+    fn synchronize_client_preferences(&self) {
+        let Ok(bytes) = agent_core::persistence::encode_model_preferences(&self.snapshot) else {
+            return;
+        };
+        if !self.client_preferences.replace(bytes.clone()) {
+            return;
+        }
+        for session in self.background_sessions.values() {
+            let receipt = session.store.apply_client_preferences(bytes.clone());
+            self.runtime.handle.spawn(async move {
+                let _ = receipt.await;
+            });
+        }
     }
 
     fn deliver_snapshot_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {

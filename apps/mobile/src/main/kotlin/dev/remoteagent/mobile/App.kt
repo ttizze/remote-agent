@@ -144,6 +144,7 @@ internal enum class WorkspaceTab {
 internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
+    private var clientPreferences = repository.modelPreferences()
     var snapshot by mutableStateOf(Snapshot.empty())
         private set
 
@@ -215,11 +216,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var browserProfileRemovalGeneration = 0UL
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     private val operations = mutableSetOf<Job>()
-    private val writes = Channel<Snapshot>(PERSISTENCE_QUEUE_CAPACITY)
+    private val writes = Channel<ByteArray>(PERSISTENCE_QUEUE_CAPACITY)
     private val writer =
         scope.launch(Dispatchers.IO) {
             for (current in writes) {
-                runCatching { repository.saveModelPreferences(current.serializeModelPreferences()) }
+                runCatching { repository.saveModelPreferences(current) }
                     .onFailure { error -> withContext(Dispatchers.Main) { notice = error.message } }
             }
         }
@@ -780,7 +781,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 val store =
                     AgentStore.offline(
                         repository.stateFile(id),
-                        repository.modelPreferences(),
+                        clientPreferences,
                         repository.cacheDirectory(id),
                         repository.diagnosticsDirectory(id),
                     )
@@ -846,7 +847,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                             backgroundOwners.getOrPut(profile.id) {
                                 AgentStore.offline(
                                     repository.stateFile(profile.id),
-                                    repository.modelPreferences(),
+                                    clientPreferences,
                                     repository.cacheDirectory(profile.id),
                                     repository.diagnosticsDirectory(profile.id),
                                 )
@@ -891,6 +892,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
         val previous = environmentSnapshots[profile.id]
+        if (previous?.connected() == true && !next.connected()) {
+            LocalNotifications.removeEnvironment(
+                context,
+                previous.environmentId() ?: profile.id,
+            )
+        }
         val pushPreferencesChanged = previous?.preferences()?.liveActivitiesEnabled !=
             next.preferences().liveActivitiesEnabled
         environmentSnapshots = environmentSnapshots + (profile.id to next)
@@ -996,7 +1003,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         AgentStore.connect(
                             Connection(target.endpoint, identity, target.invitation, true),
                             repository.stateFile(id),
-                            repository.modelPreferences(),
+                            clientPreferences,
                             repository.cacheDirectory(id),
                             repository.diagnosticsDirectory(id),
                         )
@@ -1111,6 +1118,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             repository.saveProfiles(profiles)
         }
         snapshot = next
+        synchronizeClientPreferences(next)
         profileId?.let { id ->
             profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
         }
@@ -1177,10 +1185,28 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             else -> false
         }
 
-    /** Saves the model preferences every Host shares; the store writes its own state. */
+    /** Saves and broadcasts the client preferences every Host shares. */
     fun persist() {
         val current = owner?.snapshot() ?: return
-        scope.launch { writes.send(current) }
+        synchronizeClientPreferences(current)
+    }
+
+    private fun synchronizeClientPreferences(source: Snapshot) {
+        val bytes = runCatching { source.serializeModelPreferences() }
+            .getOrElse {
+                notice = it.message
+                return
+            }
+        if (bytes.contentEquals(clientPreferences)) return
+        clientPreferences = bytes.copyOf()
+        scope.launch { writes.send(bytes) }
+        backgroundOwners.values.toList().forEach { store ->
+            val receipt = runCatching { store.applyClientPreferences(bytes) }.getOrNull() ?: return@forEach
+            scope.launch {
+                runCatching { receipt.wait() }
+                    .onFailure { error -> if (isActive) notice = error.message }
+            }
+        }
     }
 
     /** Counts the app's moves to the background, which end a dictation. */
@@ -1510,7 +1536,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             backgroundStores.forEach { store -> runCatching { store.shutdown() } }
             owner?.let { store ->
                 runCatching { store.shutdown() }
-                writes.send(store.snapshot())
+                runCatching { store.snapshot().serializeModelPreferences() }
+                    .getOrNull()
+                    ?.let { writes.send(it) }
             }
             writes.close()
             writer.join()

@@ -304,9 +304,13 @@ pub struct Preferences {
     /// The Working section (beta).
     pub working_section: bool,
     pub diff_ignore_whitespace: bool,
-    /// The script each project last ran, by project id.
+    /// The script each project last ran, by project id. This is Host/project
+    /// state and stays in the Host's device-state file.
+    #[serde(skip)]
     pub last_run_scripts: BTreeMap<String, String>,
     /// Provider instances whose resume dialog was told never to ask again.
+    /// This is scoped to the Host's provider catalog, not the client.
+    #[serde(skip)]
     pub resume_compaction_dismissed: BTreeSet<String>,
     /// The terminal's text size in points; `None` keeps the default.
     pub terminal_font_size: Option<f64>,
@@ -1635,6 +1639,94 @@ mod tests {
     }
 
     #[test]
+    fn reopening_a_session_prunes_and_rejects_old_device_metadata() {
+        let current = session("thread", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        state.apply_event(DeviceEvent::Accessibility(DeviceAccessibilityTree {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch.clone(),
+            elements: vec![],
+            errors: vec![],
+            read_at: "old".into(),
+        }));
+        state.apply_event(DeviceEvent::Foreground(DeviceForegroundUpdate {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch.clone(),
+            app: None,
+            received_at: "old".into(),
+        }));
+        state.apply_event(DeviceEvent::EventLog(DeviceEventLogEntry {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch.clone(),
+            id: 1,
+            timestamp: "old".into(),
+            kind: "old".into(),
+            summary: "old".into(),
+        }));
+        state.apply_event(DeviceEvent::Screen(DeviceScreenConfig {
+            thread_id: Some(current.thread_id.clone()),
+            session_epoch: current.session_epoch.clone(),
+            host_id: Some(current.host_id.clone()),
+            device_id: Some(current.device_id.clone()),
+            width: 1,
+            height: 1,
+            orientation: agent_protocol::device::DeviceOrientation::Portrait,
+            screen_id: None,
+            supports_hinge_angle: false,
+            supports_physical_orientation: false,
+            hinge_angle: None,
+            hinge_pose: None,
+            table_mode: false,
+            table_mode_available: false,
+        }));
+
+        let reopened = DeviceSession {
+            session_epoch: "new".into(),
+            ..current.clone()
+        };
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![reopened.clone()],
+            ..DeviceServiceState::default()
+        }));
+        assert!(state.accessibility.is_empty());
+        assert!(state.foreground.is_empty());
+        assert!(state.event_log.is_empty());
+        assert!(state.screens.is_empty());
+
+        state.apply_event(DeviceEvent::Accessibility(DeviceAccessibilityTree {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch.clone(),
+            elements: vec![],
+            errors: vec![],
+            read_at: "stale".into(),
+        }));
+        state.apply_event(DeviceEvent::EventLog(DeviceEventLogEntry {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch,
+            id: 2,
+            timestamp: "stale".into(),
+            kind: "stale".into(),
+            summary: "stale".into(),
+        }));
+        assert!(state.accessibility.is_empty());
+        assert!(state.event_log.is_empty());
+        assert!(state.accepts_device_event(
+            &reopened.host_id,
+            &reopened.device_id,
+            &reopened.session_epoch
+        ));
+    }
+
+    #[test]
     fn screen_metadata_keeps_duo_panel_identities() {
         let current = session("screens", "host", "device");
         let mut state = DeviceState::default();
@@ -1663,43 +1755,6 @@ mod tests {
         assert_eq!(state.screens.len(), 2);
         let view = crate::view::device::device_view(&Snapshot { device: state, ..Snapshot::default() });
         assert_eq!(view.screens.iter().map(|screen| screen.screen_id).collect::<Vec<_>>(), vec![Some(1), Some(3)]);
-    }
-
-        let reopened = DeviceSession {
-            session_epoch: "new".into(),
-            ..current.clone()
-        };
-        state.apply_event(DeviceEvent::State(DeviceServiceState {
-            sessions: vec![reopened.clone()],
-            ..DeviceServiceState::default()
-        }));
-        assert!(state.video_events.is_empty());
-        assert!(state.video_frames.is_empty());
-
-        state.apply_event(DeviceEvent::Accessibility(DeviceAccessibilityTree {
-            host_id: current.host_id.clone(),
-            device_id: current.device_id.clone(),
-            session_epoch: current.session_epoch.clone(),
-            elements: vec![],
-            errors: vec![],
-            read_at: "stale".into(),
-        }));
-        state.apply_event(DeviceEvent::EventLog(DeviceEventLogEntry {
-            host_id: current.host_id.clone(),
-            device_id: current.device_id.clone(),
-            session_epoch: current.session_epoch,
-            id: 2,
-            timestamp: "stale".into(),
-            kind: "stale".into(),
-            summary: "stale".into(),
-        }));
-        assert!(state.accessibility.is_empty());
-        assert!(state.event_log.is_empty());
-        assert!(state.accepts_device_event(
-            &reopened.host_id,
-            &reopened.device_id,
-            &reopened.session_epoch
-        ));
     }
 
     #[test]

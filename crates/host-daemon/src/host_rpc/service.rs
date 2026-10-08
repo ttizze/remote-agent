@@ -1259,10 +1259,6 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.background_stream(cancel).await);
         }
-        if let Call::DeviceSubscribe(params) = call {
-            let cancel = self.inner.connections.cancellation(session)?;
-            return Ok(self.device_subscribe(params, cancel).await);
-        }
         Ok(
             Response::from_result(self.request(session, call, desktop_publisher_allowed).await)
                 .into(),
