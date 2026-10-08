@@ -233,6 +233,7 @@ mod tests {
         fn limits_use_exact_lookahead(count in 0usize..80, limit in 1u32..40) {
             let mut titles=TitleList::new(&[],TitleQuery::Recent { limit, searching:false });
             for index in 0..count { titles.push(thread(&index.to_string(),None)); }
+            proptest::prop_assert_eq!(titles.remaining_recent(), Some((limit as usize + 1).saturating_sub(count)));
             let page=titles.finish();
             proptest::prop_assert_eq!(page.data.len(), count.min(limit as usize));
             proptest::prop_assert_eq!(page.has_more, count>limit as usize);
