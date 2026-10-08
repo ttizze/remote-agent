@@ -5,7 +5,7 @@ use crate::{
     scheduled_tasks as st, vcs, workspace as w,
 };
 macro_rules! contracts {
-    ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident $(, $storage:ident)?])?),* $(,)?) => {
+    ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])? $(<$storage:ident>)?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
         // Download deliberately share parameters but have different results.
         pub mod contracts {
@@ -21,23 +21,23 @@ macro_rules! contracts {
                 type Params = $params;
                 type Output = $result;
                 fn call(params: Self::Params) -> Call {
-                    Call::$variant(contracts!(@store params $($storage)?))
+                    Call::$variant(contracts!(@store $($storage)? params))
                 }
                 const METHOD: &'static str = $method;
             })*
         }
         $($(contracts!(@$clone $params, $variant);)?)*
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub enum Call { $($variant(contracts!(@type $params $($storage)?))),* }
+        pub enum Call { $($variant(contracts!(@type $($storage,)? $params))),* }
         impl Call {
             pub fn method(&self) -> &str {
                 match self { $(Self::$variant(_) => $method),* }
             }
         }
     };
-    (@store $value:ident box) => { Box::new($value) };
+    (@store box $value:ident) => { Box::new($value) };
     (@store $value:ident) => { $value };
-    (@type $params:ty box) => { Box<$params> };
+    (@type box, $params:ty) => { Box<$params> };
     (@type $params:ty) => { $params };
     (@clone $params:ty, $variant:ident) => {
         impl op::RpcMethod for $params {
@@ -206,7 +206,7 @@ contracts! {
     SetPullRequestFilesViewed, "host/pullRequests/setViewedFiles" => (pr::SetPullRequestFilesViewed, pr::PullRequestViewedFiles) [clone],
     LinkPullRequest, "host/pullRequests/link" => (pr::LinkPullRequest, pr::PullRequestOperation) [clone],
     UnlinkPullRequest, "host/pullRequests/unlink" => (pr::UnlinkPullRequest, pr::PullRequestOperation) [clone],
-    SetPullRequestWatch, "host/pullRequests/watch" => (pr::SetPullRequestWatch, pr::PullRequestOperation) [clone, box],
+    SetPullRequestWatch, "host/pullRequests/watch" => (pr::SetPullRequestWatch, pr::PullRequestOperation) [clone]<box>,
     PullRequestAction, "host/pullRequests/action" => (pr::PullRequestActionRequest, pr::PullRequestOperation) [clone],
     SubmitPullRequestReview, "host/pullRequests/review" => (pr::SubmitPullRequestReview, pr::PullRequestOperation) [clone],
     SourceControlAuth, "host/sourceControl/auth" => (pr::SourceControlAuthRequest, pr::SourceControlAuth) [clone],
