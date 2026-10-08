@@ -1,6 +1,7 @@
 import AgentCore
 import AVFoundation
 import Combine
+import AudioToolbox
 import Security
 import SwiftUI
 import UIKit
@@ -36,6 +37,10 @@ enum LocalNotifications {
                 Self.schedule(title: title, body: body, sound: sound)
             }
         }
+    }
+
+    static func playSound() {
+        AudioServicesPlaySystemSound(1007)
     }
 }
 

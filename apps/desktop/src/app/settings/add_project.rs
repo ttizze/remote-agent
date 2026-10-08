@@ -27,7 +27,7 @@ use gpui_kit::{
 };
 use std::path::PathBuf;
 
-/// Opens the add-project field at the Host's home folder.
+/// Opens the add-project field at the Host's configured base folder.
 pub(super) fn open(view: &mut Desktop, window: &mut Window, cx: &mut Context<Desktop>) {
     let local = view.remote.is_none();
     // The local Host runs as this user, so its home folder is ours; a remote
@@ -37,10 +37,31 @@ pub(super) fn open(view: &mut Desktop, window: &mut Window, cx: &mut Context<Des
             directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_string_lossy().into_owned())
         })
         .flatten();
-    let initial = add_project_initial_query(home.as_deref());
+    let configured_base_directory = view
+        .snapshot
+        .host_settings
+        .as_ref()
+        .map(|settings| settings.add_project_base_directory.trim().to_owned());
+    let initial = match configured_base_directory.as_deref() {
+        Some(base_directory) => add_project_initial_query(Some(base_directory.to_owned())),
+        None => add_project_initial_query(home.clone()),
+    };
+    let initial_directory = configured_base_directory
+        .as_deref()
+        .and_then(|base_directory| expand_local_directory(base_directory, home.as_deref()));
     let platform = if local { std::env::consts::OS } else { "" };
     let desktop = cx.entity().downgrade();
-    let form = cx.new(|cx| AddProject::new(desktop, initial, platform, local, window, cx));
+    let form = cx.new(|cx| {
+        AddProject::new(
+            desktop,
+            initial,
+            initial_directory,
+            platform,
+            local,
+            window,
+            cx,
+        )
+    });
     window.open_dialog(cx, move |dialog, _, _| {
         dialog.w(px(576.)).p_0().child(form.clone())
     });
@@ -120,6 +141,7 @@ impl Desktop {
 struct AddProject {
     desktop: WeakEntity<Desktop>,
     input: Entity<InputState>,
+    initial_directory: Option<PathBuf>,
     platform: &'static str,
     local: bool,
     /// The folder last requested and whether its listing arrived.
@@ -132,6 +154,7 @@ impl AddProject {
     fn new(
         desktop: WeakEntity<Desktop>,
         initial: String,
+        initial_directory: Option<PathBuf>,
         platform: &'static str,
         local: bool,
         window: &mut Window,
@@ -153,6 +176,7 @@ impl AddProject {
         let mut form = Self {
             desktop,
             input,
+            initial_directory,
             platform,
             local,
             requested: None,
@@ -226,10 +250,13 @@ impl AddProject {
 
     fn pick_folder(&mut self, cx: &mut Context<Self>) {
         let platform = self.platform;
+        let initial_directory = self.initial_directory.clone();
         let _ = self.desktop.update(cx, |view, _| {
             view.spawn_task(
-                async {
-                    tokio::task::spawn_blocking(crate::platform::choose_folder)
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        crate::platform::choose_folder(initial_directory.as_deref())
+                    })
                         .await
                         .ok()
                         .flatten()
@@ -241,6 +268,41 @@ impl AddProject {
                 },
             );
         });
+    }
+}
+
+fn expand_local_directory(value: &str, home: Option<&std::path::Path>) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value == "~" {
+        return home.map(PathBuf::from);
+    }
+    value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+        .and_then(|relative| home.map(|home| home.join(relative)))
+        .or_else(|| Some(PathBuf::from(value)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_local_directory;
+    use std::path::Path;
+
+    #[test]
+    fn expands_configured_project_folder_against_the_local_home() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            expand_local_directory("~/Development", Some(home)).as_deref(),
+            Some(Path::new("/Users/tester/Development"))
+        );
+        assert_eq!(
+            expand_local_directory("/Volumes/work", Some(home)).as_deref(),
+            Some(Path::new("/Volumes/work"))
+        );
+        assert_eq!(expand_local_directory("  ", Some(home)), None);
     }
 }
 

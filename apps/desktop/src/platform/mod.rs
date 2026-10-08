@@ -1022,8 +1022,12 @@ mod update_handoff_tests {
     }
 }
 
-pub(crate) fn choose_folder() -> Option<PathBuf> {
-    rfd::FileDialog::new().pick_folder()
+pub(crate) fn choose_folder(initial_directory: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(path) = initial_directory.filter(|path| path.is_dir()) {
+        dialog = dialog.set_directory(path);
+    }
+    dialog.pick_folder()
 }
 
 pub(crate) fn snapshot_metadata_path(path: &std::path::Path) -> PathBuf {
@@ -1591,11 +1595,94 @@ pub(crate) async fn play_snapshot_sound(
     }
 }
 
+/// The native command used for one local attention event. Keeping the
+/// payload as separate arguments lets tests inspect the exact command without
+/// invoking an operating-system notification service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeNotificationCommand {
+    pub(crate) program: &'static str,
+    pub(crate) args: Vec<String>,
+}
+
+pub(crate) fn native_notification_command(
+    title: &str,
+    body: &str,
+) -> NativeNotificationCommand {
+    #[cfg(target_os = "macos")]
+    {
+        return NativeNotificationCommand {
+            program: "osascript",
+            args: vec![
+                "-e".into(),
+                r#"on run argv
+display notification (item 2 of argv) with title (item 1 of argv)
+end run"#
+                    .into(),
+                title.into(),
+                body.into(),
+            ],
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return NativeNotificationCommand {
+            program: "notify-send",
+            args: vec!["--app-name".into(), "Remote Agent".into(), title.into(), body.into()],
+        };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return NativeNotificationCommand {
+            program: "powershell",
+            args: vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                r#"$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$([System.Security.SecurityElement]::Escape($args[0]))</text><text>$([System.Security.SecurityElement]::Escape($args[1]))</text></binding></visual></toast>")
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Remote Agent').Show($toast)"#
+                    .into(),
+                "--".into(),
+                title.into(),
+                body.into(),
+            ],
+        };
+    }
+}
+
+/// Delivers one already-decided OS notification. Permission prompts and
+/// policy decisions stay in the client/core layers; this function only runs
+/// the platform adapter selected for the current desktop target.
+pub(crate) async fn send_native_notification(title: &str, body: &str) -> Result<(), String> {
+    let command = native_notification_command(title, body);
+    let mut child = tokio::process::Command::new(command.program)
+        .args(command.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("native notification could not start: {error}"))?;
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .map_err(|_| "native notification timed out".to_owned())?
+        .map_err(|error| format!("native notification did not report its status: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("native notification exited with {status}"))
+}
+
+pub(crate) async fn play_notification_sound() -> Result<(), String> {
+    play_snapshot_sound(agent_core::view::snapshot_capture::SnapshotSound::SoftPop).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SNAPSHOT_MAX_OUTPUT_BYTES, decode_snapshot_accessibility, read_snapshot_output,
-        valid_snapshot_id,
+        SNAPSHOT_MAX_OUTPUT_BYTES, decode_snapshot_accessibility, native_notification_command,
+        read_snapshot_output, valid_snapshot_id,
     };
 
     #[test]
@@ -1638,5 +1725,19 @@ mod tests {
         let output = read_snapshot_output(reader).await.unwrap();
         writer.await.unwrap();
         assert_eq!(output.len(), SNAPSHOT_MAX_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn native_notification_command_keeps_user_text_out_of_the_script() {
+        let command = native_notification_command("Thread $HOME", "Approval; required");
+        assert!(!command.args.is_empty());
+        assert!(command.args.iter().any(|arg| arg == "Thread $HOME"));
+        assert!(command.args.iter().any(|arg| arg == "Approval; required"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(command.program, "notify-send");
+        #[cfg(target_os = "macos")]
+        assert_eq!(command.program, "osascript");
+        #[cfg(target_os = "windows")]
+        assert_eq!(command.program, "powershell");
     }
 }

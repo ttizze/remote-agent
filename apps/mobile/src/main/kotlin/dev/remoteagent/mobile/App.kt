@@ -32,6 +32,7 @@ import dev.remoteagent.core.environmentProjectRows as buildEnvironmentProjectRow
 import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
 import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
+import dev.remoteagent.core.notificationEvents as buildNotificationEvents
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.subscriptionUsageWidgetsJson
 import dev.remoteagent.core.validateInvitation
@@ -807,6 +808,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val pushPreferencesChanged = previous?.preferences()?.liveActivitiesEnabled !=
             next.preferences().liveActivitiesEnabled
         environmentSnapshots = environmentSnapshots + (profile.id to next)
+        previous?.let { deliverAttentionEvents(it, next) }
         val row = EnvironmentRow(
             profileId = profile.id,
             environmentId = next.environmentId() ?: profile.id,
@@ -1056,6 +1058,19 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         persistence = scope.launch {
             delay(PERSISTENCE_DEBOUNCE_MILLIS)
             persist()
+        }
+    }
+
+    private fun deliverAttentionEvents(previous: Snapshot, current: Snapshot) {
+        val appActive = !appInBackground
+        val attentionEvents = buildNotificationEvents(previous, current, appActive, appActive)
+        attentionEvents.forEach { event ->
+            if (event.inApp) notice = event.body
+            if (event.operatingSystem) {
+                LocalNotifications.deliver(context, event.title, event.body, event.sound)
+            } else if (event.sound) {
+                LocalNotifications.playSound(context)
+            }
         }
     }
 

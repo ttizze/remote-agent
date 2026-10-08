@@ -175,6 +175,8 @@ impl Views {
 pub(crate) struct Desktop {
     pub(crate) session: Option<StoreSession>,
     pub(crate) snapshot: Arc<Snapshot>,
+    /// Last snapshot used as the notification transition baseline.
+    notification_snapshot: Arc<Snapshot>,
     /// Immutable projections for every authenticated Host store.
     pub(crate) environment_registry: EnvironmentRegistry,
     pub(crate) views: Arc<Views>,
@@ -455,6 +457,7 @@ impl Desktop {
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
+            notification_snapshot: Arc::default(),
             views: Arc::new(Views::derive(
                 &Snapshot::default(),
                 &EnvironmentRegistry::default(),
@@ -555,6 +558,7 @@ impl Desktop {
             self.background_connecting.remove(&remote.id);
         }
         self.snapshot = Arc::default();
+        self.notification_snapshot = self.snapshot.clone();
         self.disconnected(window, cx);
         let updates = self.updates.clone();
         let epoch = self.epoch;
@@ -1153,6 +1157,9 @@ impl Desktop {
                 if let Some(session) = self.background_sessions.get(&profile_id) {
                     session.save(snapshot.clone());
                 }
+                if let Some(previous) = current.as_ref() {
+                    self.deliver_notification_events(previous, &snapshot, window, cx);
+                }
                 self.environment_registry.update(snapshot);
                 if disconnected {
                     self.background_sessions.remove(&profile_id);
@@ -1353,6 +1360,7 @@ impl Desktop {
     }
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.deliver_snapshot_notifications(window, cx);
         if let Some(environment_id) = self.environment_registry.update(self.snapshot.clone()) {
             self.environment_registry.select(&environment_id);
             self.generation += 1;
@@ -1376,6 +1384,47 @@ impl Desktop {
         self.sync_settings(window, cx);
         self.offer_onboarding_import(window, cx);
         self.schedule_views(cx);
+    }
+
+    fn deliver_snapshot_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let previous = std::mem::replace(&mut self.notification_snapshot, self.snapshot.clone());
+        self.deliver_notification_events(&previous, &self.snapshot, window, cx);
+    }
+
+    fn deliver_notification_events(
+        &self,
+        previous: &Snapshot,
+        current: &Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focused = window.is_window_active();
+        let events = agent_core::view::notifications::between(
+            previous,
+            current,
+            focused,
+            focused,
+        );
+        for event in events {
+            if event.in_app {
+                window.push_notification(
+                    Notification::warning(event.body.clone()).title(event.title.clone()),
+                    cx,
+                );
+            }
+            if event.operating_system {
+                let title = event.title.clone();
+                let body = event.body.clone();
+                self.runtime.handle.spawn(async move {
+                    let _ = platform::send_native_notification(&title, &body).await;
+                });
+            }
+            if event.sound {
+                self.runtime.handle.spawn(async {
+                    let _ = platform::play_notification_sound().await;
+                });
+            }
+        }
     }
 
     fn views_changed(&mut self, previous: &Views, window: &mut Window, cx: &mut Context<Self>) {

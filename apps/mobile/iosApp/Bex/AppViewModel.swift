@@ -508,6 +508,9 @@ final class BexAppViewModel: ObservableObject {
         let pushPreferencesChanged = previous?.preferences().liveActivitiesEnabled
             != next.preferences().liveActivitiesEnabled
         environmentSnapshots[profile.id] = next
+        if let previous {
+            deliverAttentionEvents(previous: previous, current: next)
+        }
         let row = EnvironmentRow(
             profileId: profile.id,
             environmentId: next.environmentId() ?? profile.id,
@@ -1079,6 +1082,33 @@ extension BexAppViewModel {
         persistence = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             self?.persist()
+        }
+    }
+
+    private func deliverAttentionEvents(
+        previous: AgentCore.Snapshot,
+        current: AgentCore.Snapshot
+    ) {
+        let appActive = UIApplication.shared.applicationState == .active
+        let attentionEvents = AgentCore.notificationEvents(
+            previous: previous,
+            current: current,
+            appVisible: appActive,
+            appFocused: appActive
+        )
+        for event in attentionEvents {
+            if event.inApp {
+                notice = event.body
+            }
+            if event.operatingSystem {
+                LocalNotifications.deliver(
+                    title: event.title,
+                    body: event.body,
+                    sound: event.sound
+                )
+            } else if event.sound {
+                LocalNotifications.playSound()
+            }
         }
     }
 

@@ -8,7 +8,7 @@ use crate::{
     },
     models::{FileContent, FileList, Project, WorktreeSettings},
     state::{Draft, RefScope, Snapshot},
-    view::{load_balancing, thread_list::ThreadListOptions},
+    view::{load_balancing, notifications, thread_list::ThreadListOptions},
 };
 use agent_protocol::{
     models::AgentActivityPhase,
@@ -253,6 +253,19 @@ pub fn environment_load_balancing_pending_action(
         now_ms,
         timeout_ms,
     )
+}
+
+/// Folds two Host snapshots into the attention events a native client should
+/// deliver. The app supplies its visibility and focus state; core owns the
+/// status transition, completion edge and preference decisions.
+#[uniffi::export]
+pub fn notification_events(
+    previous: Arc<Snapshot>,
+    current: Arc<Snapshot>,
+    app_visible: bool,
+    app_focused: bool,
+) -> Vec<notifications::NotificationEvent> {
+    notifications::between(&previous, &current, app_visible, app_focused)
 }
 
 #[uniffi::export]

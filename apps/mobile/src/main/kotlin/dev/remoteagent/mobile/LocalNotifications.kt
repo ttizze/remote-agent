@@ -9,6 +9,17 @@ import android.content.pm.PackageManager
 
 /** Delivers local attention events; network push transport stays outside the client. */
 internal object LocalNotifications {
+    fun playSound(context: Context) {
+        val ringtone =
+            android.media.RingtoneManager.getRingtone(
+                context,
+                android.media.RingtoneManager.getDefaultUri(
+                    android.media.RingtoneManager.TYPE_NOTIFICATION,
+                ),
+            )
+        ringtone?.play()
+    }
+
     fun deliver(context: Context, title: String, body: String, sound: Boolean) {
         if (
             android.os.Build.VERSION.SDK_INT >= 33 &&
