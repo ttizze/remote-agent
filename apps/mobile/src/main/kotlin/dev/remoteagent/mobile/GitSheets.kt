@@ -111,8 +111,7 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
                         } else {
                             pendingAction = action
                             val actionName = action.name.lowercase()
-                            confirmation =
-                                model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName)
+                            confirmation = model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName)
                             if (!confirmation)
                                 runGitAction(
                                     model,
@@ -553,9 +552,10 @@ private fun statusSummary(status: dev.remoteagent.core.GitStatus?): String =
         !status.isRepo -> "This folder is not a Git repository."
         else ->
             buildList {
-                if (status.hasWorkingTreeChanges) add("${status.workingTree.size} changed")
-                if (status.aheadCount > 0uL) add("${status.aheadCount} ahead")
-                if (status.behindCount > 0uL) add("${status.behindCount} behind")
-                if (isEmpty()) add(if (status.hasUpstream) "Up to date" else "No upstream")
-            }.joinToString(" · ")
+                    if (status.hasWorkingTreeChanges) add("${status.workingTree.size} changed")
+                    if (status.aheadCount > 0uL) add("${status.aheadCount} ahead")
+                    if (status.behindCount > 0uL) add("${status.behindCount} behind")
+                    if (isEmpty()) add(if (status.hasUpstream) "Up to date" else "No upstream")
+                }
+                .joinToString(" · ")
     }

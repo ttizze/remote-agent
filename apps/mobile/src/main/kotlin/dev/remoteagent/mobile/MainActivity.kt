@@ -45,15 +45,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         localNetworkGranted =
-            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) ==
-                PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
         // A not-determined permission is still being requested (or may be
         // requested below). Do not treat that state as a denial: doing so
         // would clear events queued while Android owns the permission sheet.
         if (
             android.os.Build.VERSION.SDK_INT < MIN_NOTIFICATION_PERMISSION_SDK ||
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-                    PackageManager.PERMISSION_GRANTED
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         ) {
             LocalNotifications.permissionResult(this, true)
         }
@@ -80,19 +78,13 @@ class MainActivity : ComponentActivity() {
                     activity = this,
                     model = model,
                     requestQrScan = requestQrScan,
-                    requestNotifications = {
-                        requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    },
+                    requestNotifications = { requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) },
                 )
             } else {
                 AppMaterialTheme {
                     Column(Modifier.safeDrawingPadding().padding(24.dp)) {
                         Text("同じネットワークのPCへ接続するには、付近のデバイスへのアクセスを許可してください。")
-                        Button(
-                            onClick = {
-                                requestNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
-                            }
-                        ) {
+                        Button(onClick = { requestNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {
                             Text("許可して接続")
                         }
                         Text("拒否した場合は再試行するか、設定で許可できます。インターネット経由の接続も選べます。")
@@ -129,9 +121,7 @@ class MainActivity : ComponentActivity() {
                 val urls = buildList {
                     intent.getStringExtra(Intent.EXTRA_STREAM)?.let(::add)
                     intent.clipData?.let { clip ->
-                        repeat(clip.itemCount) { index ->
-                            clip.getItemAt(index).uri?.toString()?.let(::add)
-                        }
+                        repeat(clip.itemCount) { index -> clip.getItemAt(index).uri?.toString()?.let(::add) }
                     }
                 }
                 model.importShare(text, urls)

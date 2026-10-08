@@ -41,7 +41,11 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
     var saveError by remember { mutableStateOf<String?>(null) }
     val snapshot = model.snapshot
     val catalog by rememberView(snapshot, CATALOG_OPTIONS) { it.catalogSheet(CATALOG_OPTIONS) }
-    val clearEditor = { selected = null; draft = null; saveError = null }
+    val clearEditor = {
+        selected = null
+        draft = null
+        saveError = null
+    }
     LaunchedEffect(snapshot.revision) {
         if (draft == null && selected != null) draft = snapshot.scheduledTaskDraft(selected)
     }
@@ -56,7 +60,10 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                         draft = snapshot.scheduledTaskDraft(taskId)
                         saveError = null
                     },
-                    onDelete = { model.perform(Intent.DeleteScheduledTask(it)); if (selected == it) clearEditor() },
+                    onDelete = {
+                        model.perform(Intent.DeleteScheduledTask(it))
+                        if (selected == it) clearEditor()
+                    },
                     onCreate = {
                         selected = null
                         draft = snapshot.scheduledTaskDraft(null)
@@ -117,25 +124,15 @@ private fun ScheduledTaskListSection(
                         color = AppTheme.colors.foregroundMuted,
                     )
                 }
-                TextButton(
-                    onClick = { onAction(Intent.SetScheduledTaskEnabled(task.id, !task.enabled)) }
-                ) {
+                TextButton(onClick = { onAction(Intent.SetScheduledTaskEnabled(task.id, !task.enabled)) }) {
                     Text(if (task.enabled) "Pause" else "Enable")
                 }
-                TextButton(onClick = { onAction(Intent.RunScheduledTaskNow(task.id)) }) {
-                    Text("Run now")
-                }
-                TextButton(onClick = { onDelete(task.id) }) {
-                    Text("Delete", color = AppTheme.colors.dangerForeground)
-                }
+                TextButton(onClick = { onAction(Intent.RunScheduledTaskNow(task.id)) }) { Text("Run now") }
+                TextButton(onClick = { onDelete(task.id) }) { Text("Delete", color = AppTheme.colors.dangerForeground) }
             }
-            TextButton(onClick = { onEdit(task.id) }, modifier = Modifier.padding(horizontal = 12.dp)) {
-                Text("Edit")
-            }
+            TextButton(onClick = { onEdit(task.id) }, modifier = Modifier.padding(horizontal = 12.dp)) { Text("Edit") }
         }
-        TextButton(onClick = onCreate) {
-            Text("New scheduled task")
-        }
+        TextButton(onClick = onCreate) { Text("New scheduled task") }
     }
 }
 
@@ -152,9 +149,7 @@ private fun ScheduledTaskEditor(
     onAction: (Intent) -> Unit,
     onSave: () -> Unit,
 ) {
-    LaunchedEffect(current.projectId) {
-        onAction(Intent.SearchScheduledTaskBranches(current.projectId, ""))
-    }
+    LaunchedEffect(current.projectId) { onAction(Intent.SearchScheduledTaskBranches(current.projectId, "")) }
     SectionCard(if (current.id == null) "New scheduled task" else "Edit scheduled task") {
         ScheduledTaskBasicsSection(current, projects, onChange)
         ScheduledTaskModelSection(snapshot, catalog, current, onChange)
@@ -282,9 +277,7 @@ private fun ScheduledTaskTraitControls(
     onChange: (ScheduledTaskDraft) -> Unit,
 ) {
     val traits by
-        rememberView(snapshot, current.instanceId, current.model, current.options) {
-            it.scheduledTaskTraits(current)
-        }
+        rememberView(snapshot, current.instanceId, current.model, current.options) { it.scheduledTaskTraits(current) }
     traits?.controls.orEmpty().forEach { control ->
         when (control) {
             is TraitControl.Select -> {
@@ -293,9 +286,7 @@ private fun ScheduledTaskTraitControls(
                     control.choices.forEach { choice ->
                         FilterChip(
                             selected = choice.id == control.selected,
-                            onClick = {
-                                onChange(snapshot.selectScheduledTaskTrait(current, control.id, choice.id))
-                            },
+                            onClick = { onChange(snapshot.selectScheduledTaskTrait(current, control.id, choice.id)) },
                             label = { Text(choice.label) },
                         )
                     }
@@ -318,10 +309,7 @@ private fun ScheduledTaskTraitControls(
 }
 
 @Composable
-private fun ScheduledTaskScheduleFields(
-    current: ScheduledTaskDraft,
-    onChange: (ScheduledTaskDraft) -> Unit,
-) {
+private fun ScheduledTaskScheduleFields(current: ScheduledTaskDraft, onChange: (ScheduledTaskDraft) -> Unit) {
     val interval = current.schedule is ScheduledTaskScheduleDraft.Interval
     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(
@@ -385,9 +373,7 @@ private fun ScheduledTaskWeekdayFields(
                     val day = index.toUByte()
                     if (!days.remove(day)) days.add(day)
                     onChange(
-                        current.copy(
-                            schedule = ScheduledTaskScheduleDraft.FixedTime(schedule.timeOfDay, days.sorted())
-                        )
+                        current.copy(schedule = ScheduledTaskScheduleDraft.FixedTime(schedule.timeOfDay, days.sorted()))
                     )
                 },
                 label = { Text(label) },
@@ -406,30 +392,30 @@ private fun ScheduledTaskWorkspaceSection(
     val workspace = current.workspace
     Text("Workspace", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf("root" to "Project checkout", "worktree" to "New worktree", "existing" to "Existing worktree")
-            .forEach { (kind, label) ->
-                FilterChip(
-                    selected =
-                        when (kind) {
-                            "worktree" -> workspace is ScheduledTaskWorkspaceDraft.Worktree
-                            "existing" -> workspace is ScheduledTaskWorkspaceDraft.ExistingWorktree
-                            else -> workspace is ScheduledTaskWorkspaceDraft.Root
-                        },
-                    onClick = {
-                        onChange(
-                            current.copy(
-                                workspace =
-                                    when (kind) {
-                                        "worktree" -> ScheduledTaskWorkspaceDraft.Worktree("main", null, true)
-                                        "existing" -> ScheduledTaskWorkspaceDraft.ExistingWorktree("", null)
-                                        else -> ScheduledTaskWorkspaceDraft.Root(null)
-                                    }
-                            )
-                        )
+        listOf("root" to "Project checkout", "worktree" to "New worktree", "existing" to "Existing worktree").forEach {
+            (kind, label) ->
+            FilterChip(
+                selected =
+                    when (kind) {
+                        "worktree" -> workspace is ScheduledTaskWorkspaceDraft.Worktree
+                        "existing" -> workspace is ScheduledTaskWorkspaceDraft.ExistingWorktree
+                        else -> workspace is ScheduledTaskWorkspaceDraft.Root
                     },
-                    label = { Text(label) },
-                )
-            }
+                onClick = {
+                    onChange(
+                        current.copy(
+                            workspace =
+                                when (kind) {
+                                    "worktree" -> ScheduledTaskWorkspaceDraft.Worktree("main", null, true)
+                                    "existing" -> ScheduledTaskWorkspaceDraft.ExistingWorktree("", null)
+                                    else -> ScheduledTaskWorkspaceDraft.Root(null)
+                                }
+                        )
+                    )
+                },
+                label = { Text(label) },
+            )
+        }
     }
     ScheduledTaskWorkspaceFields(snapshot, current, onChange, onAction)
 }

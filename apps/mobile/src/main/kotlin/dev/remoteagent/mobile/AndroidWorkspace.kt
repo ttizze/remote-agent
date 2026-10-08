@@ -133,8 +133,7 @@ internal fun PdfScreen(model: AndroidAppModel, path: String) {
     }
     ScreenScaffold(File(path).name, onBack = model::back) {
         when {
-            error != null ->
-                Text(error!!, Modifier.padding(20.dp), color = AppTheme.colors.dangerForeground)
+            error != null -> Text(error!!, Modifier.padding(20.dp), color = AppTheme.colors.dangerForeground)
             local == null ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = AppTheme.colors.iconMuted)
@@ -154,10 +153,9 @@ private fun PdfPages(file: File) {
                 try {
                     Result.success(
                         withContext(Dispatchers.IO) {
-                            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                                .use { descriptor ->
-                                    PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
-                                }
+                            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                                PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
+                            }
                         }
                     )
                 } catch (cancellation: CancellationException) {
@@ -227,8 +225,7 @@ private suspend fun renderPdfPage(file: File, index: Int, cache: LruCache<Int, B
     try {
         val bitmap =
             withContext(Dispatchers.IO) {
-                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use {
-                    descriptor ->
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
                     PdfRenderer(descriptor).use { renderer ->
                         require(index in 0 until renderer.pageCount) { "PDF page is unavailable" }
                         renderer.openPage(index).use { page ->
@@ -250,12 +247,7 @@ private suspend fun renderPdfPage(file: File, index: Int, cache: LruCache<Int, B
                                 )
                                 .also { candidate ->
                                     pending = candidate
-                                    page.render(
-                                        candidate,
-                                        null,
-                                        null,
-                                        PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY,
-                                    )
+                                    page.render(candidate, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                     currentCoroutineContext().ensureActive()
                                 }
                         }
@@ -273,12 +265,7 @@ private suspend fun renderPdfPage(file: File, index: Int, cache: LruCache<Int, B
 
 /** The open thread's files, diff and browser, each as its own screen. */
 @Composable
-internal fun WorkspaceScreen(
-    model: AndroidAppModel,
-    tab: WorkspaceTab,
-    file: String? = null,
-    line: ULong? = null,
-) {
+internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: String? = null, line: ULong? = null) {
     if (tab == WorkspaceTab.Files && file != null && dev.remoteagent.core.isPdfFile(file)) {
         PdfScreen(model, file)
         return
@@ -301,12 +288,7 @@ internal fun WorkspaceScreen(
 @Composable
 // Declarative native layout; the conversation decisions are supplied by core.
 @Suppress("LongMethod", "CyclomaticComplexMethod")
-private fun WorkspaceFiles(
-    model: AndroidAppModel,
-    linkedFile: String?,
-    line: ULong?,
-    modifier: Modifier,
-) {
+private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: ULong?, modifier: Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var directory by remember {
@@ -314,16 +296,12 @@ private fun WorkspaceFiles(
     }
     var path by remember { mutableStateOf(directory) }
     // A linked file opens over its folder.
-    var selected by remember {
-        mutableStateOf(linkedFile?.let { FileEntry(File(it).name, it, false, 0uL) })
-    }
+    var selected by remember { mutableStateOf(linkedFile?.let { FileEntry(File(it).name, it, false, 0uL) }) }
     LaunchedEffect(linkedFile) { linkedFile?.let { model.perform(Intent.ReadFile(it, false)) } }
     var error by remember { mutableStateOf<String?>(null) }
     var downloading by remember { mutableStateOf<Pair<String, String?>?>(null) }
     val download =
-        rememberLauncherForActivityResult(
-            ActivityResultContracts.CreateDocument("application/octet-stream")
-        ) { uri ->
+        rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
             val source = downloading
             downloading = null
             if (uri != null && source != null && source.second == model.profileId)
@@ -359,8 +337,7 @@ private fun WorkspaceFiles(
                                         null,
                                         null,
                                     )
-                                    ?.use { if (it.moveToFirst()) it.getString(0) else null }
-                                    ?: "file"
+                                    ?.use { if (it.moveToFirst()) it.getString(0) else null } ?: "file"
                             }
                         withContext(Dispatchers.IO) {
                             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -376,9 +353,7 @@ private fun WorkspaceFiles(
                     }
                 }
         }
-    LaunchedEffect(directory) {
-        if (directory.isNotBlank()) model.perform(Intent.ListFiles(directory))
-    }
+    LaunchedEffect(directory) { if (directory.isNotBlank()) model.perform(Intent.ListFiles(directory)) }
     Column(modifier.padding(horizontal = 20.dp)) {
         Row {
             OutlinedTextField(
@@ -403,8 +378,7 @@ private fun WorkspaceFiles(
         }
         error?.let { Text(it, color = AppTheme.colors.dangerForeground) }
         val files = model.snapshot.directory()?.takeIf { it.path == directory }
-        if (files?.truncated == true)
-            Text("Showing the first 2,000 entries", style = AppTheme.caption)
+        if (files?.truncated == true) Text("Showing the first 2,000 entries", style = AppTheme.caption)
         LazyColumn {
             items(files?.entries.orEmpty(), key = { it.path }) { entry ->
                 Row(Modifier.fillMaxWidth()) {
@@ -438,26 +412,20 @@ private fun WorkspaceFiles(
         }
     }
     selected?.let { entry ->
-        Dialog(
-            { selected = null },
-            properties = DialogProperties(usePlatformDefaultWidth = false),
-        ) {
+        Dialog({ selected = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
             Surface(Modifier.fillMaxSize()) {
                 Column(Modifier.padding(20.dp)) {
                     Row {
                         Text(entry.name, Modifier.weight(1f))
                         TextButton(onClick = { selected = null }) { Text("Close") }
                     }
-                    model.snapshot.error()?.let {
-                        Text(it, color = AppTheme.colors.dangerForeground)
-                    }
+                    model.snapshot.error()?.let { Text(it, color = AppTheme.colors.dangerForeground) }
                     val file = model.snapshot.file()?.takeIf { it.path == entry.path }
                     var text by remember(entry.path) { mutableStateOf("") }
                     var pending by remember(entry.path) { mutableStateOf<Long?>(null) }
                     var revision by remember(entry.path) { mutableStateOf(0L) }
                     LaunchedEffect(file?.revision) {
-                        if (pending == null && file != null)
-                            text = model.snapshot.fileDraft(entry.path) ?: file.text
+                        if (pending == null && file != null) text = model.snapshot.fileDraft(entry.path) ?: file.text
                     }
                     if (file == null) CircularProgressIndicator()
                     else if (line != null && entry.path == linkedFile) {
@@ -466,19 +434,16 @@ private fun WorkspaceFiles(
                         val horizontal = rememberScrollState()
                         val wrap = AppTheme.codeWordWrap
                         LaunchedEffect(file, line, lines.size) {
-                            val target =
-                                dev.remoteagent.core.markdownLineTarget(line, lines.size.toULong())
+                            val target = dev.remoteagent.core.markdownLineTarget(line, lines.size.toULong())
                             if (target != null) scroll.scrollToItem((target - 1uL).toInt())
                         }
                         androidx.compose.foundation.text.selection.SelectionContainer(
-                            Modifier.weight(1f)
-                                .then(if (wrap) Modifier else Modifier.horizontalScroll(horizontal))
+                            Modifier.weight(1f).then(if (wrap) Modifier else Modifier.horizontalScroll(horizontal))
                         ) {
                             LazyColumn(
                                 state = scroll,
                                 modifier =
-                                    if (wrap) Modifier.fillMaxWidth()
-                                    else Modifier.wrapContentWidth(unbounded = true),
+                                    if (wrap) Modifier.fillMaxWidth() else Modifier.wrapContentWidth(unbounded = true),
                             ) {
                                 items(lines.size) { index ->
                                     Row(
@@ -503,8 +468,7 @@ private fun WorkspaceFiles(
                                             lineHeight = AppTheme.codeLineHeight.sp,
                                             softWrap = wrap,
                                             modifier =
-                                                (if (wrap) Modifier.weight(1f) else Modifier)
-                                                    .padding(start = 8.dp),
+                                                (if (wrap) Modifier.weight(1f) else Modifier).padding(start = 8.dp),
                                         )
                                     }
                                 }
@@ -538,9 +502,7 @@ private fun WorkspaceFiles(
                                 ),
                             maxLines = Int.MAX_VALUE,
                         )
-                        Button(onClick = { model.perform(Intent.SaveFile(entry.path)) }) {
-                            Text("Save")
-                        }
+                        Button(onClick = { model.perform(Intent.SaveFile(entry.path)) }) { Text("Save") }
                     }
                 }
             }
@@ -554,9 +516,7 @@ private fun WorkspaceFiles(
 private fun ReviewScreen(model: AndroidAppModel) {
     val thread = model.snapshot.selectedThreadId()
     val panel = thread?.let { model.snapshot.diff(it) }
-    LaunchedEffect(thread, panel?.request) {
-        if (panel?.request != null) model.perform(Intent.LoadDiff)
-    }
+    LaunchedEffect(thread, panel?.request) { if (panel?.request != null) model.perform(Intent.LoadDiff) }
     val review = model.snapshot.review()
     var files by remember { mutableStateOf<List<WorkspaceDiffFile>>(emptyList()) }
     LaunchedEffect(model.snapshot.reviewRevision()) {
@@ -577,13 +537,9 @@ private fun ReviewScreen(model: AndroidAppModel) {
     val lazy = lazyFiles?.takeIf { filesRevision != null }
     val shownFiles =
         remember(lazy, files) {
-            lazy?.files?.map { WorkspaceDiffFile(it.path, it.additions, it.deletions, it.rows) }
-                ?: files
+            lazy?.files?.map { WorkspaceDiffFile(it.path, it.additions, it.deletions, it.rows) } ?: files
         }
-    val notices =
-        remember(lazy) {
-            lazy?.files?.mapNotNull { file -> file.notice?.let { file.path to it } }?.toMap()
-        }
+    val notices = remember(lazy) { lazy?.files?.mapNotNull { file -> file.notice?.let { file.path to it } }?.toMap() }
     val loading = (gitScope && git?.loading == true) || (panel?.request != null && review == null)
     val subtitle =
         panel?.let {
@@ -631,12 +587,10 @@ private fun ReviewScreen(model: AndroidAppModel) {
                     item {
                         ReviewMessage(
                             "No review diffs",
-                            empty
-                                ?: "This thread has no ready turn diffs and the worktree diff is empty.",
+                            empty ?: "This thread has no ready turn diffs and the worktree diff is empty.",
                         )
                     }
-                error != null ->
-                    item { ReviewCard("Review unavailable", error, colors.card, colors.foreground) }
+                error != null -> item { ReviewCard("Review unavailable", error, colors.card, colors.foreground) }
                 loading ->
                     item {
                         Column(
@@ -649,20 +603,11 @@ private fun ReviewScreen(model: AndroidAppModel) {
                                 color = colors.iconMuted,
                                 strokeWidth = 2.dp,
                             )
-                            Text(
-                                "Loading diff…",
-                                style = AppTheme.label,
-                                color = colors.foregroundMuted,
-                            )
+                            Text("Loading diff…", style = AppTheme.label, color = colors.foregroundMuted)
                         }
                     }
                 shownFiles.isEmpty() ->
-                    item {
-                        ReviewMessage(
-                            "No changes",
-                            git?.subtitle?.takeIf { gitScope } ?: "This diff is empty.",
-                        )
-                    }
+                    item { ReviewMessage("No changes", git?.subtitle?.takeIf { gitScope } ?: "This diff is empty.") }
             }
             if (gitScope && git?.truncated == true && !loading)
                 item {
@@ -677,16 +622,12 @@ private fun ReviewScreen(model: AndroidAppModel) {
             if (!loading)
                 items(shownFiles, key = { it.path }) { file ->
                     if (notices != null)
-                        LaunchedEffect(file.path) {
-                            model.perform(Intent.RevealDiffFile(file.path, false))
-                        }
+                        LaunchedEffect(file.path) { model.perform(Intent.RevealDiffFile(file.path, false)) }
                     Column(Modifier.padding(horizontal = 16.dp)) {
                         Row(
                             Modifier.then(
                                 if (notices != null)
-                                    Modifier.clickable {
-                                        model.perform(Intent.RevealDiffFile(file.path, true))
-                                    }
+                                    Modifier.clickable { model.perform(Intent.RevealDiffFile(file.path, true)) }
                                 else Modifier
                             ),
                             verticalAlignment = Alignment.CenterVertically,
@@ -698,9 +639,7 @@ private fun ReviewScreen(model: AndroidAppModel) {
                                 fontWeight = FontWeight.Medium,
                                 color = colors.foreground,
                             )
-                            file.deletions?.let {
-                                Text("-$it", style = AppTheme.micro, color = colors.rose)
-                            }
+                            file.deletions?.let { Text("-$it", style = AppTheme.micro, color = colors.rose) }
                             file.additions?.let {
                                 Text(
                                     "+$it",
@@ -720,10 +659,7 @@ private fun ReviewScreen(model: AndroidAppModel) {
                                 file.rows.forEach { row ->
                                     Text(
                                         row.text,
-                                        Modifier.then(
-                                            if (AppTheme.codeWordWrap) Modifier.fillMaxWidth()
-                                            else Modifier
-                                        ),
+                                        Modifier.then(if (AppTheme.codeWordWrap) Modifier.fillMaxWidth() else Modifier),
                                         fontFamily = AppTheme.mono,
                                         fontSize = AppTheme.codeFontSize.sp,
                                         lineHeight = AppTheme.codeLineHeight.sp,
@@ -769,9 +705,7 @@ private fun ReviewMenu(model: AndroidAppModel, panel: DiffPanelView, loading: Bo
                 }
             else {
                 panel.scopes.forEach { scope ->
-                    val git =
-                        scope.choice == DiffScopeChoice.Branch ||
-                            scope.choice == DiffScopeChoice.Unstaged
+                    val git = scope.choice == DiffScopeChoice.Branch || scope.choice == DiffScopeChoice.Unstaged
                     MenuChoice(scope.label, scope.selected, enabled = repository || !git) {
                         open = false
                         model.perform(Intent.SelectDiffScope(scope.choice))
@@ -801,12 +735,7 @@ private fun ReviewMenu(model: AndroidAppModel, panel: DiffPanelView, loading: Bo
 }
 
 @Composable
-private fun MenuChoice(
-    label: String,
-    selected: Boolean,
-    enabled: Boolean = true,
-    onClick: () -> Unit,
-) {
+private fun MenuChoice(label: String, selected: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     DropdownMenuItem(
         text = { Text(label, style = AppTheme.footnote) },
         trailingIcon = if (selected) ({ Icon(Icons.Outlined.Check, null) }) else null,
@@ -823,18 +752,8 @@ private fun ReviewFileNotice(notice: String) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Icon(
-            Icons.Outlined.Info,
-            null,
-            Modifier.size(16.dp),
-            tint = AppTheme.colors.foregroundMuted,
-        )
-        Text(
-            notice,
-            style = AppTheme.caption,
-            color = AppTheme.colors.foregroundMuted,
-            maxLines = 1,
-        )
+        Icon(Icons.Outlined.Info, null, Modifier.size(16.dp), tint = AppTheme.colors.foregroundMuted)
+        Text(notice, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted, maxLines = 1)
     }
 }
 
@@ -844,12 +763,7 @@ private fun ReviewMessage(title: String, detail: String) {
         Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            title,
-            style = AppTheme.footnote,
-            fontWeight = FontWeight.Bold,
-            color = AppTheme.colors.foreground,
-        )
+        Text(title, style = AppTheme.footnote, fontWeight = FontWeight.Bold, color = AppTheme.colors.foreground)
         Text(
             detail,
             Modifier.padding(top = 8.dp),
@@ -861,13 +775,7 @@ private fun ReviewMessage(title: String, detail: String) {
 }
 
 @Composable
-private fun ReviewCard(
-    title: String,
-    detail: String,
-    container: Color,
-    titleColor: Color,
-    notice: Boolean = false,
-) {
+private fun ReviewCard(title: String, detail: String, container: Color, titleColor: Color, notice: Boolean = false) {
     Column(
         Modifier.fillMaxWidth()
             .padding(8.dp)
@@ -916,14 +824,10 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
         if (user) sending = true
         try {
             val current = frame
-            val next =
-                model.browser(
-                    BrowserRequest(thread, current?.tabId ?: "", current?.imageId ?: "", action)
-                )
+            val next = model.browser(BrowserRequest(thread, current?.tabId ?: "", current?.imageId ?: "", action))
             frame = next
             error = null
-            if (address.isEmpty())
-                address = next.tabs.firstOrNull { it.id == next.tabId }?.url.orEmpty()
+            if (address.isEmpty()) address = next.tabs.firstOrNull { it.id == next.tabId }?.url.orEmpty()
         } catch (failure: Exception) {
             error = failure.message
         } finally {
@@ -948,9 +852,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
                 singleLine = true,
                 label = { Text("URL") },
             )
-            TextButton(onClick = { send(BrowserAction.Navigate(address)) }, enabled = !sending) {
-                Text("Go")
-            }
+            TextButton(onClick = { send(BrowserAction.Navigate(address)) }, enabled = !sending) { Text("Go") }
         }
         Row {
             TextButton(onClick = { send(BrowserAction.Back) }) { Text("‹") }
@@ -980,11 +882,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
         }
         val bytes = frame?.image
         val bitmap =
-            remember(bytes) {
-                bytes
-                    ?.takeIf { it.isNotEmpty() }
-                    ?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-            }
+            remember(bytes) { bytes?.takeIf { it.isNotEmpty() }?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } }
         val sendLatest by rememberUpdatedState(::send)
         val acceptsInput by rememberUpdatedState(!sending && active && bitmap != null)
         AndroidView(
@@ -1016,12 +914,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
                                 override fun onSingleTapUp(event: MotionEvent): Boolean {
                                     if (acceptsInput)
                                         point(event)?.let {
-                                            sendLatest(
-                                                BrowserAction.Click(
-                                                    it[0].toDouble(),
-                                                    it[1].toDouble(),
-                                                )
-                                            )
+                                            sendLatest(BrowserAction.Click(it[0].toDouble(), it[1].toDouble()))
                                         }
                                     return true
                                 }

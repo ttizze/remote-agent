@@ -68,27 +68,21 @@ internal data class ActivityAggregateSnapshot(val aggregate: String?, val expire
  * come from agent-core's shared activity widget helper.
  */
 internal fun parseActivityPresentation(value: String): ActivityPresentation? =
-    activityState(value)
-        ?.let { input ->
-            val activeCount = (input["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
-            val projected =
-                runCatching {
-                        agentActivityWidgetJson(
-                            value,
-                            stale = false,
-                            light = false,
-                            monochrome = false,
-                            reduced = false,
-                        )
-                    }
-                    .getOrNull()
-            val display = projected?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() }
-            val title = (display?.get("headline") as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty)
-            if (activeCount == null || display == null || title == null) {
-                null
-            } else {
-                val rows =
-                    (display["rows"] as? JsonArray)?.mapNotNull { row ->
+    activityState(value)?.let { input ->
+        val activeCount = (input["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
+        val projected =
+            runCatching {
+                    agentActivityWidgetJson(value, stale = false, light = false, monochrome = false, reduced = false)
+                }
+                .getOrNull()
+        val display = projected?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        val title = (display?.get("headline") as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty)
+        if (activeCount == null || display == null || title == null) {
+            null
+        } else {
+            val rows =
+                (display["rows"] as? JsonArray)
+                    ?.mapNotNull { row ->
                         (row as? JsonObject)?.let { rowObject ->
                             val project = (rowObject["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
                             val thread = (rowObject["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
@@ -98,14 +92,15 @@ internal fun parseActivityPresentation(value: String): ActivityPresentation? =
                                 .joinToString(" · ")
                                 .takeIf(String::isNotEmpty)
                         }
-                    }.orEmpty()
-                val body =
-                    rows.takeIf { it.isNotEmpty() }?.joinToString("\n")
-                        ?: (display["summary"] as? JsonPrimitive)?.content?.trim().orEmpty()
-                val deepLink = (display["deepLink"] as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
-                ActivityPresentation(title, body, activeCount > 0, deepLink)
-            }
+                    }
+                    .orEmpty()
+            val body =
+                rows.takeIf { it.isNotEmpty() }?.joinToString("\n")
+                    ?: (display["summary"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val deepLink = (display["deepLink"] as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
+            ActivityPresentation(title, body, activeCount > 0, deepLink)
         }
+    }
 
 private fun activityState(value: String): JsonObject? =
     value
@@ -113,8 +108,7 @@ private fun activityState(value: String): JsonObject? =
         ?.let { raw -> runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() }
         ?.let { root ->
             val activities = root["activities"] as? JsonArray
-            val activeCount =
-                (root["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
+            val activeCount = (root["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
             if (activities == null || activeCount == null) {
                 null
             } else if (activities.isEmpty() || activities.size > ACTIVITY_MAX_ROWS) {
@@ -213,7 +207,8 @@ internal fun mergeActivityStates(
                     )
                 ) {
                     "expired" -> ActivityStateMergeDisposition.Expired
-                    "ignore_stale", "dismissed" -> ActivityStateMergeDisposition.Ignored
+                    "ignore_stale",
+                    "dismissed" -> ActivityStateMergeDisposition.Ignored
                     else -> ActivityStateMergeDisposition.Accepted
                 }
         }
@@ -302,9 +297,7 @@ private fun mergeActivityState(
     incomingDeliveryAtMillis: Long,
 ): ActivityDeliveryResult? {
     if (
-        hostId.isBlank() ||
-            hostId.toByteArray(Charsets.UTF_8).size > MAX_HOST_ID_BYTES ||
-            incomingExpiryAtMillis <= 0L
+        hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > MAX_HOST_ID_BYTES || incomingExpiryAtMillis <= 0L
     ) {
         return null
     }
@@ -338,14 +331,8 @@ private fun mergeActivityStateLocked(
             incomingExpiryAtMillis = incomingExpiryAtMillis,
             incomingDeliveryAtMillis = incomingDeliveryAtMillis,
         )
-    val nextExpiryAtMillis = persistActivityMerge(
-        preferences,
-        hostId,
-        result,
-        expiryAtMillis,
-        incomingExpiryAtMillis,
-        nowMillis,
-    )
+    val nextExpiryAtMillis =
+        persistActivityMerge(preferences, hostId, result, expiryAtMillis, incomingExpiryAtMillis, nowMillis)
     var snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
     val expiredBeforeMerge = storedStates.keys.any { it !in currentStates }
     val previousActive = previousActivityActive(preferences, currentStates)
@@ -413,11 +400,7 @@ private fun resetActivityLifecycleIfNeeded(
     previousActive: Boolean,
 ): Boolean =
     if (activityLifecycleNeedsReset(expiredBeforeMerge, active)) {
-        preferences
-            .edit()
-            .putBoolean(ACTIVITY_DISMISSED_KEY, false)
-            .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
-            .apply()
+        preferences.edit().putBoolean(ACTIVITY_DISMISSED_KEY, false).putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false).apply()
         false
     } else {
         previousActive

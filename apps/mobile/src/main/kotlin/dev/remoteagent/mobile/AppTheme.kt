@@ -35,9 +35,7 @@ import java.util.Locale
 /** `#rrggbb` or `#rrggbbaa`, as the core theme writes colors. */
 internal fun parseThemeColor(value: String): Color {
     val hex = value.removePrefix("#")
-    require(value.startsWith("#") && (hex.length == 6 || hex.length == 8)) {
-        "Unexpected color $value"
-    }
+    require(value.startsWith("#") && (hex.length == 6 || hex.length == 8)) { "Unexpected color $value" }
     fun channel(index: Int) = hex.substring(index * 2, index * 2 + 2).toInt(16)
     return Color(channel(0), channel(1), channel(2), if (hex.length == 8) channel(3) else 255)
 }
@@ -162,11 +160,7 @@ internal object AppTheme {
             else -> size * resolved.baseFontSize / 16.0
         }
 
-    private fun lineHeight(
-        size: Double,
-        line: Double,
-        resolved: dev.remoteagent.core.MobileTypography,
-    ): Double =
+    private fun lineHeight(size: Double, line: Double, resolved: dev.remoteagent.core.MobileTypography): Double =
         when (line) {
             14.0 -> resolved.microLineHeight
             16.0 -> resolved.captionLineHeight
@@ -179,11 +173,7 @@ internal object AppTheme {
             else -> line * resolved.baseFontSize / 16.0
         }
 
-    private fun style(
-        size: Double,
-        line: Double,
-        weight: FontWeight = FontWeight.Normal,
-    ): TextStyle {
+    private fun style(size: Double, line: Double, weight: FontWeight = FontWeight.Normal): TextStyle {
         val resolved = resolvedTypography()
         return TextStyle(
             fontFamily = fonts,
@@ -439,18 +429,10 @@ internal data class MobileAppearanceSettings(
             )
 
         fun load(context: android.content.Context): MobileAppearanceSettings {
-            val prefs =
-                context.getSharedPreferences(
-                    "mobile-appearance",
-                    android.content.Context.MODE_PRIVATE,
-                )
+            val prefs = context.getSharedPreferences("mobile-appearance", android.content.Context.MODE_PRIVATE)
             return MobileAppearanceSettings(
                     colorScheme =
-                        runCatching {
-                                MobileColorScheme.valueOf(
-                                    prefs.getString("colorScheme", null) ?: "SYSTEM"
-                                )
-                            }
+                        runCatching { MobileColorScheme.valueOf(prefs.getString("colorScheme", null) ?: "SYSTEM") }
                             .getOrDefault(MobileColorScheme.SYSTEM),
                     theme = prefs.getString("theme", null),
                     lightTheme = prefs.getString("lightTheme", null),

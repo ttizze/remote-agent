@@ -60,11 +60,12 @@ internal object FirebasePushBootstrap {
 
 private fun firebaseBuildConfigurationAvailable(): Boolean =
     sequenceOf(
-        BuildConfig.FIREBASE_API_KEY,
-        BuildConfig.FIREBASE_APPLICATION_ID,
-        BuildConfig.FIREBASE_PROJECT_ID,
-        BuildConfig.FIREBASE_SENDER_ID,
-    ).all(String::isNotBlank)
+            BuildConfig.FIREBASE_API_KEY,
+            BuildConfig.FIREBASE_APPLICATION_ID,
+            BuildConfig.FIREBASE_PROJECT_ID,
+            BuildConfig.FIREBASE_SENDER_ID,
+        )
+        .all(String::isNotBlank)
 
 private const val CHANNEL_ID = "agent_awareness"
 private const val CHANNEL_NAME = "Agent activity"
@@ -192,9 +193,8 @@ internal object PushNotificationCenter {
     }
 
     /**
-     * Renders the one ongoing activity card. These values are separate core
-     * projection facts and must stay flat so timeout and active state cannot
-     * be hidden in a mutable notification wrapper.
+     * Renders the one ongoing activity card. These values are separate core projection facts and must stay flat so
+     * timeout and active state cannot be hidden in a mutable notification wrapper.
      */
     @Suppress("LongParameterList")
     fun showActivity(
@@ -269,8 +269,8 @@ internal object PushNotificationCenter {
     }
 
     /**
-     * Posts either an alert or the ongoing card. The independent arguments
-     * preserve route, lifecycle, timeout, and dismissal ownership.
+     * Posts either an alert or the ongoing card. The independent arguments preserve route, lifecycle, timeout, and
+     * dismissal ownership.
      */
     @Suppress("LongParameterList")
     private fun post(
@@ -292,7 +292,8 @@ internal object PushNotificationCenter {
                 visibleThread = visibleThread,
                 appResumed = ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
             ) || !notificationsEnabled(context)
-        ) return
+        )
+            return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         ensureChannel(manager)
         val intent =

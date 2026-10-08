@@ -64,19 +64,14 @@ internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab
             TextButton(onClick = { loadUsage(model) }) { Text("Refresh") }
             TextButton(
                 onClick = {
-                    model.perform(Intent.RefreshUsageRates) { result ->
-                        if (result.isSuccess) loadUsage(model)
-                    }
-                },
+                    model.perform(Intent.RefreshUsageRates) { result -> if (result.isSuccess) loadUsage(model) }
+                }
             ) {
                 Text("Refresh rates")
             }
         },
     ) {
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item { UsageTabSelector(tab) { tab = it } }
             when (tab) {
                 UsageTab.USAGE -> {
@@ -93,12 +88,14 @@ internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab
                     val sourceAccounts = model.snapshot.accounts()?.accounts.orEmpty()
                     limitsItems(pools, accounts) { account ->
                         val sourceId = account.resetCreditAccountId ?: account.id
-                        sourceAccounts.firstOrNull { it.id == sourceId }?.let { source ->
-                            model.perform(
-                                Intent.ConsumeResetCredit(source.provider, source.id, account.nextCreditId),
-                            )
-                            model.perform(Intent.LoadAccounts)
-                        }
+                        sourceAccounts
+                            .firstOrNull { it.id == sourceId }
+                            ?.let { source ->
+                                model.perform(
+                                    Intent.ConsumeResetCredit(source.provider, source.id, account.nextCreditId)
+                                )
+                                model.perform(Intent.LoadAccounts)
+                            }
                     }
                 }
             }
@@ -112,17 +109,13 @@ private fun UsageTabSelector(tab: UsageTab, onTabSelected: (UsageTab) -> Unit) {
         TextButton(onClick = { onTabSelected(UsageTab.USAGE) }) {
             Text(
                 "Usage",
-                color =
-                    if (tab == UsageTab.USAGE) AppTheme.colors.primaryText
-                    else AppTheme.colors.foregroundMuted,
+                color = if (tab == UsageTab.USAGE) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted,
             )
         }
         TextButton(onClick = { onTabSelected(UsageTab.LIMITS) }) {
             Text(
                 "Limits",
-                color =
-                    if (tab == UsageTab.LIMITS) AppTheme.colors.primaryText
-                    else AppTheme.colors.foregroundMuted,
+                color = if (tab == UsageTab.LIMITS) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted,
             )
         }
     }
@@ -145,10 +138,7 @@ private fun LazyListScope.usageItems(
     }
     item { Text("Usage by model", style = AppTheme.title) }
     items(view.rows, key = { "${it.day}:${it.provider}:${it.model}" }) { row ->
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text("${row.provider} · ${row.model}", style = AppTheme.body)
             Text(
                 "${row.day} · ${row.tokens} tokens · ${row.costLabel}",
@@ -158,20 +148,11 @@ private fun LazyListScope.usageItems(
         }
     }
     if (view.rows.isEmpty() && view.state == "ready") {
-        item {
-            Text(
-                "No usage in this period.",
-                style = AppTheme.caption,
-                color = AppTheme.colors.foregroundMuted,
-            )
-        }
+        item { Text("No usage in this period.", style = AppTheme.caption, color = AppTheme.colors.foregroundMuted) }
     }
     item { Text("Daily trend", style = AppTheme.title) }
     items(view.chart, key = { it.day }) { point ->
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(point.day, style = AppTheme.body)
             Text(
                 "${point.tokens} tokens · ${"%.2f".format(point.costUsd)} USD",
@@ -214,10 +195,7 @@ private fun LazyListScope.limitsItems(
 }
 
 @Composable
-private fun UsagePreferencesEditor(
-    preferences: UsagePreferences,
-    savePreferences: (UsagePreferences) -> Unit,
-) {
+private fun UsagePreferencesEditor(preferences: UsagePreferences, savePreferences: (UsagePreferences) -> Unit) {
     val colors = AppTheme.colors
     var error by remember { mutableStateOf<String?>(null) }
     val save: (UsagePreferences) -> Unit = { next ->
@@ -241,13 +219,8 @@ private fun UsagePreferencesEditor(
                         onClick = {
                             val overrides = preferences.priceOverrides.toMutableMap()
                             overrides.remove(modelName)
-                            save(
-                                UsagePreferences(
-                                    modelAliases = preferences.modelAliases,
-                                    priceOverrides = overrides,
-                                ),
-                            )
-                        },
+                            save(UsagePreferences(modelAliases = preferences.modelAliases, priceOverrides = overrides))
+                        }
                     ) {
                         Text("Remove", color = colors.primaryText)
                     }
@@ -266,17 +239,14 @@ private fun UsageAliases(preferences: UsagePreferences, save: (UsagePreferences)
     var aliasTarget by remember { mutableStateOf("") }
     Text("Model aliases", style = AppTheme.title)
     preferences.modelAliases.toSortedMap().forEach { (modelName, alias) ->
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-        ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             Text("$modelName → $alias", style = AppTheme.caption, modifier = Modifier.weight(1f))
             TextButton(
                 onClick = {
                     val aliases = preferences.modelAliases.toMutableMap()
                     aliases.remove(modelName)
                     save(UsagePreferences(modelAliases = aliases, priceOverrides = preferences.priceOverrides))
-                },
+                }
             ) {
                 Text("Remove", color = colors.primaryText)
             }
@@ -317,9 +287,7 @@ private fun PriceOverrideForm(
     SettingsField(cacheWritePrice, { cacheWritePrice = it }, "Cache write price (optional)")
     TextButton(
         enabled =
-            priceModel.isNotBlank() &&
-                inputPrice.toDoubleOrNull() != null &&
-                outputPrice.toDoubleOrNull() != null,
+            priceModel.isNotBlank() && inputPrice.toDoubleOrNull() != null && outputPrice.toDoubleOrNull() != null,
         onClick = {
             val input = inputPrice.toDoubleOrNull()
             val output = outputPrice.toDoubleOrNull()
@@ -353,10 +321,7 @@ internal enum class UsageTab {
 }
 
 @Composable
-private fun UsageLimitPoolView(
-    pool: UsageLimitPool,
-    useReset: (UsageLimitAccount) -> Unit,
-) {
+private fun UsageLimitPoolView(pool: UsageLimitPool, useReset: (UsageLimitAccount) -> Unit) {
     val colors = AppTheme.colors
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(pool.provider, style = AppTheme.title)
@@ -377,9 +342,7 @@ private fun UsageLimitPoolView(
                     java.time.Instant.ofEpochMilli(reset.at)
                         .atZone(java.time.ZoneId.systemDefault())
                         .format(
-                            java.time.format.DateTimeFormatter.ofLocalizedDateTime(
-                                java.time.format.FormatStyle.SHORT,
-                            ),
+                            java.time.format.DateTimeFormatter.ofLocalizedDateTime(java.time.format.FormatStyle.SHORT)
                         )
                 Text(
                     "Next reset: ${reset.label} restores ${reset.restoresPercent}% at $resetDate",
@@ -408,11 +371,7 @@ private fun UsageLimitPoolView(
 // Keep these interactions together so confirmation cannot drift from the account it updates.
 @Composable
 @Suppress("LongMethod")
-private fun UsageLimitAccount(
-    account: UsageLimitAccount,
-    showWindows: Boolean = true,
-    useReset: () -> Unit,
-) {
+private fun UsageLimitAccount(account: UsageLimitAccount, showWindows: Boolean = true, useReset: () -> Unit) {
     val colors = AppTheme.colors
     val context = LocalContext.current
     var confirmingReset by remember(account.id) { mutableStateOf(false) }
@@ -440,9 +399,7 @@ private fun UsageLimitAccount(
                     color = colors.foregroundMuted,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { confirmingReset = true }) {
-                    Text("Use reset", color = colors.primaryText)
-                }
+                TextButton(onClick = { confirmingReset = true }) { Text("Use reset", color = colors.primaryText) }
             }
         }
         account.externalLabel?.let { label ->
@@ -454,14 +411,12 @@ private fun UsageLimitAccount(
                             context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
                         }
                     }
-                },
+                }
             ) {
                 Text(label, style = AppTheme.caption, color = colors.primaryText)
             }
         }
-        account.error?.let {
-            Text(it, style = AppTheme.caption, color = colors.warningForeground)
-        }
+        account.error?.let { Text(it, style = AppTheme.caption, color = colors.warningForeground) }
     }
     if (confirmingReset) {
         AlertDialog(
@@ -473,7 +428,7 @@ private fun UsageLimitAccount(
                     onClick = {
                         confirmingReset = false
                         useReset()
-                    },
+                    }
                 ) {
                     Text("Use credit")
                 }
