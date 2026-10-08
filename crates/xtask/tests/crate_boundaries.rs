@@ -155,7 +155,16 @@ fn production_domain_host_transport_and_protocol_stay_independent_of_clients() {
 #[test]
 fn domain_has_no_io_dependencies() {
     let pure = BTreeSet::from(
-        ["chrono", "regex", "serde", "serde_json", "thiserror", "url"].map(str::to_owned),
+        [
+            "chrono",
+            "percent-encoding",
+            "regex",
+            "serde",
+            "serde_json",
+            "thiserror",
+            "url",
+        ]
+        .map(str::to_owned),
     );
     let names = production_dependencies("agent-domain", &["default"]);
     let impure: Vec<_> = names.difference(&pure).collect();
