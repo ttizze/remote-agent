@@ -1,6 +1,7 @@
 package dev.remoteagent.mobile
 
 import androidx.compose.ui.graphics.Color
+import dev.remoteagent.core.mobileAppearanceDefault
 import dev.remoteagent.core.theme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -21,5 +22,16 @@ class AppThemeTest {
         val dark = Palette(true, theme(true).colors)
         assertEquals(parseThemeColor(theme(false).colors.getValue("mobileScreen")), light.screen)
         assertEquals(parseThemeColor(theme(true).colors.getValue("statusTeal")), dark.teal)
+    }
+
+    @Test
+    fun negativeAppearanceSizesUseCoreLowerBounds() {
+        val normalized =
+            MobileAppearanceSettings.fromCore(mobileAppearanceDefault())
+                .copy(baseFontSize = -1, codeFontSize = -1)
+                .normalized()
+
+        assertEquals(11, normalized.baseFontSize)
+        assertEquals(8, normalized.codeFontSize)
     }
 }
