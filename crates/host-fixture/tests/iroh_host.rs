@@ -38,6 +38,28 @@ async fn start_host(directory: &Path) -> HostFixture {
     .await
     .unwrap()
 }
+async fn choose_fixture_model(store: &agent_core::store::Store) {
+    // These transport fixtures omit account management. Choose their explicit
+    // Codex model instead of relying on authenticated automatic selection.
+    let mut updates = store.subscribe();
+    let model = loop {
+        let snapshot = updates.borrow_and_update().clone();
+        if let Some(model) = snapshot.models.iter().find(|model| {
+            model.model.provider == agent_protocol::session::ProviderKind::Codex
+                && model.model.id == "fixture-model"
+        }) {
+            break model.model.clone();
+        }
+        updates.changed().await.unwrap();
+    };
+    store
+        .dispatch(agent_core::state::Intent::SelectModel {
+            thread_id: store.snapshot().navigation.draft_key.clone(),
+            model,
+        })
+        .await
+        .unwrap();
+}
 async fn open_session(
     peer: &Client,
     id: &Value,
@@ -636,6 +658,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
             .await
             .unwrap();
         let prompt = "[delayed-input] Preserve this input through reconnect";
+        choose_fixture_model(&store).await;
         store
             .dispatch(Intent::SetDraftText {
                 thread_id: store.snapshot().navigation.draft_key.clone(),
@@ -820,13 +843,8 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     let fixture = start_host(&root).await;
                     let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                     let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
-                    // Compare submission effects after asynchronous model defaults
-                    // have loaded, so catalog normalization cannot change the draft.
-                    let mut updates = store.subscribe();
-                    while updates.borrow_and_update().models.is_empty() {
-                        updates.changed().await.unwrap();
-                    }
                     store.dispatch(Intent::NewChat { cwd: if project { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                    choose_fixture_model(&store).await;
                     let mut thread_id = None;
                     let mut session_cwd = None;
                     for number in 0..2 {
@@ -1135,6 +1153,7 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
             })
             .await
             .unwrap();
+        choose_fixture_model(&store).await;
         store
             .dispatch(Intent::Submit {
                 thread_id: None,
@@ -2133,6 +2152,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
             .dispatch(Intent::NewChat { cwd: String::new() })
             .await
             .unwrap();
+        choose_fixture_model(&mobile).await;
 
         for (index, final_status) in ["completed", "interrupted"].into_iter().enumerate() {
             let previous_id = mobile.snapshot().navigation.thread_id.clone();
@@ -2314,6 +2334,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                 let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                choose_fixture_model(&store).await;
                 let key = store.snapshot().navigation.draft_key.clone();
                 store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] list automatically".into() }).await.unwrap();
                 store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "sidebar-message".into() }).await.unwrap();
@@ -2374,6 +2395,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
         store.dispatch(Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings: models::WorktreeSettings { create_on_new_session: true, ..Default::default() } })).await.unwrap();
         store.dispatch(Intent::NewChat { cwd: project.to_str().unwrap().into() }).await.unwrap();
+        choose_fixture_model(&store).await;
         let key = store.snapshot().navigation.draft_key.clone();
         store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] [delayed-input] keep running".into() }).await.unwrap();
         store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "managed".into() }).await.unwrap();
@@ -2711,6 +2733,7 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
             .dispatch(Intent::NewChat { cwd: String::new() })
             .await
             .unwrap();
+        choose_fixture_model(&store).await;
         store
             .dispatch(Intent::SetDraftText {
                 thread_id: store.snapshot().navigation.draft_key.clone(),
