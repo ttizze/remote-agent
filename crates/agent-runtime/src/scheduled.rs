@@ -136,17 +136,57 @@ pub struct ScheduledTasks {
 }
 
 /// Releases a task's in-flight reservation when its run ends however it ends.
-struct Reservation<'a> {
-    tasks: &'a ScheduledTasks,
+///
+/// The scheduler is also called from the MCP bridge, whose task is cancelled
+/// when the client disconnects.  A plain set reservation would prevent the
+/// next poll from ever seeing the row again because the durable status would
+/// remain `running`.  Keeping the task and start stamp here lets Drop schedule
+/// the same guarded cleanup used for other interrupted runs.
+struct Reservation {
+    tasks: Arc<ScheduledTasks>,
     id: String,
+    started: Option<(ScheduledTask, Timestamp)>,
+    completed: bool,
 }
-impl Drop for Reservation<'_> {
+
+impl Reservation {
+    fn mark_running(&mut self, task: ScheduledTask, started_at: Timestamp) {
+        self.started = Some((task, started_at));
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for Reservation {
     fn drop(&mut self) {
         self.tasks
             .active
             .lock()
             .expect("active scheduled runs")
             .remove(&self.id);
+        let Some((task, started_at)) = self.started.take() else {
+            return;
+        };
+        if self.completed {
+            return;
+        }
+        let tasks = self.tasks.clone();
+        let id = self.id.clone();
+        let spawn = async move {
+            tasks
+                .release_stuck_run(&task, &started_at, "Run was cancelled.")
+                .await;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(spawn);
+            }
+            Err(_) => {
+                tracing::warn!(task = %id, "Could not release a cancelled scheduled task run");
+            }
+        }
     }
 }
 
@@ -331,7 +371,7 @@ impl ScheduledTasks {
     }
 
     /// Runs the task now; a task already running is refused.
-    pub async fn run_now(&self, id: &str) -> Result<ScheduledTask, ScheduledTaskError> {
+    pub async fn run_now(self: &Arc<Self>, id: &str) -> Result<ScheduledTask, ScheduledTaskError> {
         let task = self.load(id).await?;
         self.run(task, Trigger::Manual).await
     }
@@ -350,17 +390,23 @@ impl ScheduledTasks {
             rescheduled = ?next,
             "skipping a missed scheduled task run"
         );
-        let (id, updated_at) = (task.id.clone(), timestamp(now));
-        self.executors
+        let (id, expected_next_run_at, updated_at) =
+            (task.id.clone(), task.next_run_at.clone(), timestamp(now));
+        let changed = self
+            .executors
             .store
-            .write(move |tx| store::reschedule(tx, &id, next, &updated_at))
+            .write(move |tx| {
+                store::reschedule(tx, &id, expected_next_run_at, next, &updated_at)
+            })
             .await?;
-        self.notify();
+        if changed {
+            self.notify();
+        }
         Ok(())
     }
 
     /// The sweep: every due task runs in turn, or is rescheduled when missed.
-    pub(crate) async fn run_due(&self) -> Result<(), StoreError> {
+    pub(crate) async fn run_due(self: &Arc<Self>) -> Result<(), StoreError> {
         let now = self.now();
         let due_before = timestamp(&now);
         let due = self
@@ -446,7 +492,12 @@ impl ScheduledTasks {
     /// A dispatch may already have reached the conversation runtime, so the
     /// attempt is counted and the next occurrence is advanced before the
     /// scheduler can poll the row again.
-    async fn release_stuck_run(&self, task: &ScheduledTask, error: &str) {
+    async fn release_stuck_run(
+        &self,
+        task: &ScheduledTask,
+        started_at: &Timestamp,
+        error: &str,
+    ) {
         let now = self.now();
         let source = match self.find(&task.id).await {
             Ok(Some(current)) => current,
@@ -461,14 +512,18 @@ impl ScheduledTasks {
             }
         };
         let next = next_run(source.enabled, &source.schedule, &now);
-        let (id, error, updated_at) = (task.id.clone(), error.to_owned(), timestamp(&now));
+        let (id, started_at, error, updated_at) =
+            (task.id.clone(), started_at.clone(), error.to_owned(), timestamp(&now));
         match self
             .executors
             .store
-            .write(move |tx| store::release(tx, Some(&id), &error, next, &updated_at))
+            .write(move |tx| {
+                store::release_running(tx, &id, &started_at, &error, next, &updated_at)
+            })
             .await
         {
-            Ok(()) => self.notify(),
+            Ok(true) => self.notify(),
+            Ok(false) => {}
             Err(store_error) => tracing::warn!(
                 task = %task.id,
                 %store_error,
@@ -478,7 +533,7 @@ impl ScheduledTasks {
     }
 
     async fn run(
-        &self,
+        self: &Arc<Self>,
         task: ScheduledTask,
         trigger: Trigger,
     ) -> Result<ScheduledTask, ScheduledTaskError> {
@@ -493,9 +548,11 @@ impl ScheduledTasks {
                 Trigger::Scheduled => Ok(task),
             };
         }
-        let _reservation = Reservation {
-            tasks: self,
+        let mut reservation = Reservation {
+            tasks: self.clone(),
             id: task.id.clone(),
+            started: None,
+            completed: false,
         };
         let started = self.now();
         let started_at = timestamp(&started);
@@ -528,6 +585,7 @@ impl ScheduledTasks {
                 Trigger::Scheduled => Ok(task),
             };
         }
+        reservation.mark_running(active.clone(), started_at.clone());
         self.notify();
 
         let finished = async {
@@ -575,6 +633,7 @@ impl ScheduledTasks {
                     // stale completion to it.
                     return Ok(source);
                 }
+                reservation.complete();
                 self.notify();
             }
             Ok(ScheduledTask {
@@ -588,9 +647,6 @@ impl ScheduledTasks {
             })
         }
         .await;
-        if let Err(error) = &finished {
-            self.release_stuck_run(&active, &error.to_string()).await;
-        }
         finished
     }
 

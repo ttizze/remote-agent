@@ -442,6 +442,85 @@ async fn a_manual_run_of_a_task_already_running_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_held_dispatch_releases_the_durable_run() {
+    let h = harness();
+    let gate = Arc::new(Gate::default());
+    let hook_gate = gate.clone();
+    *h.rig.ops.folder.lock().unwrap() = Some(Arc::new(move |_| {
+        let gate = hook_gate.clone();
+        Box::pin(async move {
+            gate.pass().await;
+            Ok(None)
+        })
+    }));
+    let task = h
+        .tasks
+        .upsert(input(Some("cancelled"), "project", minutely()))
+        .await
+        .unwrap();
+    let tasks = h.tasks.clone();
+    let run = tokio::spawn(async move { tasks.run_now(&task.id).await });
+    gate.until_arrived(1).await;
+    assert_eq!(h.task("cancelled").await.last_run_status, ScheduledTaskRunStatus::Running);
+
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    gate.release();
+
+    for _ in 0..100 {
+        let after = h.task("cancelled").await;
+        if after.last_run_status != ScheduledTaskRunStatus::Running {
+            assert_eq!(after.last_run_status, ScheduledTaskRunStatus::Failed);
+            assert_eq!(after.last_run_error.as_deref(), Some("Run was cancelled."));
+            assert_eq!(after.run_count, 1);
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("cancelled scheduled task remained running");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missed_reschedule_does_not_overwrite_a_newer_due_time() {
+    let h = harness();
+    let task = h
+        .tasks
+        .upsert(input(Some("stale-missed"), "project", fixed("09:00")))
+        .await
+        .unwrap();
+    let newer = at("2026-09-10T09:00:00.000Z");
+    h.rig
+        .store
+        .write({
+            let id = task.id.clone();
+            let newer = newer.clone();
+            move |tx| {
+                tx.execute(
+                    "UPDATE scheduled_tasks SET next_run_at = ?2 WHERE task_id = ?1",
+                    params![id, newer.as_str()],
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let changed = h
+        .rig
+        .store
+        .write({
+            let id = task.id.clone();
+            let expected = task.next_run_at.clone();
+            let replacement = at("2026-09-11T09:00:00.000Z");
+            let updated_at = at(NOW);
+            move |tx| store::reschedule(tx, &id, expected, Some(replacement), &updated_at)
+        })
+        .await
+        .unwrap();
+    assert!(!changed);
+    assert_eq!(h.task("stale-missed").await.next_run_at, Some(newer));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_deleted_and_recreated_task_is_not_stamped_by_the_old_run() {
     let h = harness();
     let gate = Arc::new(Gate::default());

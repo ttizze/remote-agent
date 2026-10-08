@@ -51,9 +51,16 @@ fn at_time<Tz: TimeZone>(timezone: &Tz, date: NaiveDate, hour: u32, minute: u32)
         .from_local_datetime(&local)
         .earliest()
         .or_else(|| {
-            timezone
-                .from_local_datetime(&(local + Duration::hours(1)))
-                .earliest()
+            // A daylight-saving transition can skip a non-hour interval
+            // (Lord Howe skips thirty minutes) or an entire civil day
+            // (Samoa skipped twenty-four hours).  Move through local wall
+            // minutes until the timezone can represent the requested time;
+            // adding one hour silently loses the first valid time in a
+            // shorter gap and still fails for a longer one.
+            (1..=2 * 24 * 60).find_map(|minutes| {
+                let candidate = local.checked_add_signed(Duration::minutes(minutes))?;
+                timezone.from_local_datetime(&candidate).earliest()
+            })
         })
 }
 
@@ -166,7 +173,49 @@ pub fn describe_schedule(schedule: &Schedule) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{FixedOffset, Timelike, Utc};
+    use chrono::{FixedOffset, LocalResult, NaiveDateTime, Timelike, Utc};
+
+    /// Small deterministic timezone used to exercise the calendar gap policy
+    /// without making the domain crate depend on a platform tz database.
+    #[derive(Clone, Copy)]
+    struct GapZone {
+        start: NaiveDateTime,
+        minutes: i64,
+    }
+    impl TimeZone for GapZone {
+        type Offset = FixedOffset;
+
+        fn from_offset(offset: &Self::Offset) -> Self {
+            Self {
+                start: NaiveDateTime::MIN,
+                minutes: i64::from(offset.local_minus_utc()) / 60,
+            }
+        }
+
+        fn offset_from_local_date(&self, _: &NaiveDate) -> LocalResult<Self::Offset> {
+            LocalResult::Single(FixedOffset::east_opt(0).unwrap())
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &NaiveDateTime,
+        ) -> LocalResult<Self::Offset> {
+            let end = self.start + Duration::minutes(self.minutes);
+            if *local >= self.start && *local < end {
+                LocalResult::None
+            } else {
+                LocalResult::Single(FixedOffset::east_opt(0).unwrap())
+            }
+        }
+
+        fn offset_from_utc_date(&self, _: &NaiveDate) -> Self::Offset {
+            FixedOffset::east_opt(0).unwrap()
+        }
+
+        fn offset_from_utc_datetime(&self, _: &NaiveDateTime) -> Self::Offset {
+            FixedOffset::east_opt(0).unwrap()
+        }
+    }
 
     fn utc(text: &str) -> DateTime<Utc> {
         text.parse().unwrap()
@@ -221,6 +270,52 @@ mod tests {
         assert_eq!(next.weekday().num_days_from_sunday(), 1);
         assert_eq!((next.hour(), next.minute()), (9, 0));
         assert_eq!(next.date_naive().to_string(), "2026-07-06");
+    }
+
+    #[test]
+    fn moves_past_a_lord_howe_style_thirty_minute_gap() {
+        let zone = GapZone {
+            start: NaiveDate::from_ymd_opt(2026, 10, 4)
+                .unwrap()
+                .and_hms_opt(2, 0, 0)
+                .unwrap(),
+            minutes: 30,
+        };
+        let from = zone
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2026, 10, 3)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .single()
+            .unwrap();
+        let next = next_run_at(&fixed("02:15", &[]), &from).unwrap();
+        assert_eq!(next.date_naive().to_string(), "2026-10-04");
+        assert_eq!((next.hour(), next.minute()), (2, 30));
+    }
+
+    #[test]
+    fn moves_past_a_samoa_style_twenty_four_hour_gap() {
+        let zone = GapZone {
+            start: NaiveDate::from_ymd_opt(2011, 12, 30)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+            minutes: 24 * 60,
+        };
+        let from = zone
+            .from_local_datetime(
+                &NaiveDate::from_ymd_opt(2011, 12, 29)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .single()
+            .unwrap();
+        let next = next_run_at(&fixed("12:00", &[]), &from).unwrap();
+        assert_eq!(next.date_naive().to_string(), "2011-12-31");
+        assert_eq!((next.hour(), next.minute()), (12, 0));
     }
 
     #[test]

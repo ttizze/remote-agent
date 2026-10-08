@@ -323,18 +323,21 @@ pub(super) fn delete(tx: &Transaction<'_>, id: &str) -> Result<(), StoreError> {
 pub(super) fn reschedule(
     tx: &Transaction<'_>,
     id: &str,
+    expected_next_run_at: Option<Timestamp>,
     next_run_at: Option<Timestamp>,
     updated_at: &Timestamp,
-) -> Result<(), StoreError> {
-    tx.execute(
-        "UPDATE scheduled_tasks SET next_run_at = ?2, updated_at = ?3 WHERE task_id = ?1",
+) -> Result<bool, StoreError> {
+    Ok(tx.execute(
+        "UPDATE scheduled_tasks SET next_run_at = ?3, updated_at = ?4
+         WHERE task_id = ?1 AND enabled = 1 AND last_run_status <> 'running'
+           AND next_run_at IS ?2",
         params![
             id,
+            expected_next_run_at.as_ref().map(Timestamp::as_str),
             next_run_at.as_ref().map(Timestamp::as_str),
             updated_at.as_str()
         ],
-    )?;
-    Ok(())
+    )? == 1)
 }
 
 pub(super) fn mark_running(
@@ -398,4 +401,29 @@ pub(super) fn release(
         ],
     )?;
     Ok(())
+}
+
+/// Releases a run that was marked by this process.  Matching the start stamp
+/// keeps cancellation cleanup from marking a deleted and recreated task.
+pub(super) fn release_running(
+    tx: &Transaction<'_>,
+    id: &str,
+    started_at: &Timestamp,
+    error: &str,
+    next_run_at: Option<Timestamp>,
+    updated_at: &Timestamp,
+) -> Result<bool, StoreError> {
+    Ok(tx.execute(
+        "UPDATE scheduled_tasks
+         SET last_run_status = 'failed', last_run_error = ?3, next_run_at = ?4, updated_at = ?5,
+             run_count = run_count + 1
+         WHERE task_id = ?1 AND last_run_status = 'running' AND last_run_at = ?2",
+        params![
+            id,
+            started_at.as_str(),
+            error,
+            next_run_at.as_ref().map(Timestamp::as_str),
+            updated_at.as_str()
+        ],
+    )? == 1)
 }

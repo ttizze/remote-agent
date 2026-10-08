@@ -8,14 +8,16 @@ struct ScheduledTasksScreen: View {
     @Environment(.dismiss) private var dismiss
     @State private var draft: ScheduledTaskDraft?
     @State private var selectedId: String?
+    @State private var saveError: String?
 
     var body: some View {
         List {
             Section("Automations") {
                 ForEach(model.snapshot.scheduledTasks().tasks, id: \.id) { task in
                     Button {
-                        selectedId = task.id
-                        draft = model.snapshot.scheduledTaskDraft(id: task.id)
+                                selectedId = task.id
+                                draft = model.snapshot.scheduledTaskDraft(id: task.id)
+                                saveError = nil
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
@@ -41,6 +43,7 @@ struct ScheduledTasksScreen: View {
                             if selectedId == task.id {
                                 selectedId = nil
                                 draft = nil
+                                saveError = nil
                             }
                         }
                     }
@@ -48,6 +51,7 @@ struct ScheduledTasksScreen: View {
                 Button {
                     selectedId = nil
                     draft = model.snapshot.scheduledTaskDraft(id: nil)
+                    saveError = nil
                 } label: {
                     Label("New scheduled task", systemImage: "plus")
                 }
@@ -56,11 +60,19 @@ struct ScheduledTasksScreen: View {
                 ScheduledTaskEditor(model: model, draft: Binding(
                     get: { self.draft ?? draft },
                     set: { self.draft = $0 }
-                )) {
+                ), taskMissing: selectedId.map { id in
+                    draft.id == id && !model.snapshot.scheduledTasks().tasks.contains { $0.id == id }
+                } == true,
+                saveError: saveError) {
                     model.perform(.saveScheduledTask(draft: self.draft ?? draft)) { result in
-                        guard case .success = result else { return }
-                        self.draft = nil
-                        self.selectedId = nil
+                        switch result {
+                        case .success:
+                            self.draft = nil
+                            self.selectedId = nil
+                            self.saveError = nil
+                        case let .failure(error):
+                            self.saveError = error.localizedDescription
+                        }
                     }
                 }
             }
@@ -80,6 +92,8 @@ struct ScheduledTasksScreen: View {
 private struct ScheduledTaskEditor: View {
     @ObservedObject var model: BexAppViewModel
     @Binding var draft: ScheduledTaskDraft
+    let taskMissing: Bool
+    let saveError: String?
     let save: () -> Void
 
     private let weekdays: [(String, UInt8)] = [("Sun", 0), ("Mon", 1), ("Tue", 2), ("Wed", 3), ("Thu", 4), ("Fri", 5), ("Sat", 6)]
@@ -122,6 +136,52 @@ private struct ScheduledTaskEditor: View {
                     Text(modelLabel).foregroundStyle(AppTheme.muted)
                     Image(systemName: "chevron.up.chevron.down")
                 }
+            }
+            let traits = model.snapshot.scheduledTaskTraits(draft: draft)
+            ForEach(Array(traits.controls.enumerated()), id: \.offset) { _, control in
+                switch control {
+                case let .select(id, label, choices, selected, note, disabled):
+                    NavigationLink {
+                        ChoicePage(title: label, choices: choices.map {
+                            Choice(id: $0.id, label: $0.label, description: $0.description)
+                        }, selected: selected) { choice in
+                            draft = model.snapshot.selectScheduledTaskTrait(
+                                draft: draft,
+                                descriptorId: id,
+                                choice: choice
+                            )
+                        }
+                    } label: {
+                        HStack {
+                            Text(label)
+                            Spacer()
+                            Text(choices.first { $0.id == selected }?.label ?? "")
+                                .foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    .disabled(disabled)
+                    .accessibilityHint(note ?? "")
+                case let .toggle(id, label, on):
+                    Toggle(label, isOn: Binding(get: { on }, set: {
+                        draft = model.snapshot.toggleScheduledTaskTrait(
+                            draft: draft,
+                            descriptorId: id,
+                            on: $0
+                        )
+                    }))
+            }
+            let runtimeChoices = model.snapshot.scheduledTaskRuntimeModes(draft: draft)
+            Picker("Runtime", selection: $draft.runtimeMode) {
+                ForEach(Array(runtimeChoices.enumerated()), id: \.offset) { _, choice in
+                    Text(choice.label).tag(choice.mode)
+                }
+            }
+            if taskMissing {
+                Text("This task was deleted elsewhere. Close this editor and start again.")
+                    .foregroundStyle(AppTheme.dangerForeground)
+            }
+            if let saveError {
+                Text(saveError).foregroundStyle(AppTheme.dangerForeground)
             }
         }
         Section("Schedule") {
@@ -193,6 +253,7 @@ private struct ScheduledTaskEditor: View {
                 ))
             }
             Button("Save scheduled task", action: save)
+                .disabled(taskMissing)
                 .frame(maxWidth: .infinity)
         }
     }

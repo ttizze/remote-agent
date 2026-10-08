@@ -9,7 +9,9 @@ use agent_core::{
     state::{
         Intent, ScheduledTaskDraft, ScheduledTaskScheduleDraft, ScheduledTaskWorkspaceDraft,
     },
+    view::{composer::controls::runtime_mode_choices, models::ProviderStatus},
 };
+use agent_domain::RuntimeMode;
 use gpui_kit::{
     component::{
         Sizable,
@@ -34,7 +36,28 @@ pub(super) struct ScheduledTasksState {
     draft: Option<ScheduledTaskDraft>,
     branches_project: Option<String>,
     seeded: bool,
+    stale: bool,
+    error: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+fn runtime_mode_id(mode: RuntimeMode) -> &'static str {
+    match mode {
+        RuntimeMode::ApprovalRequired => "approval-required",
+        RuntimeMode::AutoAcceptEdits => "auto-accept-edits",
+        RuntimeMode::Auto => "auto",
+        RuntimeMode::FullAccess => "full-access",
+    }
+}
+
+fn runtime_mode_from_id(id: &str) -> Option<RuntimeMode> {
+    Some(match id {
+        "approval-required" => RuntimeMode::ApprovalRequired,
+        "auto-accept-edits" => RuntimeMode::AutoAcceptEdits,
+        "auto" => RuntimeMode::Auto,
+        "full-access" => RuntimeMode::FullAccess,
+        _ => return None,
+    })
 }
 
 impl ScheduledTasksState {
@@ -115,6 +138,8 @@ impl ScheduledTasksState {
             draft: None,
             branches_project: None,
             seeded: false,
+            stale: false,
+            error: None,
             _subscriptions: subscriptions,
         }
     }
@@ -126,11 +151,26 @@ impl Desktop {
         self.settings.scheduled_tasks.draft = None;
         self.settings.scheduled_tasks.branches_project = None;
         self.settings.scheduled_tasks.seeded = false;
+        self.settings.scheduled_tasks.stale = false;
+        self.settings.scheduled_tasks.error = None;
     }
 
     fn sync_scheduled_task_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let scheduled_ids = self
+            .snapshot
+            .scheduled_tasks()
+            .tasks
+            .into_iter()
+            .map(|task| task.id)
+            .collect::<std::collections::HashSet<_>>();
         let search_project = {
             let state = &mut self.settings.scheduled_tasks;
+            if let Some(selected) = state.selected.as_deref()
+                && state.draft.as_ref().is_some_and(|draft| draft.id.as_deref() == Some(selected))
+                && !scheduled_ids.contains(selected)
+            {
+                state.stale = true;
+            }
             if state.draft.is_none() {
                 state.draft = Some(self.snapshot.scheduled_task_draft(state.selected.clone()));
                 state.seeded = false;
@@ -188,6 +228,9 @@ impl Desktop {
     }
 
     fn save_scheduled_task(&mut self, cx: &mut Context<Desktop>) {
+        if self.settings.scheduled_tasks.stale {
+            return;
+        }
         let Some(draft) = self.settings.scheduled_tasks.draft.clone() else {
             return;
         };
@@ -197,6 +240,9 @@ impl Desktop {
                 view.settings.scheduled_tasks.selected = None;
                 view.settings.scheduled_tasks.branches_project = None;
                 view.settings.scheduled_tasks.seeded = false;
+                view.settings.scheduled_tasks.error = None;
+            } else {
+                view.settings.scheduled_tasks.error = result.err().map(|error| error.to_string());
             }
             cx.notify();
         });
@@ -334,6 +380,12 @@ impl Desktop {
             .as_ref()
             .into_iter()
             .flat_map(|providers| providers.iter())
+            .filter(|provider| {
+                provider.enabled
+                    && provider.installed
+                    && provider.available
+                    && !matches!(provider.status, ProviderStatus::Error | ProviderStatus::Disabled)
+            })
             .flat_map(|provider| provider.models.iter().map(move |model| (provider, model)))
             .map(|(provider, model)| Choice {
                 id: format!("{}\n{}", provider.instance, model.slug),
@@ -343,6 +395,26 @@ impl Desktop {
                 selected: provider.instance == draft.instance_id && model.slug == draft.model,
             })
             .collect();
+        let runtime_choices = self
+            .snapshot
+            .providers
+            .as_ref()
+            .into_iter()
+            .flat_map(|providers| providers.iter())
+            .find(|provider| provider.instance == draft.instance_id)
+            .map_or_else(
+                || runtime_mode_choices(&[]),
+                |provider| runtime_mode_choices(&provider.supported_runtime_modes),
+            )
+            .into_iter()
+            .map(|choice| Choice {
+                id: runtime_mode_id(choice.mode).into(),
+                label: choice.label,
+                description: Some(choice.description),
+                icon: Some("shield-check"),
+                selected: choice.mode == draft.runtime_mode,
+            })
+            .collect::<Vec<_>>();
         let draft_id = self.settings.scheduled_tasks.selected.clone();
         let editor_rows = vec![
             Row::new("Title").control(Input::new(&self.settings.scheduled_tasks.title).small()).render(),
@@ -382,6 +454,14 @@ impl Desktop {
                     if !same_model {
                         draft.options.clear();
                     }
+                }
+                cx.notify();
+            }, cx).into_any_element()).render(),
+            Row::new("Runtime").control(select("scheduled-runtime", runtime_mode_id(draft.runtime_mode), runtime_choices, |view, choice, _, cx| {
+                if let Some(mode) = runtime_mode_from_id(&choice)
+                    && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
+                {
+                    draft.runtime_mode = mode;
                 }
                 cx.notify();
             }, cx).into_any_element()).render(),
@@ -504,6 +584,7 @@ impl Desktop {
         let save = Button::new("scheduled-task-save")
             .primary()
             .small()
+            .disabled(self.settings.scheduled_tasks.stale)
             .label("Save")
             .on_click(cx.listener(|view, _, _, cx| view.save_scheduled_task(cx)));
         let delete = selected.as_ref().map(|id| {
@@ -521,6 +602,25 @@ impl Desktop {
         let mut rows = editor_rows;
         if let Some(branch) = branch_row {
             rows.push(branch);
+        }
+        if self.settings.scheduled_tasks.stale {
+            rows.push(
+                Row::new("Status")
+                    .control(
+                        div()
+                            .text_color(color("error"))
+                            .child("This task was deleted elsewhere. Close this editor and start again.")
+                            .into_any_element(),
+                    )
+                    .render(),
+            );
+        }
+        if let Some(error) = self.settings.scheduled_tasks.error.clone() {
+            rows.push(
+                Row::new("Error")
+                    .control(div().text_color(color("error")).child(error).into_any_element())
+                    .render(),
+            );
         }
         section(
             Some(if selected.is_some() { "Edit scheduled task" } else { "New scheduled task" }.into()),

@@ -1,12 +1,13 @@
 //! The conversation views apps render. Each getter calls one `view` function
 //! with the device state the snapshot holds.
 use crate::commands::build::FollowUpBehavior;
-use crate::state::{DraftAttachment, Snapshot};
+use crate::state::{Draft, DraftAttachment, ScheduledTaskDraft, Snapshot};
 use crate::view::{
     archived::{ArchivedOptions, ArchivedView, archived_view},
     attachments::{AttachmentAdmission, AttachmentCandidate},
     checkpoints::{DiffPanelSelection, DiffPanelView, checkpoint_summaries, diff_panel},
     composer::{
+        controls::{RuntimeModeChoice, runtime_mode_choices},
         menu::{ComposerMenuView, composer_menu},
         stash::{StashEntryView, stash_menu},
         view::ComposerOptions,
@@ -16,7 +17,7 @@ use crate::view::{
         ordering::FavoriteModel,
         picker::{ModelPickerOptions, ModelPickerView, PickerRail, model_picker},
         staging::{self, StagedModel},
-        traits::{TraitsView, traits},
+        traits::{TraitsView, select_trait, toggle_trait, traits},
     },
     new_thread::{NewThreadView, new_thread_view},
     projects::{
@@ -275,6 +276,73 @@ impl Snapshot {
         options: crate::view::models::catalog_sheet::CatalogSheetOptions,
     ) -> crate::view::models::catalog_sheet::CatalogSheetView {
         crate::view::models::catalog_sheet::catalog_sheet(self, &options)
+    }
+    fn scheduled_task_draft_as_composer(draft: &ScheduledTaskDraft) -> Draft {
+        Draft {
+            text: draft.prompt.clone(),
+            instance_id: draft.instance_id.clone(),
+            driver: draft.driver,
+            model: draft.model.clone(),
+            options: draft.options.clone(),
+            runtime_mode: draft.runtime_mode,
+            interaction_mode: draft.interaction_mode,
+            ..Draft::default()
+        }
+    }
+    /// The model option controls for a scheduled task draft.
+    pub fn scheduled_task_traits(&self, draft: ScheduledTaskDraft) -> TraitsView {
+        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        traits(self, &composer, false)
+    }
+    /// Applies a model select option in a scheduled task draft.
+    pub fn select_scheduled_task_trait(
+        &self,
+        mut draft: ScheduledTaskDraft,
+        descriptor_id: String,
+        choice: String,
+    ) -> ScheduledTaskDraft {
+        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        if let Some(change) = select_trait(
+            &catalog(self),
+            &composer,
+            false,
+            &descriptor_id,
+            &choice,
+        ) {
+            if let Some(options) = change.options {
+                draft.options = options;
+            }
+            if let Some(prompt) = change.text {
+                draft.prompt = prompt;
+            }
+        }
+        draft
+    }
+    /// Applies a model toggle option in a scheduled task draft.
+    pub fn toggle_scheduled_task_trait(
+        &self,
+        mut draft: ScheduledTaskDraft,
+        descriptor_id: String,
+        on: bool,
+    ) -> ScheduledTaskDraft {
+        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        if let Some(change) = toggle_trait(&catalog(self), &composer, &descriptor_id, on) {
+            if let Some(options) = change.options {
+                draft.options = options;
+            }
+        }
+        draft
+    }
+    /// Runtime modes advertised by the selected provider for a scheduled task.
+    pub fn scheduled_task_runtime_modes(
+        &self,
+        draft: ScheduledTaskDraft,
+    ) -> Vec<RuntimeModeChoice> {
+        let catalog = catalog(self);
+        let supported = catalog
+            .instance(&draft.instance_id)
+            .map_or(&[][..], |instance| instance.supported_runtime_modes.as_slice());
+        runtime_mode_choices(supported)
     }
     pub fn traits(&self) -> TraitsView {
         traits(self, &self.current_draft(), true)
