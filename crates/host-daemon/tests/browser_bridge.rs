@@ -57,8 +57,28 @@ async fn stdio_browser_tool_is_typed_and_does_not_expose_generic_execution() {
         match id {
             1 => assert_eq!(response["result"]["protocolVersion"], "2025-06-18"),
             2 => {
-                assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 1);
-                let tool = &response["result"]["tools"][0];
+                let tools = response["result"]["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 5);
+                let names = tools
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    names,
+                    [
+                        "bex_browser",
+                        "preview_close",
+                        "preview_list",
+                        "preview_recording_start",
+                        "preview_recording_stop",
+                    ]
+                    .into_iter()
+                    .collect()
+                );
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool["name"] == "bex_browser")
+                    .unwrap();
                 assert_eq!(tool["name"], "bex_browser");
                 assert!(
                     !tool["inputSchema"]["properties"]["action"]["enum"]

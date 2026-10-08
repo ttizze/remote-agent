@@ -980,9 +980,11 @@ impl Desktop {
                 browser.set_visible(false, cx);
             });
         }
-        let right = self.right_mut();
-        right.close(id);
-        let empty = right.surfaces.is_empty();
+        let empty = {
+            let right = self.right_mut();
+            right.close(id);
+            right.surfaces.is_empty()
+        };
         if closing_device {
             self.panels.device.subscribed = false;
             self.perform(Intent::UnsubscribeDevice);

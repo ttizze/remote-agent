@@ -7,6 +7,7 @@
 
 /* Begin PBXBuildFile section */
         B55D00000000000000000001 /* DraftRevision.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55D00000000000000000002; };
+        D55D00000000000000000001 /* DeviceVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = D55D00000000000000000002 /* DeviceVideoDecoder.swift */; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
@@ -86,6 +87,7 @@
 
 /* Begin PBXFileReference section */
         B55D00000000000000000002 /* DraftRevision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRevision.swift; sourceTree = "<group>"; };
+        D55D00000000000000000002 /* DeviceVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceVideoDecoder.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
         C30000000000000000000004 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
@@ -181,6 +183,7 @@
 			isa = PBXGroup;
 			children = (
 				B55D00000000000000000002 /* DraftRevision.swift */,
+                D55D00000000000000000002 /* DeviceVideoDecoder.swift */,
                 A10000000000000000000011 /* BexIOSApp.swift */,
 				A10000000000000000000012 /* PlatformServices.swift */,
 				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
@@ -359,6 +362,7 @@
 			files = (
 				B55D00000000000000000001 /* DraftRevision.swift in Sources */,
 				A71000000000000000000015, A71000000000000000000016, A71000000000000000000017,
+                D55D00000000000000000001 /* DeviceVideoDecoder.swift in Sources */,
                 A10000000000000000000001 /* BexIOSApp.swift in Sources */,
 				A10000000000000000000002 /* PlatformServices.swift in Sources */,
 				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,

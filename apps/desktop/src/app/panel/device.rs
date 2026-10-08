@@ -1,9 +1,11 @@
 //! The Device surface: Host-owned discovery, setup and live device frames.
+mod device_decoder;
+
 use super::PanelTab;
 use crate::app::{Desktop, ui::{color, icon, tint}};
 use agent_core::state::{DeviceActionIntent, Intent};
 use gpui_kit::{component::{Sizable, button::{Button, ButtonVariants}, h_flex, input::{Input, InputState}, v_flex}, prelude::FluentBuilder, *};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
 pub(super) struct DeviceState {
     thread: Option<String>,
@@ -12,7 +14,8 @@ pub(super) struct DeviceState {
     detail_requests: BTreeSet<String>,
     accessibility_requests: BTreeSet<String>,
     event_log_requests: BTreeSet<String>,
-    frame: Option<(String, u64, Arc<Image>)>,
+    frames: BTreeMap<(String, String, u8), (u64, Arc<Image>)>,
+    decoder: device_decoder::DeviceVideoDecoder,
     ssh_label: Entity<InputState>,
     ssh_target: Entity<InputState>,
     ssh_identity_file: Entity<InputState>,
@@ -28,7 +31,8 @@ impl DeviceState {
             detail_requests: BTreeSet::new(),
             accessibility_requests: BTreeSet::new(),
             event_log_requests: BTreeSet::new(),
-            frame: None,
+            frames: BTreeMap::new(),
+            decoder: device_decoder::DeviceVideoDecoder::default(),
             ssh_label: cx.new(|cx| InputState::new(window, cx).placeholder("Build server")),
             ssh_target: cx.new(|cx| InputState::new(window, cx).placeholder("user@host")),
             ssh_identity_file: cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519")),
@@ -43,7 +47,8 @@ impl DeviceState {
         self.detail_requests.clear();
         self.accessibility_requests.clear();
         self.event_log_requests.clear();
-        self.frame = None;
+        self.frames.clear();
+        self.decoder.reset();
     }
 }
 
@@ -119,21 +124,26 @@ impl Desktop {
     }
 
     fn attach_device_recording(&self, draft_key: String, recording: agent_core::view::device::DeviceRecordingView) {
-        let extension = match recording.format.as_str() {
-            "mjpeg" => "mjpeg",
-            "avcc" => "avcc",
-            _ => "bin",
+        let Some((extension, mime_type)) = recording_file_type(&recording.format, &recording.bytes) else {
+            let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
+            self.stage(draft_key, move || {
+                Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
+            });
+            return;
         };
         let name = format!("device-recording-{draft_key}.{extension}");
         let bytes = recording.bytes;
+        let directory = self.attachments.directory.clone();
         self.stage(draft_key, move || {
-            let path = std::env::temp_dir().join(format!("{}-{}", uuid::Uuid::new_v4(), name));
+            let path = directory
+                .path()
+                .join(format!("{}-{}", uuid::Uuid::new_v4(), name));
             std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
             Ok((
                 vec![agent_core::state::LocalFile {
                     path: path.to_string_lossy().into_owned(),
                     name,
-                    mime_type: "application/octet-stream".into(),
+                    mime_type: mime_type.into(),
                 }],
                 None,
             ))
@@ -152,7 +162,8 @@ impl Desktop {
             self.panels.device.detail_requests.clear();
             self.panels.device.accessibility_requests.clear();
             self.panels.device.event_log_requests.clear();
-            self.panels.device.frame = None;
+            self.panels.device.frames.clear();
+            self.panels.device.decoder.reset();
         }
         if !self.panels.device.loaded {
             self.panels.device.loaded = true;
@@ -177,59 +188,77 @@ impl Desktop {
                     device_id: session.device_id.clone(),
                 });
             }
-            if session.platform == "ios" {
-                let log_key = format!("{}:{}", session.host_id, session.device_id);
-                if self.panels.device.event_log_requests.insert(log_key) {
-                    self.perform(Intent::LoadDeviceEventLog {
-                        host_id: Some(session.host_id.clone()),
-                        device_id: session.device_id.clone(),
-                        limit: 100,
-                    });
-                }
+            let log_key = format!("{}:{}", session.host_id, session.device_id);
+            if self.panels.device.event_log_requests.insert(log_key) {
+                self.perform(Intent::LoadDeviceEventLog {
+                    host_id: Some(session.host_id.clone()),
+                    device_id: session.device_id.clone(),
+                    limit: 100,
+                });
             }
         }
         let view = self.snapshot.device();
-        let newest = view
-            .frames
+        let mut newest_frames = BTreeMap::new();
+        for frame in view.frames.iter().filter(|frame| frame.thread_id == thread) {
+            let entry = newest_frames
+                .entry((frame.host_id.clone(), frame.device_id.clone()))
+                .or_insert(frame);
+            if frame.sequence > entry.sequence {
+                *entry = frame;
+            }
+        }
+        for frame in newest_frames.into_values().filter(|frame| !frame.png.is_empty()) {
+            let key = (frame.host_id.clone(), frame.device_id.clone(), 0);
+            if self
+                .panels
+                .device
+                .frames
+                .get(&key)
+                .is_none_or(|(sequence, _)| *sequence != frame.sequence)
+            {
+                self.panels.device.frames.insert(
+                    key,
+                    (
+                        frame.sequence,
+                        Arc::new(Image::from_bytes(ImageFormat::Png, frame.png.clone())),
+                    ),
+                );
+                cx.notify();
+            }
+        }
+        let events = view
+            .video_events
             .iter()
             .filter(|frame| frame.thread_id == thread)
-            .max_by_key(|frame| frame.sequence);
-        if let Some(frame) = newest
-            && self.panels.device.frame.as_ref().is_none_or(|(_, sequence, _)| *sequence != frame.sequence)
-            && !frame.png.is_empty()
-        {
-            self.panels.device.frame = Some((
-                frame.device_id.clone(),
-                frame.sequence,
-                Arc::new(Image::from_bytes(ImageFormat::Png, frame.png.clone())),
-            ));
-            cx.notify();
-        }
-        let newest_video = view
-            .video_frames
-            .iter()
-            .filter(|frame| frame.thread_id == thread && matches!(frame.encoding.as_str(), "jpeg" | "mjpeg"))
-            .max_by_key(|frame| frame.sequence);
-        let unsupported_video = view
-            .video_frames
-            .iter()
-            .find(|frame| frame.thread_id == thread && matches!(frame.encoding.as_str(), "h264" | "semu"));
-        if let Some(frame) = newest_video
-            && self.panels.device.frame.as_ref().is_none_or(|(_, sequence, _)| *sequence < frame.sequence)
-            && !frame.payload.is_empty()
-        {
-            self.panels.device.frame = Some((
-                frame.device_id.clone(),
-                frame.sequence,
-                Arc::new(Image::from_bytes(ImageFormat::Jpeg, frame.payload.clone())),
-            ));
+            .cloned()
+            .collect::<Vec<_>>();
+        for image in self.panels.device.decoder.push(&events) {
+            let format = match image.format {
+                device_decoder::DeviceImageFormat::Jpeg => ImageFormat::Jpeg,
+                device_decoder::DeviceImageFormat::Png => ImageFormat::Png,
+            };
+            self.panels.device.frames.insert(
+                (image.host_id.clone(), image.device_id.clone(), image.screen_id),
+                (
+                    image.sequence,
+                    Arc::new(Image::from_bytes(format, image.bytes)),
+                ),
+            );
             cx.notify();
         }
     }
 
     pub(super) fn render_device(&mut self, cx: &mut Context<Desktop>) -> AnyElement {
         let view = self.snapshot.device();
-        let frame = self.panels.device.frame.as_ref().map(|(_, _, image)| image.clone());
+        let frame_images = self
+            .panels
+            .device
+            .frames
+            .values()
+            .map(|((host_id, device_id, _), (_, image))| {
+                (host_id.clone(), device_id.clone(), image.clone())
+            })
+            .collect::<Vec<_>>();
         let enabled = view.enabled;
         let owner = cx.entity().downgrade();
         let current_thread = self.thread_id();
@@ -345,6 +374,65 @@ impl Desktop {
                         action: DeviceActionIntent::HardwareButton { button: "home".into() },
                     })
                 })))
+                .child(Button::new(SharedString::from(format!("device-back-{host_id}-{device_id}"))).label("Back").xsmall().on_click(cx.listener({
+                    let host_id = host_id.clone();
+                    let device_id = device_id.clone();
+                    move |view, _, _, _| view.perform(Intent::DeviceAction {
+                        host_id: Some(host_id.clone()),
+                        device_id: device_id.clone(),
+                        action: DeviceActionIntent::HardwareButton { button: "back".into() },
+                    })
+                })))
+                .child(Button::new(SharedString::from(format!("device-recents-{host_id}-{device_id}"))).label("Recents").xsmall().on_click(cx.listener({
+                    let host_id = host_id.clone();
+                    let device_id = device_id.clone();
+                    move |view, _, _, _| view.perform(Intent::DeviceAction {
+                        host_id: Some(host_id.clone()),
+                        device_id: device_id.clone(),
+                        action: DeviceActionIntent::HardwareButton { button: "recents".into() },
+                    })
+                })))
+                .child(Button::new(SharedString::from(format!("device-power-{host_id}-{device_id}"))).label("Power").xsmall().on_click(cx.listener({
+                    let host_id = host_id.clone();
+                    let device_id = device_id.clone();
+                    move |view, _, _, _| view.perform(Intent::DeviceAction {
+                        host_id: Some(host_id.clone()),
+                        device_id: device_id.clone(),
+                        action: DeviceActionIntent::HardwareButton { button: "power".into() },
+                    })
+                })))
+                .child(Button::new(SharedString::from(format!("device-enter-{host_id}-{device_id}"))).label("Enter").xsmall().on_click(cx.listener({
+                    let host_id = host_id.clone();
+                    let device_id = device_id.clone();
+                    move |view, _, _, _| {
+                        view.perform(Intent::DeviceAction {
+                            host_id: Some(host_id.clone()),
+                            device_id: device_id.clone(),
+                            action: DeviceActionIntent::Key { code: "Enter".into(), down: true },
+                        });
+                        view.perform(Intent::DeviceAction {
+                            host_id: Some(host_id.clone()),
+                            device_id: device_id.clone(),
+                            action: DeviceActionIntent::Key { code: "Enter".into(), down: false },
+                        });
+                    }
+                })))
+                .child(Button::new(SharedString::from(format!("device-touch-center-{host_id}-{device_id}"))).label("Touch center").xsmall().on_click(cx.listener({
+                    let host_id = host_id.clone();
+                    let device_id = device_id.clone();
+                    move |view, _, _, _| {
+                        view.perform(Intent::DeviceAction {
+                            host_id: Some(host_id.clone()),
+                            device_id: device_id.clone(),
+                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5 },
+                        });
+                        view.perform(Intent::DeviceAction {
+                            host_id: Some(host_id.clone()),
+                            device_id: device_id.clone(),
+                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5 },
+                        });
+                    }
+                })))
                 .child(Button::new(SharedString::from(format!("device-rotate-{host_id}-{device_id}"))).label("Rotate").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
@@ -352,6 +440,14 @@ impl Desktop {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
                         action: DeviceActionIntent::Rotate,
+                    })
+                })))
+                .child(Button::new(SharedString::from(format!("device-screenshot-{host_id}-{device_id}"))).label("Screenshot").xsmall().on_click(cx.listener({
+                    let host_id = host_id.clone();
+                    let device_id = device_id.clone();
+                    move |view, _, _, _| view.perform(Intent::CaptureDeviceScreenshot {
+                        host_id: Some(host_id.clone()),
+                        device_id: device_id.clone(),
                     })
                 })))
                 .child(Button::new(SharedString::from(format!("device-fold-book-{host_id}-{device_id}"))).label("Book fold").xsmall().on_click(cx.listener({
@@ -447,6 +543,36 @@ impl Desktop {
                 .when(current_thread_has_session, |panel| {
                     panel.child(v_flex().gap_0p5().children(device_controls))
                 })
+                .child(v_flex().gap_0p5().children(view.foreground.iter().filter(|foreground| {
+                    current_thread.as_deref().is_some_and(|thread| {
+                        view.sessions.iter().any(|session| {
+                            session.thread_id == thread
+                                && session.host_id == foreground.host_id
+                                && session.device_id == foreground.device_id
+                        })
+                    })
+                }).map(|foreground| {
+                    div().text_2xs().text_color(color("textMuted")).child(format!(
+                        "Foreground {}:{} · {}",
+                        foreground.host_id,
+                        foreground.device_id,
+                        foreground.app_id.as_deref().unwrap_or("unknown")
+                    ))
+                })))
+                .child(v_flex().gap_0p5().children(view.screens.iter().filter(|screen| {
+                    current_thread.as_deref().is_some_and(|thread| {
+                        screen.thread_id.as_deref() == Some(thread)
+                    })
+                }).map(|screen| {
+                    div().text_2xs().text_color(color("textMuted")).child(format!(
+                        "Screen {} · {}×{} · {}{}",
+                        screen.screen_id.map_or_else(|| "main".into(), |id| id.to_string()),
+                        screen.width,
+                        screen.height,
+                        screen.orientation,
+                        screen.hinge_pose.as_deref().map_or(String::new(), |pose| format!(" · {pose}"))
+                    ))
+                })))
                 .when(!view.accessibility.is_empty(), |panel| {
                     panel.child(v_flex().gap_0p5()
                         .child(div().text_xs().font_weight(FontWeight::MEDIUM).child("Accessibility overlay"))
@@ -460,19 +586,54 @@ impl Desktop {
                 })
                 .when_some(view.last_recording.clone().filter(|recording| current_thread.as_deref() == Some(recording.thread_id.as_str())), |panel, recording| {
                     let recording_for_attach = recording.clone();
-                    let draft_key = recording.thread_id.clone();
+                    let draft_key = self.snapshot.draft_key();
                     panel.child(h_flex().gap_1()
                         .child(div().text_2xs().text_color(color("textMuted")).child(format!("Recording ready · {} frames · {} bytes", recording.frame_count, recording.byte_count)))
                         .child(Button::new("device-attach-recording").label("Attach recording").xsmall().on_click(cx.listener(move |view, _, _, _| view.attach_device_recording(draft_key.clone(), recording_for_attach.clone()))))
                     )
                 })
-                .when(unsupported_video.is_some(), |panel| {
-                    panel.child(div().text_2xs().text_color(color("textMuted")).child("Live H.264 device video is unavailable in this native decoder"))
+                .when_some(self.panels.device.decoder.error().map(str::to_owned), |panel, error| {
+                    panel.child(div().text_2xs().text_color(color("textMuted")).child(error))
                 })
-                .child(frame.map_or_else(|| div().flex_1().min_h_0().items_center().justify_center().text_color(color("textMuted")).child("Open a device to see its live frame").into_any_element(), |image| {
-                    div().flex_1().min_h_0().flex().items_center().justify_center().child(img(image).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element()
-                }))
+                .child(if frame_images.is_empty() {
+                    div().flex_1().min_h_0().items_center().justify_center().text_color(color("textMuted")).child("Open a device to see its live frame").into_any_element()
+                } else {
+                    h_flex().flex_1().min_h_0().items_center().justify_center().gap_2().children(frame_images.into_iter().map(|(host_id, device_id, image)| {
+                        let accessibility = view.accessibility.iter()
+                            .filter(|tree| tree.host_id == host_id && tree.device_id == device_id)
+                            .flat_map(|tree| tree.elements.iter())
+                            .filter(|element| !element.label.is_empty())
+                            .map(|element| {
+                                div()
+                                    .absolute()
+                                    .left(relative(element.x))
+                                    .top(relative(element.y))
+                                    .w(relative(element.width))
+                                    .h(relative(element.height))
+                                    .border_1()
+                                    .border_color(tint("accent", 0.9))
+                                    .aria_label(element.label.clone())
+                            });
+                        div().relative().flex_1().min_h_0().flex().items_center().justify_center()
+                            .child(img(image).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
+                            .children(accessibility)
+                    })).into_any_element()
+                })
         })
         .into_any_element()
 }
+
+}
+
+fn recording_file_type(format: &str, bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        return Some(("webm", "video/webm"));
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some(("mp4", "video/mp4"));
+    }
+    if format == "mjpeg" && bytes.windows(2).any(|window| window == [0xff, 0xd8]) {
+        return Some(("mjpeg", "video/x-motion-jpeg"));
+    }
+    None
 }

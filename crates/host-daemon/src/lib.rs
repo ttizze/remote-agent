@@ -8,7 +8,7 @@ mod codex_accounts;
 pub mod conversation;
 mod dictation;
 pub mod device;
-mod device_stream;
+pub mod device_stream;
 mod favicon;
 mod github;
 mod git;

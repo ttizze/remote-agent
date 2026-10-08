@@ -2230,6 +2230,17 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    // Reconcile the browser target set before returning the
+                    // metadata owner’s snapshot. This closes sessions whose
+                    // targets disappeared outside the Preview UI.
+                    let _ = browser
+                        .preview_list(&params.thread_id.to_string())
+                        .await
+                        .map_err(|error| Failure::new("preview_list_failed", error))?;
                     resources
                         .preview_ports
                         .set_terminal_owners(resources.shared.terminals.preview_process_owners());
@@ -2416,9 +2427,14 @@ impl HostRpcService {
                         .browser
                         .get()
                         .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    let ids: Vec<String> = resources
-                        .preview
-                        .list(&params.thread_id)
+                    // Reconcile Chrome targets first. A tab closed from the
+                    // browser UI must not remain in the metadata owner and
+                    // cause this close request to target a dead session.
+                    let live = browser
+                        .preview_list(&params.thread_id.to_string())
+                        .await
+                        .map_err(|error| Failure::new("preview_close_failed", error))?;
+                    let ids: Vec<String> = live
                         .sessions
                         .into_iter()
                         .filter(|session| {
@@ -3718,8 +3734,9 @@ fn preview_event_thread(event: &agent_protocol::preview::PreviewEvent) -> &agent
         | agent_protocol::preview::PreviewEvent::Resized { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Failed { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Closed { thread_id, .. }
-        | agent_protocol::preview::PreviewEvent::RecordingChanged { thread_id, .. } => thread_id,
-    }
+        | agent_protocol::preview::PreviewEvent::RecordingChanged { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::RecordingArtifactRemoved { thread_id, .. } => thread_id,
+}
 }
 
 /// The two built-in providers expose the same four user-selectable permission

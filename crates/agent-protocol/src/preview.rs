@@ -341,6 +341,9 @@ pub struct PreviewTerminalOwner {
 pub struct PreviewListResult {
     pub sessions: Vec<PreviewSessionSnapshot>,
     pub recordings: Vec<PreviewRecordingStatus>,
+    /// Completed artifacts that were evicted by the Host retention owner.
+    /// Clients must drop any Save/Attach reference for these tabs.
+    pub invalidated_recordings: Vec<String>,
     pub local_servers: Vec<DiscoveredLocalServer>,
     pub scanned_at: String,
     pub server_epoch: String,
@@ -636,6 +639,13 @@ pub enum PreviewEvent {
         server_epoch: String,
         created_at: String,
         status: PreviewRecordingStatus,
+    },
+    RecordingArtifactRemoved {
+        thread_id: agent_domain::ThreadId,
+        tab_id: String,
+        revision: u64,
+        server_epoch: String,
+        created_at: String,
     },
 }
 

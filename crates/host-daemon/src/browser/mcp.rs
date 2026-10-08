@@ -114,17 +114,29 @@ async fn bridge_request(
             .map(BridgeResponse::PreviewList),
         BridgeRequest::PreviewClose { thread, tab_id } => {
             if let Some(tab_id) = tab_id {
-                browser.close_preview_tab(&thread, &tab_id).await?;
+                browser
+                    .close_preview_tab_with_cancel(&thread, &tab_id, request_cancel.clone())
+                    .await?;
             } else {
-                let tabs = browser
-                    .preview_list(&thread)
-                    .await?
+                let preview = tokio::select! {
+                    result = browser.preview_list(&thread) => result?,
+                    _ = request_cancel.cancelled() => {
+                        return Err("closing Preview tabs was cancelled".to_owned());
+                    }
+                };
+                let tabs = preview
                     .sessions
                     .into_iter()
                     .map(|session| session.tab_id)
                     .collect::<Vec<_>>();
                 for tab_id in tabs {
-                    browser.close_preview_tab(&thread, &tab_id).await?;
+                    browser
+                        .close_preview_tab_with_cancel(
+                            &thread,
+                            &tab_id,
+                            request_cancel.clone(),
+                        )
+                        .await?;
                 }
             }
             Ok(BridgeResponse::Empty)

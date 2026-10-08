@@ -16,11 +16,15 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, Command},
     sync::oneshot,
 };
@@ -29,6 +33,9 @@ const FRAME_MAX_BYTES: usize = 4 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const ENCODER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_ENCODER_OUTPUT_BYTES: usize = 64 * 1024;
 const OUTPUT_FPS: f64 = 30.0;
 const MAX_ENCODED_FRAMES: u64 = PREVIEW_RECORDING_MAX_DURATION_SECONDS * 30;
 const MAX_ENCODED_INPUT_BYTES: u64 = PREVIEW_RECORDING_MAX_BYTES * 4;
@@ -40,6 +47,7 @@ enum CaptureTermination {
     Cancellation,
     ExplicitStop,
     Deadline,
+    Detached,
 }
 
 fn capture_termination_result(termination: CaptureTermination) -> Result<(), String> {
@@ -49,13 +57,20 @@ fn capture_termination_result(termination: CaptureTermination) -> Result<(), Str
         // failures after cleanup.
         CaptureTermination::Cancellation
         | CaptureTermination::ExplicitStop
-        | CaptureTermination::Deadline => Ok(()),
+        | CaptureTermination::Deadline
+        | CaptureTermination::Detached => Ok(()),
     }
+}
+
+enum ScreencastEvent {
+    Frame(Vec<u8>, Option<f64>, Option<u64>),
+    Detached,
 }
 
 pub(crate) struct StartResult {
     pub(crate) started_at: String,
     pub(crate) artifact_path: PathBuf,
+    pub(crate) externally_detached: Arc<AtomicBool>,
     pub(crate) startup: oneshot::Receiver<Result<(), String>>,
     pub(crate) task: tokio::task::JoinHandle<Result<PreviewRecordingArtifact, String>>,
 }
@@ -78,6 +93,7 @@ pub(crate) fn start(
     let artifact_path = recording_directory.join(format!("{id}.webm"));
     let started_at = chrono::Utc::now().to_rfc3339();
     let (startup_sender, startup) = oneshot::channel();
+    let externally_detached = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(run(
         endpoint,
         tab_id,
@@ -88,10 +104,12 @@ pub(crate) fn start(
         cancel,
         stop,
         startup_sender,
+        externally_detached.clone(),
     ));
     Ok(StartResult {
         started_at,
         artifact_path,
+        externally_detached,
         startup,
         task,
     })
@@ -116,6 +134,7 @@ async fn run(
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
     startup: oneshot::Sender<Result<(), String>>,
+    externally_detached: Arc<AtomicBool>,
 ) -> Result<PreviewRecordingArtifact, String> {
     let final_path = recording_directory.join(format!("{id}.webm"));
     let partial_path = recording_directory.join(format!("{id}.part.webm"));
@@ -129,6 +148,7 @@ async fn run(
         cancel,
         stop,
         startup,
+        externally_detached,
     )
     .await;
     match result {
@@ -183,6 +203,7 @@ async fn run_capture(
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
     startup: oneshot::Sender<Result<(), String>>,
+    externally_detached: Arc<AtomicBool>,
 ) -> Result<u64, String> {
     let mut startup = Some(startup);
     let (mut socket, _) = match async_tungstenite::tokio::connect_async(endpoint).await {
@@ -194,12 +215,15 @@ async fn run_capture(
         }
     };
     let mut next_id = 0;
-    let session = match command(
+    let session = match command_with_cancel(
         &mut socket,
         &mut next_id,
+        tab_id,
         None,
         "Target.attachToTarget",
         json!({"targetId":tab_id,"flatten":true}),
+        &cancel,
+        &stop,
     )
     .await
     {
@@ -212,34 +236,40 @@ async fn run_capture(
             }
         },
         Err(error) => {
+            note_target_detached(&error, &externally_detached);
             notify_startup(&mut startup, Err(error.clone()));
             return Err(error);
         }
     };
-    if let Err(error) = command(
+    if let Err(error) = command_with_cancel(
         &mut socket,
         &mut next_id,
+        tab_id,
         Some(&session),
         "Page.enable",
         json!({}),
+        &cancel,
+        &stop,
     )
     .await
     {
-        cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+        note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
     let mut encoder = match Encoder::start(output).await {
         Ok(encoder) => encoder,
         Err(error) => {
-            cleanup_cdp(&mut socket, &mut next_id, &session).await;
+            cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
             notify_startup(&mut startup, Err(error.clone()));
             return Err(error);
         }
     };
-    if let Err(error) = command(
+    if let Err(error) = command_with_cancel(
         &mut socket,
         &mut next_id,
+        tab_id,
         Some(&session),
         "Page.startScreencast",
         json!({
@@ -249,17 +279,20 @@ async fn run_capture(
             "maxHeight":height,
             "everyNthFrame":1
         }),
+        &cancel,
+        &stop,
     )
     .await
     {
-        cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
         encoder.abort().await;
+        note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
     if cancel.is_cancelled() || stop.is_cancelled() {
         let error = "recording start was cancelled".to_owned();
-        cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
         encoder.abort().await;
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
@@ -273,6 +306,8 @@ async fn run_capture(
     let mut encoded_frames = 0u64;
     let mut encoded_input_bytes = 0u64;
     let mut first_timestamp = None;
+    let mut detached = false;
+    let mut deadline_reached = false;
     let capture_result = loop {
         tokio::select! {
             biased;
@@ -281,10 +316,20 @@ async fn run_capture(
             // The fixed reference keeps the bounded desktop copy when the
             // capture reaches its deadline.  Let the encoder finalize it;
             // size and frame limits below still bound the artifact.
-            _ = &mut deadline => break capture_termination_result(CaptureTermination::Deadline),
-            message = next_screencast_frame(&mut socket) => {
+            _ = &mut deadline => {
+                deadline_reached = true;
+                break capture_termination_result(CaptureTermination::Deadline);
+            },
+            message = next_screencast_frame(&mut socket, tab_id, &session) => {
                 let (frame, timestamp, session_id) = match message {
-                    Ok(frame) => frame,
+                    Ok(ScreencastEvent::Frame(frame, timestamp, session_id)) => {
+                        (frame, timestamp, session_id)
+                    }
+                    Ok(ScreencastEvent::Detached) => {
+                        externally_detached.store(true, Ordering::Release);
+                        detached = true;
+                        break capture_termination_result(CaptureTermination::Detached);
+                    }
                     Err(error) => break Err(error),
                 };
                 if frame.len() > FRAME_MAX_BYTES {
@@ -336,25 +381,51 @@ async fn run_capture(
                 encoded_input_bytes = encoded_input_bytes.saturating_add(added_bytes);
                 frames = frames.saturating_add(1);
                 if let Some(session_id) = session_id {
-                    if let Err(error) = send_command(
+                    if let Err(error) = send_command_with_cancel(
                         &mut socket,
                         &mut next_id,
+                        tab_id,
                         Some(&session),
                         "Page.screencastFrameAck",
                         json!({"sessionId":session_id}),
+                        &cancel,
+                        &stop,
                     ).await {
+                        if is_target_detached_error(&error) {
+                            externally_detached.store(true, Ordering::Release);
+                            detached = true;
+                            break capture_termination_result(CaptureTermination::Detached);
+                        }
                         break Err(error);
                     }
                 }
             }
         }
     };
-    let cleanup_result = cleanup_cdp(&mut socket, &mut next_id, &session).await;
+    let cleanup_result = cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+    let cleanup_detached = cleanup_result
+        .as_ref()
+        .is_err_and(|error| is_target_detached_error(error));
+    if cleanup_detached {
+        externally_detached.store(true, Ordering::Release);
+        detached = true;
+    }
     if let Err(error) = capture_result {
+        if detached || is_target_detached_error(&error) {
+            externally_detached.store(true, Ordering::Release);
+            return encoder.finish().await;
+        }
         encoder.abort().await;
         return Err(error);
     }
     if let Err(error) = cleanup_result {
+        // Chrome sends Target.detachedFromTarget when a tab is closed or the
+        // renderer crashes.  The connection can no longer accept cleanup
+        // commands in that case, but frames already handed to the encoder are
+        // still a usable desktop copy.
+        if detached || deadline_reached {
+            return encoder.finish().await;
+        }
         encoder.abort().await;
         return Err(error);
     }
@@ -367,7 +438,9 @@ async fn run_capture(
 
 async fn next_screencast_frame(
     socket: &mut WebSocketStream<ConnectStream>,
-) -> Result<(Vec<u8>, Option<f64>, Option<u64>), String> {
+    target_id: &str,
+    session: &str,
+) -> Result<ScreencastEvent, String> {
     loop {
         let Some(message) = socket.next().await else {
             return Err("recording screencast connection closed".to_owned());
@@ -383,7 +456,13 @@ async fn next_screencast_frame(
         }
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| format!("recording screencast response is invalid: {error}"))?;
+        if is_detached_event(&value, target_id, Some(session)) {
+            return Ok(ScreencastEvent::Detached);
+        }
         if value["method"] != "Page.screencastFrame" {
+            continue;
+        }
+        if value["sessionId"].as_str() != Some(session) {
             continue;
         }
         let data = value["params"]["data"]
@@ -394,13 +473,49 @@ async fn next_screencast_frame(
             .map_err(|error| format!("recording screencast frame is invalid: {error}"))?;
         let timestamp = value["params"]["metadata"]["timestamp"].as_f64();
         let session_id = value["params"]["sessionId"].as_u64();
-        return Ok((frame, timestamp, session_id));
+        return Ok(ScreencastEvent::Frame(frame, timestamp, session_id));
+    }
+}
+
+fn is_detached_event(value: &Value, target_id: &str, session: Option<&str>) -> bool {
+    match value["method"].as_str() {
+        Some("Target.detachedFromTarget") => {
+            value["params"]["targetId"].as_str() == Some(target_id)
+                && session.is_none_or(|session| {
+                    value["params"]["sessionId"].as_str() == Some(session)
+                })
+        }
+        Some("Target.targetCrashed") => {
+            value["params"]["targetId"].as_str() == Some(target_id)
+                && session_event_matches(value, session)
+        }
+        _ => false,
+    }
+}
+
+/// Target.targetCrashed is normally emitted without a sessionId. If Chrome
+/// includes one, it must still belong to this recording's attached session;
+/// an unrelated popup event must never terminate this capture.
+fn session_event_matches(value: &Value, session: Option<&str>) -> bool {
+    value["sessionId"]
+        .as_str()
+        .is_none_or(|event_session| session == Some(event_session))
+}
+
+fn is_target_detached_error(error: &str) -> bool {
+    error.contains("target detached")
+}
+
+fn note_target_detached(error: &str, externally_detached: &AtomicBool) {
+    if is_target_detached_error(error) {
+        externally_detached.store(true, Ordering::Release);
     }
 }
 
 async fn cleanup_cdp(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: &str,
 ) -> Result<(), String> {
     // Wait for both responses, with a bound per command.  A failed stop must
@@ -409,6 +524,7 @@ async fn cleanup_cdp(
     let stop = cleanup_command(
         socket,
         next_id,
+        target_id,
         Some(session),
         "Page.stopScreencast",
         json!({}),
@@ -417,6 +533,7 @@ async fn cleanup_cdp(
     let detach = cleanup_command(
         socket,
         next_id,
+        target_id,
         None,
         "Target.detachFromTarget",
         json!({"sessionId":session}),
@@ -430,13 +547,14 @@ const CDP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 async fn cleanup_command(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
 ) -> Result<(), String> {
     tokio::time::timeout(
         CDP_CLEANUP_TIMEOUT,
-        command(socket, next_id, session, method, params),
+        command(socket, next_id, target_id, session, method, params),
     )
     .await
     .map_err(|_| {
@@ -498,22 +616,39 @@ fn prune_directory(directory: &Path, protected_paths: &[PathBuf]) -> Result<(), 
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
             let path = entry.path();
-            (metadata.is_file() && !is_partial_artifact(&path)).then_some((path, metadata))
+            metadata.is_file().then_some((path, metadata))
         })
         .collect::<Vec<_>>();
     files.sort_by_key(|(_, metadata)| metadata.modified().ok());
     let mut total = files.iter().map(|(_, metadata)| metadata.len()).sum::<u64>();
     for (path, metadata) in files {
+        let protected = protected_paths
+            .iter()
+            .any(|protected| protected == &path || partial_path_for(protected) == path);
+        if is_partial_artifact(&path) {
+            if !protected {
+                total = total.saturating_sub(metadata.len());
+                let _ = std::fs::remove_file(path);
+            }
+            continue;
+        }
         if total <= MAX_STORAGE_BYTES {
             break;
         }
-        if protected_paths.iter().any(|protected| protected == &path) {
+        if protected {
             continue;
         }
         total = total.saturating_sub(metadata.len());
         let _ = std::fs::remove_file(path);
     }
     Ok(())
+}
+
+fn partial_path_for(path: &Path) -> PathBuf {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return path.with_extension("part.webm");
+    };
+    path.with_file_name(format!("{stem}.part.webm"))
 }
 
 fn is_partial_artifact(path: &Path) -> bool {
@@ -525,6 +660,28 @@ fn is_partial_artifact(path: &Path) -> bool {
 async fn command(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
+    session: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    tokio::time::timeout(
+        CDP_COMMAND_TIMEOUT,
+        command_inner(socket, next_id, target_id, session, method, params),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "recording {method} timed out after {}ms",
+            CDP_COMMAND_TIMEOUT.as_millis()
+        )
+    })?
+}
+
+async fn command_inner(
+    socket: &mut WebSocketStream<ConnectStream>,
+    next_id: &mut u64,
+    target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
@@ -537,6 +694,9 @@ async fn command(
         };
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| format!("recording {method} response is invalid: {error}"))?;
+        if is_detached_event(&value, target_id, session) {
+            return Err(format!("recording {method} target detached"));
+        }
         if value["id"].as_u64() != Some(id) {
             continue;
         }
@@ -546,6 +706,23 @@ async fn command(
         return Ok(value["result"].clone());
     }
     Err(format!("recording {method} connection closed"))
+}
+
+async fn command_with_cancel(
+    socket: &mut WebSocketStream<ConnectStream>,
+    next_id: &mut u64,
+    target_id: &str,
+    session: Option<&str>,
+    method: &str,
+    params: Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<Value, String> {
+    tokio::select! {
+        result = command(socket, next_id, target_id, session, method, params) => result,
+        _ = cancel.cancelled() => Err(format!("recording {method} was cancelled")),
+        _ = stop.cancelled() => Err(format!("recording {method} was cancelled")),
+    }
 }
 
 async fn send_command(
@@ -561,11 +738,36 @@ async fn send_command(
     if let Some(session) = session {
         request["sessionId"] = session.into();
     }
-    socket
-        .send(Message::Text(request.to_string().into()))
-        .await
-        .map_err(|error| format!("recording {method} send failed: {error}"))?;
+    tokio::time::timeout(
+        CDP_COMMAND_TIMEOUT,
+        socket.send(Message::Text(request.to_string().into())),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "recording {method} send timed out after {}ms",
+            CDP_COMMAND_TIMEOUT.as_millis()
+        )
+    })?
+    .map_err(|error| format!("recording {method} send failed: {error}"))?;
     Ok(id)
+}
+
+async fn send_command_with_cancel(
+    socket: &mut WebSocketStream<ConnectStream>,
+    next_id: &mut u64,
+    _target_id: &str,
+    session: Option<&str>,
+    method: &str,
+    params: Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<u64, String> {
+    tokio::select! {
+        result = send_command(socket, next_id, session, method, params) => result,
+        _ = cancel.cancelled() => Err(format!("recording {method} was cancelled")),
+        _ = stop.cancelled() => Err(format!("recording {method} was cancelled")),
+    }
 }
 
 struct Encoder {
@@ -595,19 +797,80 @@ fn ffmpeg_executable() -> PathBuf {
     PathBuf::from(sibling_name)
 }
 
+async fn read_bounded<R>(reader: R) -> Result<Vec<u8>, String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = reader.take((MAX_ENCODER_OUTPUT_BYTES + 1) as u64);
+    let mut output = Vec::new();
+    reader
+        .read_to_end(&mut output)
+        .await
+        .map_err(|error| format!("recording encoder output could not be read: {error}"))?;
+    if output.len() > MAX_ENCODER_OUTPUT_BYTES {
+        return Err(format!(
+            "recording encoder output exceeds {} bytes",
+            MAX_ENCODER_OUTPUT_BYTES
+        ));
+    }
+    Ok(output)
+}
+
+async fn wait_for_bounded_output(mut child: Child) -> Result<Output, String> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "recording encoder stdout is unavailable".to_owned())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "recording encoder stderr is unavailable".to_owned())?;
+    let (stdout, stderr, status) = tokio::try_join!(
+        read_bounded(&mut stdout),
+        read_bounded(&mut stderr),
+        async {
+            child
+                .wait()
+                .await
+                .map_err(|error| format!("recording encoder wait failed: {error}"))
+        }
+    )?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+async fn run_bounded_command(mut command: Command) -> Result<Output, String> {
+    let child = command
+        .spawn()
+        .map_err(|error| format!("recording encoder process could not start: {error}"))?;
+    tokio::time::timeout(ENCODER_COMMAND_TIMEOUT, wait_for_bounded_output(child))
+        .await
+        .map_err(|_| {
+            format!(
+                "recording encoder process timed out after {}ms",
+                ENCODER_COMMAND_TIMEOUT.as_millis()
+            )
+        })?
+}
+
 impl Encoder {
     async fn start(output: &Path) -> Result<Self, String> {
         let executable = ffmpeg_executable();
-        let encoders = Command::new(&executable)
+        let mut probe = Command::new(&executable);
+        probe
             .args(["-hide_banner", "-loglevel", "error", "-encoders"])
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|error| {
-                format!(
-                    "recording initialize-media-recorder failed: ffmpeg is unavailable: {error}"
-                )
-            })?;
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let encoders = run_bounded_command(probe).await.map_err(|error| {
+            format!(
+                "recording initialize-media-recorder failed: ffmpeg is unavailable: {error}"
+            )
+        })?;
         let encoder_list = format!(
             "{}{}",
             String::from_utf8_lossy(&encoders.stdout),
@@ -650,7 +913,7 @@ impl Encoder {
             .args(["-f", "webm"])
             .arg(output)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
@@ -687,7 +950,10 @@ impl Encoder {
 
     async fn finish(mut self) -> Result<u64, String> {
         drop(self.input.take());
-        let output = tokio::time::timeout(FINALIZE_TIMEOUT, self.child.wait_with_output())
+        let child = self.child;
+        let output_path = self.output;
+        let executable = self.executable;
+        let output = tokio::time::timeout(FINALIZE_TIMEOUT, wait_for_bounded_output(child))
             .await
             .map_err(|_| "recording stop-media-recorder timed out after 10000ms".to_owned())?
             .map_err(|error| format!("recording stop-media-recorder failed: {error}"))?;
@@ -698,7 +964,7 @@ impl Encoder {
                 .collect::<String>();
             return Err(format!("recording save-artifact failed: {detail}"));
         }
-        let size = tokio::fs::metadata(&self.output)
+        let size = tokio::fs::metadata(&output_path)
             .await
             .map_err(|error| format!("recording save-artifact failed: {error}"))?
             .len();
@@ -712,7 +978,7 @@ impl Encoder {
             ));
         }
         let mut header = [0u8; 4];
-        let mut file = tokio::fs::File::open(&self.output)
+        let mut file = tokio::fs::File::open(&output_path)
             .await
             .map_err(|error| format!("recording save-artifact failed: {error}"))?;
         file.read_exact(&mut header)
@@ -722,12 +988,16 @@ impl Encoder {
             return Err("recording save-artifact is not a WebM file".into());
         }
         drop(file);
-        let validation = Command::new(&self.executable)
+        let mut validation = Command::new(&executable);
+        validation
             .args(["-hide_banner", "-loglevel", "info", "-i"])
-            .arg(&self.output)
+            .arg(&output_path)
             .args(["-map", "0:v:0", "-f", "null", "-"])
-            .kill_on_drop(true)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let validation = run_bounded_command(validation)
             .await
             .map_err(|error| format!("recording save-artifact validation failed: {error}"))?;
         let validation_detail = format!(
@@ -801,10 +1071,43 @@ mod tests {
     }
 
     #[test]
+    fn external_target_close_is_a_capture_termination_event() {
+        let detached = json!({
+            "method":"Target.detachedFromTarget",
+            "params":{"targetId":"target","sessionId":"session"}
+        });
+        let crashed = json!({
+            "method":"Target.targetCrashed",
+            "params":{"targetId":"target"}
+        });
+        assert!(is_detached_event(&detached, "target", Some("session")));
+        assert!(is_detached_event(&detached, "target", None));
+        assert!(!is_detached_event(&detached, "popup", Some("session")));
+        assert!(!is_detached_event(&detached, "target", Some("other")));
+        assert!(is_detached_event(&crashed, "target", Some("session")));
+        assert!(!is_detached_event(&crashed, "popup", Some("session")));
+        assert!(!is_detached_event(
+            &json!({
+                "method":"Target.targetCrashed",
+                "sessionId":"popup-session",
+                "params":{"targetId":"target"}
+            }),
+            "target",
+            Some("session")
+        ));
+        assert!(!is_detached_event(
+            &json!({"method":"Page.screencastFrame"}),
+            "target",
+            Some("session")
+        ));
+    }
+
+    #[test]
     fn deadline_is_a_normal_finalization_signal() {
         assert!(capture_termination_result(CaptureTermination::Cancellation).is_ok());
         assert!(capture_termination_result(CaptureTermination::ExplicitStop).is_ok());
         assert!(capture_termination_result(CaptureTermination::Deadline).is_ok());
+        assert!(capture_termination_result(CaptureTermination::Detached).is_ok());
     }
 
     #[test]
@@ -893,13 +1196,24 @@ mod tests {
             .unwrap()
             .set_len(PREVIEW_RECORDING_MAX_BYTES * 4 + 1)
             .unwrap();
-        let partial = directory.path().join("active.part.webm");
+        let partial = directory.path().join("old.part.webm");
         std::fs::write(&partial, b"partial").unwrap();
 
-        prune_directory(directory.path(), &[]).unwrap();
+        prune_directory(directory.path(), std::slice::from_ref(&partial)).unwrap();
 
         assert!(!completed.exists());
         assert!(partial.exists());
+    }
+
+    #[test]
+    fn storage_pruning_removes_stale_partial_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("stale.part.webm");
+        std::fs::write(&partial, b"stale").unwrap();
+
+        prune_directory(directory.path(), &[]).unwrap();
+
+        assert!(!partial.exists());
     }
 
     #[test]

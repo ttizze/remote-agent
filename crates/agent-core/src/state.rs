@@ -639,6 +639,9 @@ impl PreviewState {
             .into_iter()
             .map(|status| (status.tab_id.clone(), status))
             .collect();
+        for tab_id in result.invalidated_recordings {
+            self.last_recordings.remove(&tab_id);
+        }
         if server_epoch_changed {
             self.last_recordings.clear();
         } else {
@@ -751,6 +754,7 @@ mod preview_state_tests {
                 updated_at: String::new(),
             }],
             recordings: vec![],
+            invalidated_recordings: vec![],
             local_servers: vec![],
             scanned_at: String::new(),
             server_epoch: epoch.into(),
@@ -758,6 +762,26 @@ mod preview_state_tests {
             scanner_epoch: "scanner".into(),
             scanner_revision: revision,
         }
+    }
+
+    #[test]
+    fn drops_core_artifact_references_evicted_by_host_retention() {
+        let mut state = PreviewState::default();
+        state.last_recordings.insert(
+            "old".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "recording".into(),
+                tab_id: "old".into(),
+                path: "/tmp/recording.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "0".into(),
+            },
+        );
+        let mut result = list("epoch", 1, "old");
+        result.invalidated_recordings = vec!["old".into()];
+        state.apply_list(result);
+        assert!(state.last_recordings.is_empty());
     }
 
     #[test]

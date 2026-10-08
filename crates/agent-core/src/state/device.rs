@@ -143,6 +143,28 @@ impl DeviceState {
     pub fn apply_event(&mut self, event: DeviceEvent) {
         match event {
             DeviceEvent::State(service) => {
+                let reopened = self
+                    .sessions
+                    .iter()
+                    .filter_map(|previous| {
+                        service
+                            .sessions
+                            .iter()
+                            .find(|current| {
+                                current.thread_id == previous.thread_id
+                                    && current.host_id == previous.host_id
+                                    && current.device_id == previous.device_id
+                            })
+                            .filter(|current| current.opened_at != previous.opened_at)
+                            .map(|_| {
+                                (
+                                    previous.thread_id.to_string(),
+                                    previous.host_id.clone(),
+                                    previous.device_id.clone(),
+                                )
+                            })
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
                 self.sessions = service.sessions.clone();
                 self.service = Some(service);
                 let active = self
@@ -163,6 +185,12 @@ impl DeviceState {
                 self.video_events.retain(|key, _| {
                     active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
                 });
+                self.frames
+                    .retain(|key, _| !reopened.contains(key));
+                self.video_frames
+                    .retain(|key, _| !reopened.contains(&(key.0.clone(), key.1.clone(), key.2.clone())));
+                self.video_events
+                    .retain(|key, _| !reopened.contains(&(key.0.clone(), key.1.clone(), key.2.clone())));
                 let active_devices = self
                     .sessions
                     .iter()
@@ -504,5 +532,67 @@ mod tests {
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
         state.apply_event(DeviceEvent::Video(frame));
         assert!(state.video_events.is_empty());
+    }
+
+    #[test]
+    fn reopened_session_drops_previous_video_epoch() {
+        let current = session("epoch-video", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let frame = DeviceVideoFrame {
+            thread_id: current.thread_id.clone(),
+            device: DeviceSummary {
+                host_id: current.host_id.clone(),
+                id: current.device_id.clone(),
+                platform: current.platform,
+                name: "Pixel".into(),
+                version: "Android".into(),
+                booted: true,
+                physical: false,
+            },
+            payload: vec![0, 0, 1, 0x65],
+            encoding: DeviceFrameEncoding::H264,
+            width: 2,
+            height: 2,
+            sequence: 99,
+            timestamp_us: Some(99),
+            keyframe: true,
+            screen_id: Some(0),
+        };
+        state.apply_event(DeviceEvent::Video(frame));
+        let mut reopened = current;
+        reopened.opened_at = "1".into();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![reopened.clone()],
+            ..DeviceServiceState::default()
+        }));
+        assert!(state.video_events.is_empty());
+        assert!(state.video_frames.is_empty());
+
+        let next = DeviceVideoFrame {
+            thread_id: reopened.thread_id,
+            device: DeviceSummary {
+                host_id: reopened.host_id,
+                id: reopened.device_id,
+                platform: reopened.platform,
+                name: "Pixel".into(),
+                version: "Android".into(),
+                booted: true,
+                physical: false,
+            },
+            payload: vec![0, 0, 1, 0x65],
+            encoding: DeviceFrameEncoding::H264,
+            width: 2,
+            height: 2,
+            sequence: 1,
+            timestamp_us: Some(1),
+            keyframe: true,
+            screen_id: Some(0),
+        };
+        state.apply_event(DeviceEvent::Video(next));
+        assert_eq!(state.video_events.values().next().unwrap().len(), 1);
     }
 }

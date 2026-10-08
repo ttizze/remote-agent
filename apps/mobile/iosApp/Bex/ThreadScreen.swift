@@ -1,6 +1,7 @@
 import AgentCore
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Where the thread screen sends the user.
 struct ThreadRoutes {
@@ -317,11 +318,17 @@ private struct TerminalMenu: View {
 struct DeviceScreen: View {
     @ObservedObject var model: BexAppViewModel
     let threadId: String
+    @StateObject private var deviceFrames = DeviceFrameStore()
+    @State private var recordingDocument: DeviceRecordingDocument?
+    @State private var exportingRecording = false
+    @State private var recordingFileName = "device-recording"
+    @State private var recordingContentType: UTType = .data
 
     var body: some View {
         let view = model.snapshot.device()
         let threadSessions = view.sessions.filter { $0.threadId == threadId }
         let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId)" }.joined(separator: ",")
+        let decodedFrames = deviceFrames.frames(for: threadId)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if !view.enabled {
@@ -417,11 +424,58 @@ struct DeviceScreen: View {
                                     action: .hardwareButton(button: "home")
                                 ))
                             }
+                            Button("Back") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "back")
+                                ))
+                            }
+                            Button("Recents") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "recents")
+                                ))
+                            }
+                            Button("Power") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "power")
+                                ))
+                            }
+                            Button("Enter") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .key(code: "Enter", down: true)
+                                ))
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .key(code: "Enter", down: false)
+                                ))
+                            }
                             Button("Rotate") {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
                                     action: .rotate
+                                ))
+                            }
+                            Button("Book fold") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .fold(command: "book")
+                                ))
+                            }
+                            Button("Table") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .duo(command: "table")
                                 ))
                             }
                             Button("Record") {
@@ -437,8 +491,32 @@ struct DeviceScreen: View {
                         if let app = detail?.foregroundApp {
                             Text("Foreground: \(app)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
                         }
+                        ForEach(Array(view.screens.filter {
+                            $0.threadId == threadId && $0.hostId == session.hostId && $0.deviceId == session.deviceId
+                        }.enumerated()), id: \.offset) { _, screen in
+                            Text("Screen \(screen.screenId.map(String.init) ?? "main") · \(screen.width)×\(screen.height) · \(screen.orientation)")
+                                .font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
+                        }
                     }
-                    if let frame = view.frames.filter({ $0.threadId == threadId }).max(by: { $0.sequence < $1.sequence }),
+                    if !decodedFrames.isEmpty {
+                        HStack(spacing: 8) {
+                            ForEach(decodedFrames) { frame in
+                                ZStack {
+                                    Image(uiImage: frame.image).resizable().scaledToFit().frame(maxWidth: .infinity)
+                                    DeviceAccessibilityOverlay(view: view, deviceKey: "\(frame.hostId):\(frame.deviceId)")
+                                }
+                                .overlay {
+                                    GeometryReader { proxy in
+                                        Color.clear
+                                            .contentShape(Rectangle())
+                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    } else if let frame = view.frames.filter({ $0.threadId == threadId }).max(by: { $0.sequence < $1.sequence }),
                        let image = UIImage(data: Data(frame.png)) {
                         ZStack {
                             Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
@@ -467,11 +545,6 @@ struct DeviceScreen: View {
                     } else {
                         Text("Open a device to see its live frame").foregroundStyle(AppTheme.muted)
                     }
-                    if view.videoFrames.contains(where: { $0.threadId == threadId && ($0.encoding == "h264" || $0.encoding == "semu") }) {
-                        Text("Live H.264 device video is unavailable in this native decoder")
-                            .font(AppTheme.font(12))
-                            .foregroundStyle(AppTheme.muted)
-                    }
                     ForEach(Array(view.accessibility.filter { tree in threadSessions.contains { $0.hostId == tree.hostId && $0.deviceId == tree.deviceId } }.enumerated()), id: \.offset) { _, tree in
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Accessibility overlay").font(AppTheme.font(13, weight: .semibold))
@@ -489,17 +562,33 @@ struct DeviceScreen: View {
                             Text("Recording ready · \(recording.frameCount) frames · \(recording.byteCount) bytes")
                                 .font(AppTheme.font(12))
                                 .foregroundStyle(AppTheme.muted)
+                            HStack(spacing: 8) {
+                                Button("Save recording") {
+                                    guard let file = deviceRecordingFileType(recording.format, recording.bytes) else {
+                                        model.notice = "The Host did not return a playable device recording."
+                                        return
+                                    }
+                                    recordingDocument = DeviceRecordingDocument(data: Data(recording.bytes))
+                                    recordingFileName = "device-recording.\(file.extension)"
+                                    recordingContentType = file.type
+                                    exportingRecording = true
+                                }
                             Button("Attach recording") {
                                 do {
                                     let directory = try AttachmentFiles.directory()
-                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).bin")
+                                    guard let file = deviceRecordingFileType(recording.format, recording.bytes) else {
+                                        model.notice = "The Host did not return a playable device recording."
+                                        return
+                                    }
+                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).\(file.extension)")
                                     try Data(recording.bytes).write(to: url, options: .atomic)
-                                    model.perform(.attachFiles(draftKey: threadId, files: [
-                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: "application/octet-stream")
+                                    model.perform(.attachFiles(draftKey: model.snapshot.currentDraftKey(), files: [
+                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: file.mime)
                                     ]))
                                 } catch {
                                     model.notice = error.localizedDescription
                                 }
+                            }
                             }
                         }
                     }
@@ -513,25 +602,37 @@ struct DeviceScreen: View {
             model.perform(.openThread(threadId: threadId))
             model.perform(.loadDevices)
             model.perform(.subscribeDevice)
+            deviceFrames.consume(view.videoEvents, threadId: threadId)
             for session in threadSessions {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
                 model.perform(.loadDeviceAccessibility(hostId: session.hostId, deviceId: session.deviceId))
-                if session.platform == "ios" {
-                    model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
-                }
+                model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
             }
+        }
+        .onChange(of: model.snapshot.device().revision) { _, _ in
+            let next = model.snapshot.device()
+            deviceFrames.consume(next.videoEvents, threadId: threadId)
         }
         .onChange(of: threadSessionKey) { _, _ in
             let sessions = model.snapshot.device().sessions
             for session in sessions where session.threadId == threadId {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
                 model.perform(.loadDeviceAccessibility(hostId: session.hostId, deviceId: session.deviceId))
-                if session.platform == "ios" {
-                    model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
-                }
+                model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
             }
         }
-        .onDisappear { model.perform(.unsubscribeDevice) }
+        .onDisappear {
+            deviceFrames.reset(threadId: threadId)
+            model.perform(.unsubscribeDevice)
+        }
+        .fileExporter(
+            isPresented: $exportingRecording,
+            document: recordingDocument,
+            contentType: recordingContentType,
+            defaultFilename: recordingFileName
+        ) { result in
+            if case let .failure(error) = result { model.notice = error.localizedDescription }
+        }
     }
 
     private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize) -> some Gesture {
@@ -559,6 +660,34 @@ struct DeviceScreen: View {
                 ))
             }
     }
+}
+
+private struct DeviceRecordingDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.data, .movie] }
+    let data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+private func deviceRecordingFileType(_ format: String, _ bytes: [UInt8]) -> (extension: String, mime: String, type: UTType)? {
+    if bytes.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) {
+        return ("webm", "video/webm", UTType(filenameExtension: "webm") ?? .movie)
+    }
+    if bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) {
+        return ("mp4", "video/mp4", UTType(filenameExtension: "mp4") ?? .movie)
+    }
+    if format == "mjpeg", zip(bytes, bytes.dropFirst()).contains(where: { $0.0 == 0xff && $0.1 == 0xd8 }) {
+        return ("mjpeg", "video/x-motion-jpeg", UTType.data)
+    }
+    return nil
 }
 
 private extension CGFloat {
