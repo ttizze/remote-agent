@@ -13,6 +13,9 @@ pub const PREVIEW_VIEWPORT_MAX_DIMENSION: u32 = 3_840;
 pub const PREVIEW_VIEWPORT_MAX_AREA: u64 = 3_840 * 2_160;
 pub const PREVIEW_RECORDING_MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const PREVIEW_RECORDING_MAX_DURATION_SECONDS: u64 = 120;
+pub const PREVIEW_PROFILE_ID_MAX_LENGTH: usize = 64;
+pub const DEFAULT_PREVIEW_PROFILE_ID: &str = "default";
+pub const INCOGNITO_PREVIEW_PROFILE_ID: &str = "incognito";
 
 pub const COMMON_DEV_PORTS: &[u16] = &[
     3000, 3001, 3333, 4173, 4200, 4321, 5000, 5173, 5174, 5175, 5500, 8000, 8080, 8081, 8888,
@@ -306,12 +309,19 @@ pub struct PreviewSessionSnapshot {
     pub viewport: PreviewViewportSetting,
     pub zoom: PreviewZoom,
     pub appearance: PreviewAppearance,
+    /// The isolated browser identity used to create this tab.  The built-in
+    /// default profile is omitted so older snapshots remain compact; Hosts
+    /// still treat an omitted value as the default partition.
+    pub profile_id: Option<String>,
     pub updated_at: String,
 }
 impl PreviewSessionSnapshot {
     pub fn validate(&self) -> Result<(), String> {
         if self.tab_id.trim().is_empty() || self.tab_id.len() > 128 {
             return Err("preview tab id is invalid".into());
+        }
+        if let Some(profile_id) = &self.profile_id {
+            validate_profile_id(profile_id)?;
         }
         self.viewport.validate()?;
         self.nav_status.validate()
@@ -382,10 +392,41 @@ pub struct PreviewList {
 pub struct PreviewRecordingStart {
     pub thread_id: agent_domain::ThreadId,
     pub tab_id: String,
+    pub options: PreviewRecordingOptions,
 }
 impl PreviewRecordingStart {
     pub fn validate(&self) -> Result<(), String> {
-        validate_tab_id(&self.tab_id)
+        validate_tab_id(&self.tab_id)?;
+        self.options.validate()
+    }
+}
+
+/// Client-owned recording preferences forwarded to the Host capture owner.
+/// The Host never silently substitutes a different frame rate or decoration
+/// policy after a recording has started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRecordingOptions {
+    pub frame_rate: u8,
+    pub show_key_presses: bool,
+    pub show_mouse_presses: bool,
+}
+impl Default for PreviewRecordingOptions {
+    fn default() -> Self {
+        Self {
+            frame_rate: 30,
+            show_key_presses: false,
+            show_mouse_presses: false,
+        }
+    }
+}
+impl PreviewRecordingOptions {
+    pub fn validate(self) -> Result<(), String> {
+        if matches!(self.frame_rate, 30 | 60) {
+            Ok(())
+        } else {
+            Err("preview recording frame rate must be 30 or 60".into())
+        }
     }
 }
 
@@ -462,6 +503,7 @@ pub struct PreviewOpen {
     pub appearance: PreviewAppearance,
     pub zoom: PreviewZoom,
     pub rendered_size: Option<PreviewRenderedViewportSize>,
+    pub profile_id: Option<String>,
 }
 impl PreviewOpen {
     pub fn validate(&self) -> Result<(), String> {
@@ -471,6 +513,9 @@ impl PreviewOpen {
         }
         if let Some(url) = &self.url {
             normalize_preview_url(url).map(|_| ())?;
+        }
+        if let Some(profile_id) = &self.profile_id {
+            validate_profile_id(profile_id)?;
         }
         Ok(())
     }
@@ -579,6 +624,17 @@ impl PreviewReportStatus {
 fn validate_tab_id(tab_id: &str) -> Result<(), String> {
     if tab_id.trim().is_empty() || tab_id.len() > 128 {
         Err("preview tab id is invalid".into())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_profile_id(profile_id: &str) -> Result<(), String> {
+    if profile_id.trim().is_empty()
+        || profile_id.len() > PREVIEW_PROFILE_ID_MAX_LENGTH
+        || profile_id.chars().any(char::is_control)
+    {
+        Err("preview profile id is invalid".into())
     } else {
         Ok(())
     }
@@ -705,7 +761,7 @@ mod tests {
     #[test]
     fn recording_requests_require_a_tab_id() {
         let thread_id = agent_domain::ThreadId::new("thread").unwrap();
-        assert!(PreviewRecordingStart { thread_id: thread_id.clone(), tab_id: "tab".into() }
+        assert!(PreviewRecordingStart { thread_id: thread_id.clone(), tab_id: "tab".into(), options: PreviewRecordingOptions::default() }
             .validate()
             .is_ok());
         assert!(PreviewRecordingStop { thread_id, tab_id: String::new() }

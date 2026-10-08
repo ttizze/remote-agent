@@ -523,10 +523,6 @@ pub struct Snapshot {
     pub frozen_open_draft: Option<FrozenDraft>,
     /// The Host's provider instances and their models; `None` until listed.
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
-    /// Host-owned Agent Client Protocol registry state. Search and lifecycle
-    /// operations are asynchronous, so the client keeps the last successful
-    /// result while a newer request is in flight.
-    pub acp_registry: AcpRegistryState,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
     /// Provider commands, path search, refs and diff previews.
@@ -557,9 +553,6 @@ pub struct Snapshot {
     /// The native app's store update surface, when a configured release link exists.
     pub native_update: Option<crate::models::NativeUpdateState>,
     pub host_resources: Option<agent_protocol::background::HostResourcesSnapshot>,
-    /// Client receipt time for the latest resource reply. Host sample clocks
-    /// are not comparable across environments and are never used for routing.
-    pub host_resources_received_at_ms: Option<i64>,
     pub process_diagnostics: Option<agent_protocol::background::ProcessDiagnosticsResult>,
     pub process_resource_history:
         Option<agent_protocol::background::ProcessResourceHistoryResult>,
@@ -594,19 +587,6 @@ pub struct Snapshot {
     pub device: DeviceState,
 }
 
-/// The client projection of the Host's ACP registry operations.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AcpRegistryState {
-    pub query: String,
-    pub results: Option<agent_protocol::operations::AcpRegistrySearchResult>,
-    pub search_pending: bool,
-    pub prepare_pending: Option<String>,
-    pub prepared: BTreeMap<String, agent_protocol::operations::PreparedAcpAgent>,
-    pub uninstall_pending: Option<String>,
-    pub probe_pending: Option<String>,
-    pub probes: BTreeMap<String, agent_protocol::operations::AcpProbeResult>,
-    pub error: Option<String>,
-}
 /// The device's fold of Host preview metadata. Pixels remain in the browser
 /// panel; this state only describes tabs, server cards and ordering.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,6 +606,8 @@ pub struct PreviewState {
     pub last_recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingArtifact>,
     #[serde(skip)]
     closed_tabs: BTreeSet<String>,
+    #[serde(skip)]
+    invalidated_recordings: BTreeSet<String>,
 }
 impl PreviewState {
     pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
@@ -649,6 +631,9 @@ impl PreviewState {
             }
             return;
         }
+        if server_epoch_changed {
+            self.invalidated_recordings.extend(self.sessions.keys().cloned());
+        }
         self.sessions = result
             .sessions
             .into_iter()
@@ -659,6 +644,19 @@ impl PreviewState {
             .into_iter()
             .map(|status| (status.tab_id.clone(), status))
             .collect();
+        for tab_id in result.invalidated_recordings {
+            self.invalidated_recordings.insert(tab_id.clone());
+            self.last_recordings.remove(&tab_id);
+        }
+        let active_recording_tabs = self
+            .recordings
+            .values()
+            .filter(|status| status.recording)
+            .map(|status| status.tab_id.clone())
+            .collect::<Vec<_>>();
+        for tab_id in active_recording_tabs {
+            self.invalidated_recordings.remove(&tab_id);
+        }
         if server_epoch_changed {
             self.last_recordings.clear();
         } else {
@@ -724,6 +722,7 @@ impl PreviewState {
     pub fn close(&mut self, tab_id: Option<&str>) {
         if let Some(tab_id) = tab_id {
             self.closed_tabs.insert(tab_id.to_owned());
+            self.invalidated_recordings.insert(tab_id.to_owned());
             self.sessions.remove(tab_id);
             if self.active_tab.as_deref() == Some(tab_id) {
                 self.active_tab = self.sessions.keys().next().cloned();
@@ -732,6 +731,8 @@ impl PreviewState {
             self.last_recordings.remove(tab_id);
         } else {
             self.closed_tabs.extend(self.sessions.keys().cloned());
+            self.invalidated_recordings
+                .extend(self.sessions.keys().cloned());
             self.sessions.clear();
             self.active_tab = None;
             self.recordings.clear();
@@ -744,6 +745,44 @@ impl PreviewState {
 
     pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
         self.recordings.get(tab_id)
+    }
+
+    pub fn apply_recording_status(
+        &mut self,
+        status: agent_protocol::preview::PreviewRecordingStatus,
+    ) {
+        if self.closed_tabs.contains(&status.tab_id)
+            || !self.sessions.contains_key(&status.tab_id)
+            || (!status.recording && self.invalidated_recordings.contains(&status.tab_id))
+        {
+            return;
+        }
+        if status.recording {
+            self.invalidated_recordings.remove(&status.tab_id);
+        }
+        self.last_recordings.remove(&status.tab_id);
+        self.recordings.insert(status.tab_id.clone(), status);
+    }
+
+    pub fn apply_recording_artifact(
+        &mut self,
+        artifact: agent_protocol::preview::PreviewRecordingArtifact,
+    ) {
+        if self.closed_tabs.contains(&artifact.tab_id)
+            || !self.sessions.contains_key(&artifact.tab_id)
+            || self.invalidated_recordings.contains(&artifact.tab_id)
+        {
+            return;
+        }
+        self.recordings.insert(
+            artifact.tab_id.clone(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: artifact.tab_id.clone(),
+                recording: false,
+                started_at: None,
+            },
+        );
+        self.last_recordings.insert(artifact.tab_id.clone(), artifact);
     }
 
     pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
@@ -768,9 +807,11 @@ mod preview_state_tests {
                 viewport: PreviewViewportSetting::Fill,
                 zoom: agent_protocol::preview::PreviewZoom::X100,
                 appearance: agent_protocol::preview::PreviewAppearance::System,
+                profile_id: None,
                 updated_at: String::new(),
             }],
             recordings: vec![],
+            invalidated_recordings: vec![],
             local_servers: vec![],
             scanned_at: String::new(),
             server_epoch: epoch.into(),
@@ -778,6 +819,26 @@ mod preview_state_tests {
             scanner_epoch: "scanner".into(),
             scanner_revision: revision,
         }
+    }
+
+    #[test]
+    fn drops_core_artifact_references_evicted_by_host_retention() {
+        let mut state = PreviewState::default();
+        state.last_recordings.insert(
+            "old".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "recording".into(),
+                tab_id: "old".into(),
+                path: "/tmp/recording.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "0".into(),
+            },
+        );
+        let mut result = list("epoch", 1, "old");
+        result.invalidated_recordings = vec!["old".into()];
+        state.apply_list(result);
+        assert!(state.last_recordings.is_empty());
     }
 
     #[test]
@@ -852,6 +913,7 @@ mod preview_state_tests {
             viewport: PreviewViewportSetting::Fill,
             zoom: agent_protocol::preview::PreviewZoom::X100,
             appearance: agent_protocol::preview::PreviewAppearance::System,
+            profile_id: None,
             updated_at: String::new(),
         });
         result.recordings = vec![
@@ -900,6 +962,29 @@ mod preview_state_tests {
         state.close(Some("tab"));
         assert!(state.recordings.is_empty());
         assert!(state.last_recordings.is_empty());
+    }
+
+    #[test]
+    fn late_recording_artifact_cannot_restore_an_evicted_or_closed_tab() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        let artifact = || agent_protocol::preview::PreviewRecordingArtifact {
+            id: "late-recording".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/late-recording.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "0".into(),
+        };
+        let mut evicted = list("epoch", 2, "tab");
+        evicted.invalidated_recordings = vec!["tab".into()];
+        state.apply_list(evicted);
+        state.apply_recording_artifact(artifact());
+        assert!(state.last_recording_for("tab").is_none());
+
+        state.close(Some("tab"));
+        state.apply_recording_artifact(artifact());
+        assert!(state.last_recording_for("tab").is_none());
     }
 }
 
@@ -1055,17 +1140,14 @@ impl Snapshot {
     /// The new-thread defaults after applying the selected project's overrides.
     /// A draft explicitly saved for that project still wins over this fallback.
     pub fn new_thread_default_draft(&self) -> Draft {
-        self.new_thread_default_draft_for_project(self.selected_project.as_deref())
-    }
-    /// The new-thread defaults for an explicit project selection. Native
-    /// project pickers can evaluate routing before changing the selected
-    /// project on the Store, so the override lookup must use the requested id.
-    pub fn new_thread_default_draft_for_project(&self, project_id: Option<&str>) -> Draft {
-        let mut draft = self.default_draft.user_defaults();
+        let mut draft = self.default_draft.clone();
         let Some(host) = &self.host_settings else {
             return draft;
         };
-        let overrides = project_id.and_then(|project| host.project_overrides.get(project));
+        let overrides = self
+            .selected_project
+            .as_deref()
+            .and_then(|project| host.project_overrides.get(project));
         if let Some(mode) = overrides.and_then(|project| project.default_runtime_mode) {
             draft.runtime_mode = mode;
         }
@@ -1073,6 +1155,45 @@ impl Snapshot {
             overrides.and_then(|project| project.default_model_selection.as_ref())
         {
             draft = draft.with_selection(selection);
+        }
+        if self.preferences.load_balancing_enabled {
+            let providers = self.providers.as_deref().unwrap_or(&[]);
+            let candidates = providers
+                .iter()
+                .map(|provider| crate::view::load_balancing::Candidate {
+                    instance_id: provider.instance.clone(),
+                    driver: provider.driver,
+                    ready: provider.enabled
+                        && provider.status == agent_protocol::models::ProviderStatus::Ready,
+                })
+                .collect::<Vec<_>>();
+            let seed = crate::view::load_balancing::seed(
+                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
+            );
+            if let Some(instance) = crate::view::load_balancing::select_instance(
+                &candidates,
+                draft.driver,
+                &self.preferences.load_balancing_weights,
+                seed,
+            ) {
+                if let Some(provider) = providers
+                    .iter()
+                    .find(|provider| provider.instance == instance)
+                {
+                    let model = provider
+                        .models
+                        .iter()
+                        .find(|model| model.slug == draft.model)
+                        .or_else(|| provider.models.iter().find(|model| model.is_default))
+                        .or_else(|| provider.models.first());
+                    if let Some(model) = model {
+                        draft.instance_id = provider.instance.clone();
+                        draft.driver = provider.driver;
+                        draft.model = model.slug.clone();
+                        draft.options.clear();
+                    }
+                }
+            }
         }
         draft
     }
@@ -1510,27 +1631,6 @@ pub enum AnswerEdit {
     Custom { text: String },
 }
 
-/// Device push registration data supplied by a native client. Provider
-/// credentials stay on the Host; this record contains only device tokens and
-/// presentation choices needed by the Host's direct delivery resource.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct PushDeviceRegistration {
-    pub device_id: String,
-    pub platform: String,
-    pub token: String,
-    pub live_activity_token: Option<String>,
-    pub push_to_start_token: Option<String>,
-    pub bundle_id: Option<String>,
-    pub apns_environment: Option<String>,
-    pub notifications_enabled: bool,
-    pub notify_on_approval: bool,
-    pub notify_on_input: bool,
-    pub notify_on_completion: bool,
-    pub notify_on_failure: bool,
-    pub live_activities_enabled: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceHostInput {
@@ -1749,6 +1849,7 @@ pub enum Intent {
         viewport: agent_protocol::preview::PreviewViewportSetting,
         appearance: agent_protocol::preview::PreviewAppearance,
         zoom: agent_protocol::preview::PreviewZoom,
+        profile_id: Option<String>,
     },
     PreviewNavigate {
         tab_id: String,
@@ -1779,6 +1880,7 @@ pub enum Intent {
     },
     PreviewRecordingStart {
         tab_id: String,
+        options: agent_protocol::preview::PreviewRecordingOptions,
     },
     PreviewRecordingStop {
         tab_id: String,
@@ -1904,16 +2006,6 @@ pub enum Intent {
     },
 
     // Queue, requests and plans.
-    RegisterPushDevice {
-        registration: PushDeviceRegistration,
-    },
-    UnregisterPushDevice {
-        device_id: String,
-    },
-    SetPushDeviceActive {
-        device_id: String,
-        active: bool,
-    },
     Queue {
         action: QueueAction,
     },
@@ -2218,18 +2310,15 @@ pub enum Intent {
     SetInAppNotificationsEnabled {
         enabled: bool,
     },
-    /// Enables weighted routing of new threads across matching environments.
+    /// Enables weighted routing of new threads across provider instances.
     SetLoadBalancingEnabled {
         enabled: bool,
     },
-    /// Sets one environment's local routing weight from 0 to 100.
+    /// Sets one provider instance's local routing weight from 0 to 100.
     SetLoadBalancingWeight {
-        environment_id: String,
+        instance_id: String,
         weight: u8,
     },
-    /// Refreshes capacity only while an automatic new-thread route is being
-    /// resolved. There is no background polling for this intent.
-    RefreshLoadBalancingResources,
     SetSnapshotCaptureEnabled {
         enabled: bool,
     },
@@ -2261,13 +2350,6 @@ pub enum Intent {
     /// The permissions new threads start with; an open thread keeps its own.
     SetDefaultRuntimeMode {
         mode: RuntimeMode,
-    },
-    /// Replaces the Host-owned provider instance map atomically.
-    SetProviderInstances {
-        /// JSON for the complete map. The native layer uses the protocol's
-        /// serde shape while the binding-safe intent keeps the config types
-        /// out of the generated mobile enum.
-        provider_instances_json: String,
     },
     ToggleFavoriteModel {
         instance_id: String,
@@ -2392,28 +2474,6 @@ pub enum Intent {
         credit_id: Option<String>,
     },
     LoadProviders,
-    /// Runs the updater owned by a configured provider installation.
-    UpdateProvider {
-        instance: String,
-        target_version: Option<String>,
-    },
-    /// Searches the Host's credential-free ACP registry.
-    SearchAcpRegistry {
-        query: String,
-    },
-    /// Installs or prepares one ACP registry agent on the Host.
-    PrepareAcpAgent {
-        agent_id: String,
-    },
-    /// Removes one Host-managed ACP agent.
-    UninstallAcpAgent {
-        agent_id: String,
-    },
-    /// Probes one prepared ACP agent from a working directory.
-    ProbeAcpAgent {
-        agent_id: String,
-        cwd: String,
-    },
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,
@@ -2754,21 +2814,14 @@ mod tests {
             snapshot.new_thread_workspace().mode,
             crate::view::projects::selection::ThreadWorkspaceMode::Local
         );
-        let other = snapshot.new_thread_default_draft_for_project(Some("other"));
-        assert_eq!(other.instance_id, "codex");
-        assert_eq!(other.model, "gpt");
     }
 
     #[test]
-    fn load_balancing_preference_does_not_mutate_a_host_default_draft() {
+    fn load_balancing_routes_a_new_thread_to_the_weighted_ready_instance() {
         let mut snapshot = Snapshot {
             selected_project: Some("project".into()),
             host_settings: Some(crate::models::HostSettings::default()),
             default_draft: Draft {
-                text: "old task text".into(),
-                project_id: Some("old-project".into()),
-                project_selected_at_ms: Some(10),
-                created_at_ms: Some(20),
                 instance_id: "codex".into(),
                 driver: Driver::Codex,
                 model: "shared".into(),
@@ -2780,14 +2833,59 @@ mod tests {
         snapshot
             .preferences
             .load_balancing_weights
-            .insert("environment-build".into(), 100);
+            .insert("codex-build".into(), 100);
+        snapshot.providers = Some(vec![
+            crate::models::ProviderInstance {
+                instance: "codex".into(),
+                driver: Driver::Codex,
+                display_name: "Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+            crate::models::ProviderInstance {
+                instance: "codex-build".into(),
+                driver: Driver::Codex,
+                display_name: "Build Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+        ]);
         let draft = snapshot.new_thread_default_draft();
-        assert_eq!(draft.instance_id, "codex");
-        assert_eq!(draft.model, "shared");
-        assert!(draft.text.is_empty());
-        assert!(draft.project_id.is_none());
-        assert!(draft.project_selected_at_ms.is_none());
-        assert!(draft.created_at_ms.is_none());
+        assert_eq!(draft.instance_id, "codex-build");
     }
 
     #[test]

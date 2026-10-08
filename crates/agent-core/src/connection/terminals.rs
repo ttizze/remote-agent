@@ -124,6 +124,7 @@ impl Owner {
                     appearance: agent_protocol::preview::PreviewAppearance::System,
                     zoom: agent_protocol::preview::PreviewZoom::X100,
                     rendered_size: None,
+                    profile_id: None,
                 }),
                 None,
                 None,

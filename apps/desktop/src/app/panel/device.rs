@@ -3,11 +3,17 @@ mod device_decoder;
 
 use super::PanelTab;
 use crate::app::{Desktop, ui::{color, icon, tint}};
-use agent_core::state::{
-    DeviceActionIntent, DeviceDuoCommandIntent, DeviceDuoPoseIntent, Intent,
-};
+use agent_core::state::{DeviceActionIntent, DeviceDuoCommandIntent, DeviceDuoPoseIntent, Intent};
 use gpui_kit::{component::{Sizable, button::{Button, ButtonVariants}, h_flex, input::{Input, InputState}, v_flex}, prelude::FluentBuilder, *};
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+
+struct ActiveDeviceTouch {
+    host_id: String,
+    device_id: String,
+    screen_id: u8,
+    x: f32,
+    y: f32,
+}
 
 pub(super) struct DeviceState {
     thread: Option<String>,
@@ -16,8 +22,12 @@ pub(super) struct DeviceState {
     detail_requests: BTreeSet<String>,
     accessibility_requests: BTreeSet<String>,
     event_log_requests: BTreeSet<String>,
-    frames: BTreeMap<(String, String, String, u8), (u64, Arc<Image>)>,
+    frames: BTreeMap<(String, String, u8), (u64, Arc<Image>)>,
+    frame_epochs: BTreeMap<(String, String, u8), String>,
+    frame_bounds: BTreeMap<(String, String, u8), Bounds<Pixels>>,
+    active_touch: Option<ActiveDeviceTouch>,
     decoder: device_decoder::DeviceVideoDecoder,
+    focus: FocusHandle,
     ssh_label: Entity<InputState>,
     ssh_target: Entity<InputState>,
     ssh_identity_file: Entity<InputState>,
@@ -34,7 +44,11 @@ impl DeviceState {
             accessibility_requests: BTreeSet::new(),
             event_log_requests: BTreeSet::new(),
             frames: BTreeMap::new(),
+            frame_epochs: BTreeMap::new(),
+            frame_bounds: BTreeMap::new(),
+            active_touch: None,
             decoder: device_decoder::DeviceVideoDecoder::default(),
+            focus: cx.focus_handle(),
             ssh_label: cx.new(|cx| InputState::new(window, cx).placeholder("Build server")),
             ssh_target: cx.new(|cx| InputState::new(window, cx).placeholder("user@host")),
             ssh_identity_file: cx.new(|cx| InputState::new(window, cx).placeholder("~/.ssh/id_ed25519")),
@@ -50,11 +64,110 @@ impl DeviceState {
         self.accessibility_requests.clear();
         self.event_log_requests.clear();
         self.frames.clear();
+        self.frame_epochs.clear();
+        self.frame_bounds.clear();
+        self.active_touch = None;
         self.decoder.reset();
     }
 }
 
 impl Desktop {
+    fn device_touch(
+        &mut self,
+        host_id: String,
+        device_id: String,
+        screen_id: u8,
+        phase: &'static str,
+        position: Point<Pixels>,
+        frame_width: u32,
+        frame_height: u32,
+        cx: &mut App,
+    ) {
+        let key = (host_id.clone(), device_id.clone(), screen_id);
+        let bounds = self
+            .panels
+            .device
+            .frame_bounds
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let Some(point) = device_frame_point(bounds, position, frame_width, frame_height) else {
+            if phase == "end" {
+                self.send_device_touch_end();
+            }
+            cx.stop_propagation();
+            return;
+        };
+        let (x, y) = point;
+        self.perform(Intent::DeviceAction {
+            host_id: Some(host_id.clone()),
+            device_id: device_id.clone(),
+            action: DeviceActionIntent::Touch { phase: phase.into(), x, y, raw: true },
+        });
+        if phase == "end" {
+            self.panels.device.active_touch = None;
+        } else {
+            self.panels.device.active_touch = Some(ActiveDeviceTouch {
+                host_id,
+                device_id,
+                screen_id,
+                x,
+                y,
+            });
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn send_device_touch_end(&mut self) -> bool {
+        let Some(touch) = self.panels.device.active_touch.take() else { return false };
+        self.perform(Intent::DeviceAction {
+            host_id: Some(touch.host_id),
+            device_id: touch.device_id,
+            action: DeviceActionIntent::Touch {
+                phase: "end".into(),
+                x: touch.x,
+                y: touch.y,
+                raw: true,
+            },
+        });
+        true
+    }
+
+    fn cancel_device_touch(&mut self, cx: &mut App) {
+        if !self.send_device_touch_end() {
+            return;
+        }
+        cx.notify();
+    }
+
+    fn device_key_down(&mut self, host_id: String, device_id: String, event: &KeyDownEvent, cx: &mut App) {
+        self.send_device_key(host_id, device_id, &event.keystroke, true);
+        cx.stop_propagation();
+    }
+
+    fn device_key_up(&mut self, host_id: String, device_id: String, event: &KeyUpEvent, cx: &mut App) {
+        self.send_device_key(host_id, device_id, &event.keystroke, false);
+        cx.stop_propagation();
+    }
+
+    fn send_device_key(&mut self, host_id: String, device_id: String, keystroke: &Keystroke, down: bool) {
+        let key = device_key_value(&keystroke.key);
+        let code = device_key_code(&key);
+        let modifiers = keystroke.modifiers;
+        self.perform(Intent::DeviceAction {
+            host_id: Some(host_id),
+            device_id,
+            action: DeviceActionIntent::Key {
+                code,
+                key,
+                down,
+                meta: modifiers.platform,
+                ctrl: modifiers.control,
+            },
+        });
+    }
+
     fn configure_device_ssh_host(&mut self, cx: &mut Context<Desktop>) {
         let label = self.panels.device.ssh_label.read(cx).value().trim().to_owned();
         let target = self.panels.device.ssh_target.read(cx).value().trim().to_owned();
@@ -126,30 +239,14 @@ impl Desktop {
     }
 
     fn attach_device_recording(&self, draft_key: String, recording: agent_core::view::device::DeviceRecordingView) {
-        let file_name = recording.file_name.clone();
-        if file_name.trim().is_empty() {
+        let Some((extension, mime_type)) = recording_file_type(&recording) else {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
             self.stage(draft_key, move || {
                 Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
             });
             return;
-        }
-        let mime_type = recording.mime_type.clone();
-        if mime_type.trim().is_empty() {
-            let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
-            self.stage(draft_key, move || {
-                Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
-            });
-            return;
-        }
-        if recording.bytes.is_empty() {
-            let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
-            self.stage(draft_key, move || {
-                Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
-            });
-            return;
-        }
-        let name = file_name;
+        };
+        let name = format!("device-recording-{draft_key}.{extension}");
         let bytes = recording.bytes;
         let directory = self.attachments.directory.clone();
         self.stage(draft_key, move || {
@@ -161,7 +258,7 @@ impl Desktop {
                 vec![agent_core::state::LocalFile {
                     path: path.to_string_lossy().into_owned(),
                     name,
-                    mime_type,
+                    mime_type: mime_type.into(),
                 }],
                 None,
             ))
@@ -174,6 +271,7 @@ impl Desktop {
         }
         let Some(thread) = self.thread_id() else { return };
         if self.panels.device.thread.as_deref() != Some(thread.as_str()) {
+            self.send_device_touch_end();
             self.panels.device.thread = Some(thread.clone());
             self.panels.device.loaded = false;
             self.panels.device.subscribed = false;
@@ -181,6 +279,9 @@ impl Desktop {
             self.panels.device.accessibility_requests.clear();
             self.panels.device.event_log_requests.clear();
             self.panels.device.frames.clear();
+            self.panels.device.frame_epochs.clear();
+            self.panels.device.frame_bounds.clear();
+            self.panels.device.active_touch = None;
             self.panels.device.decoder.reset();
         }
         if !self.panels.device.loaded {
@@ -216,25 +317,66 @@ impl Desktop {
             }
         }
         let view = self.snapshot.device();
-        let active_sessions = view
+        let active_decoder_sessions = view
             .sessions
             .iter()
             .filter(|session| session.thread_id == thread)
             .map(|session| {
                 (
-                    session.thread_id.clone(),
+                    session.thread_id.to_string(),
                     session.host_id.clone(),
                     session.device_id.clone(),
                     session.session_epoch.clone(),
                 )
             })
             .collect::<BTreeSet<_>>();
-        self.panels.device.decoder.retain_sessions(&active_sessions);
-        self.panels.device.frames.retain(|(host_id, device_id, epoch, _), _| {
-            active_sessions.iter().any(|(_, active_host, active_device, active_epoch)| {
-                active_host == host_id && active_device == device_id && active_epoch == epoch
-            })
+        self.panels
+            .device
+            .decoder
+            .retain_sessions(&active_decoder_sessions);
+        let live_epochs = view
+            .sessions
+            .iter()
+            .filter(|session| session.thread_id == thread)
+            .map(|session| ((session.host_id.clone(), session.device_id.clone()), session.session_epoch.clone()))
+            .collect::<BTreeMap<_, _>>();
+        self.panels.device.frame_epochs.retain(|(host_id, device_id, _), epoch| {
+            live_epochs.get(&(host_id.clone(), device_id.clone())) == Some(epoch)
         });
+        let live_frame_keys = self.panels.device.frame_epochs.keys().cloned().collect::<BTreeSet<_>>();
+        self.panels.device.frames.retain(|key, _| live_frame_keys.contains(key));
+        let mut newest_frames = BTreeMap::new();
+        for frame in view.frames.iter().filter(|frame| frame.thread_id == thread) {
+            let entry = newest_frames
+                .entry((frame.host_id.clone(), frame.device_id.clone()))
+                .or_insert(frame);
+            if frame.sequence > entry.sequence {
+                *entry = frame;
+            }
+        }
+        for frame in newest_frames.into_values().filter(|frame| !frame.png.is_empty()) {
+            let key = (frame.host_id.clone(), frame.device_id.clone(), 0);
+            if self
+                .panels
+                .device
+                .frames
+                .get(&key)
+                .is_none_or(|(sequence, _)| *sequence != frame.sequence)
+            {
+                self.panels.device.frames.insert(
+                    key,
+                    (
+                        frame.sequence,
+                        Arc::new(Image::from_bytes(ImageFormat::Png, frame.png.clone())),
+                    ),
+                );
+                self.panels.device.frame_epochs.insert(
+                    (frame.host_id.clone(), frame.device_id.clone(), 0),
+                    frame.session_epoch.clone(),
+                );
+                cx.notify();
+            }
+        }
         let events = view
             .video_events
             .iter()
@@ -244,18 +386,18 @@ impl Desktop {
         for image in self.panels.device.decoder.push(&events) {
             let format = match image.format {
                 device_decoder::DeviceImageFormat::Jpeg => ImageFormat::Jpeg,
+                device_decoder::DeviceImageFormat::Png => ImageFormat::Png,
             };
             self.panels.device.frames.insert(
-                (
-                    image.host_id.clone(),
-                    image.device_id.clone(),
-                    image.session_epoch.clone(),
-                    image.screen_id,
-                ),
+                (image.host_id.clone(), image.device_id.clone(), image.screen_id),
                 (
                     image.sequence,
                     Arc::new(Image::from_bytes(format, image.bytes)),
                 ),
+            );
+            self.panels.device.frame_epochs.insert(
+                (image.host_id.clone(), image.device_id.clone(), image.screen_id),
+                image.session_epoch.clone(),
             );
             cx.notify();
         }
@@ -263,13 +405,40 @@ impl Desktop {
 
     pub(super) fn render_device(&mut self, cx: &mut Context<Desktop>) -> AnyElement {
         let view = self.snapshot.device();
+        let frame_sizes = view
+            .video_frames
+            .iter()
+            .map(|frame| {
+                (
+                    (frame.host_id.clone(), frame.device_id.clone(), frame.screen_id.unwrap_or(0)),
+                    (frame.width, frame.height),
+                )
+            })
+            .chain(view.frames.iter().map(|frame| {
+                (
+                    (frame.host_id.clone(), frame.device_id.clone(), 0),
+                    (frame.width, frame.height),
+                )
+            }))
+            .collect::<BTreeMap<_, _>>();
         let frame_images = self
             .panels
             .device
             .frames
             .values()
-            .map(|((host_id, device_id, _, _), (_, image))| {
-                (host_id.clone(), device_id.clone(), image.clone())
+            .map(|((host_id, device_id, screen_id), (_, image))| {
+                let (width, height) = frame_sizes
+                    .get(&(host_id.clone(), device_id.clone(), *screen_id))
+                    .copied()
+                    .unwrap_or((1, 1));
+                (
+                    host_id.clone(),
+                    device_id.clone(),
+                    *screen_id,
+                    image.clone(),
+                    width,
+                    height,
+                )
             })
             .collect::<Vec<_>>();
         let enabled = view.enabled;
@@ -279,7 +448,7 @@ impl Desktop {
             .sessions
             .iter()
             .filter(|session| current_thread.as_deref() == Some(session.thread_id.as_str()))
-            .map(|session| (session.host_id.clone(), session.device_id.clone(), session.platform.clone()))
+            .map(|session| (session.host_id.clone(), session.device_id.clone()))
             .collect::<Vec<_>>();
         let current_thread_has_session = !action_targets.is_empty();
         let entries = view.devices.iter().map(|device| {
@@ -336,8 +505,22 @@ impl Desktop {
                     row.child(Button::new(SharedString::from(format!("remove-device-host-{id}"))).label("Remove").xsmall().on_click(cx.listener(move |view, _, _, _| view.remove_device_ssh_host(&id))))
                 })
         });
-        let device_controls = action_targets.into_iter().map(|(host_id, device_id, platform)| {
+        let device_controls = action_targets.into_iter().map(|(host_id, device_id)| {
             let target = format!("{host_id}:{device_id}");
+            let duo_status = view
+                .duo_controls
+                .iter()
+                .find(|control| {
+                    current_thread.as_deref() == Some(control.thread_id.as_str())
+                        && control.host_id == host_id
+                        && control.device_id == device_id
+                })
+                .and_then(|control| {
+                    control
+                        .error
+                        .clone()
+                        .or_else(|| control.pending.then_some("Duo control pending".into()))
+                });
             h_flex()
                 .id(SharedString::from(format!("device-controls-{target}")))
                 .gap_1()
@@ -421,24 +604,12 @@ impl Desktop {
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Key {
-                                code: "Enter".into(),
-                                key: "Enter".into(),
-                                down: true,
-                                meta: false,
-                                ctrl: false,
-                            },
+                            action: DeviceActionIntent::Key { code: "Enter".into(), key: "Enter".into(), down: true, meta: false, ctrl: false },
                         });
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Key {
-                                code: "Enter".into(),
-                                key: "Enter".into(),
-                                down: false,
-                                meta: false,
-                                ctrl: false,
-                            },
+                            action: DeviceActionIntent::Key { code: "Enter".into(), key: "Enter".into(), down: false, meta: false, ctrl: false },
                         });
                     }
                 })))
@@ -475,15 +646,16 @@ impl Desktop {
                         device_id: device_id.clone(),
                     })
                 })))
-                .when(platform == "ios", |panel| panel
-                .child(Button::new(SharedString::from(format!("device-fold-book-{host_id}-{device_id}"))).label("Book pose").xsmall().on_click(cx.listener({
+                .child(Button::new(SharedString::from(format!("device-fold-book-{host_id}-{device_id}"))).label("Book fold").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
                     move |view, _, _, _| view.perform(Intent::DeviceAction {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
                         action: DeviceActionIntent::Duo {
-                            command: DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Book },
+                            command: DeviceDuoCommandIntent::Pose {
+                                value: DeviceDuoPoseIntent::Book,
+                            },
                         },
                     })
                 })))
@@ -498,7 +670,9 @@ impl Desktop {
                         },
                     })
                 })))
-                )
+                .when_some(duo_status, |row, status| {
+                    row.child(div().text_2xs().text_color(color("textMuted")).child(status))
+                })
                 .child(Button::new(SharedString::from(format!("device-record-{host_id}-{device_id}"))).label("Record").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
@@ -511,10 +685,26 @@ impl Desktop {
                 .child(Button::new(SharedString::from(format!("device-stop-record-{host_id}-{device_id}"))).label("Stop record").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
-                    move |view, _, _, _| view.perform(Intent::StopDeviceRecording {
-                        host_id: Some(host_id.clone()),
-                        device_id: device_id.clone(),
-                    })
+                    move |view, _, _, _| {
+                        let recording = view
+                            .snapshot
+                            .device()
+                            .recordings
+                            .into_iter()
+                            .find(|recording| {
+                                recording.host_id == host_id
+                                    && recording.device_id == device_id
+                                    && recording.thread_id == view.thread_id().unwrap_or_default()
+                            });
+                        if let Some(recording) = recording {
+                            view.perform(Intent::StopDeviceRecording {
+                                host_id: Some(host_id.clone()),
+                                device_id: device_id.clone(),
+                                recording_id: recording.recording_id,
+                                session_epoch: recording.session_epoch,
+                            });
+                        }
+                    }
                 })))
                 .child(Button::new(SharedString::from(format!("device-power-off-{host_id}-{device_id}"))).label("Power off").xsmall().on_click(cx.listener({
                     move |view, _, _, _| view.perform(Intent::CloseDevice {
@@ -629,7 +819,24 @@ impl Desktop {
                 .child(if frame_images.is_empty() {
                     div().flex_1().min_h_0().items_center().justify_center().text_color(color("textMuted")).child("Open a device to see its live frame").into_any_element()
                 } else {
-                    h_flex().flex_1().min_h_0().items_center().justify_center().gap_2().children(frame_images.into_iter().map(|(host_id, device_id, image)| {
+                    h_flex().flex_1().min_h_0().items_center().justify_center().gap_2().children(frame_images.into_iter().map(|(host_id, device_id, screen_id, image, frame_width, frame_height)| {
+                        let frame_key = (host_id.clone(), device_id.clone(), screen_id);
+                        let bounds_owner = owner.clone();
+                        let down_host = host_id.clone();
+                        let down_device = device_id.clone();
+                        let move_host = host_id.clone();
+                        let move_device = device_id.clone();
+                        let up_host = host_id.clone();
+                        let up_device = device_id.clone();
+                        let out_host = host_id.clone();
+                        let out_device = device_id.clone();
+                        let exit_host = host_id.clone();
+                        let exit_device = device_id.clone();
+                        let key_down_host = host_id.clone();
+                        let key_down_device = device_id.clone();
+                        let key_up_host = host_id.clone();
+                        let key_up_device = device_id.clone();
+                        let prepaint_key = frame_key.clone();
                         let accessibility = view.accessibility.iter()
                             .filter(|tree| tree.host_id == host_id && tree.device_id == device_id)
                             .flat_map(|tree| tree.elements.iter())
@@ -645,11 +852,193 @@ impl Desktop {
                                     .border_color(tint("accent", 0.9))
                                     .aria_label(element.label.clone())
                             });
-                        div().relative().flex_1().min_h_0().flex().items_center().justify_center()
+                        div()
+                            .id(SharedString::from(format!("device-frame-{host_id}-{device_id}-{screen_id}")))
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .on_prepaint(move |bounds, _, cx| {
+                                let _ = bounds_owner.update(cx, |view, cx| {
+                                    if view.panels.device.frame_bounds.get(&prepaint_key) != Some(&bounds) {
+                                        view.panels.device.frame_bounds.insert(prepaint_key.clone(), bounds);
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .track_focus(&self.panels.device.focus)
+                            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                view.device_key_down(key_down_host.clone(), key_down_device.clone(), event, cx);
+                            }))
+                            .on_key_up(cx.listener(move |view, event: &KeyUpEvent, _, cx| {
+                                view.device_key_up(key_up_host.clone(), key_up_device.clone(), event, cx);
+                            }))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |view, event: &MouseDownEvent, _, cx| {
+                                view.device_touch(down_host.clone(), down_device.clone(), screen_id, "begin", event.position, frame_width, frame_height, cx);
+                            }))
+                            .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _, cx| {
+                                if view.panels.device.active_touch.as_ref().is_some_and(|touch| {
+                                    touch.host_id == move_host && touch.device_id == move_device && touch.screen_id == screen_id
+                                }) {
+                                    view.device_touch(move_host.clone(), move_device.clone(), screen_id, "move", event.position, frame_width, frame_height, cx);
+                                }
+                            }))
+                            .on_mouse_up(MouseButton::Left, cx.listener(move |view, event: &MouseUpEvent, _, cx| {
+                                if view.panels.device.active_touch.as_ref().is_some_and(|touch| {
+                                    touch.host_id == up_host && touch.device_id == up_device && touch.screen_id == screen_id
+                                }) {
+                                    view.device_touch(up_host.clone(), up_device.clone(), screen_id, "end", event.position, frame_width, frame_height, cx);
+                                }
+                            }))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(move |view, _, _, cx| {
+                                if view.panels.device.active_touch.as_ref().is_some_and(|touch| {
+                                    touch.host_id == out_host && touch.device_id == out_device && touch.screen_id == screen_id
+                                }) {
+                                    view.cancel_device_touch(cx);
+                                }
+                            }))
+                            .on_mouse_exit(cx.listener(move |view, _, _, cx| {
+                                if view.panels.device.active_touch.as_ref().is_some_and(|touch| {
+                                    touch.host_id == exit_host && touch.device_id == exit_device && touch.screen_id == screen_id
+                                }) {
+                                    view.cancel_device_touch(cx);
+                                }
+                            }))
                             .child(img(image).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
                             .children(accessibility)
                     })).into_any_element()
                 })
         })
         .into_any_element()
+}
+
+}
+
+fn device_frame_point(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<(f32, f32)> {
+    let view_width = bounds.size.width.as_f32().max(1.0);
+    let view_height = bounds.size.height.as_f32().max(1.0);
+    let point = agent_core::state::project_device_point(
+        view_width,
+        view_height,
+        frame_width as f32,
+        frame_height as f32,
+        position.x.as_f32() - bounds.left().as_f32(),
+        position.y.as_f32() - bounds.top().as_f32(),
+    )?;
+    Some((point.x, point.y))
+}
+
+fn device_key_code(key: &str) -> String {
+    let lower = key.to_ascii_lowercase();
+    if lower.len() == 1 {
+        let byte = lower.as_bytes()[0];
+        if byte.is_ascii_lowercase() {
+            return format!("Key{}", (byte as char).to_ascii_uppercase());
+        }
+        if byte.is_ascii_digit() {
+            return format!("Digit{}", byte as char);
+        }
+    }
+    match lower.as_str() {
+        "!" => "Digit1",
+        "@" => "Digit2",
+        "#" => "Digit3",
+        "$" => "Digit4",
+        "%" => "Digit5",
+        "^" => "Digit6",
+        "&" => "Digit7",
+        "*" => "Digit8",
+        "(" => "Digit9",
+        ")" => "Digit0",
+        "-" | "_" => "Minus",
+        "=" | "+" => "Equal",
+        "[" | "{" => "BracketLeft",
+        "]" | "}" => "BracketRight",
+        "\\" | "|" => "Backslash",
+        ";" | ":" => "Semicolon",
+        "'" | "\"" => "Quote",
+        "`" | "~" => "Backquote",
+        "," | "<" => "Comma",
+        "." | ">" => "Period",
+        "/" | "?" => "Slash",
+        "enter" | "return" => "Enter",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" | "forwarddelete" => "Delete",
+        "escape" | "esc" => "Escape",
+        "up" | "arrowup" => "ArrowUp",
+        "down" | "arrowdown" => "ArrowDown",
+        "left" | "arrowleft" => "ArrowLeft",
+        "right" | "arrowright" => "ArrowRight",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        "space" | " " => "Space",
+        value => value,
+    }
+    .into()
+}
+
+fn device_key_value(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "enter" | "return" => "Enter".into(),
+        "tab" => "Tab".into(),
+        "backspace" => "Backspace".into(),
+        "delete" | "forwarddelete" => "Delete".into(),
+        "escape" | "esc" => "Escape".into(),
+        "up" | "arrowup" => "ArrowUp".into(),
+        "down" | "arrowdown" => "ArrowDown".into(),
+        "left" | "arrowleft" => "ArrowLeft".into(),
+        "right" | "arrowright" => "ArrowRight".into(),
+        "home" => "Home".into(),
+        "end" => "End".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        "space" => " ".into(),
+        _ => key.into(),
+    }
+}
+
+fn recording_file_type(recording: &agent_core::view::device::DeviceRecordingView) -> Option<(&'static str, String)> {
+    let extension = std::path::Path::new(&recording.file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())?;
+    if !extension.eq_ignore_ascii_case("mp4")
+        || !recording.mime_type.eq_ignore_ascii_case("video/mp4")
+        || recording.bytes.len() < 12
+        || &recording.bytes[4..8] != b"ftyp"
+    {
+        return None;
+    }
+    Some(("mp4", recording.mime_type.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{device_key_code, device_key_value};
+
+    #[test]
+    fn gpui_keys_use_dom_physical_codes() {
+        assert_eq!(device_key_code("a"), "KeyA");
+        assert_eq!(device_key_code("1"), "Digit1");
+        assert_eq!(device_key_code("up"), "ArrowUp");
+        assert_eq!(device_key_code("enter"), "Enter");
+        assert_eq!(device_key_code("?"), "Slash");
+    }
+
+    #[test]
+    fn gpui_keys_carry_canonical_semantic_values() {
+        assert_eq!(device_key_value("up"), "ArrowUp");
+        assert_eq!(device_key_value("enter"), "Enter");
+        assert_eq!(device_key_value("a"), "a");
+        assert_eq!(device_key_value("1"), "1");
+    }
 }
