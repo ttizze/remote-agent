@@ -202,7 +202,7 @@ internal fun TerminalScreen(
 
 private fun NativeTerminal.showKeyboard() {
     view.requestFocus()
-    view.context.getSystemService(InputMethodManager::class.java).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+    view.context.getSystemService(InputMethodManager::class.java).showSoftInput(view, 0)
 }
 
 private fun NativeTerminal.hideKeyboard() {
