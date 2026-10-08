@@ -320,6 +320,14 @@ mod tests {
         assert_eq!(expired.windows, usage.windows);
         assert_eq!(expired.fetched_at, fetched_at);
         assert!(expired.error.is_none());
+        let retried = a
+            .read(async {
+                Ok(UsageSnapshot::windows(vec![
+                    UsageWindow::from_used("5時間枠".into(), 32., None).unwrap(),
+                ]))
+            })
+            .await;
+        assert_eq!(retried.windows[0].used_percent, Some(32.));
         cache.remove("a");
         assert!(!Arc::ptr_eq(&a, cache.entry("a".into()).or_default()));
     }
