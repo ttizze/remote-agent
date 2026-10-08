@@ -104,9 +104,10 @@ struct ServiceInner {
     updater: crate::UpdateManager,
     started: AtomicBool,
     handoff_draining: AtomicBool,
-    // Ordinary admitted operations hold a read permit. Handoff takes the
-    // write permit, so independent RPCs can overlap while the handoff waits
-    // for all of them, and no new operation can enter once draining starts.
+    // Ordinary RPCs and service-owned background mutations hold a read
+    // permit. Handoff takes the write permit, so independent work can overlap
+    // while the handoff waits for all of it, and no new operation can enter
+    // once draining starts.
     handoff_gate: tokio::sync::RwLock<()>,
 }
 
@@ -135,11 +136,13 @@ struct HostResources {
     keybindings: Arc<crate::keybindings::Keybindings>,
     usage: crate::usage::UsageService,
     pull_requests: Arc<GitHubPullRequestService>,
-    pull_request_watch_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    pull_request_watch_task:
+        tokio::sync::Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     background: Arc<BackgroundOwner>,
-    background_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    background_task: tokio::sync::Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     background_stop: tokio_util::sync::CancellationToken,
-    background_consumers_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    background_consumers_task:
+        tokio::sync::Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     provider_cache: tokio::sync::RwLock<Option<ProviderHealthCache>>,
     provider_refresh: tokio::sync::Mutex<()>,
     devices: Arc<crate::device::DeviceService>,
@@ -386,11 +389,11 @@ impl HostRpcService {
             keybindings,
             usage: crate::usage::UsageService::new(&state_path),
             pull_requests,
-            pull_request_watch_task: OnceLock::new(),
+            pull_request_watch_task: tokio::sync::Mutex::new(None),
             background,
-            background_task: OnceLock::new(),
+            background_task: tokio::sync::Mutex::new(None),
             background_stop: tokio_util::sync::CancellationToken::new(),
-            background_consumers_task: OnceLock::new(),
+            background_consumers_task: tokio::sync::Mutex::new(None),
             provider_cache: tokio::sync::RwLock::new(None),
             provider_refresh: tokio::sync::Mutex::new(()),
             devices,
@@ -617,17 +620,23 @@ impl HostRpcService {
         if self.inner.started.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        let _ = self.inner.resources.background_task.set(
-            self.inner
-                .resources
-                .background
-                .spawn(self.inner.resources.background_stop.clone()),
-        );
-        let _ = self
-            .inner
-            .resources
-            .background_consumers_task
-            .set(self.spawn_background_consumers());
+        {
+            let mut task = self.inner.resources.background_task.lock().await;
+            if task.is_none() {
+                *task = Some(
+                    self.inner
+                        .resources
+                        .background
+                        .spawn(self.inner.resources.background_stop.clone()),
+                );
+            }
+        }
+        {
+            let mut task = self.inner.resources.background_consumers_task.lock().await;
+            if task.is_none() {
+                *task = Some(self.spawn_background_consumers());
+            }
+        }
         if let Err(error) = self.inner.updater.acknowledge_current(UpdateTarget::Host) {
             tracing::warn!(
                 target: "bex",
@@ -646,24 +655,47 @@ impl HostRpcService {
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.start().await?;
         }
-        self.start_pull_request_watch();
+        self.start_pull_request_watch().await;
         Ok(())
     }
 
-    fn start_pull_request_watch(&self) {
-        if self.inner.resources.pull_request_watch_task.get().is_some() {
+    async fn start_pull_request_watch(&self) {
+        if self
+            .inner
+            .resources
+            .pull_request_watch_task
+            .lock()
+            .await
+            .is_some()
+        {
             return;
         }
         let Some(conversation) = self.inner.resources.conversation.get().cloned() else {
             return;
         };
+        let handoff_inner = Arc::downgrade(&self.inner);
         let service = self.inner.resources.pull_requests.clone();
         let projects = self.inner.resources.shared.projects.clone();
+        let stop = self.inner.resources.background_stop.clone();
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(agent_runtime::DEFAULT_WATCH_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = interval.tick() => {}
+                }
+                let Some(inner) = handoff_inner.upgrade() else {
+                    return;
+                };
+                let handoff_service = HostRpcService { inner };
+                let gate = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    result = handoff_service.acquire_handoff_gate(false) => result,
+                };
+                let Ok(_gate) = gate else {
+                    return;
+                };
                 let now = timestamp_now();
                 // Resolve the checked-out branch for each persisted thread. A
                 // successful empty result clears only the automatic source;
@@ -699,23 +731,27 @@ impl HostRpcService {
                     } else {
                         workspace.cwd.clone()
                     };
-                    let discovery = service.discover(Path::new(&cwd), false).await;
+                    let discovery = tokio::select! {
+                        _ = stop.cancelled() => return,
+                        discovery = service.discover(Path::new(&cwd), false) => discovery,
+                    };
                     let Some(host) = discovery.host.as_deref() else {
                         continue;
                     };
                     if !supports_github_host(Some(host)) {
                         continue;
                     }
-                    let Ok(detected) = service
-                        .branch_pull_request(
+                    let detected = tokio::select! {
+                        _ = stop.cancelled() => return,
+                        detected = service.branch_pull_request(
                             Path::new(&cwd),
                             &summary.project,
                             branch,
                             discovery.repository.as_deref(),
                             Some(host),
-                        )
-                        .await
-                    else {
+                        ) => detected,
+                    };
+                    let Ok(detected) = detected else {
                         continue;
                     };
                     let current = summary
@@ -755,12 +791,13 @@ impl HostRpcService {
                     {
                         continue;
                     }
-                    let _ = conversation
-                        .dispatch_host_command(
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = conversation.dispatch_host_command(
                             summary.id.clone(),
                             Command::ResolveBranchPullRequest { link: detected },
-                        )
-                        .await;
+                        ) => {}
+                    }
                 }
                 let watched = match service.links.watched_links() {
                     Ok(watched) => watched,
@@ -798,10 +835,15 @@ impl HostRpcService {
                         host: Some(link.host.clone()),
                         allow_stale: false,
                     };
-                    let Ok(detail) = service
-                        .get(Path::new(&project.root), &reference.project_id, &reference)
-                        .await
-                    else {
+                    let detail = tokio::select! {
+                        _ = stop.cancelled() => return,
+                        detail = service.get(
+                            Path::new(&project.root),
+                            &reference.project_id,
+                            &reference,
+                        ) => detail,
+                    };
+                    let Ok(detail) = detail else {
                         continue;
                     };
                     let (links, wake) = agent_runtime::merge_pull_request_detail(
@@ -828,14 +870,15 @@ impl HostRpcService {
                     {
                         continue;
                     }
-                    let _ = conversation
-                        .dispatch_host_command(
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = conversation.dispatch_host_command(
                             thread.clone(),
                             Command::SyncPullRequestLink {
                                 link: updated.clone(),
                             },
-                        )
-                        .await;
+                        ) => {}
+                    }
                     if detail.summary.state == agent_domain::PullRequestState::Open {
                         if let Some(wake) = wake.filter(|wake| !wake.text.trim().is_empty()) {
                             let message_id = MessageId::new(format!(
@@ -854,8 +897,9 @@ impl HostRpcService {
                                 summary: wake.detail.clone(),
                                 detail: Some(wake.detail.clone()),
                             };
-                            let _ = conversation
-                                .dispatch_host_command(
+                            tokio::select! {
+                                _ = stop.cancelled() => return,
+                                _ = conversation.dispatch_host_command(
                                     thread,
                                     Command::PullRequestWake {
                                         message: SendMessage {
@@ -876,18 +920,17 @@ impl HostRpcService {
                                         },
                                         notification,
                                     },
-                                )
-                                .await;
+                                ) => {}
+                            }
                         }
                     }
                 }
             }
         });
-        let _ = self
-            .inner
-            .resources
-            .pull_request_watch_task
-            .set(tokio_util::task::AbortOnDropHandle::new(task));
+        let mut slot = self.inner.resources.pull_request_watch_task.lock().await;
+        if slot.is_none() {
+            *slot = Some(tokio_util::task::AbortOnDropHandle::new(task));
+        }
     }
 
     /// A handoff is safe only after conversation runs and terminal
@@ -937,7 +980,7 @@ impl HostRpcService {
     }
 
     pub(crate) async fn accept_handoff_if_idle(&self) -> anyhow::Result<bool> {
-        let _gate = self.inner.handoff_gate.write().await;
+        let gate = self.inner.handoff_gate.write().await;
         if self
             .inner
             .handoff_draining
@@ -950,18 +993,24 @@ impl HostRpcService {
             self.inner.handoff_draining.store(false, Ordering::Release);
             return Ok(false);
         }
-        match self.inner.updater.accept_handoff_if_ready().await {
+        let accepted = match self.inner.updater.accept_handoff_if_ready().await {
             Ok(accepted) => {
                 if !accepted {
                     self.inner.handoff_draining.store(false, Ordering::Release);
                 }
-                Ok(accepted)
+                accepted
             }
             Err(error) => {
                 self.inner.handoff_draining.store(false, Ordering::Release);
-                Err(error)
+                drop(gate);
+                return Err(error);
             }
+        };
+        drop(gate);
+        if accepted {
+            self.stop_background_tasks().await;
         }
+        Ok(accepted)
     }
     pub(crate) fn handoff_is_draining(&self) -> bool {
         self.inner.handoff_draining.load(Ordering::Acquire)
@@ -1052,7 +1101,7 @@ impl HostRpcService {
     }
     /// Stops provider processes after the conversation records the shutdown.
     pub(crate) async fn shutdown_owned_processes(&self) {
-        self.inner.resources.background_stop.cancel();
+        self.stop_background_tasks().await;
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.shutdown().await;
         }
@@ -1061,6 +1110,18 @@ impl HostRpcService {
         }
         self.inner.resources.shared.terminals.shutdown().await;
         self.inner.resources.devices.shutdown_owned().await;
+    }
+
+    async fn stop_background_tasks(&self) {
+        self.inner.resources.background_stop.cancel();
+        let tasks = [
+            self.inner.resources.pull_request_watch_task.lock().await.take(),
+            self.inner.resources.background_consumers_task.lock().await.take(),
+            self.inner.resources.background_task.lock().await.take(),
+        ];
+        for mut task in tasks.into_iter().flatten() {
+            let _ = (&mut task).await;
+        }
     }
     fn conversation(&self) -> Result<&Arc<Conversation>, Failure> {
         self.inner.resources.conversation.get().ok_or_else(|| {
@@ -3458,7 +3519,17 @@ impl HostRpcService {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
                 }
 
-                let policy = service.inner.resources.background.policy().await;
+                let gate = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    result = service.acquire_handoff_gate(false) => result,
+                };
+                let Ok(_gate) = gate else {
+                    return;
+                };
+                let policy = tokio::select! {
+                    _ = stop.cancelled() => return,
+                    policy = service.inner.resources.background.policy() => policy,
+                };
                 let now = Self::host_now();
 
                 if policy.provider_health_refresh_interval_ms > 0
@@ -3478,16 +3549,21 @@ impl HostRpcService {
                     // provider probe therefore observes the configured cadence
                     // instead of creating a tight retry loop.
                     last_provider_refresh = Some(now.clone());
-                    let _ = service.refresh_provider_cache().await;
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = service.refresh_provider_cache() => {}
+                    }
                 }
 
                 if policy.automatic_git_fetch_interval_ms > 0 {
-                    let demanded = service
-                        .inner
-                        .resources
-                        .background
-                        .demanded_vcs_workspaces()
-                        .await;
+                    let demanded = tokio::select! {
+                        _ = stop.cancelled() => return,
+                        demanded = service
+                            .inner
+                            .resources
+                            .background
+                            .demanded_vcs_workspaces() => demanded,
+                    };
                     last_git_fetch
                         .retain(|cwd, _| demanded.iter().any(|candidate| candidate == cwd));
                     for cwd in demanded {
@@ -3505,19 +3581,21 @@ impl HostRpcService {
                             _ = stop.cancelled() => return,
                             result = refresh => result,
                         };
-                        service
-                            .inner
-                            .resources
-                            .background
-                            .record_attribution(
-                                "git",
-                                "remote.fetch",
-                                0,
-                                0,
-                                1,
-                                started.elapsed().as_millis() as u64,
-                            )
-                            .await;
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            _ = service
+                                .inner
+                                .resources
+                                .background
+                                .record_attribution(
+                                    "git",
+                                    "remote.fetch",
+                                    0,
+                                    0,
+                                    1,
+                                    started.elapsed().as_millis() as u64,
+                                ) => {}
+                        }
                         if let Err(error) = result {
                             tracing::debug!(target: "bex", operation = "host.vcs.background_refresh", cwd = %cwd, message = %error);
                         }
@@ -3528,12 +3606,14 @@ impl HostRpcService {
 
                 if background_work_due(last_resource_sample.as_ref(), &now, 5_000) {
                     last_resource_sample = Some(now);
-                    service
-                        .inner
-                        .resources
-                        .background
-                        .sample_resources_if_demanded()
-                        .await;
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = service
+                            .inner
+                            .resources
+                            .background
+                            .sample_resources_if_demanded() => {}
+                    }
                 }
             }
         }))
@@ -4104,5 +4184,28 @@ mod handoff_service_tests {
             .await
             .expect("status operation remains readable during drain");
         drop(status_gate);
+    }
+
+    #[tokio::test]
+    async fn shutdown_awaits_background_owner_tasks() {
+        let (_directory, service) = test_service();
+        service.start().await.expect("Host service start");
+        service.shutdown_owned_processes().await;
+
+        assert!(service.inner.resources.background_stop.is_cancelled());
+        assert!(service
+            .inner
+            .resources
+            .background_task
+            .lock()
+            .await
+            .is_none());
+        assert!(service
+            .inner
+            .resources
+            .background_consumers_task
+            .lock()
+            .await
+            .is_none());
     }
 }
