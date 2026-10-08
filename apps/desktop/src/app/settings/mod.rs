@@ -10,6 +10,7 @@ mod keybindings;
 mod projects;
 mod providers;
 mod scripts;
+mod usage;
 
 use super::{
     Desktop, Route,
@@ -39,11 +40,12 @@ pub(crate) enum SettingsPage {
     Providers,
     Connections,
     Archived,
+    Usage,
 }
 
 impl SettingsPage {
     /// The navigation entries in their order.
-    fn sections() -> [SettingsPage; 7] {
+    fn sections() -> [SettingsPage; 8] {
         [
             SettingsPage::Projects { project_id: None },
             SettingsPage::General,
@@ -52,6 +54,7 @@ impl SettingsPage {
             SettingsPage::Providers,
             SettingsPage::Connections,
             SettingsPage::Archived,
+            SettingsPage::Usage,
         ]
     }
     fn label(&self) -> &'static str {
@@ -63,6 +66,7 @@ impl SettingsPage {
             SettingsPage::Providers => "Providers",
             SettingsPage::Connections => "Connections",
             SettingsPage::Archived => "Archive",
+            SettingsPage::Usage => "Usage",
         }
     }
     fn icon(&self) -> &'static str {
@@ -74,6 +78,7 @@ impl SettingsPage {
             SettingsPage::Providers => "bot",
             SettingsPage::Connections => "link-2",
             SettingsPage::Archived => "archive",
+            SettingsPage::Usage => "chart-no-axes-combined",
         }
     }
     fn same_section(&self, other: &SettingsPage) -> bool {
@@ -92,6 +97,7 @@ pub(crate) struct SettingsState {
     appearance: appearance::AppearanceState,
     keybindings: keybindings::KeybindingsState,
     providers: providers::ProvidersState,
+    usage: usage::UsageState,
     /// The stores whose onboarding already ran in this app session.
     onboarded: std::collections::HashSet<String>,
 }
@@ -111,6 +117,7 @@ impl SettingsState {
             appearance: appearance::AppearanceState::new(window, cx),
             keybindings: keybindings::KeybindingsState::new(window, cx),
             providers: providers::ProvidersState::new(window, cx),
+            usage: usage::UsageState::new(window, cx),
             onboarded: Default::default(),
         }
     }
@@ -248,6 +255,7 @@ impl Desktop {
                 page_container(1024., vec![self.hosts.clone().into_any_element()])
             }
             SettingsPage::Archived => self.render_archived(window, cx),
+            SettingsPage::Usage => self.render_usage(window, cx),
         };
         v_flex()
             .id("settings")
@@ -385,6 +393,9 @@ impl Desktop {
             SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
             SettingsPage::Providers => self.perform(Intent::LoadAccounts),
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
+            SettingsPage::Usage => self.perform(Intent::LoadUsageSummary {
+                input: usage::summary_input(&self.snapshot),
+            }),
             SettingsPage::Archived | SettingsPage::Appearance | SettingsPage::Keybindings => {}
         }
     }

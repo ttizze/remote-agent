@@ -100,6 +100,8 @@ results! {
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
     Empty(crate::models::Empty),
     AccountUsage(crate::operations::AccountUsage),
+    UsageSummary(crate::usage::Summary),
+    UsagePricing(crate::usage::Pricing),
     Accounts(crate::operations::Accounts), Selected(crate::operations::AccountSelection),
     Login(crate::operations::AccountLogin), LoginStatus(crate::operations::AccountLoginStatus),
     TerminalMetadata(crate::operations::TerminalMetadataEvent),

@@ -104,21 +104,31 @@ pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
     pub fetched_at: i64,
     pub error: Option<String>,
+    pub reset_credits: Option<crate::usage::ResetCredits>,
+    pub external_usage: Option<crate::usage::ExternalUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageWindow {
+    pub id: Option<String>,
+    pub kind: Option<crate::usage::WindowKind>,
     pub label: String,
+    pub used_percent: Option<u32>,
     pub remaining_percent: u32,
+    pub window_duration_mins: Option<u32>,
     pub resets_at: Option<i64>,
 }
 
 impl UsageWindow {
     pub fn from_used(label: String, used: f64, resets_at: Option<i64>) -> Option<Self> {
         used.is_finite().then(|| Self {
+            id: None,
+            kind: None,
             label,
+            used_percent: Some(used.clamp(0.0, 100.0).floor() as u32),
             remaining_percent: (100.0 - used.clamp(0.0, 100.0)).floor() as u32,
+            window_duration_mins: None,
             resets_at,
         })
     }
@@ -499,6 +509,25 @@ pub struct ReadAccountUsage {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadUsageSummary {
+    pub input: crate::usage::SummaryInput,
+}
+rpc_method!(ReadUsageSummary, UsageSummary, |self| self.clone());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshUsageRates {}
+rpc_method!(RefreshUsageRates, RefreshUsageRates, |self| self.clone());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsumeResetCredit {
+    pub provider: crate::provider::ProviderKind,
+    pub account_id: String,
+    pub credit_id: Option<String>,
+}
+rpc_method!(ConsumeResetCredit, ConsumeResetCredit, |self| self.clone());
+
 /// The prefix every terminal of a thread shares; the Host's cleanup matches it.
 pub fn thread_terminal_handle(thread: &str) -> String {
     format!("terminal:{thread}")
@@ -644,5 +673,49 @@ mod terminal_tests {
         let handle = thread_terminal_handle_for("thread:1", "setup-install");
         assert_eq!(handle, "terminal:thread:1:setup-install");
         assert!(handle.starts_with(&format!("{}:", thread_terminal_handle("thread:1"))));
+    }
+
+    #[test]
+    fn usage_requests_keep_their_typed_wire_contracts() {
+        let summary = ReadUsageSummary {
+            input: crate::usage::SummaryInput::daily("2026-10-01", "2026-10-08"),
+        };
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap(),
+            json!({
+                "input": {
+                    "sinceDay": "2026-10-01",
+                    "untilDay": "2026-10-08",
+                    "timeZone": "UTC",
+                    "resolution": "day",
+                    "sinceTime": null,
+                    "untilTime": null,
+                    "modelAliases": {},
+                    "priceOverrides": {}
+                }
+            })
+        );
+        assert_eq!(
+            Call::ReadUsageSummary(summary).method(),
+            "host/usage/summary"
+        );
+
+        let consume = ConsumeResetCredit {
+            provider: crate::provider::ProviderKind::Codex,
+            account_id: "account".into(),
+            credit_id: Some("credit".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&consume).unwrap(),
+            json!({"provider":"codex","accountId":"account","creditId":"credit"})
+        );
+        assert_eq!(
+            Call::ConsumeResetCredit(consume).method(),
+            "host/account/consumeResetCredit"
+        );
+        assert_eq!(
+            Call::RefreshUsageRates(RefreshUsageRates {}).method(),
+            "host/usage/refreshRates"
+        );
     }
 }

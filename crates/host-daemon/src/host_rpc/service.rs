@@ -98,6 +98,7 @@ struct HostResources {
     commands: super::commands::CommandCache,
     search: crate::workspace_search::WorkspaceSearch,
     keybindings: Arc<crate::keybindings::Keybindings>,
+    usage: crate::usage::UsageService,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
@@ -125,6 +126,7 @@ impl HostRpcService {
         projects: ProjectStore,
     ) -> anyhow::Result<Self> {
         let connections = Connections::new();
+        let state_path = projects.path().to_owned();
         let terminal_history = projects.path().with_file_name("terminals");
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
             projects.path().with_file_name("keybindings.json"),
@@ -155,6 +157,7 @@ impl HostRpcService {
             commands: Default::default(),
             search: Default::default(),
             keybindings,
+            usage: crate::usage::UsageService::new(&state_path),
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -561,6 +564,18 @@ impl HostRpcService {
                     .usage(&params.id)
                     .await?
                     .into(),
+                Call::ReadUsageSummary(params) => resources
+                    .usage
+                    .summary(params.input.clone(), self.usage_homes())
+                    .await
+                    .map_err(|error| Failure::new("usage_read_failed", error))?
+                    .into(),
+                Call::RefreshUsageRates(_) => resources.usage.refresh_rates().await.into(),
+                Call::ConsumeResetCredit(params) => self
+                    .identity(params.provider)?
+                    .consume_reset_credit(&params.account_id, params.credit_id.as_deref())
+                    .await?
+                    .into(),
                 Call::ListProviders(_) => self.providers().await.into(),
                 Call::ProviderCommands(params) => self.provider_commands(params).await?.into(),
                 Call::SearchEntries(params) => resources
@@ -749,6 +764,14 @@ impl HostRpcService {
             .get()
             .ok_or_else(|| Failure::new("provider_unavailable", "Claude unavailable"))
     }
+    fn usage_homes(&self) -> Vec<(ProviderKind, PathBuf)> {
+        let resources = &self.inner.resources;
+        let mut homes = vec![(ProviderKind::Codex, resources.codex.directory.clone())];
+        if let Some(claude) = resources.claude.get() {
+            homes.push((ProviderKind::Claude, claude.native_home.clone()));
+        }
+        homes
+    }
     async fn account_request(&self, request: Call) -> Result<Body, Failure> {
         if matches!(request, Call::ListAccounts(_)) {
             let mut combined = op::Accounts {
@@ -767,7 +790,10 @@ impl HostRpcService {
                 .collect::<Vec<_>>();
             for (_, agent) in self.identities() {
                 match Identity::list(agent.as_ref()).await {
-                    Ok(accounts) => {
+                    Ok(mut accounts) => {
+                        for account in &mut accounts.accounts {
+                            account.usage = agent.usage(&account.id).await.ok();
+                        }
                         combined.accounts.extend(accounts.accounts);
                         combined.selected.extend(accounts.selected);
                         errors.extend(accounts.error);

@@ -148,6 +148,16 @@ struct Composer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Model and reasoning settings")
+                if let limits = composerUsageLimits {
+                    Button(action: openSettings) {
+                        Text(limits.windows.first.map { "\($0.remainingPercent)% left" } ?? "Limits")
+                            .font(AppTheme.font(12, weight: .medium))
+                            .foregroundStyle(AppTheme.muted)
+                            .padding(.horizontal, 5)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(limits.label)
+                }
                 if let toggle = composer.controls.interactionToggle, alwaysExpanded {
                     Button { model.perform(.setInteractionMode(mode: toggle.toggled)) } label: {
                         Label(toggle.label, systemImage: toggle.mode == .plan ? "list.bullet.clipboard" : "hammer")
@@ -163,6 +173,12 @@ struct Composer: View {
         }
         .padding(.top, 14).padding(.bottom, 6)
         .frame(minHeight: 140)
+    }
+
+    private var composerUsageLimits: ComposerUsageLimits? {
+        guard let driver = composer.controls.model?.driver else { return nil }
+        let provider: ProviderKind = driver == .codex ? .codex : .claude
+        return model.snapshot.composerUsageLimits(provider: provider)
     }
 
     @ViewBuilder

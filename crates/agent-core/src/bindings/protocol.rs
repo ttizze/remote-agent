@@ -1,7 +1,14 @@
 //! ABI converters for retained peripheral wire records.
 use crate::{models::*, provider::ProviderKind};
 use agent_domain::{Driver, InteractionMode, RuntimeMode};
-use agent_protocol::{browser::*, diagnostics::*, operations::*};
+use agent_protocol::{
+    browser::*,
+    diagnostics::*,
+    operations::*,
+    usage::{
+        ExternalUsage, PriceOverride, ResetCredits, Resolution, WindowKind as UsageWindowKind,
+    },
+};
 #[uniffi::remote(Enum)]
 enum WorktreeStatus {
     Unmerged,
@@ -276,12 +283,48 @@ struct AccountUsage {
     pub windows: Vec<UsageWindow>,
     pub fetched_at: i64,
     pub error: Option<String>,
+    pub reset_credits: Option<ResetCredits>,
+    pub external_usage: Option<ExternalUsage>,
 }
 #[uniffi::remote(Record)]
 struct UsageWindow {
+    pub id: Option<String>,
+    pub kind: Option<UsageWindowKind>,
     pub label: String,
+    pub used_percent: Option<u32>,
     pub remaining_percent: u32,
+    pub window_duration_mins: Option<u32>,
     pub resets_at: Option<i64>,
+}
+#[uniffi::remote(Enum)]
+enum UsageWindowKind {
+    Session,
+    Weekly,
+    Monthly,
+    Other,
+}
+#[uniffi::remote(Record)]
+struct ResetCredits {
+    pub available_count: u32,
+    pub next_expires_at: Option<i64>,
+    pub next_credit_id: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct ExternalUsage {
+    pub label: String,
+    pub url: String,
+}
+#[uniffi::remote(Enum)]
+enum Resolution {
+    Day,
+    Hour,
+}
+#[uniffi::remote(Record)]
+struct PriceOverride {
+    pub input_cost_per_million_tokens: f64,
+    pub output_cost_per_million_tokens: f64,
+    pub cache_read_cost_per_million_tokens: Option<f64>,
+    pub cache_write_cost_per_million_tokens: Option<f64>,
 }
 #[uniffi::remote(Record)]
 struct Accounts {

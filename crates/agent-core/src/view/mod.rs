@@ -36,6 +36,7 @@ pub mod thread_sort;
 pub mod thread_summary;
 pub mod time;
 pub mod timeline;
+pub mod usage;
 pub mod work_log;
 pub mod working_status;
 

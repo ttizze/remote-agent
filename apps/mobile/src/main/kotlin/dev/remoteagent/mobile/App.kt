@@ -68,6 +68,8 @@ internal sealed interface Route {
 
     data class Settings(val projectId: String? = null) : Route
 
+    data object Usage : Route
+
     data object Archived : Route
 }
 

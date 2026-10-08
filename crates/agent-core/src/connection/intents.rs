@@ -1371,6 +1371,37 @@ impl Owner {
                 Next::call(Call::RemoveWorktree(op::RemoveWorktree { path }), None)
             }
             Intent::LoadAccounts => Next::call(Call::ListAccounts(m::Empty {}), None),
+            Intent::LoadUsageSummary { input } => {
+                self.state.usage_loading = true;
+                self.state.usage_error = None;
+                Next::call(
+                    Call::ReadUsageSummary(op::ReadUsageSummary {
+                        input: input.into(),
+                    }),
+                    None,
+                )
+            }
+            Intent::SetUsagePreferences { preferences } => {
+                self.state.preferences.usage = preferences;
+                Next::Done
+            }
+            Intent::RefreshUsageRates => {
+                self.state.usage_loading = true;
+                self.state.usage_error = None;
+                Next::call(Call::RefreshUsageRates(op::RefreshUsageRates {}), None)
+            }
+            Intent::ConsumeResetCredit {
+                provider,
+                account_id,
+                credit_id,
+            } => Next::call(
+                Call::ConsumeResetCredit(op::ConsumeResetCredit {
+                    provider,
+                    account_id,
+                    credit_id,
+                }),
+                None,
+            ),
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),
                 None,
