@@ -147,7 +147,7 @@ impl Registry {
                 continue;
             }
             entry.content.display = display.clone();
-            entry.urgent = display.urgent;
+            entry.urgent |= display.urgent;
             self.generation += 1;
             entry.generation = self.generation;
             entry.due = now.max(entry.sent_at + 1);
@@ -351,6 +351,20 @@ mod tests {
         assert_eq!(aps(&waiting)["relevance-score"], 100);
         registry.complete(&waiting, ResultKind::Accepted, 164);
         assert!(!registry.deliveries(224).remove(0).urgent);
+    }
+    #[test]
+    fn a_task_change_before_the_first_delivery_cannot_lower_registration_priority() {
+        let mut registry = registry();
+        registry
+            .register("phone", &params("activity", 1), "PC", 100)
+            .unwrap();
+        let claude = session(ProviderKind::Claude);
+        registry.update(&claude, "running", 100);
+        let initial = registry.deliveries(100).remove(0);
+        assert!(initial.urgent);
+        registry.complete(&initial, ResultKind::Accepted, 100);
+        registry.update(&claude, "completed", 101);
+        assert!(!registry.deliveries(101).remove(0).urgent);
     }
     #[test]
     fn registration_capacity_expiry_and_payload_size_are_bounded() {
