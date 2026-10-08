@@ -1028,10 +1028,22 @@ fn submission(
     next.error = None;
     if let Some(reason) = thread_id
         .as_ref()
-        .and_then(|id| previous.conversations.get(id))
-        .and_then(|thread| {
-            crate::session::direct_input_unavailable_reason(thread.can_accept_direct_input)
+        .and_then(|id| {
+            previous
+                .conversations
+                .get(id)
+                .map(|thread| thread.can_accept_direct_input)
+                .or_else(|| {
+                    previous
+                        .threads
+                        .as_ref()?
+                        .data
+                        .iter()
+                        .find(|thread| thread.id.as_ref() == Some(id))
+                        .map(|thread| thread.can_accept_direct_input)
+                })
         })
+        .and_then(crate::session::direct_input_unavailable_reason)
     {
         next.error = Some(reason);
         return (next, Vec::new());
@@ -1103,23 +1115,31 @@ mod submission_tests {
     #[rstest::rstest]
     fn read_only_subagents_keep_drafts_without_dispatching_input(
         #[values(None, Some(false), Some(true))] can_accept_direct_input: Option<bool>,
+        #[values(false, true)] loaded: bool,
     ) {
         let id =
             crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "child".into())
                 .unwrap();
         let key = DraftKey::from(id.clone());
+        let thread = crate::models::Thread {
+            id: Some(id.clone()),
+            can_accept_direct_input,
+            ..Default::default()
+        };
         let snapshot = Snapshot {
-            conversations: Arc::new(
-                [(
-                    id.clone(),
-                    Arc::new(crate::models::Thread {
-                        id: Some(id.clone()),
-                        can_accept_direct_input,
-                        ..Default::default()
-                    }),
-                )]
-                .into(),
-            ),
+            conversations: Arc::new(if loaded {
+                [(id.clone(), Arc::new(thread.clone()))].into()
+            } else {
+                Default::default()
+            }),
+            threads: Some(Arc::new(crate::models::ThreadList {
+                data: vec![thread],
+                projects: vec![],
+                more_project_ids: vec![],
+                has_more_chats: false,
+                has_more_projects: false,
+                provider_errors: None,
+            })),
             drafts: Arc::new(
                 [(
                     key.clone(),
