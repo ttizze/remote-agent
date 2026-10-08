@@ -90,7 +90,7 @@ pub fn composer_draft(snapshot: &Snapshot, thread: Option<&ThreadId>) -> (String
                 .drafts
                 .get(&key)
                 .cloned()
-                .unwrap_or_else(|| snapshot.default_draft.clone());
+                .unwrap_or_else(|| snapshot.default_draft.user_defaults());
             (key, draft)
         }
     }

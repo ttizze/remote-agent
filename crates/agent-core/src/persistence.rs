@@ -36,7 +36,7 @@ struct LocalState {
 pub(crate) fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&LocalState {
         drafts: (*snapshot.drafts).clone(),
-        default_draft: snapshot.default_draft.clone(),
+        default_draft: snapshot.default_draft.user_defaults(),
         follow_up: snapshot.follow_up,
         selected_thread: snapshot.selected_thread.clone(),
         selected_project: snapshot.selected_project.clone(),
@@ -56,7 +56,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     };
     Ok(Snapshot {
         drafts: local.drafts.into(),
-        default_draft: local.default_draft,
+        default_draft: local.default_draft.user_defaults(),
         follow_up: local.follow_up,
         selected_thread: local.selected_thread,
         selected_project: local.selected_project,
@@ -70,7 +70,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
 }
 
 pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&snapshot.default_draft)
+    serde_json::to_vec(&snapshot.default_draft.user_defaults())
 }
 
 /// The device state saved at `path` with the model `defaults` every Host
@@ -123,7 +123,7 @@ fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
         });
     if !defaults.is_empty() {
         match serde_json::from_slice(defaults) {
-            Ok(draft) => state.default_draft = draft,
+            Ok(draft) => state.default_draft = draft.user_defaults(),
             Err(_) => {
                 state.error =
                     Some("Saved model preferences could not be read. Choose a model again.".into())
@@ -138,7 +138,6 @@ fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
             }
         }
     }
-    state.default_draft.attachments.clear();
     state.stash.settle_pending_images();
     state
 }
@@ -163,7 +162,7 @@ impl Saved {
             drafts: snapshot.drafts.clone(),
             outbox: snapshot.outbox.clone(),
             stash: snapshot.stash.clone(),
-            default_draft: snapshot.default_draft.clone(),
+            default_draft: snapshot.default_draft.user_defaults(),
             follow_up: snapshot.follow_up,
             selected_thread: snapshot.selected_thread.clone(),
             selected_project: snapshot.selected_project.clone(),

@@ -930,7 +930,7 @@ impl Owner {
             .drafts
             .get(&key)
             .cloned()
-            .unwrap_or_else(|| self.state.default_draft.clone());
+            .unwrap_or_else(|| self.state.default_draft.user_defaults());
         change(&mut draft);
         self.state.drafts.insert(key, draft);
     }
