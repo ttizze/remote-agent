@@ -244,6 +244,27 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn skips_non_files_without_blocking_task_list_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(directory.path().join("favicon.svg"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        let root = directory.path().to_path_buf();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || sender.send(resolve(&root)).unwrap());
+        let icon = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("icon discovery blocked on a non-file");
+        reader.join().unwrap();
+        assert!(icon.is_none());
+    }
+
     proptest::proptest! {
         #[test]
         fn icon_declarations_accept_attribute_order_and_whitespace(
