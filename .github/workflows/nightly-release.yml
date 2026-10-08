@@ -92,9 +92,11 @@ jobs:
             echo 'publish-mobile requires include-mobile.' >&2
             exit 1
           fi
-          printf 'publish=%s\n' "$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
-          printf 'include_mobile=%s\n' "$INCLUDE_MOBILE" >> "$GITHUB_OUTPUT"
-          printf 'upload_mobile=%s\n' "$UPLOAD_MOBILE" >> "$GITHUB_OUTPUT"
+          {
+            printf 'publish=%s\n' "$SHOULD_PUBLISH"
+            printf 'include_mobile=%s\n' "$INCLUDE_MOBILE"
+            printf 'upload_mobile=%s\n' "$UPLOAD_MOBILE"
+          } >> "$GITHUB_OUTPUT"
       - id: metadata
         name: Resolve pure release metadata
         env:
@@ -102,7 +104,6 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version || '' }}
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_RUN_NUMBER: ${{ github.run_number }}
-          RELEASE_BUILD_TIME: ${{ github.run_started_at }}
         run: |
           set -euo pipefail
           args=(
@@ -111,7 +112,7 @@ jobs:
             --run-number "$RELEASE_RUN_NUMBER"
             --sha "$RELEASE_SHA"
             --repository "$GITHUB_REPOSITORY"
-            --build-time "$RELEASE_BUILD_TIME"
+            --build-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             --output release/metadata.json
             --github-output
           )
@@ -304,7 +305,7 @@ jobs:
         run: >-
           nix develop . --command ./gradlew
           :apps:mobile:bundleRelease :apps:mobile:assembleRelease
-          -PreleaseVersion=$RELEASE_VERSION -PreleaseCode=$RELEASE_CODE
+          "-PreleaseVersion=$RELEASE_VERSION" "-PreleaseCode=$RELEASE_CODE"
           --no-daemon --parallel --max-workers=4 --build-cache --console=plain
       - name: Collect Android release artifacts
         env:

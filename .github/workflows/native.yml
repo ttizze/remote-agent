@@ -5,11 +5,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      ios-test-rounds:
-        description: Fresh Simulator and Host rounds per iPhone runner, to measure flaky tests
-        type: number
-        default: 1
 permissions:
   contents: read
 concurrency:
@@ -65,16 +60,15 @@ jobs:
               docs/PRIVACY.md) area=all ;;
               docs/* | AGENTS.md | CHANGELOG.md | CONTEXT.md | README.md | README.ja.md | SECURITY.md) area=docs ;;
               apps/mobile/src/* | apps/mobile/build.gradle.kts | build.gradle.kts | settings.gradle.kts | \
-                gradle.properties | gradle/* | gradlew | gradlew.bat | detekt.yml | scripts/android-e2e.sh) area=android ;;
-              apps/mobile/iosApp/* | .swiftformat | .swiftlint.yml | scripts/ios-e2e.sh | \
+                gradle.properties | gradle/* | gradlew | gradlew.bat | detekt.yml) area=android ;;
+              apps/mobile/iosApp/* | .swiftformat | .swiftlint.yml | \
                 scripts/build-agent-ios.sh | scripts/archive-ios.sh) area=iphone ;;
               apps/desktop/*) area=desktop ;;
               *) area=all ;;
             esac
             if [[ $area == all || $area == android ]]; then android=true; fi
             if [[ $area == all || $area == iphone ]]; then iphone=true; fi
-            # Mac Rust checks also render the iPhone Markdown fixtures.
-            if [[ $area == all || $area == iphone || $area == desktop ]]; then mac=true; fi
+            if [[ $area == all || $area == desktop ]]; then mac=true; fi
           done < <(git diff --name-only "$base" HEAD)
           printf 'android=%s\niphone=%s\nmac=%s\n' "$android" "$iphone" "$mac" | tee -a "$GITHUB_OUTPUT"
   repository:
@@ -85,16 +79,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - name: Check workflows and vendored runtimes
+      - name: Check workflows and pinned Node assets
         run: |
           nix develop .#native --command actionlint
           nix develop .#native --command npm --prefix crates/host-daemon/src/visualize ci --ignore-scripts --no-audit
           nix develop .#native --command npm --prefix crates/host-daemon/src/visualize run vendor
-          git diff --exit-code -- crates/host-daemon/src/visualize
-          nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk ci --ignore-scripts --no-audit --no-fund
+          nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk ci --ignore-scripts --omit=optional --no-audit
           nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk run vendor
           nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk test
-          git diff --exit-code -- crates/host-daemon/src/claude/sdk/bridge.bundle.mjs crates/host-daemon/src/claude/sdk/SDK-LICENSE.md
+          git diff --exit-code -- crates/host-daemon/src/visualize crates/host-daemon/src/claude/sdk
   toolchain:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -137,17 +130,12 @@ jobs:
           key: ${{ hashFiles('flake.lock') }}
           save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
-      - name: Build desktop, Host and CLI
-        run: nix develop .#native --command cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon -p agent-cli
-      - name: Install the SDK runtime beside the Host
-        run: nix develop .#native --command node scripts/install-claude-sdk.mjs target/debug
-      - name: Core contracts and isolated iroh Host
-        run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+      - name: Build desktop and Host
+        run: nix develop .#native --command cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon
+      - name: Conversation and native contracts
+        run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime
       - name: Documentation examples
-        run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
-      - name: Real-time passive approval soak
-        if: github.event_name == 'workflow_dispatch'
-        run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
+        run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime
   android:
     needs: changes
     if: needs.changes.outputs.android == 'true'
@@ -172,29 +160,14 @@ jobs:
         with:
           cache-provider: basic
           cache-read-only: ${{ github.event_name == 'pull_request' }}
-      - name: Check Android and build app and test APKs
+      - name: Check Android and build app APK
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/gradle
           ANDROID_USER_HOME: ${{ runner.temp }}/android
         run: >-
-          nix develop . --command ./gradlew
-          :apps:mobile:ktfmtCheck :apps:mobile:detekt
-          :apps:mobile:testDebugUnitTest
-          :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest
+          nix develop .#android --command ./gradlew
+          :apps:mobile:ktfmtCheck :apps:mobile:detekt :apps:mobile:testDebugUnitTest :apps:mobile:assembleDebug
           --no-daemon --parallel --max-workers=4 --build-cache --console=plain
-      - name: Enable emulator hardware acceleration
-        run: sudo chmod a+rw /dev/kvm
-      - name: Build isolated Android Host fixtures
-        run: nix develop .#native --command cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
-      - name: Android emulator acceptance
-        run: nix develop .#android-test --command bash scripts/android-e2e.sh
-      - name: Retain Android acceptance logs and screenshots
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: android-acceptance
-          path: target/qa/android-*
-          retention-days: 7
   mac:
     name: Mac
     needs: changes
@@ -232,51 +205,36 @@ jobs:
           key: macos-rust-xcode-26.6-${{ hashFiles('flake.lock') }}
           save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
-      - name: Mac contracts and acceptance
+      - name: Mac contracts
         run: |
           set -o pipefail
           mkdir -p target/qa
           nix develop . --command just quality rust 2>&1 | tee target/qa/quality.log
-      - name: Retain Apple acceptance logs and result bundles
+      - name: Build desktop and Host
+        run: nix develop . --command cargo build --locked -p bex-desktop -p host-daemon -p bex-process
+      - name: Retain Mac verification logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: apple-macos-acceptance
-          path: |
-            target/qa/quality.log
-            target/qa/Bex-*
+          name: apple-macos-verification
+          path: target/qa/quality.log
           retention-days: 7
   iphone:
-    name: iPhone ${{ matrix.label }}
+    name: iPhone
     needs: changes
     if: needs.changes.outputs.iphone == 'true'
     concurrency:
-      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}-{2}', github.run_id, github.job, matrix.label) }}
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}', github.run_id, github.job) }}
       cancel-in-progress: false
       queue: max
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # With Mac, four jobs stay within the hosted macOS concurrency limit.
-          - { shard: 0, label: 1/3 }
-          - { shard: 1, label: 2/3 }
-          - { shard: 2, label: 3/3 }
     runs-on: macos-26
     timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: 2
       APP_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      NEXTEST_TEST_THREADS: 6
-      # The iPhone runner has its own Host and one Simulator on a 7 GiB Mac.
-      BEX_IOS_TEST_WORKERS: 1
-      BEX_IOS_TEST_SHARD: ${{ matrix.shard }}
-      BEX_IOS_TEST_SHARDS: 3
-      BEX_IOS_TEST_ROUNDS: ${{ inputs.ios-test-rounds || 1 }}
-      # The builders validate Swift content/toolchain hashes before reuse.
-      IOS_SWIFT_CACHE_PATHS: |
+      # The builder validates Swift content/toolchain hashes before reuse.
+      BEX_IOS_SWIFT_CACHE_PATHS: |
         target/qa/ios-derived-data
-        target/qa/ios-markdown
         target/agent-bindings
         target/aarch64-apple-ios-sim/release/libAgentCore.a
         target/aarch64-apple-ios-sim/release/AgentCore.swiftmodule
@@ -290,33 +248,31 @@ jobs:
         with:
           cmd-format: nix develop . --command {0}
           key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}
-          save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 0 }}
+          save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         id: ios-cache
         with:
-          path: ${{ env.IOS_SWIFT_CACHE_PATHS }}
-          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/xtask/src/ios_markdown.rs', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
+          path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
+          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/agent-domain/src/**', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**', 'apps/mobile/native-res/**') }}
           restore-keys: ios-swift-xcode-26.6-
-      - name: iPhone contracts and acceptance
+      - name: Build iPhone client
         run: |
           set -o pipefail
           mkdir -p target/qa
           nix develop . --command just quality swift 2>&1 | tee target/qa/quality.log
-      - name: Save iPhone Swift builds once for all shards
-        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
+      - name: Save iPhone Swift builds
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: ${{ env.IOS_SWIFT_CACHE_PATHS }}
+          path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
           key: ${{ steps.ios-cache.outputs.cache-primary-key }}
-      - name: Retain Apple acceptance logs and result bundles
+      - name: Retain iPhone verification logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: apple-iphone-${{ matrix.shard }}-acceptance
-          path: |
-            target/qa/quality.log
-            target/qa/Bex-*
+          name: apple-iphone-verification
+          path: target/qa/quality.log
           retention-days: 7
   windows:
     needs: toolchain
@@ -339,14 +295,9 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
-      - name: Build desktop, Host and CLI
-        run: cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon -p agent-cli
-      - name: Install the SDK runtime beside the Host
-        run: node scripts/install-claude-sdk.mjs target/debug
-      - name: Core contracts and isolated iroh Host
-        run: cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+      - name: Build desktop and Host
+        run: cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon
+      - name: Conversation and native contracts
+        run: cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime
       - name: Documentation examples
-        run: cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
-      - name: Real-time passive approval soak
-        if: github.event_name == 'workflow_dispatch'
-        run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
+        run: cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime

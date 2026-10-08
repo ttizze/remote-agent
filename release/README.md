@@ -30,9 +30,8 @@ or an explicitly requested manual run from `main`.
 
 The release/build/CI-owned generic names now use `APP_*`, `IOS_*`, and
 `MACOS_*` where there is no external consumer. In particular,
-`APP_CODE_SIGN_IDENTITY`, `APP_XCODE_DEVELOPER_DIR`, and
-`IOS_SWIFT_CACHE_PATHS` replaced their former product-prefixed internal names
-in the release and native CI paths.
+`APP_CODE_SIGN_IDENTITY` and `APP_XCODE_DEVELOPER_DIR` replaced their former
+product-prefixed internal names in the release and native CI paths.
 
 The following identifiers remain because changing them without the owners of
 their consumers would break the current format or application identity:
@@ -40,6 +39,8 @@ their consumers would break the current format or application identity:
 - `BEX_BUILD_REVISION` is compiled into the shared diagnostics and bindings.
 - `BEX_CARGO_TARGET_DIR` is an Xcode build setting consumed by the iOS project
   and the test runner.
+- `BEX_IOS_SWIFT_CACHE_PATHS` is consumed by the iOS build tooling and remains
+  the single cache variable; no compatibility alias is provided.
 - `BEX_IOS_TEST_*`, `BEX_PAIRING_*`, and the `target/qa/Bex-*` fixtures are
   consumed by the native acceptance runner.
 - `Bex.app`, the iOS project/scheme, bundle identifiers, and `bex-*` Cargo

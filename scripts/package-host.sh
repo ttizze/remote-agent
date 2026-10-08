@@ -26,11 +26,10 @@ for binary in host-daemon bex-provider-supervisor; do
     [[ -f $source ]] || { echo "missing built Host binary: $source" >&2; exit 1; }
     cp "$source" "$stage/$binary$suffix"
 done
-for resource in Claude-Agent-SDK-LICENSE.md; do
-    source="$target_dir/release/$resource"
-    [[ -f $source ]] || { echo "missing Host runtime resource: $source" >&2; exit 1; }
-    cp "$source" "$stage/$resource"
-done
+resource=Claude-Agent-SDK-LICENSE.md
+source="$target_dir/release/$resource"
+[[ -f $source ]] || { echo "missing Host runtime resource: $source" >&2; exit 1; }
+cp "$source" "$stage/$resource"
 node_version=$(node --version 2>/dev/null || true)
 [[ $node_version =~ ^v([0-9]+)\. ]] || {
     echo 'Node.js 18 or newer must be available while packaging the Host.' >&2
@@ -45,7 +44,7 @@ printf '%s\n' "$platform" > "$stage/platform"
 printf '%s\n' "$arch" > "$stage/architecture"
 {
     printf '%s\n' 'The Host embeds its lockfile-pinned JavaScript SDK and requires Node.js 18 or newer at runtime.'
-    printf '%s\n' 'Install Node.js separately and make the `node` executable available in PATH, or place `node` beside the Host executable.'
+    printf '%s\n' 'Install Node.js separately and make the node executable available in PATH, or place node beside the Host executable.'
     printf 'The packaging environment used Node.js %s.\n' "$node_version"
 } > "$stage/NODE-RUNTIME-REQUIREMENT.txt"
 
