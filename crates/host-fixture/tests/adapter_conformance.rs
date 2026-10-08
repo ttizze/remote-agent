@@ -743,6 +743,12 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .filter(|entry| entry["method"] == "thread/list")
             .collect::<Vec<_>>()
     };
+    let page_reads = || {
+        list_reads()
+            .iter()
+            .filter(|entry| entry["ancestorThreadId"].is_null())
+            .count()
+    };
     let listing = local
         .peer
         .call(&op::ListSessions::new(Default::default()))
