@@ -719,35 +719,6 @@ struct Encoder {
     executable: PathBuf,
 }
 
-fn ffmpeg_executable() -> PathBuf {
-    if let Some(path) = std::env::var_os("AGENT_FFMPEG_EXECUTABLE") {
-        return PathBuf::from(path);
-    }
-    let sibling_name = packaged_ffmpeg_name();
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(sibling) = packaged_ffmpeg_path(&executable)
-    {
-        if sibling.is_file() {
-            return sibling;
-        }
-    }
-    PathBuf::from(sibling_name)
-}
-
-fn packaged_ffmpeg_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    }
-}
-
-fn packaged_ffmpeg_path(executable: &Path) -> Option<PathBuf> {
-    executable
-        .parent()
-        .map(|directory| directory.join(packaged_ffmpeg_name()))
-}
-
 async fn read_bounded<R>(reader: R) -> Result<Vec<u8>, String>
 where
     R: AsyncRead + Unpin,
@@ -809,7 +780,7 @@ async fn run_bounded_command(mut command: Command) -> Result<Output, String> {
 
 impl Encoder {
     async fn start(output: &Path) -> Result<Self, String> {
-        let executable = ffmpeg_executable();
+        let executable = crate::ffmpeg::executable();
         let mut probe = Command::new(&executable);
         probe
             .args(["-hide_banner", "-loglevel", "error", "-encoders"])
@@ -995,15 +966,6 @@ mod tests {
         assert_eq!(PREVIEW_RECORDING_MAX_BYTES, 50 * 1024 * 1024);
         assert_eq!(PREVIEW_RECORDING_MAX_DURATION_SECONDS, 120);
         assert_eq!(MIME_TYPE, "video/webm;codecs=vp9");
-    }
-
-    #[test]
-    fn packaged_ffmpeg_is_resolved_beside_the_running_executable() {
-        let executable = Path::new("/opt/remote-agent/bin/host-daemon");
-        assert_eq!(
-            packaged_ffmpeg_path(executable),
-            Some(PathBuf::from("/opt/remote-agent/bin/ffmpeg"))
-        );
     }
 
     #[test]

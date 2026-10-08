@@ -4018,42 +4018,91 @@ mod provider_settings_tests {
 }
 
 #[cfg(test)]
-mod handoff_gate_tests {
-    use super::handoff_admission_allowed;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    use tokio::sync::oneshot;
+mod handoff_service_tests {
+    use super::HostRpcService;
+    use crate::ProjectStore;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    fn test_service() -> (tempfile::TempDir, HostRpcService) {
+        let directory = tempfile::tempdir().expect("temporary Host state directory");
+        let projects = ProjectStore::new(directory.path().join("projects.json"));
+        let service = HostRpcService::new(Err("test provider is unavailable".into()), projects)
+            .expect("Host service fixture");
+        (directory, service)
+    }
 
     #[tokio::test]
-    async fn readers_overlap_while_handoff_waits_and_drain_rejects_new_admissions() {
-        let gate = Arc::new(tokio::sync::RwLock::new(()));
-        let draining = Arc::new(AtomicBool::new(false));
-        let first = gate.read().await;
-        let second = gate.read().await;
-        let (accepted, received) = oneshot::channel();
-        let writer_gate = gate.clone();
-        let writer_draining = draining.clone();
-        let writer = tokio::spawn(async move {
-            let _write = writer_gate.write().await;
-            writer_draining.store(true, Ordering::Release);
-            accepted.send(()).expect("handoff waiter is alive");
-        });
+    async fn service_read_admissions_overlap_while_handoff_waits_for_both() {
+        let (_directory, service) = test_service();
+        let first = service
+            .acquire_handoff_gate(false)
+            .await
+            .expect("first operation admission");
+        let second = service
+            .acquire_handoff_gate(false)
+            .await
+            .expect("second operation admission");
+        let handoff_service = service.clone();
+        let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
 
         tokio::task::yield_now().await;
-        assert!(!writer.is_finished(), "handoff must wait for both readers");
+        assert!(!handoff.is_finished(), "handoff must wait for both operations");
         drop(first);
         tokio::task::yield_now().await;
-        assert!(!writer.is_finished(), "handoff must wait for the second reader");
+        assert!(!handoff.is_finished(), "handoff must wait for the second operation");
         drop(second);
-        tokio::time::timeout(std::time::Duration::from_secs(1), received)
-            .await
-            .expect("handoff acquires the write permit")
-            .expect("handoff acceptance signal");
-        writer.await.expect("handoff task");
 
-        assert!(!handoff_admission_allowed(draining.load(Ordering::Acquire), false));
-        assert!(handoff_admission_allowed(draining.load(Ordering::Acquire), true));
+        let accepted = tokio::time::timeout(Duration::from_secs(1), handoff)
+            .await
+            .expect("handoff completes after admitted operations finish")
+            .expect("handoff task");
+        assert!(!accepted.expect("handoff inspection"));
+        assert!(!service.handoff_is_draining());
+    }
+
+    #[tokio::test]
+    async fn canceled_service_admission_does_not_block_handoff_or_later_work() {
+        let (_directory, service) = test_service();
+        let held = service
+            .acquire_handoff_gate(false)
+            .await
+            .expect("held operation admission");
+        let handoff_service = service.clone();
+        let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
+        tokio::task::yield_now().await;
+
+        let canceled_service = service.clone();
+        let canceled = tokio::spawn(async move {
+            canceled_service.acquire_handoff_gate(false).await
+        });
+        tokio::task::yield_now().await;
+        canceled.abort();
+        assert!(canceled.await.is_err(), "admission task was canceled");
+        drop(held);
+
+        let accepted = tokio::time::timeout(Duration::from_secs(1), handoff)
+            .await
+            .expect("handoff completes after cancellation")
+            .expect("handoff task")
+            .expect("handoff inspection");
+        assert!(!accepted);
+        assert!(service.acquire_handoff_gate(false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn service_rejects_new_admissions_while_draining_but_allows_status_reads() {
+        let (_directory, service) = test_service();
+        service
+            .inner
+            .handoff_draining
+            .store(true, Ordering::Release);
+
+        assert!(service.acquire_handoff_gate(false).await.is_err());
+        let status_gate = service
+            .acquire_handoff_gate(true)
+            .await
+            .expect("status operation remains readable during drain");
+        drop(status_gate);
     }
 }

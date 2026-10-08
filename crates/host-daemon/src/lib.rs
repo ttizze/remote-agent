@@ -8,6 +8,7 @@ mod codex_accounts;
 pub mod conversation;
 mod dictation;
 pub mod device;
+pub mod ffmpeg;
 mod favicon;
 mod github;
 mod git;
