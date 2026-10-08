@@ -1088,6 +1088,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun refreshPushRegistration() {
         val selectedPreferences = pushPreferences(profileId ?: "")
+        reconcileActivityNotificationPreferences()
         if (!selectedPreferences.notificationsEnabled) pushCapability = PushCapability.DisabledByPreference
         if (!FirebasePushBootstrap.ensure(context)) {
             pushCapability = PushCapability.UnsupportedUnconfigured
@@ -1102,6 +1103,30 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             return
         }
         profiles.forEach { registerPushForHost(it.id) }
+    }
+
+    private fun reconcileActivityNotificationPreferences() {
+        var changed = false
+        var aggregate: String? = null
+        profiles.forEach { profile ->
+            if (!pushPreferences(profile.id).liveActivitiesEnabled) {
+                changed = true
+                aggregate = removeActivityState(context, profile.id)
+            }
+        }
+        if (!changed) return
+        val presentation = aggregate?.let(::parseActivityPresentation)
+        if (presentation == null) {
+            PushNotificationCenter.cancelActivity(context)
+        } else {
+            PushNotificationCenter.showActivity(
+                context,
+                presentation.title,
+                presentation.body,
+                presentation.deepLink,
+                presentation.active,
+            )
+        }
     }
 
     private fun pushOwner(hostId: String): AgentStore? =

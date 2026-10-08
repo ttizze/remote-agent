@@ -49,4 +49,9 @@ schema and `input-push-token`; see Apple's
 [ActivityKit push notification documentation](https://developer.apple.com/documentation/ActivityKit/starting-and-updating-live-activities-with-activitykit-push-notifications)
 for the required app and signing configuration.
 
+FCM token replacement and provider error handling follow Google's
+[token-management guidance](https://firebase.google.com/docs/cloud-messaging/manage-tokens):
+an `INVALID_ARGUMENT` response is not treated as token expiry unless the
+response proves that the exact registered token is unregistered.
+
 No deployment command reads a real credential in tests or source control.

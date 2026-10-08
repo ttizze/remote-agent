@@ -149,6 +149,10 @@ internal object PushNotificationCenter {
         deepLink: String?,
         active: Boolean,
     ) {
+        if (!active) {
+            cancelActivity(context)
+            return
+        }
         post(
             context,
             title,
@@ -158,6 +162,11 @@ internal object PushNotificationCenter {
             key = "agent-activity",
             suppressVisible = false,
         )
+    }
+
+    fun cancelActivity(context: Context) {
+        context.getSystemService(NotificationManager::class.java)
+            ?.cancel(NotificationIds.id(context, "agent-activity"))
     }
 
     private fun post(
@@ -211,7 +220,7 @@ internal object PushNotificationCenter {
 
 /** Allocates stable, collision-free notification ids without deriving them
  * from untrusted deep-link hash codes. */
-private object NotificationIds {
+internal object NotificationIds {
     private const val PREFERENCES = "push-notification-ids"
     private const val NEXT_ID = "next-id"
     private const val FIRST_ID = 1_000

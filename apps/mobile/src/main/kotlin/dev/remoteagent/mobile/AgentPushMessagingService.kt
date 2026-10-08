@@ -73,36 +73,33 @@ private fun activityState(value: String): JsonObject? {
     }.getOrNull()
 }
 
-/** Stores one Host state and returns the serialized cross-Host aggregate. */
-private fun mergeActivityState(context: android.content.Context, hostId: String, value: String): String? {
-    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
-    val state = activityState(value) ?: return null
-    val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
-    val next = preferences.all
-        .filterKeys { it.startsWith("host:") }
-        .mapNotNull { (key, raw) ->
-            val json = raw as? String ?: return@mapNotNull null
-            val parsed = activityState(json) ?: return@mapNotNull null
-            key.removePrefix("host:") to parsed
-        }
-        .toMutableMap()
-    next[hostId] = state
-    val retained = next.toList().sortedByDescending {
+private fun storedActivityStates(
+    preferences: android.content.SharedPreferences,
+): MutableMap<String, JsonObject> = preferences.all
+    .filterKeys { it.startsWith("host:") }
+    .mapNotNull { (key, raw) ->
+        val json = raw as? String ?: return@mapNotNull null
+        val parsed = activityState(json) ?: return@mapNotNull null
+        key.removePrefix("host:") to parsed
+    }
+    .toMutableMap()
+
+private fun retainedActivityStates(states: Map<String, JsonObject>): List<Pair<String, JsonObject>> =
+    states.toList().sortedByDescending {
         (it.second["updatedAt"] as? JsonPrimitive)?.content.orEmpty()
     }
         .take(ACTIVITY_MAX_HOSTS)
-    val editor = preferences.edit().clear()
-    retained.forEach { (id, parsed) -> editor.putString("host:$id", Json.encodeToString(JsonObject.serializer(), parsed)) }
-    editor.apply()
 
-    val allRows = retained.flatMap { (_, parsed) -> (parsed["activities"] as? JsonArray).orEmpty() }.take(64)
-    val activeCount = retained.sumOf { (_, parsed) ->
+private fun aggregateActivityState(states: List<Pair<String, JsonObject>>): String? {
+    if (states.isEmpty()) return null
+    val allRows = states.flatMap { (_, parsed) -> (parsed["activities"] as? JsonArray).orEmpty() }.take(64)
+    val activeCount = states.sumOf { (_, parsed) ->
         (parsed["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0) ?: 0
     }
-    val title = (retained.firstOrNull()?.second?.get("title") as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
+    val title = (states.firstOrNull()?.second?.get("title") as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
         ?: "Agent activity"
-    val subtitle = (retained.firstOrNull()?.second?.get("subtitle") as? JsonPrimitive)?.content.orEmpty()
-    val updatedAt = retained.maxOfOrNull { (_, parsed) -> (parsed["updatedAt"] as? JsonPrimitive)?.content.orEmpty() }.orEmpty()
+    val subtitle = (states.firstOrNull()?.second?.get("subtitle") as? JsonPrimitive)?.content.orEmpty()
+    val updatedAt = states.maxOfOrNull { (_, parsed) -> (parsed["updatedAt"] as? JsonPrimitive)?.content.orEmpty() }.orEmpty()
     val aggregate = buildJsonObject {
         put("title", title)
         put("subtitle", subtitle)
@@ -111,6 +108,27 @@ private fun mergeActivityState(context: android.content.Context, hostId: String,
         put("activities", JsonArray(allRows))
     }
     return Json.encodeToString(JsonObject.serializer(), aggregate)
+}
+
+/** Stores one Host state and returns the serialized cross-Host aggregate. */
+private fun mergeActivityState(context: android.content.Context, hostId: String, value: String): String? {
+    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
+    val state = activityState(value) ?: return null
+    val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
+    val next = storedActivityStates(preferences)
+    next[hostId] = state
+    val retained = retainedActivityStates(next)
+    val editor = preferences.edit().clear()
+    retained.forEach { (id, parsed) -> editor.putString("host:$id", Json.encodeToString(JsonObject.serializer(), parsed)) }
+    editor.apply()
+    return aggregateActivityState(retained)
+}
+
+/** Drops a disabled Host and returns the remaining aggregate, if any. */
+internal fun removeActivityState(context: android.content.Context, hostId: String): String? {
+    val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
+    preferences.edit().remove("host:$hostId").apply()
+    return aggregateActivityState(retainedActivityStates(storedActivityStates(preferences)))
 }
 
 internal class AgentPushMessagingService : FirebaseMessagingService() {
