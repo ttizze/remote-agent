@@ -14,7 +14,9 @@ struct ThreadRequestRow: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(request.title).font(.subheadline.weight(.semibold))
                 .accessibilityIdentifier("request.\(request.id)")
-            Text(request.body).textSelection(.enabled)
+            if case .question = request.requestBody {} else {
+                Text(request.body).textSelection(.enabled)
+            }
             if !request.details.isEmpty {
                 DisclosureGroup("詳細") { Text(request.details).font(.caption.monospaced()).textSelection(.enabled) }
             }
@@ -95,9 +97,13 @@ struct ThreadRequestRow: View {
     @ViewBuilder private func questionView(_ question: Question) -> some View {
         let id = question.id
         let binding = Binding<String>(get: { answers[id] ?? "" }, set: { answers[id] = $0 })
-        Text(question.prompt)
-        ForEach(question.choices, id: \.id) { choice in
-            Button("\((selections[id] ?? []).contains(choice.id) ? "✓ " : "")\(choice.label)") {
+        if !question.header.isEmpty {
+            Text(question.header).font(.subheadline.weight(.semibold))
+        }
+        Text(question.prompt).textSelection(.enabled)
+        ForEach(Array(question.choices.enumerated()), id: \.element.id) { index, choice in
+            let selected = (selections[id] ?? []).contains(choice.id)
+            Button {
                 var selected = selections[id] ?? []
                 if question.multiple {
                     if selected.contains(choice.id) {
@@ -110,10 +116,16 @@ struct ThreadRequestRow: View {
                 }
                 selections[id] = selected
                 answers[id] = ""
-            }.buttonStyle(.bordered)
-            if !choice.description.isEmpty {
-                Text(choice.description).font(.caption)
             }
+            label: {
+                questionChoiceLabel(
+                    number: index + 1, label: choice.label, description: choice.description, selected: selected
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(index + 1). \(choice.label)")
+            .accessibilityHint(choice.description)
+            .accessibilityValue(selected ? "選択済み" : "未選択")
         }
         if question.allowFreeText {
             if question.secret {
@@ -122,6 +134,33 @@ struct ThreadRequestRow: View {
                 TextField("回答", text: binding).textFieldStyle(.roundedBorder).accessibilityIdentifier("request.answer")
             }
         }
+    }
+
+    private func questionChoiceLabel(number: Int, label: String, description: String, selected: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(number)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 24, minHeight: 24)
+                .background(Color.secondary.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label).font(.subheadline.weight(.medium))
+                if !description.isEmpty {
+                    Text(description).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "checkmark")
+                .frame(width: 20, height: 24)
+                .opacity(selected ? 1 : 0)
+                .accessibilityHidden(true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
     }
 
     private func submitResponse() {

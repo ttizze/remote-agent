@@ -303,6 +303,10 @@ extension BexLaunchUITests {
         let completed = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", "MARKDOWN_STREAM_COMPLETE"))
             .firstMatch
         XCTAssertTrue(completed.waitForExistence(timeout: 30))
+        let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: completed)
+        wait(for: [visible], timeout: 5)
+        XCTAssertFalse(app.buttons["task.latest"].exists,
+                       "Streaming growth of the same row must keep its final text visible")
         captureScreen(app, named: "Long Markdown stream completed with draft preserved")
     }
 

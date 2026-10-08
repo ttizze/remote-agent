@@ -27,7 +27,7 @@ impl Snapshot {
             return Vec::new();
         };
         let mut entries = AgentEntries::new();
-        for thread in self.threads.iter().flat_map(|list| &list.data) {
+        for thread in self.conversations.values() {
             let (Some(id), Some(parent)) = (&thread.id, &thread.parent_id) else {
                 continue;
             };
@@ -248,8 +248,15 @@ mod tests {
     fn snapshot(data: serde_json::Value) -> Snapshot {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session("root"));
+        let data: Vec<Thread> = serde_json::from_value(data).unwrap();
+        snapshot.conversations = Arc::new(
+            data.iter()
+                .filter_map(|thread| Some((thread.id.clone()?, Arc::new(thread.clone()))))
+                .collect(),
+        );
         snapshot.threads = Some(Arc::new(serde_json::from_value(serde_json::json!({
-            "data":data, "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
+            "data":data.into_iter().filter(|thread| thread.parent_id.is_none()).collect::<Vec<_>>(),
+            "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
         })).unwrap()));
         snapshot
     }
@@ -277,10 +284,8 @@ mod tests {
         assert!(before[0].active);
         assert_eq!(before[1].status, "未確認");
         assert_eq!(state.navigation.thread_id, Some(session("root")));
-        let page = Arc::make_mut(state.threads.as_mut().unwrap());
-        page.data.reverse();
-        for thread in &mut page.data {
-            thread.updated_at = Some(999.);
+        for thread in Arc::make_mut(&mut state.conversations).values_mut() {
+            Arc::make_mut(thread).updated_at = Some(999.);
         }
         Arc::make_mut(&mut state.activity)
             .active
@@ -488,14 +493,15 @@ mod tests {
         #[case] active: bool,
     ) {
         let mut state = snapshot(serde_json::json!([]));
-        Arc::make_mut(state.threads.as_mut().unwrap())
-            .data
-            .push(Thread {
+        Arc::make_mut(&mut state.conversations).insert(
+            session("child"),
+            Arc::new(Thread {
                 id: Some(session("child")),
                 parent_id: Some(session("root")),
                 status,
                 ..Default::default()
-            });
+            }),
+        );
         let agents = state.agent_panel();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].status, label);
@@ -507,10 +513,12 @@ mod tests {
         fn arbitrary_native_graphs_show_only_unique_reachable_agents(parents in prop::collection::vec(0usize..25, 1..25)) {
             let mut state = snapshot(serde_json::json!([]));
             Arc::make_mut(&mut state.navigation).thread_id = Some(session("0"));
-            let page = Arc::make_mut(state.threads.as_mut().unwrap());
-            page.data = parents.iter().enumerate().map(|(index,parent)| Thread {
-                id:Some(session(&index.to_string())), parent_id:Some(session(&parent.to_string())), ..Default::default()
-            }).collect();
+            state.conversations = Arc::new(parents.iter().enumerate().map(|(index,parent)| {
+                let id = session(&index.to_string());
+                (id.clone(), Arc::new(Thread {
+                    id:Some(id), parent_id:Some(session(&parent.to_string())), ..Default::default()
+                }))
+            }).collect());
             let rows = state.agent_panel();
             let expected:HashSet<_> = (1..parents.len()).filter(|&index| {
                 let mut cursor=index;

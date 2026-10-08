@@ -62,6 +62,16 @@ cp "$target/release/host-daemon" "$executables/host-daemon"
 cp crates/host-daemon/src/claude/sdk/bridge.bundle.mjs "$resources/bex-claude-sdk.mjs"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
+# Use macOS's libiconv so the app also runs on Macs without Nix.
+for executable in "$executables/Bex" "$executables/host-daemon" "$executables/bex-provider-supervisor"; do
+    while IFS= read -r library; do
+        [[ $library == /nix/store/* ]] || continue
+        [[ ${library##*/} == libiconv.2.dylib ]] || {
+            echo "Unsupported Nix library dependency: $library" >&2; exit 1
+        }
+        /usr/bin/install_name_tool -change "$library" /usr/lib/libiconv.2.dylib "$executable"
+    done < <(/usr/bin/otool -L "$executable" | awk 'NR > 1 {print $1}')
+done
 sign "$executables/Bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"

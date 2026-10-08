@@ -45,6 +45,14 @@ Codex and Claude Code are the supported providers.
 
 ## Provider boundaries
 
+The task list reads root metadata, with one lookahead per displayed section.
+It does not enumerate descendants or calculate their Git status. Search also
+reads only root titles. Desktop observes `host/session/agents` only
+while the selected conversation's Agents panel is visible; core refreshes that
+fleet on connection and activity updates. Responses contain only identity,
+parent identity, name and status and update conversation metadata without
+replacing history. Mobile task-list restoration does not request this data.
+
 Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong
 to `adapters/codex/`. Clients request normalized history pages; core joins

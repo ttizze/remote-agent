@@ -869,6 +869,27 @@ impl HostRpcService {
                     message = %format_args!("elapsed_ms={} success={}", started.elapsed().as_millis(), result.is_ok()));
                 result?.into()
             }
+            Call::ListAgents(params) => {
+                let agent = self.agent(params.thread_id.provider)?;
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut threads = session_pages(agent.as_ref(), "", Some(&params.thread_id.id))
+                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                    .try_flatten()
+                    .boxed();
+                let mut agents = Vec::new();
+                while let Some(summary) = next_title(&mut threads, deadline).await? {
+                    let thread = crate::projects::titles::summary(summary.thread);
+                    if let (Some(id), Some(parent_id)) = (thread.id, thread.parent_id) {
+                        agents.push(agent_protocol::models::AgentObservation {
+                            id,
+                            parent_id,
+                            name: thread.name,
+                            status: thread.status,
+                        });
+                    }
+                }
+                agents.into()
+            }
             Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
                 let update = if let Call::UpdateWorktreeSettings(settings) = request {
                     Some(settings.clone())
@@ -1190,6 +1211,7 @@ impl HostRpcService {
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
         let search = query.search_term.as_str();
         let agents = self.agents();
+        let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
@@ -1262,65 +1284,17 @@ impl HostRpcService {
                 serde_json::to_value(provider_errors)?,
             ));
         }
+        let roots_ms = started.elapsed().as_millis();
         let mut page = titles.finish();
-        // The recent page can end before a visible root's older descendants.
-        let descendants = futures_util::future::join_all(page.data.iter().filter_map(|thread| {
-            let id = thread.id.as_ref()?;
-            if thread.parent_id.is_some() {
-                return None;
-            }
-            let (_, agent) = agents
-                .iter()
-                .find(|(provider, _)| *provider == id.provider)?;
-            Some(async move {
-                let mut threads = session_pages(agent.as_ref(), "", Some(&id.id))
-                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
-                    .try_flatten()
-                    .boxed();
-                let mut children = Vec::new();
-                let error = loop {
-                    match next_title(&mut threads, deadline).await {
-                        Ok(Some(summary)) => children.push(summary),
-                        Ok(None) => break None,
-                        Err(error) => break Some(error),
-                    }
-                };
-                (id.provider, children, agent.capabilities(), error)
-            })
-        }))
-        .await;
-        let mut children = Vec::new();
-        for (provider, summaries, capabilities, error) in descendants {
-            if let Some(error) = error {
-                provider_errors.insert(provider.key().into(), serde_json::to_value(error)?);
-            }
-            for summary in summaries {
-                let mut thread = summary.thread;
-                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
-                    branches.insert(id.clone(), branch);
-                }
-                describe_thread(&mut thread, capabilities, &snapshot);
-                children.push(crate::projects::titles::summary(thread));
-            }
-        }
-        children.sort_by(|a, b| {
-            b.updated_at
-                .unwrap_or_default()
-                .total_cmp(&a.updated_at.unwrap_or_default())
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        page.data = crate::projects::titles::append_descendants(page.data, children);
-        page.projects = tokio::task::spawn_blocking(move || {
-            let mut projects = page.projects;
+        let mut projects = std::mem::take(&mut page.projects);
+        let icons = tokio::task::spawn_blocking(move || {
             for project in &mut projects {
                 project.favicon_png = project.roots.iter().find_map(|root| {
                     crate::projects::icons::resolve(std::path::Path::new(&root.path))
                 });
             }
             projects
-        })
-        .await
-        .map_err(|error| Failure::new("project_icons_unavailable", error))?;
+        });
         let sources: Vec<_> = page
             .data
             .iter()
@@ -1335,10 +1309,13 @@ impl HostRpcService {
                 })
             })
             .collect();
-        let statuses =
+        let (projects, statuses) = tokio::join!(
+            icons,
             crate::worktrees::directory_statuses(sources.iter().flatten().cloned().collect())
-                .await
-                .map_err(|error| Failure::new("worktree_status_failed", error))?;
+        );
+        page.projects =
+            projects.map_err(|error| Failure::new("project_icons_unavailable", error))?;
+        let statuses = statuses.map_err(|error| Failure::new("worktree_status_failed", error))?;
         for (thread, source) in page.data.iter_mut().zip(sources) {
             thread.worktree_status = source
                 .as_ref()
@@ -1348,6 +1325,9 @@ impl HostRpcService {
         if !provider_errors.is_empty() {
             page.provider_errors = Some(provider_errors);
         }
+        tracing::info!(target: "bex", operation = "host.thread.list.stages",
+            message = %format_args!("roots_ms={roots_ms} decoration_ms={} titles={}",
+                started.elapsed().as_millis() - roots_ms, page.data.len()));
         Ok(page)
     }
 
