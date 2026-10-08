@@ -147,9 +147,12 @@ Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
 
-The model name opens a searchable catalog. Desktop's account row includes the
-Host-reported weekly quota windows; clicking it opens account switching, then
-account management (add/login/confirmed sign-out). On iPhone, new conversations
+The model name opens a searchable catalog. For Claude, the Host forwards the SDK's
+`displayName` unchanged as the model name, without a provider prefix or text from
+`description`.
+Desktop's account row includes the Host-reported weekly quota windows; clicking
+it opens account switching, then account management (add/login/confirmed sign-out).
+On iPhone, new conversations
 choose Codex or Claude Code with a segmented control; existing conversations
 keep their agent fixed. The account is read-only in the model picker, and
 Manage opens the same agent/account screen used by Settings. Browsing agent
