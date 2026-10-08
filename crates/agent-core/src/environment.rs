@@ -1392,9 +1392,9 @@ mod tests {
             &capabilities,
             EnvironmentCapability::FileAttachments
         ));
-        let mut descriptor = descriptor("one", "One");
-        descriptor.capabilities = capabilities;
-        let value = serde_json::to_value(descriptor).unwrap();
+        let mut file_descriptor = descriptor("one", "One");
+        file_descriptor.capabilities = capabilities.clone();
+        let value = serde_json::to_value(file_descriptor).unwrap();
         assert_eq!(
             value["capabilities"]["fileAttachments"]["maxUploadBytes"],
             42
@@ -1402,9 +1402,9 @@ mod tests {
         capabilities.server_installation = Some(EnvironmentInstallation::NpmGlobal {
             prefix: "/usr/local".into(),
         });
-        let mut descriptor = descriptor("one", "One");
-        descriptor.capabilities = capabilities;
-        let value = serde_json::to_value(descriptor).unwrap();
+        let mut installation_descriptor = descriptor("one", "One");
+        installation_descriptor.capabilities = capabilities;
+        let value = serde_json::to_value(installation_descriptor).unwrap();
         assert_eq!(
             value["capabilities"]["serverInstallation"]["kind"],
             "npm-global"
@@ -1897,6 +1897,7 @@ mod tests {
                 agent_domain::SelectOption {
                     id: "effort".into(),
                     label: "Effort".into(),
+                    description: None,
                     options: vec![agent_domain::OptionChoice {
                         id: "high".into(),
                         label: "High".into(),

@@ -267,6 +267,7 @@ pub(crate) mod fixtures {
             enabled: true,
             installed: true,
             version: None,
+            version_advisory: None,
             status: crate::models::ProviderStatus::Ready,
             message: None,
             unavailable_reason: None,

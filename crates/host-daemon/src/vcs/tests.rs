@@ -1,4 +1,9 @@
 use super::*;
+use crate::vcs::refs::{checkout, create, list_refs};
+use crate::vcs::status::status;
+use agent_protocol::workspace::{
+    BranchChanges, CreateRef, DiffSource, DiffSourceKind, ListRefs, RefKind, RefList, SwitchRef,
+};
 
 fn run(cwd: &Path, args: &[&str]) -> String {
     let output = Command::new("git")

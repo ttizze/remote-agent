@@ -149,7 +149,7 @@ mod tests {
             }
         );
         assert_eq!(rows[1].control, SettingControl::Switch { on: false });
-        assert_eq!(
+        assert!(matches!(
             (SECTION.intent)(
                 &snapshot,
                 &SettingsScope::Host,
@@ -159,6 +159,6 @@ mod tests {
             Some(Intent::SetNotificationMode {
                 mode: NotificationMode::Sound
             })
-        );
+        ));
     }
 }

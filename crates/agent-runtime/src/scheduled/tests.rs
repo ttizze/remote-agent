@@ -217,11 +217,12 @@ async fn due_poll_skips_a_corrupt_schedule_without_defecting_healthy_tasks() {
     h.rig
         .store
         .write(|tx| {
-            let mut definition: serde_json::Value = tx.query_row(
+            let definition: String = tx.query_row(
                 "SELECT definition FROM scheduled_tasks WHERE task_id = 'due-corrupt'",
                 [],
                 |row| row.get(0),
             )?;
+            let mut definition: serde_json::Value = serde_json::from_str(&definition).unwrap();
             definition["schedule"] = serde_json::json!({
                 "type": "fixed_time",
                 "timeOfDay": "25:00",
@@ -301,7 +302,7 @@ async fn releases_interrupted_runs_on_startup_and_still_executes_due_tasks() {
         .rig
         .store
         .read(|c| {
-            c.query_row(
+            Ok(c.query_row(
                 "SELECT last_run_status, last_run_error, run_count
                  FROM scheduled_tasks WHERE task_id = 'stuck-corrupt'",
                 [],
@@ -312,14 +313,14 @@ async fn releases_interrupted_runs_on_startup_and_still_executes_due_tasks() {
                         row.get::<_, i64>(2)?,
                     ))
                 },
-            )
+            )?)
         })
         .unwrap();
     assert_eq!(
         corrupt,
         (
-            "failed".into(),
-            Some("Run was interrupted by a server restart.".into()),
+            "failed".to_owned(),
+            Some("Run was interrupted by a server restart.".to_owned()),
             1
         )
     );

@@ -432,6 +432,7 @@ mod tests {
             agent_domain::OptionDescriptor::Select(agent_domain::SelectOption {
                 id: "effort".into(),
                 label: "Effort".into(),
+                description: None,
                 options: vec![
                     agent_domain::OptionChoice {
                         id: "high".into(),

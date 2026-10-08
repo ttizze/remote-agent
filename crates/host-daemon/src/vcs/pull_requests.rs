@@ -731,6 +731,7 @@ mod tests {
             is_cross_repository: None,
             head_repository_name_with_owner: None,
             head_repository_owner_login: None,
+            head_sha: None,
         }
     }
 

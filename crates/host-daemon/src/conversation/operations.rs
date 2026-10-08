@@ -766,7 +766,7 @@ mod settings_tests {
 
     #[test]
     fn text_generation_resolves_title_and_source_control_models_separately() {
-        let model = |driver, name| ModelSelection {
+        let model = |driver: Driver, name: &str| ModelSelection {
             instance: name.into(),
             driver,
             model: name.into(),
@@ -835,6 +835,8 @@ mod settings_tests {
         );
         assert!(
             generation_prompt(&TextGenerationRequest {
+                operation: "generateCommitMessage",
+                project: "project".into(),
                 model: commit.model,
                 instructions: commit.instructions,
                 cwd: "/tmp/project".into(),

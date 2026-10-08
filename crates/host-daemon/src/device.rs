@@ -4330,7 +4330,7 @@ async fn discover_host(
         .run(
             "xcrun",
             &[
-                "simctl".into(),
+                String::from("simctl"),
                 "list".into(),
                 "devices".into(),
                 "--json".into(),
@@ -4856,7 +4856,7 @@ mod tests {
             vec![DeviceCommand {
                 program: "xcrun".into(),
                 args: vec![
-                    "simctl".into(),
+                    String::from("simctl"),
                     "ui".into(),
                     "sim".into(),
                     "appearance".into(),
@@ -4877,7 +4877,7 @@ mod tests {
         assert_eq!(
             push[0].args,
             vec![
-                "simctl".into(),
+                String::from("simctl"),
                 "push".into(),
                 "sim".into(),
                 "app.example".into(),
@@ -4932,7 +4932,7 @@ mod tests {
         assert_eq!(
             commands[0].args,
             vec![
-                "simctl".into(),
+                String::from("simctl"),
                 "spawn".into(),
                 "sim".into(),
                 "/hub/serve-sim-ax-settings".into(),

@@ -271,7 +271,11 @@ mod tests {
         #[test]
         fn launch_argument_formatting_is_stable(arguments in prop::collection::vec("[a-zA-Z0-9_./:-]{0,16}", 0..12)) {
             let formatted = format_launch_args(&arguments);
-            let expected = arguments.iter().map(|value| value.trim()).filter(|value| !value.is_empty()).cloned().collect::<Vec<_>>();
+            let expected = arguments
+                .iter()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
             prop_assert_eq!(parse_launch_args(&formatted), expected);
         }
     }

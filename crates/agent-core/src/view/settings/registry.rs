@@ -10,7 +10,7 @@ use crate::{
     state::{Intent, Snapshot},
     view::time::TimestampFormat,
 };
-use agent_protocol::models::ProjectSettingsOverrides;
+use agent_protocol::models::{ProjectSettingsOverrides, WorktreeSettings};
 
 /// What the Host page's rows are built from.
 pub(super) struct Context<'a> {

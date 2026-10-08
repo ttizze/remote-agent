@@ -174,7 +174,7 @@ async fn browser_reports_an_in_flight_action_or_recording_as_busy() {
     let browser = Browser {
         profile: bridge_directory.path().join("profile"),
         executable: "fixture-browser".into(),
-        state: tokio::sync::Mutex::new(State::default()),
+        state: tokio::sync::Mutex::new(State::default()).into(),
         recordings: Default::default(),
         recording_artifacts: Default::default(),
         stop: Default::default(),

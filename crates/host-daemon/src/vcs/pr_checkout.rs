@@ -387,6 +387,7 @@ mod tests {
             is_cross_repository: cross_repository,
             head_repository_name_with_owner: None,
             head_repository_owner_login: None,
+            head_sha: None,
         }
     }
 

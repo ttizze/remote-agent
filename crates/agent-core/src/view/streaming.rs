@@ -54,7 +54,7 @@ mod tests {
 
     fn state(text: &str, streaming: bool, status: RunStatus) -> State {
         let thread = Thread {
-            id: ThreadId::from("thread:streaming"),
+            id: ThreadId::new("thread:streaming").unwrap(),
             project: "project".into(),
             title: "title".into(),
             selection: ModelSelection {
@@ -96,9 +96,9 @@ mod tests {
                 restart_cancelled_work: vec![],
                 checkpoint_scope: None,
                 native_baseline_heads: BTreeMap::new(),
-                id: RunId::from("run:streaming"),
+                id: RunId::new("run:streaming").unwrap(),
                 ordinal: 1,
-                message: MessageId::from("message:streaming"),
+                message: MessageId::new("message:streaming").unwrap(),
                 selection: ModelSelection {
                     instance: "codex".into(),
                     driver: Driver::Codex,
@@ -118,8 +118,8 @@ mod tests {
             }],
             messages: vec![Message {
                 notification: None,
-                id: MessageId::from("message:assistant"),
-                run: Some(RunId::from("run:streaming")),
+                id: MessageId::new("message:assistant").unwrap(),
+                run: Some(RunId::new("run:streaming").unwrap()),
                 role: Role::Assistant,
                 text: text.into(),
                 attachments: vec![],
@@ -130,6 +130,7 @@ mod tests {
                 created_at: Timestamp::from_millis(0).unwrap(),
                 updated_at: Timestamp::from_millis(0).unwrap(),
                 context: None,
+                scheduled_task: None,
             }],
             ..State::default()
         }

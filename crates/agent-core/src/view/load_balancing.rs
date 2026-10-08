@@ -284,7 +284,8 @@ mod tests {
                 received_at_ms: Some(100_000),
                 weight,
             };
-            prop_assert_eq!(select_environment(&[candidate], 100_000), Some("fresh"));
+            let candidates = [candidate];
+            prop_assert_eq!(select_environment(&candidates, 100_000), Some("fresh"));
         }
     }
 }

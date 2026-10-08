@@ -280,7 +280,7 @@ mod tests {
             .unwrap();
         assert_eq!(section.rows[0].control, SettingControl::Switch { on: true });
         assert_eq!(section.rows[1].control, SettingControl::Switch { on: true });
-        assert_eq!(
+        assert!(matches!(
             (SECTION.intent)(
                 &snapshot,
                 &SettingsScope::Host,
@@ -292,6 +292,6 @@ mod tests {
             Some(Intent::SetSnapshotSound {
                 sound: SnapshotSound::CameraShutter
             })
-        );
+        ));
     }
 }

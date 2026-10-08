@@ -549,18 +549,18 @@ mod tests {
                 account(
                     "old",
                     Some(" SAME@example.com "),
-                    usage(20, 10, None, WindowKind::Session, "primary", Some(2_000)),
+                    usage(20.0, 10, None, WindowKind::Session, "primary", Some(2_000)),
                 ),
                 account(
                     "fresh",
                     Some("same@example.com"),
-                    usage(40, 20, None, WindowKind::Session, "primary", Some(3_000)),
+                    usage(40.0, 20, None, WindowKind::Session, "primary", Some(3_000)),
                 ),
                 account(
                     "key-old",
                     None,
                     usage(
-                        10,
+                        10.0,
                         10,
                         Some("shared"),
                         WindowKind::Session,
@@ -572,7 +572,7 @@ mod tests {
                     "key-fresh",
                     None,
                     usage(
-                        30,
+                        30.0,
                         20,
                         Some("shared"),
                         WindowKind::Session,
@@ -587,14 +587,14 @@ mod tests {
         let view = usage_limits(Some(&accounts));
         assert_eq!(view.len(), 2);
         assert_eq!(view[0].id, "fresh");
-        assert_eq!(view[0].windows[0].used_percent, 40);
+        assert_eq!(view[0].windows[0].used_percent, 40.0);
         assert_eq!(view[1].id, "key-fresh");
-        assert_eq!(view[1].windows[0].used_percent, 30);
+        assert_eq!(view[1].windows[0].used_percent, 30.0);
     }
 
     #[test]
     fn carries_forward_the_freshest_reset_credit_when_windows_come_from_another_read() {
-        let mut credit_read = usage(70, 10, None, WindowKind::Session, "primary", Some(2_000));
+        let mut credit_read = usage(70.0, 10, None, WindowKind::Session, "primary", Some(2_000));
         credit_read.reset_credits = Some(agent_protocol::usage::ResetCredits {
             available_count: 2,
             next_expires_at: Some(4_000),
@@ -606,7 +606,7 @@ mod tests {
                 account(
                     "windows",
                     Some(" SAME@example.test "),
-                    usage(20, 20, None, WindowKind::Session, "primary", Some(3_000)),
+                    usage(20.0, 20, None, WindowKind::Session, "primary", Some(3_000)),
                 ),
             ],
             selected: HashMap::new(),
@@ -615,7 +615,7 @@ mod tests {
         let view = usage_limits(Some(&accounts));
         assert_eq!(view.len(), 1);
         assert_eq!(view[0].id, "windows");
-        assert_eq!(view[0].windows[0].used_percent, 20);
+        assert_eq!(view[0].windows[0].used_percent, 20.0);
         assert_eq!(view[0].reset_credit_count, 2);
         assert_eq!(view[0].next_credit_id.as_deref(), Some("credit-1"));
         assert_eq!(view[0].reset_credit_account_id.as_deref(), Some("credit"));
@@ -669,12 +669,12 @@ mod tests {
                 account(
                     "first",
                     Some("first@example.test"),
-                    usage(80, 10, None, WindowKind::Session, "primary", None),
+                    usage(80.0, 10, None, WindowKind::Session, "primary", None),
                 ),
                 account(
                     "selected",
                     Some("selected@example.test"),
-                    usage(20, 10, None, WindowKind::Session, "primary", None),
+                    usage(20.0, 10, None, WindowKind::Session, "primary", None),
                 ),
             ],
             selected: HashMap::from([(ProviderKind::Codex, "selected".into())]),
@@ -682,7 +682,7 @@ mod tests {
         };
         let view = composer_usage_limits(Some(&accounts), ProviderKind::Codex).unwrap();
         assert_eq!(view.account_id, "selected");
-        assert_eq!(view.windows[0].used_percent, 20);
+        assert_eq!(view.windows[0].used_percent, 20.0);
         assert_eq!(view.label, "Usage limits · selected@example.test");
     }
 
@@ -691,12 +691,12 @@ mod tests {
         let first = account(
             "a",
             Some("a@example.test"),
-            usage(80, 10, None, WindowKind::Session, "primary", Some(1_000)),
+            usage(80.0, 10, None, WindowKind::Session, "primary", Some(1_000)),
         );
         let mut second = account(
             "b",
             Some("b@example.test"),
-            usage(40, 10, None, WindowKind::Session, "primary", Some(1_100)),
+            usage(40.0, 10, None, WindowKind::Session, "primary", Some(1_100)),
         );
         second.usage.as_mut().unwrap().windows.push(UsageWindow {
             id: Some("weekly".into()),
@@ -731,7 +731,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .used_percent,
-            10
+            10.0
         );
     }
 

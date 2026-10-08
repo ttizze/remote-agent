@@ -2143,7 +2143,10 @@ fn provider_instance_edit_rejects_invalid_environment_before_dispatch() {
         ..Snapshot::default()
     });
     let next = owner.prepare(Intent::SetProviderInstances {
-        provider_instances_json: serde_json::to_string(&BTreeMap::from([(
+        provider_instances_json: serde_json::to_string(&BTreeMap::<
+            String,
+            agent_protocol::models::ProviderInstanceConfig,
+        >::from([(
             "build".into(),
             agent_protocol::models::ProviderInstanceConfig {
                 environment: BTreeMap::from([("bad-name".into(), "x".into())]),
@@ -3289,6 +3292,7 @@ fn reloading_a_diff_focus_invalidates_the_old_preview_and_lazy_files() {
     };
     owner.state.sources.diff_preview = Some(DiffPreviewEntry {
         request: request.clone(),
+        active_cwd: request.cwd.clone(),
         result: Some(Arc::new(w::DiffPreviewResult {
             cwd: "/repo".into(),
             generated_at: agent_domain::Timestamp::from_millis(1).unwrap(),
