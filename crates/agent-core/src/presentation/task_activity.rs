@@ -35,29 +35,24 @@ impl Snapshot {
                     .iter()
                     .find(|thread| thread.id.as_ref() == Some(id));
                 let conversation = self.conversations.get(id).map(AsRef::as_ref);
-                let source = conversation
+                let live = conversation.filter(|_| self.subscriptions.contains_key(id));
+                let source = live
                     .filter(|thread| thread.status != SessionStatus::Unknown)
-                    .or(summary)
-                    .or(conversation);
+                    .or(summary);
                 let observed = self.activity.active.get(id).copied();
                 let session_status = source.map(|thread| thread.status).unwrap_or_default();
                 // Unsubscribed history may belong to an earlier run of this session.
-                let latest = conversation
-                    .filter(|_| self.subscriptions.contains_key(id))
-                    .and_then(|thread| thread.turns.as_ref()?.last());
-                let waiting = conversation.is_some_and(|thread| {
+                let latest = live.and_then(|thread| thread.turns.as_ref()?.last());
+                let waiting = live.is_some_and(|thread| {
                     thread.requests.values().any(|request| {
                         request.delivery == crate::session::RequestDelivery::Awaiting
                     })
                 });
                 let known = session_status != SessionStatus::Unavailable
-                    && (observed.is_some()
+                    && (observed == Some(true)
                         || source.is_some_and(|thread| {
                             thread.list_stale != Some(true)
-                                && !matches!(
-                                    thread.status,
-                                    SessionStatus::Unavailable | SessionStatus::Unknown
-                                )
+                                && thread.status != SessionStatus::Unknown
                         }));
                 let (status, status_label, ongoing) = task_phase(
                     known,
@@ -172,9 +167,9 @@ mod tests {
         state.subscriptions = Arc::default();
         let id = state.task_activities()[0].session.clone();
         Arc::make_mut(&mut state.activity).active.insert(id, false);
-        assert_eq!(state.task_activities()[0].status_label, "終了");
+        assert_eq!(state.task_activities()[0].status_label, "更新待ち");
         let disconnected = reduce(&state, Event::Disconnected("offline".into())).0;
-        assert_eq!(disconnected.task_activities()[0].status, "finished");
+        assert_eq!(disconnected.task_activities()[0].status, "unknown");
     }
     #[test]
     fn provider_unavailability_cannot_certify_a_cached_terminal_result() {
@@ -182,6 +177,27 @@ mod tests {
         let id = state.task_activities()[0].session.clone();
         Arc::make_mut(&mut state.activity).active.insert(id, false);
         assert_eq!(state.task_activities()[0].status, "unknown");
+    }
+    #[test]
+    fn fresh_list_state_takes_priority_over_unsubscribed_status_and_old_requests() {
+        use crate::state::operations::{ListSessions, Operation};
+        let mut state = snapshot("idle", "failed");
+        state.subscriptions = Arc::default();
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut state.conversations)
+                .values_mut()
+                .next()
+                .unwrap(),
+        );
+        let request = serde_json::from_value(json!({"id":"request","target":"session","delivery":"awaiting","body":{"question":{"questions":[]}}})).unwrap();
+        thread.requests.insert("request".into(), Arc::new(request));
+        for (status, expected) in [("running", "running"), ("idle", "finished")] {
+            ListSessions::new(Default::default()).apply(&mut state,serde_json::from_value(json!({
+                "data":[{"id":{"provider":"codex","id":"task"}, "status":status}],
+                "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
+            })).unwrap());
+            assert_eq!(state.task_activities()[0].status, expected);
+        }
     }
 
     #[test]
