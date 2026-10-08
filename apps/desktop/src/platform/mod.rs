@@ -86,13 +86,22 @@ pub(crate) struct Connections {
     local_endpoint: tokio::sync::OnceCell<(PathBuf, Endpoint)>,
     startup: tokio::sync::Mutex<()>,
 }
+
+/// The connection path is part of the power-publisher safety boundary.  A
+/// local session is marked only after the registry-backed local Host answered
+/// on its loopback endpoint; a remote ticket can never acquire this marker.
+pub(crate) struct ConnectedStore {
+    pub(crate) store: Arc<Store>,
+    pub(crate) local_host_supervised: bool,
+}
+
 impl Connections {
     pub(crate) async fn connect(
         self: &Arc<Self>,
         remote: Option<&str>,
         snapshot: Snapshot,
         options: StoreOptions,
-    ) -> anyhow::Result<Arc<Store>> {
+    ) -> anyhow::Result<ConnectedStore> {
         let startup = self.startup.lock().await;
         if let Some(remote) = remote {
             let ticket = remote.parse::<Ticket>()?;
@@ -104,13 +113,17 @@ impl Connections {
                 }
             };
             drop(startup);
-            return Ok(Arc::new(
-                Store::connect(endpoint, &ticket, snapshot, options, None).await?,
-            ));
+            return Ok(ConnectedStore {
+                store: Arc::new(Store::connect(endpoint, &ticket, snapshot, options, None).await?),
+                local_host_supervised: false,
+            });
         }
         let store = Arc::new(self.connect_local(snapshot, options).await?);
         self.recover_local(store.clone());
-        Ok(store)
+        Ok(ConnectedStore {
+            store,
+            local_host_supervised: true,
+        })
     }
 
     async fn endpoint_for(

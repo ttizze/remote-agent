@@ -41,6 +41,7 @@ use gpui_kit::{
 };
 use hosts::{HostEvent, Hosts};
 use std::{path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -48,7 +49,7 @@ type Done = Box<
 >;
 
 enum Update {
-    Connected(Result<(StoreSession, PathBuf), String>),
+    Connected(Result<(StoreSession, PathBuf, bool), String>),
     Snapshot(Arc<Snapshot>),
     Views(Box<Views>),
     Completed(Option<Done>, Result<Outcome, String>),
@@ -56,6 +57,10 @@ enum Update {
     Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
     Transcribed(uuid::Uuid, Result<Outcome, String>),
+    HostPowerSample {
+        attempt: u64,
+        snapshot: agent_protocol::background::HostPowerSnapshot,
+    },
     Tick,
 }
 
@@ -110,6 +115,7 @@ pub(crate) struct Desktop {
     epoch: u64,
     pub(crate) connecting: bool,
     pub(crate) remote: Option<RemoteHost>,
+    local_host_supervised: bool,
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
@@ -127,10 +133,22 @@ pub(crate) struct Desktop {
     pub(crate) dictation: Option<dictation::Dictation>,
     last_host_power_report_ms: Option<i64>,
     last_host_power: Option<agent_protocol::background::HostPowerSnapshot>,
+    host_power_attempt: u64,
+    host_power_probe: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    host_power_probe_stop: Option<CancellationToken>,
+    desktop_process_monitor: Arc<host_daemon::DesktopProcessMonitor>,
     /// Decoded project icons, by content hash.
     pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+fn local_host_power_publish_allowed(
+    local_host_supervised: bool,
+    remote_selected: bool,
+    probe_in_flight: bool,
+) -> bool {
+    local_host_supervised && !remote_selected && !probe_in_flight
 }
 
 /// Keys every window binds; screens handle their own focus-specific keys.
@@ -210,6 +228,7 @@ impl Desktop {
             epoch: 0,
             connecting: false,
             remote: None,
+            local_host_supervised: false,
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
@@ -227,6 +246,10 @@ impl Desktop {
             dictation: None,
             last_host_power_report_ms: None,
             last_host_power: None,
+            host_power_attempt: 0,
+            host_power_probe: None,
+            host_power_probe_stop: None,
+            desktop_process_monitor: Arc::new(host_daemon::DesktopProcessMonitor::new()),
             project_icons: Default::default(),
             tick: None,
             _subscriptions: subscriptions,
@@ -248,8 +271,14 @@ impl Desktop {
     ) {
         self.attachments.clear();
         self.dictation = None;
+        if let Some(stop) = self.host_power_probe_stop.take() {
+            stop.cancel();
+        }
+        self.host_power_probe.take();
+        self.local_host_supervised = false;
         self.last_host_power_report_ms = None;
         self.last_host_power = None;
+        self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
         self.epoch += 1;
         self.views_running = false;
         self.connecting = true;
@@ -297,14 +326,21 @@ impl Desktop {
                             }
                         }
                     });
+                    let connected = connections
+                        .connect(ticket.as_deref(), snapshot, options)
+                        .await;
+                    let local_host_supervised = connected
+                        .as_ref()
+                        .map(|connected| connected.local_host_supervised)
+                        .unwrap_or(false);
                     StoreSession::publish(
-                        connections
-                            .connect(ticket.as_deref(), snapshot, options)
-                            .await,
+                        connected.map(|connected| connected.store),
                         runtime.clone(),
                         tx,
                         move |result| {
-                            Update::Connected(result.map(|session| (session, path.clone())))
+                            Update::Connected(result.map(|session| {
+                                (session, path.clone(), local_host_supervised)
+                            }))
                         },
                         Update::Snapshot,
                     )
@@ -448,7 +484,7 @@ impl Desktop {
                 cx.notify();
                 return;
             }
-            Update::Connected(Ok((mut session, path))) => {
+            Update::Connected(Ok((mut session, path, local_host_supervised))) => {
                 let (tx, rx) = async_channel::bounded(4);
                 let updates = self.updates.clone();
                 let epoch = self.epoch;
@@ -467,6 +503,7 @@ impl Desktop {
                     .background_policy
                     .as_ref()
                     .map(|snapshot| snapshot.host_power.clone());
+                self.local_host_supervised = local_host_supervised;
                 self.session = Some(session);
                 self.connecting = false;
                 self.perform(Intent::LoadAccounts);
@@ -538,18 +575,42 @@ impl Desktop {
                 }
                 self.snapshot_changed(window, cx);
             }
+            Update::HostPowerSample { attempt, snapshot } => {
+                if let Some(stop) = self.host_power_probe_stop.take() {
+                    stop.cancel();
+                }
+                self.host_power_probe.take();
+                if attempt != self.host_power_attempt || !self.local_host_supervised {
+                    return;
+                }
+                let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+                    return;
+                };
+                self.last_host_power = Some(snapshot.clone());
+                let receipt = store.report_host_power(snapshot);
+                self.runtime.handle.spawn(async move {
+                    let _ = receipt.await;
+                });
+            }
         }
         cx.notify();
     }
 
-    /// GPUI owns the desktop lifecycle, so its one-second app tick is the
-    /// publisher for local power state. The Host remains the receiver and
-    /// policy owner; this only supplies sampled observations at the policy
-    /// cadence and keeps heartbeat timestamps fresh.
+    /// GPUI owns the desktop lifecycle, so its one-second app tick schedules a
+    /// local-only power observation. The bounded native probe runs on the
+    /// runtime and returns through the epoch-tagged update channel; GPUI only
+    /// applies the result and reports it to the connected Host.
     fn publish_host_power(&mut self) {
-        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+        if !local_host_power_publish_allowed(
+            self.local_host_supervised,
+            self.remote.is_some(),
+            self.host_power_probe.is_some(),
+        ) {
             return;
-        };
+        }
+        if self.session.is_none() {
+            return;
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -588,13 +649,28 @@ impl Desktop {
         {
             return;
         }
-        let next = host_daemon::sample_desktop_power(&power);
         self.last_host_power_report_ms = Some(now_ms);
-        self.last_host_power = Some(next.clone());
-        let receipt = store.report_host_power(next);
-        self.runtime.handle.spawn(async move {
-            let _ = receipt.await;
-        });
+        self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
+        let attempt = self.host_power_attempt;
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        let stop = CancellationToken::new();
+        let process_monitor = self.desktop_process_monitor.clone();
+        self.host_power_probe_stop = Some(stop.clone());
+        self.host_power_probe = Some(tokio_util::task::AbortOnDropHandle::new(
+            self.runtime.handle.spawn(async move {
+                let mut snapshot = host_daemon::sample_desktop_power(&stop).await;
+                let process_sample = tokio::task::spawn_blocking(move || process_monitor.sample());
+                let processes = tokio::select! {
+                    _ = stop.cancelled() => Vec::new(),
+                    result = process_sample => result.unwrap_or_default(),
+                };
+                snapshot.desktop_processes = processes;
+                let _ = updates
+                    .send((epoch, Update::HostPowerSample { attempt, snapshot }))
+                    .await;
+            }),
+        ));
     }
 
     fn outcome(&mut self, outcome: &Outcome, window: &mut Window, cx: &mut Context<Self>) {
@@ -753,6 +829,19 @@ impl Desktop {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_host_power_publish_allowed;
+
+    #[test]
+    fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
+        assert!(local_host_power_publish_allowed(true, false, false));
+        assert!(!local_host_power_publish_allowed(false, false, false));
+        assert!(!local_host_power_publish_allowed(true, true, false));
+        assert!(!local_host_power_publish_allowed(true, false, true));
     }
 }
 
