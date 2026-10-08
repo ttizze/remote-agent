@@ -280,7 +280,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 
 ## 現行統合の正本（2026-10-09 checkpoint）
 
-現行の会話 wire は `remote-agent/streams/14` だけを扱う。上の dated decision log に残る `streams/10`、`streams/11`、`streams/12`、旧 SDK 制御の説明、段階途中の未実装記録は履歴であり、この checkpoint の current behavior を表さない。現行 M3 の production consumers は Git/VCS と GitHub PR、scheduler、worktree、browser/preview、device、push/activity、usage、settings/platform、updater/release で、各 owner の production path に接続済みである。最終 QA は、文書更新後の同一 revision でまだ行っていない。
+現行の会話 wire は `remote-agent/streams/14` だけを扱う。上の dated decision log に残る `streams/10`、`streams/11`、`streams/12`、旧 SDK 制御の説明、段階途中の未実装記録は履歴であり、この checkpoint の current behavior を表さない。現行 M3 の production consumers は Git/VCS と GitHub PR、scheduler、worktree、browser/preview、device、push/activity、usage、settings/platform、updater/release で、各 owner の production path に接続済みである。最終の同一 revision 検証結果は [PR #55 の検証欄](https://github.com/ttizze/remote-agent/pull/55) に記録する。以下は途中 checkpoint の記録である。
 
 Native consumers は、Android の Git (`GitControls.kt`・`GitSheets.kt`)、Material You (`AppTheme.kt`)、thread drag arrangement (`ThreadArrangement.kt`)、device (`DeviceScreen.kt`)、artifact/citation の共通 core、ならびに desktop の minimap (`crates/agent-core/src/view/timeline/desktop_layout.rs`) と assistant citations (`apps/desktop/src/app/timeline/markdown.rs`) に接続している。個別の source row の翻訳完了や同一 revision の native build 完了を、この静的な対応記録から推論しない。
 
@@ -291,4 +291,4 @@ M3 Settings と現行の core/desktop/iOS/Android consumers は、現行の pref
 - `170c255effd25da4f5c3a1e37de6a99cb816d543`: scoped/native/Host/GPUI の中間検証 pass。iOS artifact stamp はこの checkpoint を参照している。
 - `d0713f9411c9d524dbdf39f92d237ca7f4ef16ec`: Xcode 11 で unsigned main app、Activity/Usage widget objects、Share extension executable/plist を確認し、Android candidate 9 で XML 39/39 pass、両 JNI release ABI、unsigned APK、両 ZIP の JNI `.so` revision を確認した。iOS core library stamp は `170c255effd25da4f5c3a1e37de6a99cb816d543` であるため、いずれも文書更新後の同一 head の最終証明ではない。
 
-Root はこの文書変更後の一つの revision で unit test、workspace clippy (`-D warnings`)、fmt、Host/GPUI、UniFFI、iOS の共有/Activity/Share Extension、Android の同一 revision build と artifact stamp を再実行し、結果を PR に記録する。現在の作業範囲は PR55 の review 用 branch への push と PR 更新までで、main の変更、CI の結果待ちまたは dispatch、live provider、実機・実端末、signing、signed launch は含めない。ここより前の日付を持つ記録は、当時の判断と検証結果を保つために残している。
+同一 revision の unit test、workspace clippy (`-D warnings`)、fmt、Host/GPUI、UniFFI、iOS の共有/Activity/Share Extension、Android build と artifact stamp の結果は [PR #55 の検証欄](https://github.com/ttizze/remote-agent/pull/55) に記録する。現在の作業範囲は PR55 の review 用 branch への push と PR 更新までで、main の変更、CI の結果待ちまたは dispatch、live provider、実機・実端末、signing、signed launch は含めない。ここより前の日付を持つ記録は、当時の判断と検証結果を保つために残している。
