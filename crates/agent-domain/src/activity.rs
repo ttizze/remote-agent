@@ -26,10 +26,14 @@ pub enum ActivityDeepLink {
 /// notification decisions and native click handlers.
 pub fn activity_thread_deep_link(environment_id: &str, thread_id: &str) -> String {
     format!(
-        "remoteagent://threads/{}/{}",
+        "{ACTIVITY_THREAD_DEEP_LINK_PREFIX}{}/{}",
         encode_route_segment(environment_id),
         encode_route_segment(thread_id),
     )
+}
+
+fn is_activity_trim_character(character: char) -> bool {
+    character == '\u{feff}' || (character != '\u{85}' && character.is_whitespace())
 }
 
 fn encode_route_segment(value: &str) -> String {
@@ -53,9 +57,7 @@ pub fn parse_activity_deep_link(value: &str) -> Option<ActivityDeepLink> {
         return Some(ActivityDeepLink::Overview);
     }
 
-    if value.trim_matches(|character: char| {
-        character == '\u{feff}' || (character != '\u{85}' && character.is_whitespace())
-    }) != value
+    if value.trim_matches(is_activity_trim_character) != value
         || value.contains('?')
         || value.contains('#')
     {
@@ -702,7 +704,7 @@ pub fn bounded_activity_link(value: &str) -> String {
 /// Trims a display string and bounds it in UTF-16 units without splitting a
 /// surrogate pair. The ellipsis is part of the display budget.
 pub fn bounded_activity_text(text: &str, max_units: usize) -> String {
-    let text = text.trim_matches(|c: char| c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace()));
+    let text = text.trim_matches(is_activity_trim_character);
     if text.encode_utf16().count() <= max_units {
         return text.to_owned();
     }
@@ -715,8 +717,7 @@ pub fn bounded_activity_text(text: &str, max_units: usize) -> String {
             (units > prefix_budget).then_some(offset)
         })
         .unwrap_or(text.len());
-    let prefix = text[..end]
-        .trim_end_matches(|c: char| c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace()));
+    let prefix = text[..end].trim_end_matches(is_activity_trim_character);
     format!("{prefix}{}", ".".repeat(max_units.min(3)))
 }
 
