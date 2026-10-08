@@ -3,39 +3,44 @@ import SwiftUI
 import UIKit
 
 struct AccountUsageView: View {
-    let usage: AccountUsage?
+    let limits: UsageLimitAccount?
     let useReset: () -> Void
     @State private var confirmingReset = false
 
-    init(usage: AccountUsage?, useReset: @escaping () -> Void = {}) {
-        self.usage = usage
+    init(limits: UsageLimitAccount?, useReset: @escaping () -> Void = {}) {
+        self.limits = limits
         self.useReset = useReset
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let usage {
-                if let error = usage.error {
+            if let limits,
+               limits.fetchedAt > 0 || !limits.windows.isEmpty || limits.resetCreditCount > 0
+                   || limits.error != nil
+            {
+                if let error = limits.error {
                     Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
                         .font(.caption).foregroundStyle(AppTheme.warningForeground)
                 }
-                ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
+                ForEach(Array(limits.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
                 }
-                if let credits = usage.resetCredits, credits.availableCount > 0 {
+                if limits.resetCreditCount > 0 {
                     HStack {
-                        Text("Reset credits: \(credits.availableCount)")
+                        Text("Reset credits: \(limits.resetCreditCount)")
                             .font(.caption).foregroundStyle(AppTheme.muted)
                         Spacer()
                         Button("Use reset") { confirmingReset = true }
                             .font(.caption)
                     }
                 }
-                if let external = usage.externalUsage, let url = URL(string: external.url) {
-                    Link(external.label, destination: url).font(.caption)
+                if let label = limits.externalLabel,
+                   let url = URL(string: limits.externalUrl ?? "")
+                {
+                    Link(label, destination: url).font(.caption)
                 }
-                if usage.error == nil {
-                    let date = Date(timeIntervalSince1970: Double(usage.fetchedAt))
+                if limits.error == nil {
+                    let date = Date(timeIntervalSince1970: Double(limits.fetchedAt))
                     Text("\(date.formatted(date: .omitted, time: .shortened)) 更新")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -53,7 +58,7 @@ struct AccountUsageView: View {
 }
 
 private struct UsageWindowView: View {
-    let window: UsageWindow
+    let window: UsageLimitWindow
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack { Text(window.label); Spacer(); Text("残り \(window.remainingPercent)%").monospacedDigit() }

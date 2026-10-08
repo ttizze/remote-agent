@@ -162,6 +162,30 @@ fn commands(next: Next) -> Vec<crate::commands::outbox::PendingCommand> {
 }
 
 #[test]
+fn reset_credit_intent_writes_the_selected_source_and_credit() {
+    let mut owner = owner(Snapshot::default());
+    let Next::Call(call, None) = owner
+        .prepare(Intent::ConsumeResetCredit {
+            provider: agent_protocol::provider::ProviderKind::Claude,
+            account_id: "source-account".into(),
+            credit_id: Some("credit-1".into()),
+        })
+        .unwrap()
+    else {
+        panic!("reset credit request")
+    };
+    let crate::protocol::Call::ConsumeResetCredit(request) = *call else {
+        panic!("reset credit request")
+    };
+    assert_eq!(
+        request.provider,
+        agent_protocol::provider::ProviderKind::Claude
+    );
+    assert_eq!(request.account_id, "source-account");
+    assert_eq!(request.credit_id.as_deref(), Some("credit-1"));
+}
+
+#[test]
 fn a_send_clears_the_composer_shows_the_message_and_restores_it_when_refused() {
     let mut owner = opened(thread_state("Thread"));
     owner.state.drafts.insert(
