@@ -422,7 +422,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    for _ in 0..3
+    for _ in 0..4
         + usize::from(selected.is_some())
         + usize::from(!cwd.is_empty())
         + snapshot
@@ -437,6 +437,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
             "host/account/list" => snapshot.account.accounts.as_ref().map(|accounts| json!(accounts)).unwrap_or_else(|| json!({"accounts":[],"selected":{}})),
             "host/account/usage" => json!({"windows":[],"fetchedAt":1,"error":null}),
+            "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
             "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
             "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
@@ -2829,6 +2830,9 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
                 let accounts = read(&mut reader).await;
                 assert_eq!(accounts["method"], "host/account/list");
                 writer.reply(&accounts, json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
+                let activity = read(&mut reader).await;
+                assert_eq!(activity["method"], "host/taskActivity/read");
+                writer.reply(&activity, json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
                 wait_for(&store, |state| state.threads.is_some()).await;
                 assert_eq!(store.snapshot().threads.as_ref().unwrap().data[0].id.as_ref().map(|session| session.id.as_str()), Some("fresh"));
             }
@@ -2963,11 +2967,12 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 session.close();
             }
             if let Some((session, mut reader, writer)) = replacement {
-                for _ in 0..3 {
+                for _ in 0..4 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
+                        "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
@@ -3341,10 +3346,11 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
 async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_model() {
     let (store, mut reader, writer) = connected(Snapshot::default()).await;
     let mut pending = BTreeMap::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let request = read(&mut reader).await;
         pending.insert(request["method"].as_str().unwrap().to_owned(), request);
     }
+    writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
     writer.reply(&pending["host/session/list"], json!({"result":{
         "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
     }})).await.unwrap();
@@ -3407,7 +3413,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     let (store, mut reader, writer) = connected(initial).await;
     let epoch = store.snapshot().epoch;
     let mut requests = BTreeMap::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
         let request = read(&mut reader).await;
         assert!(
             requests
@@ -3430,6 +3436,10 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
             json!({"branch":"main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
         ),
         ("host/account/list", json!({"accounts":[],"selected":{}})),
+        (
+            "host/taskActivity/read",
+            json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+        ),
         (
             "host/model/list",
             json!({"data":[{"id":"fresh","model":{"provider": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
@@ -3526,6 +3536,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                         "host/session/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                         "host/session/open" => {
                             let a = request["params"]["session"]["id"] == "A";
                             json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"id":{"provider":"codex","id":if a {"A"} else {"B"}},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":if a {json!({"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}})} else {json!({"inline":{"body":{"assistantText":{"text":"B prefix","phase":"unknown"}}}})}}]}]}}})
@@ -4238,10 +4249,11 @@ fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
 async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries() {
     let (store, mut reader, writer) = connected(Snapshot::default()).await;
     let mut pending = BTreeMap::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let request = read(&mut reader).await;
         pending.insert(request["method"].as_str().unwrap().to_owned(), request);
     }
+    writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
     writer.reply(&pending["host/session/list"],json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
     writer
         .reply(

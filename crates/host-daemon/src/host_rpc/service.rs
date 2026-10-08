@@ -95,6 +95,47 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
+    async fn read_task_activity(
+        &self,
+    ) -> Result<agent_protocol::live_activity::TaskActivityState, Failure> {
+        let revision = self.inner.router.task_activity_revision();
+        let listings = futures_util::future::join_all(self.agents().into_iter().map(
+            |(provider, agent)| async move {
+                let pages = session_pages(agent.as_ref(), "", None);
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    pages.try_collect::<Vec<_>>(),
+                )
+                .await;
+                (provider, result)
+            },
+        ))
+        .await;
+        let mut unavailable: Vec<_> = self.inner.startup_errors.keys().copied().collect();
+        let mut native = Vec::new();
+        let mut successful = false;
+        for (provider, result) in listings {
+            match result {
+                Ok(Ok(pages)) => {
+                    successful = true;
+                    native.extend(pages.into_iter().flatten().map(|summary| summary.thread));
+                }
+                _ => unavailable.push(provider),
+            }
+        }
+        let state = self
+            .inner
+            .router
+            .task_activity(native, &unavailable, revision);
+        if !successful && !unavailable.is_empty() {
+            return Err(Failure::new(
+                "task_activity_unavailable",
+                "タスクの状態を取得できません。",
+            ));
+        }
+        Ok(state)
+    }
+
     pub async fn enable_apns(&self, path: &std::path::Path, host_name: &str) -> anyhow::Result<()> {
         self.inner
             .router
@@ -638,6 +679,7 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::ReadTaskActivity(_) => self.read_task_activity().await?.into(),
             Call::RegisterLiveActivity(params) => {
                 params
                     .validate()
@@ -648,16 +690,10 @@ impl HostRpcService {
                     .apns()
                     .is_some_and(|apns| apns.environment() == params.environment);
                 if enabled {
-                    let list = self
-                        .host_title_list(agent_protocol::models::ListQuery {
-                            project_limit: u32::MAX,
-                            chat_limit: u32::MAX,
-                            ..Default::default()
-                        })
-                        .await?;
+                    self.read_task_activity().await?;
                     self.inner
                         .router
-                        .register_live_activity(session, params, list.data)
+                        .register_live_activity(session, params)
                         .map_err(|error| Failure::new("live_activity_failed", error))?;
                 }
                 agent_protocol::live_activity::LiveActivityRegistration { enabled }.into()

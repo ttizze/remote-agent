@@ -51,6 +51,11 @@ pub(super) fn notification(
     }
 
     match message {
+        Notification::TaskActivity { state } => {
+            let mut next = previous.clone();
+            next.accept_task_activity(state);
+            (next, Vec::new())
+        }
         Notification::TerminalFailed { handle, reason } => {
             reduce(previous, Event::TerminalFailed { handle, reason })
         }

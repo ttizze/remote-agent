@@ -12,8 +12,7 @@ struct BexTaskWidgets: WidgetBundle {
 private struct BexTaskActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TaskActivityAttributes.self) { context in
-            let view = context.isStale || !context.state.connected ?
-                context.state.display.stale : context.state.display.current
+            let view = context.state.display.current
             VStack(alignment: .leading, spacing: 10) {
                 Text("Bex · \(context.state.hostName)").font(.headline).lineLimit(1)
                 TaskIconRow(icons: view.icons)
@@ -25,8 +24,7 @@ private struct BexTaskActivity: Widget {
             .activitySystemActionForegroundColor(.primary)
             .widgetURL(context.attributes.url)
         } dynamicIsland: { context in
-            let view = context.isStale || !context.state.connected ?
-                context.state.display.stale : context.state.display.current
+            let view = context.state.display.current
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Text("Bex").font(.headline)

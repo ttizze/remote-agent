@@ -222,6 +222,8 @@ pub struct Snapshot {
     pub composer_catalog: Option<Arc<agent_protocol::composer::ComposerCatalog>>,
     #[serde(skip)]
     pub host_name: Option<String>,
+    #[serde(skip)]
+    pub task_activity: Option<Arc<agent_protocol::live_activity::TaskActivityState>>,
     pub storage_scope: String,
     pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(default)]
@@ -396,7 +398,7 @@ macro_rules! prepare_operations {
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
-        RegisterLiveActivity, UnregisterLiveActivity,
+        ReadTaskActivity, RegisterLiveActivity, UnregisterLiveActivity,
         ReadPermissionSettings, UpdatePermissionSettings,
         ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession,
@@ -778,6 +780,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
             next.terminals = Arc::default();
             next.observed_agents = None;
+            next.task_activity = None;
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
                     drafts: std::mem::take(&mut next.drafts),
@@ -842,12 +845,14 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.operations = Arc::default();
             reset_session(&mut next);
             next.connected = true;
+            next.task_activity = None;
             next.error = None;
             next.list_query = Arc::new((*next.list_query).clone().for_connection());
             let mut effects = vec![
                 Effect::execute(op::ListSessions::new((*next.list_query).clone())),
                 Effect::execute(op::LoadModels {}),
                 Effect::execute(op::ListAccounts {}),
+                Effect::execute(op::ReadTaskActivity {}),
             ];
             effects.extend(op::refresh_agents(
                 next.connected,

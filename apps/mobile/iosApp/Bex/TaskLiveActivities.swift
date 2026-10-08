@@ -2,11 +2,10 @@ import ActivityKit
 import AgentCore
 import Foundation
 import OSLog
-import UIKit
 
 private extension TaskActivityAttributes.Display {
     init(_ source: TaskActivityDisplay) {
-        self.init(current: .init(source.current), stale: .init(source.stale),
+        self.init(current: .init(source.current),
                   canStart: source.canStart, ongoing: source.ongoing, urgent: source.urgent)
     }
 }
@@ -38,11 +37,11 @@ final class TaskLiveActivities {
     private var tokenObservers: [String: Task<Void, Never>] = [:]
     private var stateObservers: [String: Task<Void, Never>] = [:]
     private var tokens: [String: Data] = [:]
-    private var remote = Set<String>()
     private struct Input: Equatable {
         let hostID: String?
         let foreground: Bool
-        let state: TaskActivityAttributes.ContentState
+        let connected: Bool
+        let state: TaskActivityAttributes.ContentState?
     }
 
     private var pending: Input?
@@ -50,8 +49,6 @@ final class TaskLiveActivities {
     private var worker: Task<Void, Never>?
     // User dismissal lasts until this host's active task set becomes empty.
     private var started = Set<String>()
-    private(set) var hostID: String?
-    private(set) var sessions: [SessionRef] = []
     fileprivate let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.remoteagent.mobile.ios",
         category: "LiveActivity"
@@ -79,22 +76,7 @@ final class TaskLiveActivities {
         }
     }
 
-    func registrationFinished(activityID: String, token: Data, enabled: Bool) {
-        guard tokens[activityID] == token else { return }
-        logger.info("Host Live Activity push updates enabled: \(enabled, privacy: .public)")
-        guard remote.contains(activityID) != enabled else { return }
-        if enabled {
-            remote.insert(activityID)
-        } else {
-            remote.remove(activityID)
-        }
-        previous = nil
-    }
-
     private func register(_ activity: Activity<TaskActivityAttributes>, token: Data) {
-        if tokens[activity.id] != token, remote.remove(activity.id) != nil {
-            previous = nil
-        }
         tokens[activity.id] = token
         logger.info("Registering Live Activity push token (\(token.count, privacy: .public) bytes)")
         let environment: PushEnvironment = Bundle.main
@@ -138,18 +120,15 @@ final class TaskLiveActivities {
         observer.cancel()
         stateObservers.removeValue(forKey: activity.id)?.cancel()
         tokens.removeValue(forKey: activity.id)
-        remote.remove(activity.id)
         output.yield(.intent(hostID: activity.attributes.hostID,
                              intent: .unregisterLiveActivity(UnregisterLiveActivity(activityId: activity.id))))
     }
 
     func synchronize(hostID: String?, hostName: String, connected: Bool, foreground: Bool,
-                     overview: TaskActivityOverview) {
-        self.hostID = hostID
-        sessions = overview.sessions
-        let input = Input(hostID: hostID, foreground: foreground,
-                          state: .init(display: .init(overview.display), connected: connected,
-                                       hostName: String(hostName.unicodeScalars.prefix(120))))
+                     display: TaskActivityDisplay?) {
+        let input = Input(hostID: hostID, foreground: foreground, connected: connected,
+                          state: display.map { .init(display: .init($0),
+                                                     hostName: String(hostName.unicodeScalars.prefix(120))) })
         guard input != (pending ?? previous) else { return }
         pending = input
         guard worker == nil else { return }
@@ -165,6 +144,17 @@ final class TaskLiveActivities {
 
     func flush() async {
         await worker?.value
+        // ActivityKit may produce the first token after request() returns. Keep the
+        // background task alive for that token as well as the registration reply.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline,
+              Activity<TaskActivityAttributes>.activities.contains(where: {
+                  ($0.activityState == .active || $0.activityState == .stale) && tokens[$0.id] == nil
+              }) {
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch { break }
+        }
         // The background task must also cover Host registration, not just ActivityKit updates.
         await withCheckedContinuation { continuation in
             if case .terminated = output.yield(.flush(continuation)) {
@@ -185,38 +175,26 @@ final class TaskLiveActivities {
                 started.remove(host)
                 continue
             }
-            guard input.state.connected else {
-                if remote.contains(activity.id) {
-                    continue
-                }
-                var state = activity.content.state
-                state.connected = false
-                await activity.update(ActivityContent(state: state, staleDate: .now))
-                continue
-            }
-            if input.state.display.ongoing {
-                await activity.update(content(input.state, foreground: input.foreground,
-                                              remote: remote.contains(activity.id)))
+            // No initial reply yet: preserve this host's existing activity.
+            guard let state = input.state else { continue }
+            if state.display.ongoing {
+                await activity.update(content(state))
             } else {
-                let timing = taskActivityTiming(
-                    foreground: input.foreground,
-                    remoteUpdates: remote.contains(activity.id)
-                )
-                let dismissal = Date.now.addingTimeInterval(TimeInterval(timing.dismissAfterSeconds))
-                await activity.end(ActivityContent(state: input.state, staleDate: nil),
+                let dismissal = Date.now.addingTimeInterval(TimeInterval(taskActivityDismissSeconds()))
+                await activity.end(ActivityContent(state: state, staleDate: nil),
                                    dismissalPolicy: .after(dismissal))
             }
         }
-        guard input.state.connected, let host = input.hostID else { return }
-        if !input.state.display.ongoing {
+        guard let state = input.state, input.connected, let host = input.hostID else { return }
+        if !state.display.ongoing {
             started.remove(host)
         }
-        guard input.state.display.canStart,
+        guard state.display.canStart,
               input.foreground, ActivityAuthorizationInfo().areActivitiesEnabled,
               !started.contains(host) else { return }
         do {
             let activity = try Activity.request(attributes: TaskActivityAttributes(hostID: host),
-                                                content: content(input.state, foreground: true),
+                                                content: content(state),
                                                 pushType: .token)
             started.insert(host)
             observe(activity)
@@ -225,12 +203,9 @@ final class TaskLiveActivities {
         }
     }
 
-    private func content(_ state: TaskActivityAttributes.ContentState, foreground: Bool, remote: Bool = false)
-        -> ActivityContent<TaskActivityAttributes.ContentState> {
-        let timing = taskActivityTiming(foreground: foreground, remoteUpdates: remote)
-        let staleDate = timing.staleAfterSeconds.map { Date.now.addingTimeInterval(TimeInterval($0)) }
-        return ActivityContent(state: state, staleDate: staleDate,
-                               relevanceScore: state.display.urgent ? 100 : 50)
+    private func content(_ state: TaskActivityAttributes
+        .ContentState) -> ActivityContent<TaskActivityAttributes.ContentState> {
+        ActivityContent(state: state, staleDate: nil, relevanceScore: state.display.urgent ? 100 : 50)
     }
 }
 
@@ -238,8 +213,7 @@ extension BexAppViewModel {
     func synchronizeLiveActivities(foreground: Bool) {
         liveActivities.synchronize(hostID: selectedProfileId, hostName: selectedProfileName ?? "PC Host",
                                    connected: snapshot.connected(), foreground: foreground,
-                                   overview: snapshot.taskActivityOverview(previousSessions:
-                                       liveActivities.hostID == selectedProfileId ? liveActivities.sessions : []))
+                                   display: snapshot.taskActivityDisplay())
     }
 
     func observeLiveActivityRequests() {
@@ -257,14 +231,10 @@ extension BexAppViewModel {
                     let receipt = try owner.dispatch(intent: intent)
                     // Finish each request before dispatching a rotated token or unregistering.
                     let outcome = try await receipt.wait()
-                    guard case let .liveActivityRegistered(enabled) = outcome,
-                          case let .registerLiveActivity(registration) = intent else { continue }
-                    liveActivities.registrationFinished(
-                        activityID: registration.activityId,
-                        token: registration.token,
-                        enabled: enabled
-                    )
-                    synchronizeLiveActivities(foreground: UIApplication.shared.applicationState == .active)
+                    if case let .liveActivityRegistered(enabled) = outcome {
+                        liveActivities.logger
+                            .info("Host Live Activity push updates enabled: \(enabled, privacy: .public)")
+                    }
                 } catch {
                     liveActivities.logger.error("Live Activity push registration failed")
                     // Registration retries with the current token after reconnecting.

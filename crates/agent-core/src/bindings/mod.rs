@@ -493,22 +493,23 @@ mod tests {
                 .unwrap().wait().await.unwrap();
             // Leave every automatic read pending on the old transport.
             let mut methods = std::collections::BTreeSet::new();
-            for _ in 0..4 {
+            for _ in 0..5 {
                 let request = tokio::time::timeout(Duration::from_secs(2), old.read_request()).await
                     .expect("Connected must reload without native intents").unwrap().unwrap();
                 methods.insert(request["method"].as_str().unwrap().to_owned());
             }
-            assert_eq!(methods, ["host/session/list", "host/session/open", "host/model/list", "host/account/list"].map(str::to_owned).into());
+            assert_eq!(methods, ["host/session/list", "host/session/open", "host/model/list", "host/account/list", "host/taskActivity/read"].map(str::to_owned).into());
             let server = async {
                 assert!(!matches!(old.read_request().await, Ok(Some(_))),
                     "reconnect must close the old stream without probing it with list/history reads");
                 let (next, mut reader, writer) = scoped_incoming(&host, &trust).await;
                 let mut requests = std::collections::BTreeMap::new();
-                for _ in 0..4 {
+                for _ in 0..5 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     assert!(requests.insert(request["method"].as_str().unwrap().to_owned(), request).is_none());
                 }
                 writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
+                writer.reply(&requests["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
                 let list = &requests["host/session/list"];
                 assert_eq!(list["params"]["projectLimit"], 15);
                 assert_eq!(list["params"]["chatLimit"], 25);
@@ -591,6 +592,7 @@ mod tests {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
                             "host/account/list" => json!({"accounts":[],"selected":{}}),
+                            "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                             "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
                             "host/model/list" => json!({"data":[],"nextCursor":null}),
@@ -599,7 +601,7 @@ mod tests {
                         json!({"result":result})
                     };
                     let server = async {
-                        for _ in 0..(3 + usize::from(selected)) {
+                        for _ in 0..(4 + usize::from(selected)) {
                             let request = reader.read_request().await.unwrap().unwrap();
                             writer.reply(&request, response(&request, "before")).await.unwrap();
                         }
@@ -610,7 +612,7 @@ mod tests {
                             // transport without waiting for the normal 30-second deadline.
                             let (next, mut next_reader, next_writer) = scoped_incoming(&host, &trust).await;
                             let mut reads = 0;
-                            while reads < 3 + usize::from(selected) {
+                            while reads < 4 + usize::from(selected) {
                                 let request = next_reader.read_request().await.unwrap().unwrap();
                                 reads += usize::from(request["method"] != "host/diagnostics/connection");
                                 next_writer.reply(&request, response(&request, "after")).await.unwrap();
@@ -805,17 +807,22 @@ mod tests {
             .await
             .expect("a changed endpoint must replace the session without probing the old one");
         resumed.unwrap();
-        // Leave automatic list/model/account reads pending, then cancel the foreground read.
+        // Leave automatic list/model/account/task reads pending, then cancel the foreground read.
         let mut methods = std::collections::BTreeSet::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let request = reader.read_request().await.unwrap().unwrap();
             methods.insert(request["method"].as_str().unwrap().to_owned());
         }
         assert_eq!(
             methods,
-            ["host/session/list", "host/model/list", "host/account/list"]
-                .map(str::to_owned)
-                .into()
+            [
+                "host/session/list",
+                "host/model/list",
+                "host/account/list",
+                "host/taskActivity/read"
+            ]
+            .map(str::to_owned)
+            .into()
         );
         let recovering = store.clone();
         let endpoint = replacement.clone();
@@ -904,7 +911,7 @@ mod tests {
                     let mut withheld = Some(withheld);
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
-                        while requests.len() < (1 + usize::from(selected) + 2 * usize::from(round == 0)) {
+                        while requests.len() < (1 + usize::from(selected) + 3 * usize::from(round == 0)) {
                             let request = reader.read_request().await.unwrap().expect("refresh must retain the existing stream");
                             requests.push(request);
                         }
@@ -914,6 +921,7 @@ mod tests {
                                 "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[]}}}),
                                 "host/account/list" if round == 0 => json!({"accounts":[],"selected":{}}),
                                 "host/model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
+                                "host/taskActivity/read" if round == 0 => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
                             if round == 2 && selected && request["method"] == "host/session/open" { pending.push(request); continue; }

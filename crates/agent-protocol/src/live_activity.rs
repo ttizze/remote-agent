@@ -2,9 +2,18 @@
 use crate::execution::TurnStatus;
 use serde::{Deserialize, Serialize};
 
-pub const TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS: u32 = 10 * 60;
-pub const TASK_ACTIVITY_BACKGROUND_FRESHNESS_SECONDS: u32 = 30;
+pub const TASK_ACTIVITY_PUSH_TTL_SECONDS: u32 = 10 * 60;
 pub const TASK_ACTIVITY_DISMISS_SECONDS: u32 = 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadTaskActivity {}
+
+/// Host revision prevents a delayed initial read from replacing a newer notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskActivityState {
+    pub revision: u64,
+    pub display: TaskActivityDisplay,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,10 +82,6 @@ impl TaskActivitySummary {
         }
         summary
     }
-    pub fn ongoing(self) -> bool {
-        self.running + self.waiting + self.unknown > 0
-    }
-
     pub fn display(self) -> TaskActivityDisplay {
         let total = self.running + self.waiting + self.unknown;
         let mut parts = Vec::new();
@@ -119,26 +124,8 @@ impl TaskActivitySummary {
             icons,
             overflow,
         };
-        let stale = if total == 0 {
-            current.clone()
-        } else {
-            TaskActivityView {
-                total,
-                label: "更新待ち".into(),
-                icons: current
-                    .icons
-                    .iter()
-                    .map(|_| TaskActivityIcon {
-                        kind: TaskActivityIconKind::Unknown,
-                        label: "更新待ち".into(),
-                    })
-                    .collect(),
-                overflow,
-            }
-        };
         TaskActivityDisplay {
             current,
-            stale,
             can_start: self.running + self.waiting > 0,
             ongoing: total > 0,
             urgent: total == 0 || self.waiting > 0,
@@ -167,7 +154,6 @@ pub struct TaskActivityIcon {
 #[serde(rename_all = "camelCase")]
 pub struct TaskActivityDisplay {
     pub current: TaskActivityView,
-    pub stale: TaskActivityView,
     pub can_start: bool,
     pub ongoing: bool,
     pub urgent: bool,
@@ -183,27 +169,35 @@ pub struct TaskActivityView {
 }
 
 /// Unknown state cannot certify completion; a running turn outlives its idle notification.
-pub fn task_phase(
-    known: bool,
-    active: bool,
-    waiting: bool,
-    turn: Option<TurnStatus>,
-) -> (&'static str, bool) {
-    if waiting {
-        return ("waiting", true);
-    }
-    if !known {
-        return ("unknown", false);
-    }
-    if active {
-        return ("running", true);
-    }
-    match turn {
-        Some(TurnStatus::Completed) => ("completed", false),
-        Some(TurnStatus::Failed) => ("failed", false),
-        Some(TurnStatus::Interrupted) => ("interrupted", false),
-        Some(TurnStatus::Running) => ("finishing", true),
-        _ => ("finished", false),
+/// Compact task facts survive conversation-cache eviction. Clients render their display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskState {
+    pub status: crate::models::SessionStatus,
+    pub waiting: bool,
+    pub latest: Option<TurnStatus>,
+}
+impl TaskState {
+    pub fn phase(self) -> (&'static str, bool) {
+        use crate::models::SessionStatus;
+        if self.waiting {
+            return ("waiting", true);
+        }
+        if matches!(
+            self.status,
+            SessionStatus::Unknown | SessionStatus::Unavailable
+        ) {
+            return ("unknown", false);
+        }
+        if self.status == SessionStatus::Running {
+            return ("running", true);
+        }
+        match self.latest {
+            Some(TurnStatus::Completed) => ("completed", false),
+            Some(TurnStatus::Failed) => ("failed", false),
+            Some(TurnStatus::Interrupted) => ("interrupted", false),
+            Some(TurnStatus::Running) => ("finishing", true),
+            _ => ("finished", false),
+        }
     }
 }
 
@@ -237,14 +231,6 @@ mod tests {
                 TaskActivityIconKind::Unknown
             ]
         );
-        assert_eq!(display.stale.label, "更新待ち");
-        assert!(
-            display
-                .stale
-                .icons
-                .iter()
-                .all(|icon| icon.label == "更新待ち")
-        );
         let uncertain = TaskActivitySummary {
             unknown: 1,
             ..Default::default()
@@ -255,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_remains_visible_even_if_the_system_marks_the_activity_stale() {
+    fn completion_is_a_task_result_and_remains_visible_until_dismissal() {
         let display = TaskActivitySummary::default().display();
         assert!(!display.ongoing && !display.can_start && display.urgent);
         assert_eq!(display.current.label, "すべてのタスクが終了");
@@ -264,7 +250,6 @@ mod tests {
             TaskActivityIconKind::Finished
         );
         assert_eq!(display.current.icons[0].label, display.current.label);
-        assert_eq!(display.stale, display.current);
     }
     #[test]
     fn a_single_waiting_or_uncertain_task_keeps_the_activity_alive() {
@@ -277,7 +262,7 @@ mod tests {
             ("failed", false),
         ] {
             assert_eq!(
-                TaskActivitySummary::from_statuses([status]).ongoing(),
+                TaskActivitySummary::from_statuses([status]).display().ongoing,
                 ongoing
             );
         }
@@ -292,11 +277,35 @@ mod tests {
             Some(TurnStatus::Failed),
             Some(TurnStatus::Interrupted),
         ] {
-            for active in [false, true] {
-                assert_eq!(task_phase(false, active, false, turn), ("unknown", false));
-                for known in [false, true] {
-                    assert_eq!(task_phase(known, active, true, turn), ("waiting", true));
-                }
+            for status in [
+                crate::models::SessionStatus::Unknown,
+                crate::models::SessionStatus::Unavailable,
+            ] {
+                assert_eq!(
+                    TaskState {
+                        status,
+                        waiting: false,
+                        latest: turn
+                    }
+                    .phase(),
+                    ("unknown", false)
+                );
+            }
+            for status in [
+                crate::models::SessionStatus::Unknown,
+                crate::models::SessionStatus::Unavailable,
+                crate::models::SessionStatus::Idle,
+                crate::models::SessionStatus::Running,
+            ] {
+                assert_eq!(
+                    TaskState {
+                        status,
+                        waiting: true,
+                        latest: turn
+                    }
+                    .phase(),
+                    ("waiting", true)
+                );
             }
         }
     }
@@ -311,8 +320,24 @@ mod tests {
             (Some(TurnStatus::Interrupted), ("interrupted", false)),
         ];
         for (turn, expected) in cases {
-            assert_eq!(task_phase(true, false, false, turn), expected);
-            assert_eq!(task_phase(true, true, false, turn), ("running", true));
+            assert_eq!(
+                TaskState {
+                    status: crate::models::SessionStatus::Idle,
+                    waiting: false,
+                    latest: turn
+                }
+                .phase(),
+                expected
+            );
+            assert_eq!(
+                TaskState {
+                    status: crate::models::SessionStatus::Running,
+                    waiting: false,
+                    latest: turn
+                }
+                .phase(),
+                ("running", true)
+            );
         }
     }
     proptest::proptest! {
@@ -326,13 +351,10 @@ mod tests {
             proptest::prop_assert_eq!(display.urgent, waiting > 0 || total == 0);
             proptest::prop_assert!(display.current.icons.len() <= 12);
             proptest::prop_assert_eq!(display.current.overflow, total.saturating_sub(12));
-            proptest::prop_assert_eq!(display.stale.total, total);
-            proptest::prop_assert_eq!(display.stale.overflow, display.current.overflow);
             if total > 0 {
                 proptest::prop_assert_eq!(display.current.icons.len() as u32 + display.current.overflow, total);
             } else {
                 proptest::prop_assert_eq!(display.current.icons.len(), 1);
-                proptest::prop_assert_eq!(&display.current, &display.stale);
             }
         }
         #[test]
@@ -344,7 +366,7 @@ mod tests {
             proptest::prop_assert_eq!(summary.running, states.iter().filter(|state| **state < 2).count() as u32);
             proptest::prop_assert_eq!(summary.waiting, states.iter().filter(|state| **state == 2).count() as u32);
             proptest::prop_assert_eq!(summary.unknown, states.iter().filter(|state| **state == 3).count() as u32);
-            proptest::prop_assert_eq!(summary.ongoing(), states.iter().any(|state| *state < 4));
+            proptest::prop_assert_eq!(summary.display().ongoing, states.iter().any(|state| *state < 4));
         }
         #[test]
         fn registration_bounds_are_enforced(activity in ".{0,140}", token in proptest::collection::vec(proptest::num::u8::ANY, 0..270)) {

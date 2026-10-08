@@ -726,11 +726,14 @@ mod tests {
         let (peer, mut reader, writer) = host_fixture::connect(&snapshot).await;
         let store = crate::store::Store::new(peer, snapshot);
         let empty_list = json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false});
-        for _ in 0..4 {
+        for _ in 0..5 {
             let request = read(&mut reader).await;
             let result = match request["method"].as_str().unwrap() {
                 "host/session/list" => empty_list.clone(),
                 "host/account/list" => json!({"accounts":[],"selected":{}}),
+                "host/taskActivity/read" => {
+                    json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                }
                 "host/model/list" => json!({"data":[],"nextCursor":null}),
                 "host/session/open" => json!({"thread":{"id":parent}}),
                 method => panic!("unexpected initial request {method}"),
@@ -863,8 +866,8 @@ mod tests {
         let (_, effects) = reduce(&snapshot, Event::Connected);
         assert_eq!(
             effects.len(),
-            4,
-            "reconnecting does not fetch an unobserved fleet"
+            5,
+            "reconnecting loads the task aggregate without fetching an unobserved fleet"
         );
         let (ignored, effects) = reduce_intent(
             &snapshot,
@@ -897,7 +900,7 @@ mod tests {
         let (_, effects) = reduce(&watching, Event::Connected);
         assert_eq!(
             effects.len(),
-            5,
+            6,
             "reconnect refreshes only the observed fleet"
         );
         let (closed, effects) = reduce_intent(&watching, Intent::WatchAgents { thread_id: None });

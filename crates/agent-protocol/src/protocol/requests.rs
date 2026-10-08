@@ -62,6 +62,7 @@ macro_rules! contracts {
     };
 }
 contracts! {
+    ReadTaskActivity, "host/taskActivity/read" => (crate::live_activity::ReadTaskActivity, crate::live_activity::TaskActivityState) [clone],
     RegisterLiveActivity, "host/liveActivity/register" => (crate::live_activity::RegisterLiveActivity, crate::live_activity::LiveActivityRegistration) [clone],
     UnregisterLiveActivity, "host/liveActivity/unregister" => (crate::live_activity::UnregisterLiveActivity, m::Empty) [clone],
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),

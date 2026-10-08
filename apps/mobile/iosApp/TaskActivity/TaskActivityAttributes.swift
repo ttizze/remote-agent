@@ -20,7 +20,6 @@ struct TaskActivityAttributes: ActivityAttributes, Hashable {
 
     struct Display: Codable, Hashable {
         var current: View
-        var stale: View
         var canStart: Bool
         var ongoing: Bool
         var urgent: Bool
@@ -28,7 +27,6 @@ struct TaskActivityAttributes: ActivityAttributes, Hashable {
 
     struct ContentState: Codable, Hashable {
         var display: Display
-        var connected: Bool
         var hostName: String
     }
 

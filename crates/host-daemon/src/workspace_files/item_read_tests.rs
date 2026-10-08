@@ -116,6 +116,9 @@ impl Fixture {
                             json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                         }
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
+                        "host/taskActivity/read" => {
+                            json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                        }
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let items = if automatic_reads {

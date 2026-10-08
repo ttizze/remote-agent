@@ -10,6 +10,10 @@ pub use requests::{Call, contracts};
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Notification {
+    #[serde(rename = "host/taskActivity/changed")]
+    TaskActivity {
+        state: crate::live_activity::TaskActivityState,
+    },
     #[serde(rename = "host/session/activity")]
     Activity {
         session: crate::session::SessionRef,
@@ -92,6 +96,7 @@ macro_rules! results {
     }
 }
 results! {
+    TaskActivity(crate::live_activity::TaskActivityState),
     LiveActivity(crate::live_activity::LiveActivityRegistration),
     Browser(crate::browser::BrowserFrame),
     Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),

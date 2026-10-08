@@ -1,4 +1,5 @@
 use super::{requests::RequestOrigin, session_actor::SessionActor};
+use agent_protocol::live_activity::TaskState;
 use agent_protocol::{
     models::{Thread, ThreadResponse},
     protocol::{self, Notification},
@@ -151,11 +152,12 @@ impl Outbound {
     }
 }
 
-/// Only the connection and identity registries share this lock. History transforms,
-/// encoders, arbitration and queue delivery run under their conversation's lock.
+/// Connections and compact task facts share this lock; conversation history has its own lock.
 #[derive(Default)]
 struct State {
     apns: Option<Arc<crate::apns::Apns>>,
+    tasks: HashMap<SessionRef, (TaskState, u64)>,
+    task_revision: u64,
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
     executions: HashMap<SessionRef, Arc<Mutex<SessionActor>>>,
@@ -190,6 +192,36 @@ fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn task_display(
+    tasks: &HashMap<SessionRef, (TaskState, u64)>,
+) -> agent_protocol::live_activity::TaskActivityDisplay {
+    agent_protocol::live_activity::TaskActivitySummary::from_statuses(
+        tasks.values().map(|(task, _)| task.phase().0),
+    )
+    .display()
+}
+fn publish_task_activity(
+    apns: Option<&crate::apns::Apns>,
+    sessions: &HashMap<SessionId, Outbound>,
+    revision: u64,
+    display: &agent_protocol::live_activity::TaskActivityDisplay,
+) -> Vec<SessionId> {
+    if let Some(apns) = apns {
+        apns.update(display.clone());
+    }
+    let frame = protocol::encode(Notification::TaskActivity {
+        state: agent_protocol::live_activity::TaskActivityState {
+            revision,
+            display: display.clone(),
+        },
+    })
+    .expect("task activity encodes");
+    sessions
+        .iter()
+        .filter_map(|(id, output)| output.try_send(*id, frame.clone()).err().map(|_| *id))
+        .collect()
+}
+
 impl SessionRouter {
     pub(super) fn set_apns(&self, apns: Option<Arc<crate::apns::Apns>>) {
         lock_state(&self.state).apns = apns;
@@ -210,38 +242,109 @@ impl SessionRouter {
             apns.revoke(principal);
         }
     }
-    pub(super) fn register_live_activity(
+    pub(super) fn task_activity_revision(&self) -> u64 {
+        lock_state(&self.state).task_revision
+    }
+    pub(super) fn task_activity(
         &self,
-        connection: SessionId,
-        params: &agent_protocol::live_activity::RegisterLiveActivity,
         native: Vec<Thread>,
-    ) -> Result<(), String> {
-        let tasks = native
+        unavailable: &[ProviderKind],
+        read_revision: u64,
+    ) -> agent_protocol::live_activity::TaskActivityState {
+        let tasks: Vec<_> = native
             .into_iter()
             .filter_map(|thread| {
                 let target = thread.id.clone()?;
                 let actor = self.actor(&target);
-                let thread = lock_state(&actor).overlay(thread);
-                let phase = agent_protocol::live_activity::task_phase(
-                    !matches!(
-                        thread.status,
+                let owned = lock_state(&actor);
+                let status_known = owned.timeline.status
+                    != agent_protocol::models::SessionStatus::Unknown
+                    || thread.list_stale != Some(true);
+                let thread = owned.overlay(thread);
+                drop(owned);
+                let task = TaskState {
+                    status: if status_known {
+                        thread.status
+                    } else {
                         agent_protocol::models::SessionStatus::Unknown
-                            | agent_protocol::models::SessionStatus::Unavailable
-                    ),
-                    thread.status == agent_protocol::models::SessionStatus::Running,
-                    thread.requests.values().any(|request| {
+                    },
+                    waiting: thread.requests.values().any(|request| {
                         request.delivery == agent_protocol::session::RequestDelivery::Awaiting
                     }),
-                    thread
+                    latest: thread
                         .turns
                         .as_ref()
                         .and_then(|turns| turns.last())
                         .map(|turn| turn.status),
-                );
+                };
                 self.prune(&target, &actor);
-                Some((target, phase.0.to_owned()))
+                Some((target, task))
             })
             .collect();
+        let mut state = lock_state(&self.state);
+        let before = task_display(&state.tasks);
+        // Provider events received while loading the list take precedence, including completion.
+        for (session, task) in tasks {
+            let previous = state.tasks.get(&session);
+            if previous.is_some_and(|(old, revision)| *revision > read_revision || old == &task)
+                || (task.phase().0 == "unknown" && !previous.is_some_and(|(old, _)| old.phase().1))
+                || (previous.is_none() && !task.phase().1)
+            {
+                continue;
+            }
+            state.task_revision += 1;
+            let revision = state.task_revision;
+            state.tasks.insert(session, (task, revision));
+        }
+        let uncertain: Vec<_> = state
+            .tasks
+            .iter()
+            .filter_map(|(session, (task, revision))| {
+                (unavailable.contains(&session.provider)
+                    && *revision <= read_revision
+                    && task.phase().0 != "unknown"
+                    && task.phase().1)
+                    .then(|| session.clone())
+            })
+            .collect();
+        for session in uncertain {
+            state.task_revision += 1;
+            let revision = state.task_revision;
+            state.tasks.insert(
+                session,
+                (
+                    TaskState {
+                        status: agent_protocol::models::SessionStatus::Unavailable,
+                        ..Default::default()
+                    },
+                    revision,
+                ),
+            );
+        }
+        let display = task_display(&state.tasks);
+        let failed = if display != before {
+            publish_task_activity(
+                state.apns.as_deref(),
+                &state.sessions,
+                state.task_revision,
+                &display,
+            )
+        } else {
+            Vec::new()
+        };
+        let result = agent_protocol::live_activity::TaskActivityState {
+            revision: state.task_revision,
+            display,
+        };
+        drop(state);
+        self.close_failed(failed);
+        result
+    }
+    pub(super) fn register_live_activity(
+        &self,
+        connection: SessionId,
+        params: &agent_protocol::live_activity::RegisterLiveActivity,
+    ) -> Result<(), String> {
         let state = lock_state(&self.state);
         let principal = state
             .sessions
@@ -252,7 +355,7 @@ impl SessionRouter {
             .apns
             .as_ref()
             .ok_or("APNs is unavailable")?
-            .register(&principal.principal, params, tasks)
+            .register(&principal.principal, params, task_display(&state.tasks))
             .map_err(str::to_owned)
     }
     pub(crate) fn new() -> Self {
@@ -967,29 +1070,45 @@ impl SessionRouter {
             let frame = protocol::encode(Notification::Activity { session: target.clone(), active, finished: !active && matches!(change, SessionChange::Turn { completed: true, turn } if turn.status == agent_protocol::execution::TurnStatus::Completed) }).expect("activity encodes");
             failed.extend(self.broadcast_frames(frame));
         }
-        if let Some(apns) = self.apns() {
-            let timeline = &actor.timeline;
-            apns.update(
-                target,
-                agent_protocol::live_activity::task_phase(
-                    !matches!(
-                        timeline.status,
-                        agent_protocol::models::SessionStatus::Unknown
-                            | agent_protocol::models::SessionStatus::Unavailable
-                    ),
-                    timeline.status == agent_protocol::models::SessionStatus::Running,
-                    timeline.requests.values().any(|request| {
-                        request.delivery == agent_protocol::session::RequestDelivery::Awaiting
-                    }),
-                    timeline
-                        .turns
-                        .as_ref()
-                        .and_then(|turns| turns.last())
-                        .map(|turn| turn.status),
-                )
-                .0,
-            );
+        let mut state = lock_state(&self.state);
+        let previous = state.tasks.get(target).map(|(task, _)| *task);
+        let task = TaskState {
+            status: if actor.timeline.status != agent_protocol::models::SessionStatus::Unknown
+                || matches!(change, SessionChange::Status { .. })
+            {
+                actor.timeline.status
+            } else {
+                previous.map(|task| task.status).unwrap_or_default()
+            },
+            waiting: actor.timeline.requests.values().any(|request| {
+                request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+            }),
+            latest: actor
+                .timeline
+                .turns
+                .as_ref()
+                .and_then(|turns| turns.last())
+                .map(|turn| turn.status)
+                .or_else(|| previous.and_then(|task| task.latest)),
+        };
+        if previous != Some(task)
+            && (task.phase().0 != "unknown" || previous.is_some_and(|task| task.phase().1))
+        {
+            let before = task_display(&state.tasks);
+            state.task_revision += 1;
+            let revision = state.task_revision;
+            state.tasks.insert(target.clone(), (task, revision));
+            let display = task_display(&state.tasks);
+            if before != display {
+                failed.extend(publish_task_activity(
+                    state.apns.as_deref(),
+                    &state.sessions,
+                    state.task_revision,
+                    &display,
+                ));
+            }
         }
+        drop(state);
         actor.release();
     }
 }
@@ -997,6 +1116,128 @@ impl SessionRouter {
 mod tests {
     use super::*;
     use agent_protocol::models::{Item, Thread, Turn};
+
+    #[test]
+    fn task_state_is_authoritative_without_apns_or_conversation_subscriptions() {
+        use agent_protocol::models::SessionStatus;
+        use agent_protocol::session::RequestDelivery;
+        let router = SessionRouter::new();
+        let target = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "task".into(),
+        };
+        let other = SessionRef {
+            provider: ProviderKind::Claude,
+            id: "task".into(),
+        };
+        let seed = |id: &SessionRef, status| Thread {
+            id: Some(id.clone()),
+            status,
+            ..Default::default()
+        };
+        let initial = router.task_activity(
+            vec![
+                seed(&target, SessionStatus::Running),
+                seed(&other, SessionStatus::Running),
+            ],
+            &[],
+            0,
+        );
+        assert_eq!(initial.display.current.label, "実行中 2件");
+        let request = serde_json::from_value(serde_json::json!({
+            "id":"question", "target":"session", "delivery":"awaiting", "body":{"question":{"questions":[]}}
+        })).unwrap();
+        router.session_change(
+            &target,
+            SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        );
+        router.session_change(&target, SessionChange::Request { request });
+        let waiting = router.task_activity(Vec::new(), &[], 0);
+        assert_eq!(waiting.display.current.label, "確認待ち 1件 · 実行中 1件");
+        router.session_change(
+            &target,
+            SessionChange::RequestDelivery {
+                request_id: "question".into(),
+                state: RequestDelivery::Sent,
+            },
+        );
+        assert_eq!(
+            router
+                .task_activity(Vec::new(), &[], 0)
+                .display
+                .current
+                .label,
+            "実行中 2件"
+        );
+        let read_revision = router.task_activity_revision();
+        router.session_change(
+            &target,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        let remaining = router.task_activity(
+            vec![seed(&target, SessionStatus::Running)],
+            &[],
+            read_revision,
+        );
+        assert_eq!(remaining.display.current.label, "実行中 1件");
+        router.session_change(
+            &other,
+            SessionChange::Status {
+                status: SessionStatus::Unavailable,
+            },
+        );
+        assert_eq!(
+            router
+                .task_activity(Vec::new(), &[], 0)
+                .display
+                .current
+                .label,
+            "状態確認中 1件"
+        );
+        let completed = router.task_activity(
+            vec![seed(&other, SessionStatus::Idle)],
+            &[],
+            router.task_activity_revision(),
+        );
+        assert!(!completed.display.ongoing);
+        assert!(completed.revision > initial.revision);
+    }
+
+    #[test]
+    fn a_failed_provider_marks_seeded_activity_unknown_until_a_fresh_read_recovers() {
+        let router = SessionRouter::new();
+        let target = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "external".into(),
+        };
+        let thread = |status| Thread {
+            id: Some(target.clone()),
+            status,
+            ..Default::default()
+        };
+        router.task_activity(
+            vec![thread(agent_protocol::models::SessionStatus::Running)],
+            &[],
+            0,
+        );
+        assert!(router.execution_targets().is_empty());
+        let uncertain = router.task_activity(
+            Vec::new(),
+            &[ProviderKind::Codex],
+            router.task_activity_revision(),
+        );
+        assert_eq!(uncertain.display.current.label, "状態確認中 1件");
+        let ended = router.task_activity(
+            vec![thread(agent_protocol::models::SessionStatus::Idle)],
+            &[],
+            uncertain.revision,
+        );
+        assert!(!ended.display.ongoing);
+    }
 
     #[test]
     fn live_activity_survives_disconnect_and_gets_terminal_result_before_execution_is_pruned() {
@@ -1029,17 +1270,16 @@ mod tests {
                 completed: false,
             },
         );
-        router
-            .register_live_activity(
-                phone.id(),
-                &params,
-                vec![Thread {
-                    id: Some(target.clone()),
-                    status: SessionStatus::Idle,
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
+        router.task_activity(
+            vec![Thread {
+                id: Some(target.clone()),
+                status: SessionStatus::Idle,
+                ..Default::default()
+            }],
+            &[],
+            0,
+        );
+        router.register_live_activity(phone.id(), &params).unwrap();
         assert_eq!(
             apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["display"]["current"]
                 ["label"],
@@ -1069,14 +1309,7 @@ mod tests {
         assert!(apns.test_payloads(crate::apns::now() + 3).is_empty());
         assert!(
             router
-                .register_live_activity(
-                    replacement.id(),
-                    &params,
-                    vec![Thread {
-                        id: Some(target),
-                        ..Default::default()
-                    }]
-                )
+                .register_live_activity(replacement.id(), &params)
                 .is_err()
         );
     }
@@ -1774,7 +2007,7 @@ mod tests {
             .updates
             .unwrap();
         // A provider can deliver a buffered burst before the network writer is scheduled.
-        // This is less than 100 KiB, well within the connection's memory budget.
+        // Both notification streams remain well within the connection's memory budget.
         for index in 0..512 {
             router.session_change(
                 &SessionRef::new(
@@ -1810,6 +2043,13 @@ mod tests {
                 panic!("expected activity")
             };
             assert_eq!(active, index % 2 == 0);
+            let activity =
+                protocol::decode::<Notification>(&connection.recv().await.unwrap()).unwrap();
+            let Notification::TaskActivity { state } = activity else {
+                panic!("expected task state")
+            };
+            assert_eq!(state.display.ongoing, active);
+            assert_eq!(state.revision, index + 1);
         }
         assert_eq!(
             connection

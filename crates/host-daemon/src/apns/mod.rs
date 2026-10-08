@@ -1,10 +1,7 @@
 //! Host-owned Live Activity push updates, independent of connected phone sessions.
 mod client;
 mod registry;
-use agent_protocol::{
-    live_activity::{PushEnvironment, RegisterLiveActivity},
-    session::SessionRef,
-};
+use agent_protocol::live_activity::{PushEnvironment, RegisterLiveActivity, TaskActivityDisplay};
 use client::{Client, ResultKind};
 use futures_util::{StreamExt, stream};
 use registry::Registry;
@@ -119,23 +116,22 @@ impl Apns {
         &self,
         owner: &str,
         params: &RegisterLiveActivity,
-        tasks: Vec<(SessionRef, String)>,
+        display: TaskActivityDisplay,
     ) -> Result<(), &'static str> {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let timestamp = now();
-        registry.seed(tasks, timestamp);
-        registry.register(owner, params, &self.host_name, timestamp)?;
+        registry.register(owner, params, &self.host_name, display, timestamp)?;
         self.wake.notify_one();
         Ok(())
     }
-    pub fn update(&self, session: &SessionRef, status: &str) {
+    pub fn update(&self, display: TaskActivityDisplay) {
         self.registry
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .update(session, status, now());
+            .update(display, now());
         self.wake.notify_one();
     }
     pub fn unregister(&self, owner: &str, activity: &str) {

@@ -12,6 +12,8 @@ enum PushEnvironment {
     Production,
 }
 #[uniffi::remote(Record)]
+struct ReadTaskActivity {}
+#[uniffi::remote(Record)]
 struct RegisterLiveActivity {
     pub activity_id: String,
     pub token: Vec<u8>,
@@ -32,7 +34,6 @@ struct TaskActivityIcon {
 #[uniffi::remote(Record)]
 struct TaskActivityDisplay {
     pub current: TaskActivityView,
-    pub stale: TaskActivityView,
     pub can_start: bool,
     pub ongoing: bool,
     pub urgent: bool,

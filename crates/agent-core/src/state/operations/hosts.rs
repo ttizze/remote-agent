@@ -1,5 +1,15 @@
 use super::*;
-pub use agent_protocol::live_activity::{RegisterLiveActivity, UnregisterLiveActivity};
+pub use agent_protocol::live_activity::{
+    ReadTaskActivity, RegisterLiveActivity, UnregisterLiveActivity,
+};
+
+impl Operation for ReadTaskActivity {
+    rpc_operation!();
+    fn apply(self, snapshot: &mut Snapshot, state: Self::Output) -> Vec<Effect> {
+        snapshot.accept_task_activity(state);
+        Vec::new()
+    }
+}
 
 impl Operation for RegisterLiveActivity {
     rpc_operation!();

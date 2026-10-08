@@ -12,6 +12,8 @@ use std::{
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) mod task_menu;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "linux")]

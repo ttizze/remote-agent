@@ -456,6 +456,7 @@ impl Store {
                 drop(self.dispatch(Intent::ListSessions(op::ListSessions::new(
                     (*snapshot.list_query).clone(),
                 ))));
+                drop(self.dispatch(Intent::ReadTaskActivity(op::ReadTaskActivity {})));
                 drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
                 return Ok(performance);
             };
@@ -721,6 +722,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         permission_settings,
         composer_catalog,
         host_name,
+        task_activity,
         storage_scope,
         archived_scopes,
         account,
@@ -753,6 +755,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && current.model_defaults == *model_defaults
         && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
         && current.host_name == *host_name
+        && current.task_activity == *task_activity
         && current.permission_settings == *permission_settings
         && current.composer_catalog == *composer_catalog
         && current.storage_scope == *storage_scope
@@ -1530,6 +1533,17 @@ mod tests {
             ("terminals", |snapshot| snapshot.terminals = Arc::default()),
             ("conversations", |snapshot| {
                 snapshot.conversations = Arc::default()
+            }),
+            ("task_activity", |snapshot| {
+                snapshot.task_activity =
+                    Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
+                        revision: 1,
+                        display: agent_protocol::live_activity::TaskActivitySummary {
+                            running: 1,
+                            ..Default::default()
+                        }
+                        .display(),
+                    }));
             }),
             ("observed_agents", |snapshot| {
                 snapshot.observed_agents = Some(crate::session::SessionRef {

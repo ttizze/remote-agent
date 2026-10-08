@@ -39,6 +39,7 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ReadTaskActivity(ReadTaskActivity),
     RegisterLiveActivity(RegisterLiveActivity),
     UnregisterLiveActivity(UnregisterLiveActivity),
     ReadPermissionSettings(ReadPermissionSettings),
