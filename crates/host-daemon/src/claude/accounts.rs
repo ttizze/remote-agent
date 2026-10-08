@@ -331,6 +331,7 @@ impl Accounts {
                     };
                     Ok(crate::account_usage::UsageSnapshot {
                         windows: crate::account_usage::claude(&response),
+                        credential_fingerprint: None,
                         reset_credits,
                         external_usage: None,
                     })

@@ -183,6 +183,10 @@ impl Snapshot {
         crate::view::usage::composer_usage_limits(self.accounts.as_ref(), provider)
     }
 
+    pub fn usage_limit_pools(&self, now_ms: i64) -> Vec<crate::view::usage::UsageLimitPool> {
+        crate::view::usage::usage_limit_pools(self.accounts.as_ref(), now_ms)
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,

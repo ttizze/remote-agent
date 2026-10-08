@@ -11,6 +11,7 @@ pub(crate) type UsageCache = HashMap<String, Arc<UsageEntry>>;
 #[derive(Debug, Default)]
 pub(crate) struct UsageSnapshot {
     pub windows: Vec<UsageWindow>,
+    pub credential_fingerprint: Option<String>,
     pub reset_credits: Option<agent_protocol::usage::ResetCredits>,
     pub external_usage: Option<agent_protocol::usage::ExternalUsage>,
 }
@@ -19,6 +20,7 @@ impl UsageSnapshot {
     pub(crate) fn windows(windows: Vec<UsageWindow>) -> Self {
         Self {
             windows,
+            credential_fingerprint: None,
             ..Self::default()
         }
     }
@@ -60,6 +62,7 @@ impl UsageEntry {
                 .unwrap_or_default()
                 .as_secs() as i64,
             error,
+            credential_fingerprint: snapshot.credential_fingerprint,
             reset_credits: snapshot.reset_credits,
             external_usage: snapshot.external_usage,
         };

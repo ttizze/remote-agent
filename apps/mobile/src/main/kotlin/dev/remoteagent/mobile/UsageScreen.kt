@@ -109,20 +109,30 @@ internal fun UsageScreen(model: AndroidAppModel) {
             } else {
                 item {
                     SectionCard("Limits") {
+                        val pools = model.snapshot.usageLimitPools(System.currentTimeMillis())
                         val accounts = model.snapshot.usageLimits()
-                        if (accounts.isEmpty()) {
+                        val sourceAccounts = model.snapshot.accounts()?.accounts.orEmpty()
+                        val pooledIds = pools.flatMap { it.accounts }.map { it.id }.toSet()
+                        fun consumeReset(account: dev.remoteagent.core.UsageLimitAccount) {
+                            val sourceId = account.resetCreditAccountId ?: account.id
+                            sourceAccounts.firstOrNull { it.id == sourceId }?.let { source ->
+                                model.perform(Intent.ConsumeResetCredit(source.provider, source.id, account.nextCreditId))
+                                model.perform(Intent.LoadAccounts)
+                            }
+                        }
+                        if (pools.isEmpty() && accounts.isEmpty()) {
                             Text("Provider limits are unavailable until accounts are loaded.", Modifier.padding(16.dp), style = AppTheme.caption)
                         } else {
-                            accounts.forEachIndexed { index, account ->
+                            pools.forEachIndexed { index, pool ->
                                 if (index > 0) HorizontalDivider(color = AppTheme.colors.border)
-                                val source = model.snapshot.accounts()?.accounts?.firstOrNull { it.id == account.id }
-                                UsageLimitAccount(account) {
-                                    source?.let {
-                                        model.perform(Intent.ConsumeResetCredit(it.provider, it.id, account.nextCreditId))
-                                        model.perform(Intent.LoadAccounts)
-                                    }
-                                }
+                                UsageLimitPoolView(pool) { account -> consumeReset(account) }
                             }
+                            accounts
+                                .filter { it.id !in pooledIds }
+                                .forEach { account ->
+                                    HorizontalDivider(color = AppTheme.colors.border)
+                                    UsageLimitAccount(account, showWindows = false) { consumeReset(account) }
+                                }
                         }
                     }
                 }
@@ -254,15 +264,16 @@ private enum class UsageTab {
 }
 
 @Composable
-private fun UsageLimitAccount(account: dev.remoteagent.core.UsageLimitAccount, useReset: () -> Unit) {
+private fun UsageLimitPoolView(
+    pool: dev.remoteagent.core.UsageLimitPool,
+    useReset: (dev.remoteagent.core.UsageLimitAccount) -> Unit,
+) {
     val colors = AppTheme.colors
-    val context = LocalContext.current
-    var confirmingReset by remember(account.id) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(account.email ?: account.id, style = AppTheme.body)
-        account.windows.forEach { window ->
+    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(pool.provider, style = AppTheme.title)
+        pool.windows.forEach { window ->
             Row(Modifier.fillMaxWidth()) {
-                Text(window.label, Modifier.weight(1f), style = AppTheme.caption)
+                Text(window.label, Modifier.weight(1f), style = AppTheme.body)
                 Text("${window.remainingPercent}% remaining", style = AppTheme.caption)
             }
             LinearProgressIndicator(
@@ -271,6 +282,61 @@ private fun UsageLimitAccount(account: dev.remoteagent.core.UsageLimitAccount, u
                 color = colors.primary,
                 trackColor = colors.secondary,
             )
+            window.pace?.let { pace ->
+                Text("Pace: $pace", style = AppTheme.caption, color = colors.foregroundMuted)
+            }
+            window.resets.firstOrNull()?.let { reset ->
+                Text(
+                    "Next reset: ${reset.label} restores ${reset.restoresPercent}% at ${usageResetTime(reset.at)}",
+                    style = AppTheme.caption,
+                    color = colors.foregroundMuted,
+                )
+            }
+            window.columns.forEach { column ->
+                Row(Modifier.fillMaxWidth()) {
+                    Text(column.label, Modifier.weight(1f), style = AppTheme.caption)
+                    Text(
+                        column.window?.let { "${it.remainingPercent}% left" } ?: "No limit reported",
+                        style = AppTheme.caption,
+                        color = colors.foregroundMuted,
+                    )
+                }
+            }
+        }
+        pool.accounts
+            .filter {
+                it.resetCreditCount > 0 || it.externalLabel != null || it.error != null
+            }
+            .forEach { account ->
+                UsageLimitAccount(account, showWindows = false) { useReset(account) }
+            }
+    }
+}
+
+@Composable
+private fun UsageLimitAccount(
+    account: dev.remoteagent.core.UsageLimitAccount,
+    showWindows: Boolean = true,
+    useReset: () -> Unit,
+) {
+    val colors = AppTheme.colors
+    val context = LocalContext.current
+    var confirmingReset by remember(account.id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(account.email ?: account.id, style = AppTheme.body)
+        if (showWindows) {
+            account.windows.forEach { window ->
+                Row(Modifier.fillMaxWidth()) {
+                    Text(window.label, Modifier.weight(1f), style = AppTheme.caption)
+                    Text("${window.remainingPercent}% remaining", style = AppTheme.caption)
+                }
+                LinearProgressIndicator(
+                    progress = { window.remainingPercent / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = colors.primary,
+                    trackColor = colors.secondary,
+                )
+            }
         }
         if (account.resetCreditCount > 0) {
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -302,6 +368,11 @@ private fun UsageLimitAccount(account: dev.remoteagent.core.UsageLimitAccount, u
         )
     }
 }
+
+private fun usageResetTime(at: Long): String = java.time.Instant
+    .ofEpochMilli(at)
+    .atZone(java.time.ZoneId.systemDefault())
+    .format(java.time.format.DateTimeFormatter.ofLocalizedDateTime(java.time.format.FormatStyle.SHORT))
 
 private fun loadUsage(model: AndroidAppModel) {
     val now = java.time.LocalDate.now()
