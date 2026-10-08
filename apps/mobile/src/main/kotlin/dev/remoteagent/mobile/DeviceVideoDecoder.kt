@@ -23,7 +23,7 @@ import java.util.ArrayDeque
 private const val DEVICE_VIDEO_MAX_PENDING_FRAMES = 8
 private const val DEVICE_VIDEO_MAX_INGRESS_BYTES = 16 * 1024 * 1024
 // This is the native accessibility overlay's fixed accent, shared with the Compose surface.
-@Suppress("MagicNumber") private val DEVICE_ACCESSIBILITY_COLOR = android.graphics.Color.rgb(79, 140, 255)
+private const val DEVICE_ACCESSIBILITY_COLOR = -0xB07301 // 0xFF4F8CFF: opaque RGB(79, 140, 255).
 private const val DEVICE_ACCESSIBILITY_STROKE_WIDTH = 2f
 private const val AVC_LENGTH_PREFIX_BYTES = 4
 private const val AVC_PARAMETER_SET_LENGTH_BYTES = 2
