@@ -12,6 +12,20 @@ struct ThreadRoutes {
     let device: () -> Void
 }
 
+private enum ThreadSheet: Identifiable {
+    case file(FileTarget)
+    case pdf(FileTarget)
+    case context(ContextChip)
+
+    var id: String {
+        switch self {
+        case let .file(target): "file:\(target.id)"
+        case let .pdf(target): "pdf:\(target.id)"
+        case let .context(chip): "context:\(chip.contextId)"
+        }
+    }
+}
+
 /// One thread: header, feed, the floating working control, request cards and
 /// the composer.
 struct ThreadScreen: View {
@@ -24,9 +38,7 @@ struct ThreadScreen: View {
     @State private var showingAgents = false
     @State private var showingSettings = false
     @State private var forkingRun: String?
-    @State private var openedFile: FileTarget?
-    @State private var openedPDF: FileTarget?
-    @State private var contextPreview: ContextChip?
+    @State private var sheet: ThreadSheet?
     private let endId = "feed-end"
 
     var body: some View {
@@ -51,23 +63,23 @@ struct ThreadScreen: View {
         .toolbar { header }
         .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
         .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
-        .sheet(item: $openedFile) { ThreadFileSheet(model: model, target: $0) }
-        .sheet(item: $openedPDF) { ThreadPDFSheet(model: model, target: $0) }
-        .sheet(isPresented: Binding(
-            get: { contextPreview != nil },
-            set: { if !$0 { contextPreview = nil } }
-        )) {
-            if let contextPreview {
-                ContextPreviewSheet(chip: contextPreview, openTerminal: {
-                    openContextTerminal(contextPreview.terminalId)
-                    self.contextPreview = nil
+        .sheet(item: $sheet) { sheet in
+            switch sheet {
+            case let .file(target):
+                ThreadFileSheet(model: model, target: target)
+            case let .pdf(target):
+                ThreadPDFSheet(model: model, target: target)
+            case let .context(chip):
+                ContextPreviewSheet(chip: chip, openTerminal: {
+                    openContextTerminal(chip.terminalId)
+                    self.sheet = nil
                 })
             }
         }
         .environment(\.markdownLinks, MarkdownLinkOpener(
             workspaceRoot: model.cwd.isEmpty ? nil : model.cwd,
-            openFile: { openedFile = $0 },
-            openPDF: { openedPDF = $0 },
+            openFile: { sheet = .file($0) },
+            openPDF: { sheet = .pdf($0) },
             loadFile: model.download
         ))
         .sheet(isPresented: $showingSettings) {
@@ -213,9 +225,9 @@ struct ThreadScreen: View {
             },
             openThread: { model.openThread($0) },
             openTerminal: openContextTerminal,
-            showContextPreview: { contextPreview = $0 },
+            showContextPreview: { sheet = .context($0) },
             download: model.downloadAttachment,
-            useArtifactTemplate: { model.useArtifactTemplate($0) }
+            useArtifactTemplate: model.useArtifactTemplate
         )
     }
 
