@@ -597,7 +597,7 @@ fn environment_descriptor(
 }
 
 fn detect_machine_kind() -> Option<String> {
-    if let Some(value) = std::env::var_os("BEX_ENVIRONMENT_MACHINE") {
+    if let Some(value) = std::env::var_os("AGENT_ENVIRONMENT_MACHINE") {
         let value = value.to_string_lossy().trim().to_ascii_lowercase();
         if matches!(
             value.as_str(),
