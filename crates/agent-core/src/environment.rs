@@ -1,8 +1,10 @@
 //! Pure environment identity, capability, and cross-environment view helpers.
 use crate::{
-    state::Snapshot,
+    state::{ModelOption, Snapshot},
     view::load_balancing::{self, Candidate as LoadBalancingCandidate},
     view::{
+        composer::controls::{compatible_runtime_mode, runtime_mode_choices},
+        models::options::normalize_model_options,
         settings::{SettingsScope, SettingsView},
         sidebar::{SidebarDraftRow, SidebarItem, SidebarOptions, SidebarSection, SidebarThreadRow},
         thread_list::{
@@ -11,7 +13,7 @@ use crate::{
         thread_menu::{ThreadMenuAction, ThreadMenuChild, ThreadMenuItem},
     },
 };
-use agent_domain::Driver;
+use agent_domain::{Driver, InteractionMode, RuntimeMode};
 use agent_protocol::models::{
     AgentActivityPhase, AwarenessActivity, AwarenessSnapshot, EnvironmentCapabilities,
     EnvironmentDescriptor, ProviderInstance,
@@ -526,8 +528,9 @@ pub struct EnvironmentUsageSnapshot {
 }
 
 /// The target Host/project/provider selected for a new-thread draft. The
-/// caller promotes the owning Store before creating the draft, so all
-/// subsequent mutations stay with that Host.
+/// options and modes are canonical for the target provider. The caller
+/// promotes the owning Store before creating the draft, so all subsequent
+/// mutations stay with that Host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentLoadBalancedRoute {
     pub environment_id: String,
@@ -535,6 +538,9 @@ pub struct EnvironmentLoadBalancedRoute {
     pub provider_instance: String,
     pub driver: Driver,
     pub model: String,
+    pub options: Vec<ModelOption>,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1061,6 +1067,9 @@ impl EnvironmentRegistry {
         driver: Driver,
         provider_instance: Option<&str>,
         model: &str,
+        options: &[ModelOption],
+        runtime_mode: RuntimeMode,
+        interaction_mode: InteractionMode,
         weights: &BTreeMap<String, u8>,
         now_ms: i64,
     ) -> EnvironmentLoadBalancingEvaluation {
@@ -1164,6 +1173,15 @@ impl EnvironmentRegistry {
             else {
                 continue;
             };
+            let runtime_mode = compatible_runtime_mode(
+                runtime_mode,
+                &runtime_mode_choices(&provider.supported_runtime_modes),
+            );
+            let interaction_mode = if provider.show_interaction_mode_toggle {
+                interaction_mode
+            } else {
+                InteractionMode::Default
+            };
             route_candidates.push(RouteCandidate {
                 route: EnvironmentLoadBalancedRoute {
                     environment_id: environment_id.clone(),
@@ -1171,6 +1189,9 @@ impl EnvironmentRegistry {
                     provider_instance: provider.instance.clone(),
                     driver,
                     model: selected_model.slug.clone(),
+                    options: normalize_model_options(&selected_model.option_descriptors, options),
+                    runtime_mode,
+                    interaction_mode,
                 },
                 capacity: LoadBalancingCandidate {
                     environment_id,
@@ -1188,7 +1209,11 @@ impl EnvironmentRegistry {
             };
         }
         let pending_resources = route_candidates.iter().any(|candidate| {
-            candidate.capacity.resources.is_none() || candidate.capacity.received_at_ms.is_none()
+            load_balancing::resource_sample_needs_refresh(
+                candidate.capacity.resources.as_ref(),
+                candidate.capacity.received_at_ms,
+                now_ms,
+            )
         });
         let capacities: Vec<_> = route_candidates
             .iter()
@@ -1736,9 +1761,9 @@ mod tests {
             status: ProviderStatus::Ready,
             message: None,
             unavailable_reason: None,
-            show_interaction_mode_toggle: true,
+            show_interaction_mode_toggle: false,
             reports_context_window: true,
-            supported_runtime_modes: vec![],
+            supported_runtime_modes: vec![RuntimeMode::ApprovalRequired],
             models: vec![Model {
                 slug: "shared".into(),
                 name: "Shared".into(),
@@ -1779,6 +1804,9 @@ mod tests {
             Driver::Codex,
             Some("codex"),
             "shared",
+            &[],
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
             &BTreeMap::new(),
             100_000,
         );
@@ -1792,6 +1820,9 @@ mod tests {
                 provider_instance: "codex".into(),
                 driver: Driver::Codex,
                 model: "shared".into(),
+                options: vec![],
+                runtime_mode: RuntimeMode::ApprovalRequired,
+                interaction_mode: InteractionMode::Default,
             })
         );
         let weights = BTreeMap::from([(String::from("host-b"), 0)]);
@@ -1801,6 +1832,9 @@ mod tests {
             Driver::Codex,
             Some("codex"),
             "shared",
+            &[],
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
             &weights,
             100_000,
         );
@@ -1819,11 +1853,103 @@ mod tests {
             Driver::Codex,
             Some("codex"),
             "shared",
+            &[],
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
             &BTreeMap::new(),
             100_000,
         );
         assert_eq!(pending.candidate_count, 2);
         assert!(pending.pending_resources);
         assert!(pending.route.is_none());
+
+        let mut stale_resources = (*snapshot("host-b", "project-b", 8)).clone();
+        stale_resources.host_resources_received_at_ms = Some(100_000 - 15_001);
+        let mut stale_registry = EnvironmentRegistry::default();
+        stale_registry.update(snapshot("host-a", "project-a", 2));
+        stale_registry.update(Arc::new(stale_resources));
+        let stale = stale_registry.evaluate_load_balancing(
+            "host-a",
+            "project-a",
+            Driver::Codex,
+            Some("codex"),
+            "shared",
+            &[],
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
+            &BTreeMap::new(),
+            100_000,
+        );
+        assert!(stale.pending_resources);
+        assert!(stale.route.is_none());
+
+        let mut fallback_provider = provider.clone();
+        fallback_provider.models = vec![Model {
+            slug: "fallback".into(),
+            name: "Fallback".into(),
+            aliases: vec![],
+            badge: None,
+            is_default: true,
+            is_legacy: false,
+            option_descriptors: vec![agent_domain::OptionDescriptor::Select(
+                agent_domain::SelectOption {
+                    id: "effort".into(),
+                    label: "Effort".into(),
+                    options: vec![agent_domain::OptionChoice {
+                        id: "high".into(),
+                        label: "High".into(),
+                        description: None,
+                        is_default: true,
+                    }],
+                    current_value: Some("high".into()),
+                    prompt_injected_values: vec![],
+                },
+            )],
+        }];
+        let mut fallback_snapshot = (*snapshot("host-b", "project-b", 8)).clone();
+        fallback_snapshot.providers = Some(vec![fallback_provider]);
+        let mut fallback_registry = EnvironmentRegistry::default();
+        fallback_registry.update(snapshot("host-a", "project-a", 2));
+        fallback_registry.update(Arc::new(fallback_snapshot));
+        let fallback = fallback_registry.evaluate_load_balancing(
+            "host-a",
+            "project-a",
+            Driver::Codex,
+            Some("codex"),
+            "missing-model",
+            &[
+                ModelOption {
+                    key: "effort".into(),
+                    value: "invalid".into(),
+                },
+                ModelOption {
+                    key: "old-option".into(),
+                    value: "value".into(),
+                },
+            ],
+            RuntimeMode::FullAccess,
+            InteractionMode::Plan,
+            &BTreeMap::new(),
+            100_000,
+        );
+        assert_eq!(
+            fallback.route.as_ref().map(|route| route.model.as_str()),
+            Some("fallback")
+        );
+        assert_eq!(
+            fallback.route.as_ref().map(|route| route.options.clone()),
+            Some(vec![ModelOption {
+                key: "effort".into(),
+                value: "high".into(),
+            }])
+        );
+        assert_eq!(
+            fallback.route.as_ref().map(|route| route.runtime_mode),
+            Some(RuntimeMode::ApprovalRequired)
+        );
+        assert_eq!(
+            fallback.route.as_ref().map(|route| route.interaction_mode),
+            Some(InteractionMode::Default)
+        );
     }
 }

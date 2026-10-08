@@ -49,6 +49,9 @@ pub struct EnvironmentLoadBalancedRouteView {
     pub provider_instance: String,
     pub driver: agent_domain::Driver,
     pub model: String,
+    pub options: Vec<crate::state::ModelOption>,
+    pub runtime_mode: agent_domain::RuntimeMode,
+    pub interaction_mode: agent_domain::InteractionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -158,8 +161,8 @@ pub fn environment_load_balancing_preferences(
 
 /// Evaluates the source draft against all registered environments. This is a
 /// pure projection over cached snapshots; native owners request resource
-/// refreshes only when the returned evaluation says a matching candidate is
-/// still waiting for its first reply.
+/// refreshes when a matching candidate has no usable receipt yet or its
+/// client-received sample has expired.
 #[uniffi::export]
 pub fn environment_load_balancing_route(
     snapshots: Vec<Arc<Snapshot>>,
@@ -189,6 +192,9 @@ pub fn environment_load_balancing_route(
         draft.driver,
         Some(&draft.instance_id),
         &draft.model,
+        &draft.options,
+        draft.runtime_mode,
+        draft.interaction_mode,
         &source.preferences.load_balancing_weights,
         now_ms,
     );
@@ -201,6 +207,9 @@ pub fn environment_load_balancing_route(
             provider_instance: route.provider_instance,
             driver: route.driver,
             model: route.model,
+            options: route.options,
+            runtime_mode: route.runtime_mode,
+            interaction_mode: route.interaction_mode,
         }),
     }
 }

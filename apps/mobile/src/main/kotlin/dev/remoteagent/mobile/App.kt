@@ -70,6 +70,7 @@ private data class PendingLoadBalancedNewThread(
     val projectId: String,
     val sourceEnvironmentId: String,
     val startedAtMillis: Long,
+    val generation: Long,
 )
 
 private const val PERSISTENCE_QUEUE_CAPACITY = 8
@@ -179,6 +180,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var observation: Job? = null
     private var persistence: Job? = null
     private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread? = null
+    private var loadBalancingAttemptGeneration = 0L
+    private var automaticRouteProfileId: String? = null
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     private val operations = mutableSetOf<Job>()
     private val writes = Channel<Snapshot>(PERSISTENCE_QUEUE_CAPACITY)
@@ -372,14 +375,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun openNewThread(projectId: String?) {
         val sourceEnvironmentId = snapshot.environmentId()
         if (projectId == null || sourceEnvironmentId == null) {
-            pendingLoadBalancedNewThread = null
+            invalidatePendingLoadBalancedNewThread()
             perform(Intent.NewThread(projectId))
             return
         }
         // A project chosen from the aggregate picker already names its Host;
         // automatic balancing is only for the selected Host's local project.
         if (scopedValue(projectId).second != null) {
-            pendingLoadBalancedNewThread = null
+            invalidatePendingLoadBalancedNewThread()
             perform(Intent.NewThread(projectId))
             return
         }
@@ -390,51 +393,70 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             System.currentTimeMillis(),
         )
         if (evaluation.pendingResources) {
+            loadBalancingAttemptGeneration += 1
+            val generation = loadBalancingAttemptGeneration
             pendingLoadBalancedNewThread = PendingLoadBalancedNewThread(
                 projectId,
                 sourceEnvironmentId,
                 System.currentTimeMillis(),
+                generation,
             )
             requestLoadBalancingResources()
             scope.launch {
                 delay(3_000L)
-                retryPendingLoadBalancedNewThread()
+                retryPendingLoadBalancedNewThread(generation)
             }
             return
         }
-        pendingLoadBalancedNewThread = null
+        invalidatePendingLoadBalancedNewThread()
         val route = evaluation.route
         if (route == null) {
             perform(Intent.NewThread(projectId))
             return
         }
-        val sourceDraft = snapshot.newThreadDefaultsForProject(projectId)
-        startRoutedNewThread(route, sourceDraft, projectId)
+        startRoutedNewThread(
+            route,
+            projectId,
+            sourceEnvironmentId,
+            loadBalancingAttemptGeneration,
+        )
     }
 
     private fun startRoutedNewThread(
         route: dev.remoteagent.core.EnvironmentLoadBalancedRouteView,
-        sourceDraft: Draft,
         fallbackProjectId: String,
+        sourceEnvironmentId: String,
+        generation: Long,
     ) {
+        automaticRouteProfileId = environments
+            .firstOrNull { it.environmentId == route.environmentId }
+            ?.profileId
         perform(Intent.NewThread("${route.environmentId}:${route.projectId}")) { result ->
+            if (generation != loadBalancingAttemptGeneration) return@perform
             if (result.isFailure) {
-                perform(Intent.NewThread(fallbackProjectId))
+                if (snapshot.environmentId() == route.environmentId) {
+                    val fallback = "$sourceEnvironmentId:$fallbackProjectId"
+                    if (scopedValue(fallback).second != null) perform(Intent.NewThread(fallback))
+                }
             } else {
-                perform(Intent.SetModel(route.providerInstance, route.driver, route.model, sourceDraft.options))
-                perform(Intent.SetRuntimeMode(sourceDraft.runtimeMode))
-                perform(Intent.SetInteractionMode(sourceDraft.interactionMode))
+                perform(Intent.SetModel(route.providerInstance, route.driver, route.model, route.options))
+                perform(Intent.SetRuntimeMode(route.runtimeMode))
+                perform(Intent.SetInteractionMode(route.interactionMode))
             }
         }
+        automaticRouteProfileId = null
     }
 
-    private fun retryPendingLoadBalancedNewThread() {
+    private fun retryPendingLoadBalancedNewThread(generation: Long? = null) {
         val pending = pendingLoadBalancedNewThread ?: return
-        if (snapshot.environmentId() != pending.sourceEnvironmentId ||
-            System.currentTimeMillis() - pending.startedAtMillis > 3_000L
-        ) {
-            pendingLoadBalancedNewThread = null
-            perform(Intent.NewThread(pending.projectId))
+        if (generation != null && generation != pending.generation) return
+        if (snapshot.environmentId() != pending.sourceEnvironmentId) {
+            invalidatePendingLoadBalancedNewThread()
+            return
+        }
+        if (System.currentTimeMillis() - pending.startedAtMillis >= 3_000L) {
+            invalidatePendingLoadBalancedNewThread()
+            perform(Intent.NewThread("${pending.sourceEnvironmentId}:${pending.projectId}"))
             return
         }
         val evaluation = dev.remoteagent.core.environmentLoadBalancingRoute(
@@ -443,18 +465,32 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             pending.projectId,
             System.currentTimeMillis(),
         )
-        if (evaluation.pendingResources) return
-        pendingLoadBalancedNewThread = null
+        if (evaluation.pendingResources) {
+            if (generation != null) {
+                scope.launch {
+                    delay(50L)
+                    retryPendingLoadBalancedNewThread(generation)
+                }
+            }
+            return
+        }
+        invalidatePendingLoadBalancedNewThread()
         val route = evaluation.route
         if (route == null) {
-            perform(Intent.NewThread(pending.projectId))
+            perform(Intent.NewThread("${pending.sourceEnvironmentId}:${pending.projectId}"))
             return
         }
         startRoutedNewThread(
             route,
-            snapshot.newThreadDefaultsForProject(pending.projectId),
             pending.projectId,
+            pending.sourceEnvironmentId,
+            loadBalancingAttemptGeneration,
         )
+    }
+
+    private fun invalidatePendingLoadBalancedNewThread() {
+        loadBalancingAttemptGeneration += 1
+        pendingLoadBalancedNewThread = null
     }
 
     private fun requestLoadBalancingResources() {
@@ -578,7 +614,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun selectProfile(id: String) {
         if (profiles.none { it.id == id }) return
-        pendingLoadBalancedNewThread = null
+        if (automaticRouteProfileId != id) invalidatePendingLoadBalancedNewThread()
         stack = listOf(Route.Home)
         if (profileId == id && owner != null) {
             startBackgroundProfiles(id)
@@ -628,7 +664,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun detach(): AgentStore? {
-        pendingLoadBalancedNewThread = null
+        if (automaticRouteProfileId == null) invalidatePendingLoadBalancedNewThread()
         persist()
         draftEdits.reset()
         initialization?.cancel()

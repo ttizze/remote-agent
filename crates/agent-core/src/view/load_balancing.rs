@@ -6,6 +6,66 @@ use agent_protocol::background::HostResourcesSnapshot;
 /// surprising share of automatic drafts.
 pub const DEFAULT_WEIGHT: u8 = 50;
 pub const PREFERENCE_WEIGHTS: [u8; 4] = [100, 50, 25, 0];
+pub const RESOURCE_SAMPLE_MAX_AGE_MS: i64 = 15_000;
+pub const RESOURCE_SAMPLE_MAX_FUTURE_MS: i64 = 5_000;
+
+/// Returns whether a client-received capacity sample can be used for a new
+/// draft. The receipt clock is authoritative; a Host's sampled-at clock may
+/// differ between machines and is therefore never used here.
+pub fn resource_sample_is_fresh(
+    resources: Option<&HostResourcesSnapshot>,
+    received_at_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    let (Some(_), Some(received_at_ms)) = (resources, received_at_ms) else {
+        return false;
+    };
+    let age_ms = now_ms.saturating_sub(received_at_ms);
+    (-RESOURCE_SAMPLE_MAX_FUTURE_MS..=RESOURCE_SAMPLE_MAX_AGE_MS).contains(&age_ms)
+}
+
+/// Missing and expired receipts require a new sample before automatic
+/// routing. A present but unusable sample is deliberately not pending: the
+/// Host has answered and capacity selection should resolve it as unavailable.
+pub fn resource_sample_needs_refresh(
+    resources: Option<&HostResourcesSnapshot>,
+    received_at_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    !resource_sample_is_fresh(resources, received_at_ms, now_ms)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingRouteAction {
+    Retry,
+    Cancel,
+    Fallback,
+}
+
+/// Resolves the lifetime of a pending automatic route before a client reads
+/// another snapshot. A newer attempt or a changed source selection cancels
+/// the old one; the timeout falls back only while the original source remains
+/// selected.
+pub fn pending_route_action(
+    attempt_generation: u64,
+    current_generation: u64,
+    source_environment_id: &str,
+    selected_environment_id: Option<&str>,
+    started_at_ms: i64,
+    now_ms: i64,
+    timeout_ms: i64,
+) -> PendingRouteAction {
+    if attempt_generation != current_generation
+        || selected_environment_id != Some(source_environment_id)
+    {
+        return PendingRouteAction::Cancel;
+    }
+    if now_ms.saturating_sub(started_at_ms) >= timeout_ms {
+        PendingRouteAction::Fallback
+    } else {
+        PendingRouteAction::Retry
+    }
+}
 
 /// Resolves a saved weight to one of the preferences exposed by the settings
 /// UI. Values below or above Normal snap to the adjacent choice so every
@@ -47,14 +107,14 @@ pub fn select_environment<'a>(
         let Some(resources) = candidate.resources.as_ref() else {
             continue;
         };
-        let Some(received_at_ms) = candidate.received_at_ms else {
-            continue;
-        };
-        if candidate.weight == 0 || !resources.usable_for_load_balancing() {
+        if !resource_sample_is_fresh(
+            Some(resources),
+            candidate.received_at_ms,
+            now_ms,
+        ) {
             continue;
         }
-        let age_ms = now_ms.saturating_sub(received_at_ms);
-        if age_ms > 15_000 || age_ms < -5_000 {
+        if candidate.weight == 0 || !resources.usable_for_load_balancing() {
             continue;
         }
         let Some(cpu_utilization) = resources.cpu_utilization else {
@@ -170,6 +230,51 @@ mod tests {
         let mut missing_receipt = candidate("missing-receipt", Some(resources(now)), 100);
         missing_receipt.received_at_ms = None;
         assert_eq!(select_environment(&[missing_receipt], now), None);
+    }
+
+    #[test]
+    fn missing_and_expired_receipts_need_refresh_but_invalid_capacity_does_not() {
+        let now = 100_000;
+        let resources = resources(now);
+        assert!(resource_sample_needs_refresh(None, Some(now), now));
+        assert!(resource_sample_needs_refresh(
+            Some(&resources),
+            Some(now - RESOURCE_SAMPLE_MAX_AGE_MS - 1),
+            now,
+        ));
+        assert!(!resource_sample_needs_refresh(
+            Some(&resources),
+            Some(now),
+            now
+        ));
+
+        let mut unusable = resources;
+        unusable.cpu_utilization = Some(0.99);
+        assert!(!resource_sample_needs_refresh(
+            Some(&unusable),
+            Some(now),
+            now
+        ));
+    }
+
+    #[test]
+    fn pending_route_lifetime_cancels_old_or_moved_attempts() {
+        assert_eq!(
+            pending_route_action(1, 2, "source", Some("source"), 1_000, 1_500, 3_000),
+            PendingRouteAction::Cancel
+        );
+        assert_eq!(
+            pending_route_action(1, 1, "source", Some("other"), 1_000, 1_500, 3_000),
+            PendingRouteAction::Cancel
+        );
+        assert_eq!(
+            pending_route_action(1, 1, "source", Some("source"), 1_000, 4_000, 3_000),
+            PendingRouteAction::Fallback
+        );
+        assert_eq!(
+            pending_route_action(1, 1, "source", Some("source"), 1_000, 3_999, 3_000),
+            PendingRouteAction::Retry
+        );
     }
 
     #[test]

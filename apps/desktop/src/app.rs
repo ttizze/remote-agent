@@ -31,6 +31,7 @@ use agent_core::{
     state::{Intent, Snapshot},
     view::{
         command_palette::{self, CommandPaletteItem, CommandPaletteItemKind},
+        load_balancing::{self, PendingRouteAction},
         new_thread::NewThreadView,
         sidebar::{SidebarOptions, SidebarView},
         thread::{ThreadView, ThreadViewOptions},
@@ -105,7 +106,8 @@ struct ViewInputs {
 struct PendingLoadBalancedNewThread {
     project_id: String,
     source_environment_id: String,
-    started_at: Instant,
+    started_at_ms: i64,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +186,7 @@ pub(crate) struct Desktop {
     pending_open: Option<(String, String)>,
     pending_new_thread: Option<(String, Option<String>)>,
     pending_load_balanced_new_thread: Option<PendingLoadBalancedNewThread>,
+    load_balancing_attempt_generation: u64,
     load_balancing_refresh_requested: bool,
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
@@ -453,6 +456,7 @@ impl Desktop {
             pending_open: None,
             pending_new_thread: None,
             pending_load_balanced_new_thread: None,
+            load_balancing_attempt_generation: 0,
             load_balancing_refresh_requested: false,
             hosts,
             route: Route::Chat,
@@ -504,8 +508,7 @@ impl Desktop {
         self.epoch += 1;
         self.views_running = false;
         self.connecting = true;
-        self.pending_load_balanced_new_thread = None;
-        self.load_balancing_refresh_requested = false;
+        self.invalidate_load_balancing_attempt();
         self.remote = remote;
         self.session.take();
         if let Some(remote) = &remote {
@@ -734,7 +737,13 @@ impl Desktop {
         let Some(session) = self.background_sessions.remove(&profile_id) else {
             return false;
         };
-        self.session.take();
+        let previous_profile_id = self.remote.as_ref().map(|remote| remote.id.clone());
+        if let Some(previous_session) = self.session.take()
+            && let Some(previous_profile_id) = previous_profile_id
+        {
+            self.background_sessions
+                .insert(previous_profile_id, previous_session);
+        }
         self.snapshot = session.store.snapshot();
         self.session = Some(session);
         self.remote = self
@@ -921,7 +930,7 @@ impl Desktop {
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Tick => {
-                self.retry_pending_load_balanced_new_thread();
+                self.retry_pending_load_balanced_new_thread(window, cx);
                 self.apply_pending_open(window, cx);
                 self.reconnect_selected_if_due(window, cx);
                 self.start_background_connections();
@@ -1306,6 +1315,13 @@ impl Desktop {
         }
     }
 
+    fn invalidate_load_balancing_attempt(&mut self) {
+        self.load_balancing_attempt_generation =
+            self.load_balancing_attempt_generation.wrapping_add(1);
+        self.pending_load_balanced_new_thread = None;
+        self.load_balancing_refresh_requested = false;
+    }
+
     fn automatic_new_thread(
         &mut self,
         project_id: &str,
@@ -1334,6 +1350,9 @@ impl Desktop {
             draft.driver,
             (!draft.instance_id.is_empty()).then_some(draft.instance_id.as_str()),
             &draft.model,
+            &draft.options,
+            draft.runtime_mode,
+            draft.interaction_mode,
             &self.snapshot.preferences.load_balancing_weights,
             ui::now_ms(),
         );
@@ -1342,10 +1361,13 @@ impl Desktop {
         }
         if evaluation.pending_resources {
             if allow_refresh && !self.load_balancing_refresh_requested {
+                self.load_balancing_attempt_generation =
+                    self.load_balancing_attempt_generation.wrapping_add(1);
                 self.pending_load_balanced_new_thread = Some(PendingLoadBalancedNewThread {
                     project_id: project_id.to_owned(),
                     source_environment_id,
-                    started_at: Instant::now(),
+                    started_at_ms: ui::now_ms(),
+                    generation: self.load_balancing_attempt_generation,
                 });
                 self.load_balancing_refresh_requested = true;
                 self.refresh_load_balancing_resources();
@@ -1360,63 +1382,120 @@ impl Desktop {
         {
             return AutomaticNewThreadResult::Unavailable;
         }
-        self.pending_load_balanced_new_thread = None;
-        self.load_balancing_refresh_requested = false;
-        let runtime_mode = draft.runtime_mode;
-        let interaction_mode = draft.interaction_mode;
-        let options = draft.options;
-        let selection = (route.provider_instance, route.driver, route.model);
+        self.invalidate_load_balancing_attempt();
+        let selection = (
+            route.provider_instance,
+            route.driver,
+            route.model,
+            route.options,
+            route.runtime_mode,
+            route.interaction_mode,
+        );
+        let target_environment_id = route.environment_id;
         let target_project = route.project_id;
+        let source_environment_id_for_fallback = source_environment_id.clone();
         let fallback_project = project_id.to_owned();
+        let attempt_generation = self.load_balancing_attempt_generation;
         self.perform_then(
             Intent::NewThread {
                 project_id: Some(target_project),
             },
-            move |view, result, _, _| {
+            move |view, result, window, cx| {
+                if view.load_balancing_attempt_generation != attempt_generation {
+                    return;
+                }
                 if result.is_err() {
-                    view.begin_new_thread(Some(fallback_project));
+                    if view.environment_registry.selected()
+                        != Some(target_environment_id.as_str())
+                    {
+                        return;
+                    }
+                    view.begin_new_thread_on_environment(
+                        &source_environment_id_for_fallback,
+                        &fallback_project,
+                        window,
+                        cx,
+                    );
                     return;
                 }
                 view.perform(Intent::SetModel {
                     instance_id: selection.0.clone(),
                     driver: selection.1,
                     model: selection.2.clone(),
-                    options,
+                    options: selection.3.clone(),
                 });
                 view.perform(Intent::SetRuntimeMode {
-                    mode: runtime_mode,
+                    mode: selection.4,
                 });
                 view.perform(Intent::SetInteractionMode {
-                    mode: interaction_mode,
+                    mode: selection.5,
                 });
             },
         );
         AutomaticNewThreadResult::Started
     }
 
-    fn retry_pending_load_balanced_new_thread(&mut self) {
+    fn begin_new_thread_on_environment(
+        &mut self,
+        environment_id: &str,
+        project_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) -> bool {
+        if self.environment_registry.selected() != Some(environment_id)
+            && !self.promote_environment(environment_id)
+        {
+            return false;
+        }
+        self.snapshot_changed(window, cx);
+        self.begin_new_thread(Some(project_id.to_owned()));
+        true
+    }
+
+    fn retry_pending_load_balanced_new_thread(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
         let Some(pending) = self.pending_load_balanced_new_thread.clone() else {
             return;
         };
-        if pending.started_at.elapsed() > Duration::from_secs(3) {
-            self.pending_load_balanced_new_thread = None;
-            self.load_balancing_refresh_requested = false;
-            self.begin_new_thread(Some(pending.project_id));
-            return;
-        }
-        if self.environment_registry.selected() != Some(pending.source_environment_id.as_str()) {
-            self.pending_load_balanced_new_thread = None;
-            self.load_balancing_refresh_requested = false;
-            self.begin_new_thread(Some(pending.project_id));
-            return;
+        match load_balancing::pending_route_action(
+            pending.generation,
+            self.load_balancing_attempt_generation,
+            &pending.source_environment_id,
+            self.environment_registry.selected(),
+            pending.started_at_ms,
+            ui::now_ms(),
+            3_000,
+        ) {
+            PendingRouteAction::Cancel => {
+                self.invalidate_load_balancing_attempt();
+                return;
+            }
+            PendingRouteAction::Fallback => {
+                self.invalidate_load_balancing_attempt();
+                self.begin_new_thread_on_environment(
+                    &pending.source_environment_id,
+                    &pending.project_id,
+                    window,
+                    cx,
+                );
+                return;
+            }
+            PendingRouteAction::Retry => {}
         }
         match self.automatic_new_thread(&pending.project_id, false) {
             AutomaticNewThreadResult::Waiting => {}
             AutomaticNewThreadResult::Started => {}
             AutomaticNewThreadResult::Unavailable => {
-                self.pending_load_balanced_new_thread = None;
-                self.load_balancing_refresh_requested = false;
-                self.begin_new_thread(Some(pending.project_id));
+                self.invalidate_load_balancing_attempt();
+                self.begin_new_thread_on_environment(
+                    &pending.source_environment_id,
+                    &pending.project_id,
+                    window,
+                    cx,
+                );
             }
         }
     }
@@ -1424,6 +1503,7 @@ impl Desktop {
     /// Starts a new-thread draft in `project_id`, leaving settings.
     pub(crate) fn new_thread(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         self.route = Route::Chat;
+        self.invalidate_load_balancing_attempt();
         let automatic = project_id.as_deref().map_or(
             AutomaticNewThreadResult::Unavailable,
             |project_id| self.automatic_new_thread(project_id, true),
