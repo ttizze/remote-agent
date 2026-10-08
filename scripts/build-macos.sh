@@ -25,6 +25,7 @@ sign() { /usr/bin/codesign --force --sign "$identity" --timestamp=none "$@"; }
 verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 if [[ $product == host ]]; then
     cargo build --locked --package host-daemon --package codex-app-server --package bex-process --release
+    cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$target/release/Claude-Agent-SDK-LICENSE.md"
     sign --identifier app.bex.provider-supervisor "$target/release/bex-provider-supervisor"
     verify "$target/release/bex-provider-supervisor"
     sign --identifier app.bex.host "$target/release/host-daemon"
@@ -55,6 +56,7 @@ executables="$bundle/Contents/MacOS"
 resources="$bundle/Contents/Resources"
 mkdir -p "$executables" "$resources"
 cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
+cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$resources/Claude-Agent-SDK-LICENSE.md"
 cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
