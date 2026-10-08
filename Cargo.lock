@@ -4749,6 +4749,7 @@ dependencies = [
  "icu_collator",
  "icu_normalizer",
  "ignore",
+ "image",
  "libc",
  "proptest",
  "regex",
