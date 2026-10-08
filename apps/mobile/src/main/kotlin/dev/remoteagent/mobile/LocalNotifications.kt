@@ -23,7 +23,8 @@ private data class LocalNotificationRequest(
 /** Delivers local attention events; network push transport stays outside the client. */
 internal object LocalNotifications {
     private val pending = mutableListOf<LocalNotificationRequest>()
-    private val activeNotifications = mutableMapOf<Int, LocalNotificationRequest>()
+    /** Posted notices are keyed by their complete route, never a lossy hash. */
+    private val activeNotifications = mutableMapOf<String, LocalNotificationRequest>()
     /** A denied permission must not retain events for a later replay. */
     private var permissionDenied = false
 
@@ -78,7 +79,7 @@ internal object LocalNotifications {
             }
             return
         }
-        post(context, request)
+        post(context, request, alert = true)
         updateBadge(context)
     }
 
@@ -96,7 +97,7 @@ internal object LocalNotifications {
             pending.clear()
             copy
         }
-        requests.forEach { post(context, it) }
+        requests.forEach { post(context, it, alert = true) }
         updateBadge(context)
     }
 
@@ -108,28 +109,32 @@ internal object LocalNotifications {
         val requests = synchronized(activeNotifications) { activeNotifications.values.toList() }
         if (requests.isEmpty()) {
             manager.activeNotifications
-                .filter { it.tag == LOCAL_ATTENTION_TAG }
-                .forEach { manager.cancel(LOCAL_ATTENTION_TAG, it.id) }
+                .filter { isLocalAttentionTag(it.tag) }
+                .forEach { notice -> notice.tag?.let { manager.cancel(it, notice.id) } }
             return
         }
-        requests.forEach { request -> post(context, request) }
+        // Rebuild the number on each existing notice without replaying its
+        // sound/vibration. A badge refresh is an OS update, not a new event.
+        requests.forEach { request -> post(context, request, alert = false) }
     }
 
     /** Removes a notification after its content intent has been consumed. */
     fun acknowledge(context: Context, deepLink: String?) {
-        val id = deepLink?.hashCode() ?: return
-        context.getSystemService(NotificationManager::class.java).cancel(LOCAL_ATTENTION_TAG, id)
-        synchronized(activeNotifications) { activeNotifications.remove(id) }
+        val route = deepLink ?: return
+        val tag = notificationTag(route)
+        context.getSystemService(NotificationManager::class.java)
+            .cancel(tag, LOCAL_NOTIFICATION_ID)
+        synchronized(activeNotifications) { activeNotifications.remove(tag) }
         updateBadge(context)
     }
 
     fun clearDelivered(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.activeNotifications
-            .filter { it.tag == LOCAL_ATTENTION_TAG }
-            .forEach { manager.cancel(LOCAL_ATTENTION_TAG, it.id) }
+            .filter { isLocalAttentionTag(it.tag) }
+            .forEach { notice -> notice.tag?.let { manager.cancel(it, notice.id) } }
         synchronized(activeNotifications) {
-            activeNotifications.keys.forEach { id -> manager.cancel(LOCAL_ATTENTION_TAG, id) }
+            activeNotifications.keys.forEach { tag -> manager.cancel(tag, LOCAL_NOTIFICATION_ID) }
             activeNotifications.clear()
         }
         synchronized(pending) { pending.clear() }
@@ -138,29 +143,34 @@ internal object LocalNotifications {
     /** Removes only notices owned by a Host that left the profile registry. */
     fun removeEnvironment(context: Context, environmentId: String) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        val removedIds = synchronized(activeNotifications) {
+        val removedTags = synchronized(activeNotifications) {
             activeNotifications
                 .filter { (_, request) -> environmentId == request.deepLink?.let(::deepLinkEnvironmentId) }
-                .map { (id, _) -> id }
-                .also { ids -> ids.forEach { id -> activeNotifications.remove(id) } }
+                .map { (tag, _) -> tag }
+                .also { tags -> tags.forEach { tag -> activeNotifications.remove(tag) } }
         }
-        removedIds.forEach { manager.cancel(LOCAL_ATTENTION_TAG, it) }
+        removedTags.forEach { tag -> manager.cancel(tag, LOCAL_NOTIFICATION_ID) }
         synchronized(pending) {
             pending.removeAll { environmentId == it.deepLink?.let(::deepLinkEnvironmentId) }
         }
         updateBadge(context)
     }
 
-    private fun post(context: Context, request: LocalNotificationRequest) {
-        val notificationId = notificationId(request)
+    private fun post(context: Context, request: LocalNotificationRequest, alert: Boolean) {
+        val tag = notificationTag(request)
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (alert) {
+            // A replacement is a new event for the same route. Dismiss the
+            // old record first so the replacement can alert once.
+            manager.cancel(tag, LOCAL_NOTIFICATION_ID)
+        }
         val postedCount = synchronized(activeNotifications) {
-            activeNotifications[notificationId] = request
+            activeNotifications[tag] = request
             activeNotifications.size
         }
         val soundClass = request.soundKind?.substringAfterLast('.')?.lowercase() ?: "input"
         val channelId =
             "remote-agent-attention-${if (request.sound) "sound" else "silent"}-$soundClass"
-        val manager = context.getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
             channelId,
             "Remote Agent attention",
@@ -188,7 +198,9 @@ internal object LocalNotifications {
             .setContentTitle(request.title)
             .setContentText(request.body)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setNumber(postedCount)
+        if (!alert) builder.setSilent(true)
         request.deepLink?.let { deepLink ->
             val route = Intent(
                 Intent.ACTION_VIEW,
@@ -201,17 +213,24 @@ internal object LocalNotifications {
             builder.setContentIntent(
                 PendingIntent.getActivity(
                     context,
-                    deepLink.hashCode(),
+                    LOCAL_NOTIFICATION_ID,
                     route,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
             )
         }
-        manager.notify(LOCAL_ATTENTION_TAG, notificationId, builder.build())
+        manager.notify(tag, LOCAL_NOTIFICATION_ID, builder.build())
     }
 
-    private fun notificationId(request: LocalNotificationRequest): Int =
-        request.deepLink?.hashCode() ?: request.threadId?.hashCode() ?: request.body.hashCode()
+    private const val LOCAL_NOTIFICATION_ID = 1
+
+    private fun notificationTag(request: LocalNotificationRequest): String =
+        notificationTag(request.deepLink ?: request.threadId ?: "local")
+
+    private fun notificationTag(route: String): String = "$LOCAL_ATTENTION_TAG:$route"
+
+    private fun isLocalAttentionTag(tag: String?): Boolean =
+        tag?.startsWith("$LOCAL_ATTENTION_TAG:") == true
 
     private fun deepLinkEnvironmentId(deepLink: String): String? {
         val uri = runCatching { Uri.parse(deepLink) }.getOrNull() ?: return null

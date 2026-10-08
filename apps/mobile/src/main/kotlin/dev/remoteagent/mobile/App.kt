@@ -307,8 +307,23 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     failed,
                 )
             ) {
-                dev.remoteagent.core.BrowserProfileRemovalDecision.READY ->
-                    perform(Intent.RemoveBrowserProfile(plan.profileId))
+                dev.remoteagent.core.BrowserProfileRemovalDecision.READY -> {
+                    var removalFailed = false
+                    for (environmentId in plan.environmentIds) {
+                        if (generation != browserProfileRemovalGeneration) return@launch
+                        val store = stores[environmentId] ?: continue
+                        try {
+                            store.dispatch(Intent.RemoveBrowserProfile(plan.profileId)).wait()
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            removalFailed = true
+                        }
+                    }
+                    if (removalFailed) {
+                        notice = "Browser profile could not be removed from every connected Host; try again."
+                    }
+                }
                 dev.remoteagent.core.BrowserProfileRemovalDecision.FAILED ->
                     notice = "Browser profile data could not be cleared on every connected Host; the profile was kept."
                 dev.remoteagent.core.BrowserProfileRemovalDecision.PENDING,
@@ -1124,7 +1139,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun deliverAttentionEvents(previous: Snapshot, current: Snapshot) {
         val appActive = !appInBackground
-        if (appActive) LocalNotifications.clearDelivered(context)
+        val modeChanged = previous.preferences().notificationMode !=
+            current.preferences().notificationMode
+        if (appActive || modeChanged) LocalNotifications.clearDelivered(context)
         val attentionEvents = buildNotificationEvents(previous, current, appActive, appActive)
         attentionEvents.forEach { event ->
             if (event.inApp) {

@@ -205,7 +205,7 @@ async fn publish_badge(update: &LauncherBadgeUpdate) -> anyhow::Result<()> {
             UNITY_LAUNCHER_ENTRY_PATH,
             UNITY_LAUNCHER_ENTRY_INTERFACE,
             UNITY_UPDATE_SIGNAL,
-            &(update.application_uri, properties),
+            &(update.application_uri.as_str(), properties),
         ),
     )
     .await??;
@@ -224,8 +224,10 @@ mod tests {
             update.application_uri,
             "application://app.remoteagent.desktop.desktop"
         );
-        assert!(include_str!("../../linux/app.remoteagent.desktop.desktop")
-            .contains("Name=Remote Agent"));
+        assert!(
+            include_str!("../../linux/app.remoteagent.desktop.desktop")
+                .contains("Name=Remote Agent")
+        );
         assert_eq!(update.count, 3);
         assert!(update.count_visible);
     }

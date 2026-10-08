@@ -682,7 +682,24 @@ final class BexAppViewModel: ObservableObject {
                 failed: failed
             ) {
             case .ready:
-                self.perform(.removeBrowserProfile(profileId: plan.profileId))
+                var removalFailed = false
+                for environmentId in plan.environmentIds {
+                    guard self.browserProfileRemovalGeneration == generation else { return }
+                    guard let owner = stores[environmentId] else { continue }
+                    do {
+                        let receipt = try owner.dispatch(
+                            intent: .removeBrowserProfile(profileId: plan.profileId)
+                        )
+                        _ = try await receipt.wait()
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        removalFailed = true
+                    }
+                }
+                if removalFailed {
+                    self.notice = "Browser profile could not be removed from every connected Host; try again."
+                }
             case .failed:
                 self.notice = "Browser profile data could not be cleared on every connected Host; the profile was kept."
             case .pending, .stale:
@@ -1147,13 +1164,15 @@ extension BexAppViewModel {
         current: AgentCore.Snapshot
     ) {
         let appActive = UIApplication.shared.applicationState == .active
+        let modeChanged = previous.preferences().notificationMode
+            != current.preferences().notificationMode
+        if appActive || modeChanged { LocalNotifications.clearDelivered() }
         let attentionEvents = AgentCore.notificationEvents(
             previous: previous,
             current: current,
             appVisible: appActive,
             appFocused: appActive
         )
-        if appActive { LocalNotifications.clearDelivered() }
         for event in attentionEvents {
             if event.inApp {
                 notice = "\(event.kind): \(event.body)"
