@@ -129,6 +129,7 @@ struct ThreadScreen: View {
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .alignment)
+                    .defaultScrollAnchor(isFollowingLatest ? .bottom : nil, for: .sizeChanges)
                     // Tail updates preserve a detached reader; prepends retain native offset correction.
                     .transaction(value: lastRowId) { transaction in
                         if !isFollowingLatest {
@@ -157,18 +158,11 @@ struct ThreadScreen: View {
                         }
                         loadVisibleHistory()
                     }
-                    .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in
-                        ConversationScrollMetrics(
-                            content: geometry.contentSize,
-                            container: geometry.containerSize,
-                            latestVisible: geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
-                                geometry.contentSize.height - geometry.visibleRect.maxY <= 80
-                        )
-                    } action: { old, new in
-                        latestHistoryRowVisible = new.latestVisible
-                        if old.content != new.content || old.container != new.container {
-                            followLatest(to: lastRowId, using: proxy)
-                        }
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
+                            geometry.contentSize.height - geometry.visibleRect.maxY <= 80
+                    } action: { _, latestVisible in
+                        latestHistoryRowVisible = latestVisible
                         loadVisibleHistory()
                     }
                     .onChange(of: thread.id, initial: true) {
