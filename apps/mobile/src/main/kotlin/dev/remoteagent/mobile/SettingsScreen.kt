@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.RadioButton
@@ -87,6 +88,12 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                     SectionCard("Projects & threads") {
                         NavigationRow(Icons.Outlined.Archive, "Archived Threads") { model.navigate(Route.Archived) }
                         NavigationRow(Icons.Outlined.Schedule, "Scheduled tasks") { model.navigate(Route.ScheduledTasks) }
+                    }
+                }
+            if (projectId == null)
+                item {
+                    SectionCard("Server settings") {
+                        NavigationRow(Icons.Outlined.Computer, "Usage") { model.navigate(Route.Usage) }
                     }
                 }
             view.project?.let { header ->
@@ -360,6 +367,8 @@ private fun AccountsSection(model: AndroidAppModel) {
     var code by remember { mutableStateOf("") }
     SectionCard("Provider accounts") {
         model.snapshot.accounts()?.accounts.orEmpty().forEach { account ->
+            val limits = model.snapshot.usageLimits().firstOrNull { it.id == account.id }
+            var confirmingReset by remember(account.id) { mutableStateOf(false) }
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -375,7 +384,7 @@ private fun AccountsSection(model: AndroidAppModel) {
                         Text("Remove", color = colors.dangerForeground)
                     }
                 }
-                account.usage?.windows?.forEach { window ->
+                limits?.windows?.forEach { window ->
                     Text(
                         "${window.label}: ${window.remainingPercent}% remaining",
                         style = AppTheme.caption,
@@ -388,9 +397,44 @@ private fun AccountsSection(model: AndroidAppModel) {
                         trackColor = colors.secondary,
                     )
                 }
-                account.usage?.error?.let {
+                if ((limits?.resetCreditCount ?: 0) > 0) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Reset credits: ${limits?.resetCreditCount}", style = AppTheme.caption, color = colors.foregroundMuted, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { confirmingReset = true }) {
+                            Text("Use reset", color = colors.primaryText)
+                        }
+                    }
+                }
+                limits?.externalLabel?.let {
+                    TextButton(onClick = {
+                        limits.externalUrl?.let { url ->
+                            val uri = Uri.parse(url)
+                            if (uri.scheme == "https") {
+                                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                            }
+                        }
+                    }) {
+                        Text(it, style = AppTheme.caption, color = colors.primaryText)
+                    }
+                }
+                limits?.error?.let {
                     Text(accountErrorMessage(it), style = AppTheme.caption, color = colors.warningForeground)
                 }
+            }
+            if (confirmingReset) {
+                AlertDialog(
+                    onDismissRequest = { confirmingReset = false },
+                    title = { Text("Use a reset credit?") },
+                    text = { Text("This redeems one credit and clears the current rate-limit windows.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmingReset = false
+                            model.perform(Intent.ConsumeResetCredit(account.provider, account.id, limits?.nextCreditId))
+                            model.perform(Intent.LoadAccounts)
+                        }) { Text("Use credit") }
+                    },
+                    dismissButton = { TextButton(onClick = { confirmingReset = false }) { Text("Cancel") } },
+                )
             }
             HorizontalDivider(color = colors.border)
         }

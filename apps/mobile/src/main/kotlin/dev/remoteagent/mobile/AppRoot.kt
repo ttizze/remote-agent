@@ -112,6 +112,8 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     Route.Appearance -> AppearanceScreen(model)
 
                     Route.ScheduledTasks -> ScheduledTasksScreen(model)
+
+                    Route.Usage -> UsageScreen(model)
                     Route.Archived -> ArchivedScreen(model)
                 }
             }

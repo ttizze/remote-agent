@@ -18,6 +18,7 @@ mod projects;
 mod repository;
 mod terminals;
 mod text_generation;
+mod usage;
 mod vcs;
 mod workspace_files;
 mod workspace_review;

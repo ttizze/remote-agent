@@ -474,6 +474,11 @@ pub struct Snapshot {
         BTreeMap<(ThreadId, String), agent_protocol::operations::TerminalSummary>,
     pub accounts: Option<agent_protocol::operations::Accounts>,
     pub account_login: Option<agent_protocol::operations::AccountLogin>,
+    /// The last Host usage report and its loading error, if any.
+    pub usage_summary: Option<agent_protocol::usage::Summary>,
+    pub usage_pricing: Option<agent_protocol::usage::Pricing>,
+    pub usage_loading: bool,
+    pub usage_error: Option<String>,
     pub host_status: Option<crate::models::HostStatus>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
@@ -1599,6 +1604,18 @@ pub enum Intent {
 
     // Accounts and Hosts.
     LoadAccounts,
+    LoadUsageSummary {
+        input: crate::view::usage::UsageSummaryInput,
+    },
+    SetUsagePreferences {
+        preferences: crate::view::usage::UsagePreferences,
+    },
+    RefreshUsageRates,
+    ConsumeResetCredit {
+        provider: crate::provider::ProviderKind,
+        account_id: String,
+        credit_id: Option<String>,
+    },
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,

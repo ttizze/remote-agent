@@ -41,6 +41,7 @@
 		5A6B00000000000000000001 /* GitControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6B00000000000000000002 /* GitControls.swift */; };
 		5A6B00000000000000000003 /* GitSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6B00000000000000000004 /* GitSheets.swift */; };
 		5AC745F7F218DE3C213121D1 /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */; };
+		5AC745F7F218DE3C213121D2 /* UsageScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7F9C1E57CCEFA4413DFD7D /* UsageScreen.swift */; };
 		5A93A711C7F8F640D6399526 /* SetupCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A84E28D9598398CE73A1B57 /* SetupCard.swift */; };
 		5A8D5783B4484B7A52BBFE4C /* SnoozeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A70A17BFA716640470D90FE /* SnoozeSheet.swift */; };
 		5A1A2B3C4D5E6F7081920A01 /* ThreadSwipeActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1A2B3C4D5E6F7081920B01 /* ThreadSwipeActions.swift */; };
@@ -98,6 +99,7 @@
 		5A6B00000000000000000002 /* GitControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitControls.swift; sourceTree = "<group>"; };
 		5A6B00000000000000000004 /* GitSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSheets.swift; sourceTree = "<group>"; };
 		5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
+		5A7F9C1E57CCEFA4413DFD7D /* UsageScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageScreen.swift; sourceTree = "<group>"; };
 		5A84E28D9598398CE73A1B57 /* SetupCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupCard.swift; sourceTree = "<group>"; };
 		5A70A17BFA716640470D90FE /* SnoozeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnoozeSheet.swift; sourceTree = "<group>"; };
 		5A1A2B3C4D5E6F7081920B01 /* ThreadSwipeActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadSwipeActions.swift; sourceTree = "<group>"; };
@@ -169,6 +171,7 @@
 				5A6B00000000000000000002 /* GitControls.swift */,
 				5A6B00000000000000000004 /* GitSheets.swift */,
 				5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */,
+				5A7F9C1E57CCEFA4413DFD7D /* UsageScreen.swift */,
 				5A84E28D9598398CE73A1B57 /* SetupCard.swift */,
 				5A70A17BFA716640470D90FE /* SnoozeSheet.swift */,
 				5A1A2B3C4D5E6F7081920B01 /* ThreadSwipeActions.swift */,
@@ -301,6 +304,7 @@
 				5A6B00000000000000000001 /* GitControls.swift in Sources */,
 				5A6B00000000000000000003 /* GitSheets.swift in Sources */,
 				5AC745F7F218DE3C213121D1 /* SettingsScreen.swift in Sources */,
+				5AC745F7F218DE3C213121D2 /* UsageScreen.swift in Sources */,
 				5A93A711C7F8F640D6399526 /* SetupCard.swift in Sources */,
 				5A8D5783B4484B7A52BBFE4C /* SnoozeSheet.swift in Sources */,
 				5A1A2B3C4D5E6F7081920A01 /* ThreadSwipeActions.swift in Sources */,

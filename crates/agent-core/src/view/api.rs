@@ -131,6 +131,26 @@ impl Snapshot {
     ) -> ScheduledTaskBranchView {
         scheduled_task_branch_view(self, &project_id, &selected_branch)
     }
+
+    pub fn usage_preferences(&self) -> crate::view::usage::UsagePreferences {
+        self.preferences.usage.clone()
+    }
+
+    pub fn usage_page(&self) -> crate::view::usage::UsagePageView {
+        crate::view::usage::usage_page(self)
+    }
+
+    pub fn usage_limits(&self) -> Vec<crate::view::usage::UsageLimitAccount> {
+        crate::view::usage::usage_limits(self.accounts.as_ref())
+    }
+
+    pub fn composer_usage_limits(
+        &self,
+        provider: crate::provider::ProviderKind,
+    ) -> Option<crate::view::usage::ComposerUsageLimits> {
+        crate::view::usage::composer_usage_limits(self.accounts.as_ref(), provider)
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,

@@ -31,6 +31,8 @@ pub(super) enum Reply {
     WorktreeSettings(m::WorktreeSettings),
     Worktrees(Vec<m::Worktree>),
     Accounts(op::Accounts),
+    UsageSummary(agent_protocol::usage::Summary),
+    UsagePricing(agent_protocol::usage::Pricing),
     Login(op::AccountLogin),
     HostStatus(m::HostStatus),
     Remotes(Vec<m::RemoteHost>),
@@ -100,6 +102,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::Keybindings(peer.request(call).await?)
         }
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
+        Call::ReadUsageSummary(_) => Reply::UsageSummary(peer.request(call).await?),
+        Call::RefreshUsageRates(_) => Reply::UsagePricing(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
         Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
@@ -438,6 +442,10 @@ impl Owner {
                         &error.to_string(),
                     ));
                 }
+                if matches!(call, Call::ReadUsageSummary(_) | Call::RefreshUsageRates(_)) {
+                    self.state.usage_loading = false;
+                    self.state.usage_error = Some(error.to_string());
+                }
                 match &call {
                     Call::ProviderCommands(request) => {
                         self.provider_commands_finished(request, Err(&error))
@@ -599,6 +607,16 @@ impl Owner {
             Reply::WorktreeSettings(settings) => workspace.worktree_settings = Some(settings),
             Reply::Worktrees(worktrees) => workspace.worktrees = worktrees,
             Reply::Accounts(accounts) => self.state.accounts = Some(accounts),
+            Reply::UsageSummary(summary) => {
+                self.state.usage_loading = false;
+                self.state.usage_error = None;
+                self.state.usage_pricing = Some(summary.pricing.clone());
+                self.state.usage_summary = Some(summary);
+            }
+            Reply::UsagePricing(pricing) => {
+                self.state.usage_loading = false;
+                self.state.usage_pricing = Some(pricing);
+            }
             Reply::Login(login) => self.state.account_login = Some(login),
             Reply::HostStatus(status) => self.state.host_status = Some(status),
             Reply::Remotes(remotes) => self.state.remote_hosts = remotes,

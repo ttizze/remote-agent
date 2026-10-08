@@ -4,6 +4,13 @@ import UIKit
 
 struct AccountUsageView: View {
     let usage: AccountUsage?
+    let useReset: () -> Void
+    @State private var confirmingReset = false
+
+    init(usage: AccountUsage?, useReset: @escaping () -> Void = {}) {
+        self.usage = usage
+        self.useReset = useReset
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -15,6 +22,18 @@ struct AccountUsageView: View {
                 ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
                 }
+                if let credits = usage.resetCredits, credits.availableCount > 0 {
+                    HStack {
+                        Text("Reset credits: \(credits.availableCount)")
+                            .font(.caption).foregroundStyle(AppTheme.muted)
+                        Spacer()
+                        Button("Use reset") { confirmingReset = true }
+                            .font(.caption)
+                    }
+                }
+                if let external = usage.externalUsage, let url = URL(string: external.url) {
+                    Link(external.label, destination: url).font(.caption)
+                }
                 if usage.error == nil {
                     let date = Date(timeIntervalSince1970: Double(usage.fetchedAt))
                     Text("\(date.formatted(date: .omitted, time: .shortened)) 更新")
@@ -23,6 +42,12 @@ struct AccountUsageView: View {
             } else {
                 Text("使用量を取得中…").font(.caption).foregroundStyle(.secondary)
             }
+        }
+        .alert("Use a reset credit?", isPresented: $confirmingReset) {
+            Button("Cancel", role: .cancel) {}
+            Button("Use credit") { useReset() }
+        } message: {
+            Text("This redeems one credit and clears the current rate-limit windows.")
         }
     }
 }

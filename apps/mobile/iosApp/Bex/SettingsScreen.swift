@@ -38,6 +38,9 @@ struct SettingsScreen: View {
                         SettingsLink(symbol: "calendar.badge.clock", label: "Scheduled tasks") {
                             ScheduledTasksScreen(model: model)
                         }
+                        SettingsLink(symbol: "chart.bar.xaxis", label: "Usage") {
+                            UsageScreen(model: model)
+                        }
                         SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
                             ProviderAccountsPage(model: model)
                         }
@@ -436,7 +439,14 @@ private struct ProviderAccountsPage: View {
                 ForEach(model.snapshot.accounts()?.accounts ?? [], id: \.id) { account in
                     VStack(alignment: .leading, spacing: 8) {
                         AccountIdentityView(account: account)
-                        AccountUsageView(usage: account.usage)
+                        AccountUsageView(usage: account.usage) {
+                            model.perform(.consumeResetCredit(
+                                provider: account.provider,
+                                accountId: account.id,
+                                creditId: account.usage?.resetCredits?.nextCreditId
+                            ))
+                            model.perform(.loadAccounts)
+                        }
                         HStack {
                             Button("Select") {
                                 model.perform(.selectAccount(provider: account.provider, id: account.id))

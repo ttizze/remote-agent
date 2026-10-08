@@ -172,16 +172,55 @@ impl Accounts {
                         .unwrap_or_default()
                         .as_secs() as i64,
                     error: None,
+                    reset_credits: None,
+                    external_usage: None,
                 };
             }
             cache
                 .read(async {
                     let value =
                         rpc(helper.server().await?, "account/rateLimits/read", json!({})).await?;
-                    Ok(crate::account_usage::codex(&value))
+                    Ok(crate::account_usage::UsageSnapshot {
+                        windows: crate::account_usage::codex(&value),
+                        reset_credits: crate::account_usage::codex_reset_credits(&value),
+                        external_usage: Some(agent_protocol::usage::ExternalUsage {
+                            label: "ChatGPT usage".into(),
+                            url: "https://chatgpt.com/#settings/Usage".into(),
+                        }),
+                    })
                 })
                 .await
         })
+    }
+
+    pub(crate) async fn consume_reset_credit(
+        &mut self,
+        account_id: &str,
+        credit_id: Option<&str>,
+    ) -> Result<Empty, String> {
+        let helper = self.helper(account_id)?;
+        // The app-server pins the redemption to its own next available credit;
+        // unlike the Claude endpoint it does not accept a grant id.
+        let _ = credit_id;
+        let idempotency_key = uuid::Uuid::new_v4().to_string();
+        let mut params = serde_json::Map::new();
+        params.insert("idempotencyKey".into(), Value::String(idempotency_key));
+        let result = rpc(
+            helper.server().await?,
+            "account/rateLimitResetCredit/consume",
+            Value::Object(params),
+        )
+        .await?;
+        match result.get("outcome").and_then(Value::as_str) {
+            Some("reset" | "alreadyRedeemed" | "already_redeemed") => {
+                self.usage.remove(account_id);
+                Ok(Empty {})
+            }
+            Some("noCredit" | "no_credit" | "nothingToReset" | "nothing_to_reset") => {
+                Err("No reset credit is available.".into())
+            }
+            Some(_) | None => Err("The reset credit response was invalid.".into()),
+        }
     }
 
     async fn discover_desktop(&mut self) -> Result<(), String> {

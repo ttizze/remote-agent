@@ -28,6 +28,7 @@ pub struct Preferences {
     pub terminal_font_size: Option<f64>,
     /// Each model's last chosen options, which a newly picked model takes.
     pub model_options: crate::view::models::staging::ModelOptionMemory,
+    pub usage: crate::view::usage::UsagePreferences,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -41,6 +42,7 @@ impl Default for Preferences {
             resume_compaction_dismissed: BTreeSet::new(),
             terminal_font_size: None,
             model_options: BTreeMap::new(),
+            usage: Default::default(),
         }
     }
 }
