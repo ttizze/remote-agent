@@ -197,6 +197,15 @@ pub struct ThreadList {
     #[serde(with = "crate::protocol::json")]
     pub provider_errors: Option<Map<String, Value>>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentObservation {
+    pub id: crate::session::SessionRef,
+    pub parent_id: crate::session::SessionRef,
+    pub name: Option<String>,
+    pub status: crate::execution::SessionStatus,
+}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {

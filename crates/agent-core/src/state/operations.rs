@@ -68,6 +68,9 @@ pub enum Intent {
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
     ListSessions(ListSessions),
+    WatchAgents {
+        thread_id: Option<crate::session::SessionRef>,
+    },
     AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,
@@ -195,6 +198,9 @@ pub enum OperationKey {
         turn: agent_protocol::ids::TurnId,
     },
     SessionList,
+    Agents {
+        session: crate::session::SessionRef,
+    },
     History {
         session: crate::session::SessionRef,
     },
@@ -252,6 +258,7 @@ pub enum Scheduling {
     Concurrent,
     Control,
     LatestList(crate::models::ListQuery),
+    LatestAgents(crate::session::SessionRef),
     LatestReview,
     Item(ReadItem),
     Terminal { handle: String, starts: bool },
@@ -260,6 +267,9 @@ impl Scheduling {
     pub(crate) fn latest_key(&self) -> Option<OperationKey> {
         match self {
             Self::LatestList(_) => Some(OperationKey::SessionList),
+            Self::LatestAgents(session) => Some(OperationKey::Agents {
+                session: session.clone(),
+            }),
             Self::LatestReview => Some(OperationKey::WorkspaceReview),
             _ => None,
         }

@@ -233,6 +233,8 @@ pub struct Snapshot {
     pub conversations: Arc<BTreeMap<crate::session::SessionRef, Arc<Thread>>>,
     #[serde(default)]
     pub threads: Option<Arc<ThreadList>>,
+    #[serde(skip)]
+    pub observed_agents: Option<crate::session::SessionRef>,
     #[serde(default)]
     pub models: Arc<Vec<Model>>,
     #[serde(default)]
@@ -408,6 +410,17 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         LoadHostName, LoadHostManagement, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
+        Intent::WatchAgents { thread_id } => {
+            let thread_id = thread_id.filter(|id| next.navigation.thread_id.as_ref() == Some(id));
+            if next.observed_agents != thread_id {
+                if let Some(session) = next.observed_agents.take() {
+                    Arc::make_mut(&mut next.operations).remove(&op::OperationKey::Agents { session });
+                }
+                next.observed_agents = thread_id;
+                let effects = op::refresh_agents(next.connected, next.observed_agents.as_ref());
+                return (next, effects);
+            }
+        }
         Intent::ReadOlder { thread_id } => {
             if let Some(cursor) = previous.conversations.get(&thread_id).and_then(|thread| thread.history_cursor.clone()) {
                 return prepare(previous, next, op::ReadHistory { session: thread_id, cursor, include_activity: false });
@@ -707,6 +720,9 @@ fn set_draft_text(snapshot: &mut Snapshot, thread_id: DraftKey, text: String) {
 
 fn navigate(snapshot: &mut Snapshot, navigation: Navigation) {
     let previous_id = snapshot.navigation.thread_id.clone();
+    if previous_id != navigation.thread_id {
+        snapshot.observed_agents = None;
+    }
     let _ = previous_id
         .filter(|id| navigation.thread_id.as_ref() != Some(id))
         .filter(|id| {
@@ -761,6 +777,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 return (next, Vec::new());
             }
             next.terminals = Arc::default();
+            next.observed_agents = None;
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
                     drafts: std::mem::take(&mut next.drafts),
@@ -832,6 +849,10 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 Effect::execute(op::LoadModels {}),
                 Effect::execute(op::ListAccounts {}),
             ];
+            effects.extend(op::refresh_agents(
+                next.connected,
+                next.observed_agents.as_ref(),
+            ));
             if let Some(thread_id) = &next.navigation.thread_id {
                 effects.push(Effect::execute(op::ReadThread::open(thread_id.clone())));
             } else {

@@ -638,6 +638,8 @@ impl Agent for Codex {
                     use_state_db_only: true,
                     source_kinds: if ancestor.is_some() {
                         &["subAgentThreadSpawn"]
+                    } else if search.trim().is_empty() {
+                        &["cli", "vscode", "exec", "appServer", "unknown"]
                     } else {
                         &[
                             "cli",

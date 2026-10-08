@@ -20,20 +20,28 @@ pub(super) fn notification(
         } else if finished && previous.navigation.thread_id.as_ref() != Some(&id) {
             activity.unread.insert(id);
         }
-        return (
-            next,
-            if active
-                && previous.threads.as_ref().is_some_and(|list| {
-                    list.data
-                        .iter()
-                        .any(|thread| thread.id.as_ref() == Some(&session))
-                })
-            {
+        let child = previous
+            .conversations
+            .get(&session)
+            .is_some_and(|thread| thread.parent_id.is_some());
+        let listed = previous.threads.as_ref().is_some_and(|list| {
+            list.data
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(&session))
+        });
+        let mut effects =
+            if (child && previous.list_query.search_term.trim().is_empty()) || (active && listed) {
                 Vec::new()
             } else {
                 refresh_list(previous)
-            },
-        );
+            };
+        if !listed && !previous.conversations.contains_key(&session) {
+            effects.extend(op::refresh_agents(
+                previous.connected,
+                previous.observed_agents.as_ref(),
+            ));
+        }
+        return (next, effects);
     }
 
     match message {
@@ -44,7 +52,23 @@ pub(super) fn notification(
         | Notification::Exited { .. }
         | Notification::TerminalRestored { .. }
         | Notification::TerminalDetached { .. }) => process(previous, event),
-        Notification::SessionRenamed { .. } => (previous.clone(), refresh_list(previous)),
+        Notification::SessionRenamed { session } => {
+            let effects = if previous
+                .conversations
+                .get(&session)
+                .is_some_and(|thread| thread.parent_id.is_some())
+            {
+                let mut effects =
+                    op::refresh_agents(previous.connected, previous.observed_agents.as_ref());
+                if !previous.list_query.search_term.trim().is_empty() {
+                    effects.extend(refresh_list(previous));
+                }
+                effects
+            } else {
+                refresh_list(previous)
+            };
+            (previous.clone(), effects)
+        }
         _ => (previous.clone(), Vec::new()),
     }
 }
@@ -154,10 +178,20 @@ pub(super) fn session_update(
         && current.cwd.as_deref() == Some(&next.navigation.cwd);
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(&mut next, id);
-    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. } | crate::models::ItemBody::Subagent { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
+    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
     let mut effects = details;
-    if completed || changed_metadata {
+    if (completed || changed_metadata)
+        && (current.parent_id.is_none() || !previous.list_query.search_term.trim().is_empty())
+    {
         effects.extend(refresh_list(previous));
+    }
+    if (previous.observed_agents.as_ref() == Some(id) || current.parent_id.is_some())
+        && matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::Subagent { .. }))
+    {
+        effects.extend(op::refresh_agents(
+            previous.connected,
+            previous.observed_agents.as_ref(),
+        ));
     }
     if next.connected
         && completed
@@ -181,12 +215,54 @@ mod tests {
     use super::*;
     use crate::session::{ProviderKind, SessionRef};
 
+    #[rstest::rstest]
+    fn known_child_activity_updates_rows_without_refetching(
+        #[values(true, false)] active: bool,
+        #[values(true, false)] observing: bool,
+    ) {
+        let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let snapshot = Snapshot {
+            connected: true,
+            observed_agents: observing.then_some(parent.clone()),
+            navigation: Arc::new(Navigation {
+                thread_id: Some(parent.clone()),
+                ..Default::default()
+            }),
+            conversations: Arc::new(
+                [(
+                    child.clone(),
+                    Arc::new(crate::models::Thread {
+                        id: Some(child.clone()),
+                        parent_id: Some(parent),
+                        name: Some("Review".into()),
+                        ..Default::default()
+                    }),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let (next, effects) = notification(
+            &snapshot,
+            crate::protocol::Notification::Activity {
+                session: child.clone(),
+                active,
+                finished: !active,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(next.activity.active[&child], active);
+        assert_eq!(next.agent_panel()[0].active, active);
+        assert_eq!(next.navigation, snapshot.navigation);
+    }
+
     #[test]
-    fn running_subagents_refresh_the_list_without_waiting_for_completion() {
+    fn running_subagents_refresh_only_the_observed_fleet_without_waiting_for_completion() {
         let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
         let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
         let subscription = uuid::Uuid::new_v4();
-        let snapshot = Snapshot {
+        let mut snapshot = Snapshot {
             connected: true,
             threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
                 "data":[{"id":parent}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
@@ -216,6 +292,7 @@ mod tests {
             "id":"spawn","status":"running","clientInputId":null,
             "body":{"inline":{"body":{"subagent":{"tool":"spawnAgent","prompt":null,"model":null,"effort":null,"sender":parent,"receivers":[child],"states":[],"agentId":null,"result":null}}}}
         })).unwrap();
+        snapshot.observed_agents = Some(parent);
         let (next, effects) = session_update(
             &snapshot,
             crate::session::SessionUpdate {

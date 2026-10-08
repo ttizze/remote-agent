@@ -130,10 +130,13 @@ mod tests {
             let parent = agent_protocol::session::SessionRef { provider:agent_protocol::session::ProviderKind::Codex, id:"parent".into() };
             let snapshot = Arc::make_mut(&mut desktop.snapshot);
             snapshot.threads = Some(Arc::new(serde_json::from_value(serde_json::json!({
-                "data":[{"id":{"provider":"codex","id":"parent"},"name":"Parent"},
-                {"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"parent"},"name":"Review","status":"running"}],
+                "data":[{"id":{"provider":"codex","id":"parent"},"name":"Parent"}],
                 "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
             })).unwrap()));
+            Arc::make_mut(&mut snapshot.conversations).insert(
+                agent_protocol::session::SessionRef { provider: parent.provider, id:"child".into() },
+                Arc::new(serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"parent"},"name":"Review","status":"running"})).unwrap())
+            );
             Arc::make_mut(&mut snapshot.navigation).thread_id = Some(parent.clone());
             Arc::make_mut(&mut snapshot.navigation).draft_key = parent.clone().into();
             Arc::make_mut(&mut snapshot.drafts).insert(parent.into(),Arc::new(Draft { text:"Keep my draft".into(),..Default::default() }));

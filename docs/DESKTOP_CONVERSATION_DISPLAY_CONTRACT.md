@@ -130,7 +130,7 @@ complete retrieval and reopening.
   descendants, using provider-scoped parent IDs. Rows keep stable identity and
   order during activity updates and show available names, running/unread state,
   model and activity detail. Cached observations remain visible offline. Live
-  observations take precedence over stale activity events. List refreshes discover
+  observations take precedence over stale activity events. Opening the panel and activity updates discover
   children without waiting for the parent turn to finish; children do not consume
   root conversation display limits. Claude tasks use their originating activity's
   identity and status without inventing independent native sessions. Rows monitor
@@ -140,7 +140,7 @@ complete retrieval and reopening.
   `agents_are_scoped_to_the_selected_parent_and_keep_stable_identity`,
   `native_events_enrich_one_agent_without_reparenting_it`,
   `claude_activity_updates_the_same_row_without_a_native_child_session`,
-  `children_follow_visible_roots_without_consuming_title_limits`, and desktop
+  `root_titles_exclude_children_but_search_preserves_child_matches`, and desktop
   `agents_open_to_the_right_without_changing_parent_or_draft` and
   `pending_operations_do_not_block_task_navigation`.
 
