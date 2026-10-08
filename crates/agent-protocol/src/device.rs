@@ -281,6 +281,49 @@ pub enum DeviceOrientation {
     LandscapeRight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceFoldPosture {
+    Closed,
+    Opened,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceDuoPose {
+    Closed,
+    Book,
+    Open,
+    Laptop,
+    Tent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceDuoPhysical {
+    Faceup,
+    Facedown,
+}
+
+/// The explicit controls accepted by the reference Duo stream.  Keeping the
+/// value typed here prevents the Host from becoming a string command tunnel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DeviceDuoCommand {
+    Angle { value: f32 },
+    Pose { value: DeviceDuoPose },
+    Table { value: bool },
+    Physical { value: DeviceDuoPhysical },
+    Orientation { value: DeviceOrientation },
+}
+
+impl DeviceDuoCommand {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::Angle { value } = self
+            && (!value.is_finite() || !(0.0..=180.0).contains(value))
+        {
+            return Err("device Duo angle must be finite and between 0 and 180".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceSettings {
     pub appearance: Option<DeviceAppearance>,
@@ -576,12 +619,21 @@ pub struct DeviceEventLogEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceInputKind {
     Touch { phase: DeviceTouchPhase, x: f32, y: f32 },
-    Key { code: String, down: bool },
+    /// A keyboard event carries both its physical code and the browser-style
+    /// key value. The code is used for iOS HID; Android uses the key value so
+    /// shifted and non-ASCII input is preserved without guessing from a code.
+    Key {
+        code: String,
+        key: String,
+        down: bool,
+        meta: bool,
+        ctrl: bool,
+    },
     HardwareButton(DeviceHardwareButton),
     Rotate,
     SetOrientation(DeviceOrientation),
-    Fold { command: String },
-    Duo { command: String },
+    Fold { command: DeviceFoldPosture },
+    Duo { command: DeviceDuoCommand },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,11 +668,12 @@ impl DeviceInput {
             DeviceInputKind::Touch { x, y, .. } if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) => {
                 Err("device touch coordinates must be finite and normalized".into())
             }
-            DeviceInputKind::Key { code, .. } if code.trim().is_empty() || code.len() > 64 => {
-                Err("device key code is invalid".into())
+            DeviceInputKind::Key { code, key, .. }
+                if code.trim().is_empty() || code.len() > 64 || key.is_empty() || key.len() > 128 =>
+            {
+                Err("device key code or key value is invalid".into())
             }
-            DeviceInputKind::Fold { command } | DeviceInputKind::Duo { command }
-                if command.trim().is_empty() || command.len() > 64 => Err("device fold command is invalid".into()),
+            DeviceInputKind::Duo { command } => command.validate(),
             _ => Ok(()),
         }
     }
@@ -643,6 +696,7 @@ pub struct DeviceEventLogInput {
 pub enum DeviceRecordingFormat {
     RawFrames,
     Mjpeg,
+    /// H.264 frames finalized as a playable fragmented MP4 attachment.
     Avcc,
 }
 
@@ -840,5 +894,48 @@ mod tests {
         png.extend_from_slice(&640u32.to_be_bytes());
         assert_eq!(png_dimensions(&png), (320, 640));
         assert_eq!(png_dimensions(&[0, 1, 2]), (0, 0));
+    }
+
+    #[test]
+    fn keyboard_input_validates_both_physical_code_and_actual_key_value() {
+        let valid = DeviceInput {
+            host_id: None,
+            device_id: "emulator-1".into(),
+            input: DeviceInputKind::Key {
+                code: "KeyA".into(),
+                key: "A".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            },
+        };
+        assert!(valid.validate().is_ok());
+        let mut empty_key = valid.clone();
+        if let DeviceInputKind::Key { key, .. } = &mut empty_key.input {
+            key.clear();
+        }
+        assert!(empty_key.validate().is_err());
+        let mut oversized_key = valid;
+        if let DeviceInputKind::Key { key, .. } = &mut oversized_key.input {
+            *key = "x".repeat(129);
+        }
+        assert!(oversized_key.validate().is_err());
+    }
+
+    #[test]
+    fn duo_input_validates_a_bounded_angle_without_string_commands() {
+        let input = DeviceInput {
+            host_id: None,
+            device_id: "simulator".into(),
+            input: DeviceInputKind::Duo {
+                command: DeviceDuoCommand::Angle { value: 90.0 },
+            },
+        };
+        assert!(input.validate().is_ok());
+        let mut invalid = input.clone();
+        if let DeviceInputKind::Duo { command } = &mut invalid.input {
+            *command = DeviceDuoCommand::Angle { value: 180.1 };
+        }
+        assert!(invalid.validate().is_err());
     }
 }
