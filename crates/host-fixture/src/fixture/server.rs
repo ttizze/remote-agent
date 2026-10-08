@@ -221,18 +221,18 @@ impl Context {
         )
     }
 
-    pub(super) fn trace(&self, method: &str, facts: Value) -> Result<()> {
+    pub(super) fn trace(&self, method: &str, mut facts: Value) -> Result<()> {
         if !self.config.trace {
             return Ok(());
         }
-        let mut facts = facts;
         facts["method"] = method.into();
+        let mut line = serde_json::to_vec(&facts)?;
+        line.push(b'\n');
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.home.join("rpc-trace.jsonl"))?;
-        serde_json::to_writer(&mut file, &facts)?;
-        file.write_all(b"\n")?;
+        file.write_all(&line)?;
         Ok(())
     }
 }
