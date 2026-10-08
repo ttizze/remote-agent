@@ -6,7 +6,12 @@ import SwiftUI
 /// to desktop and mobile so clients do not interpret transcript data locally.
 struct UsageScreen: View {
     @ObservedObject var model: BexAppViewModel
-    @State private var tab = UsageTab.usage
+    @State private var tab: UsageTab
+
+    init(model: BexAppViewModel, initialTab: UsageTab = .usage) {
+        self.model = model
+        _tab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         let view = model.snapshot.usagePage()
@@ -257,7 +262,7 @@ private struct UsagePreferencesEditor: View {
     }
 }
 
-private enum UsageTab: Hashable {
+enum UsageTab: Hashable {
     case usage
     case limits
 }

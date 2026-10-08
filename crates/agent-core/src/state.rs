@@ -1510,6 +1510,27 @@ pub enum AnswerEdit {
     Custom { text: String },
 }
 
+/// Device push registration data supplied by a native client. Provider
+/// credentials stay on the Host; this record contains only device tokens and
+/// presentation choices needed by the Host's direct delivery resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PushDeviceRegistration {
+    pub device_id: String,
+    pub platform: String,
+    pub token: String,
+    pub live_activity_token: Option<String>,
+    pub push_to_start_token: Option<String>,
+    pub bundle_id: Option<String>,
+    pub apns_environment: Option<String>,
+    pub notifications_enabled: bool,
+    pub notify_on_approval: bool,
+    pub notify_on_input: bool,
+    pub notify_on_completion: bool,
+    pub notify_on_failure: bool,
+    pub live_activities_enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceHostInput {
@@ -1826,6 +1847,16 @@ pub enum Intent {
     },
 
     // Queue, requests and plans.
+    RegisterPushDevice {
+        registration: PushDeviceRegistration,
+    },
+    UnregisterPushDevice {
+        device_id: String,
+    },
+    SetPushDeviceActive {
+        device_id: String,
+        active: bool,
+    },
     Queue {
         action: QueueAction,
     },

@@ -10,6 +10,23 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+fun publicFirebaseOption(property: String, environment: String): String =
+    providers.gradleProperty(property)
+        .orElse(providers.environmentVariable(environment))
+        .orElse("")
+        .get()
+
+fun buildConfigString(value: String): String {
+    require(value.none { Character.isISOControl(it.code) }) { "Firebase public options cannot contain control characters" }
+    return "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+}
+
+val firebaseApiKey = publicFirebaseOption("firebaseApiKey", "REMOTE_AGENT_FIREBASE_API_KEY")
+val firebaseApplicationId = publicFirebaseOption("firebaseApplicationId", "REMOTE_AGENT_FIREBASE_APPLICATION_ID")
+val firebaseProjectId = publicFirebaseOption("firebaseProjectId", "REMOTE_AGENT_FIREBASE_PROJECT_ID")
+val firebaseSenderId = publicFirebaseOption("firebaseSenderId", "REMOTE_AGENT_FIREBASE_SENDER_ID")
+val firebaseStorageBucket = publicFirebaseOption("firebaseStorageBucket", "REMOTE_AGENT_FIREBASE_STORAGE_BUCKET")
+
 ktfmt {
     kotlinLangStyle()
     maxWidth.set(120)
@@ -110,6 +127,11 @@ android {
         versionCode = releaseCode ?: 1
         versionName = releaseVersion ?: "0.1.0"
         buildConfigField("String", "RELEASE_CHANNEL", "\"$releaseChannel\"")
+        buildConfigField("String", "FIREBASE_API_KEY", buildConfigString(firebaseApiKey))
+        buildConfigField("String", "FIREBASE_APPLICATION_ID", buildConfigString(firebaseApplicationId))
+        buildConfigField("String", "FIREBASE_PROJECT_ID", buildConfigString(firebaseProjectId))
+        buildConfigField("String", "FIREBASE_SENDER_ID", buildConfigString(firebaseSenderId))
+        buildConfigField("String", "FIREBASE_STORAGE_BUCKET", buildConfigString(firebaseStorageBucket))
     }
     if (releaseSigningConfigured) {
         signingConfigs {
@@ -179,6 +201,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.6.1")
     implementation("androidx.camera:camera-view:1.6.1")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("com.google.firebase:firebase-messaging:24.1.2")
     // Project icons may be SVG, which the platform image decoders do not read.
     implementation("com.caverock:androidsvg-aar:1.4")
 }

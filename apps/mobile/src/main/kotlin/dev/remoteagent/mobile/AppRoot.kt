@@ -45,6 +45,7 @@ internal fun RemoteAgentApp(
     activity: ComponentActivity,
     model: AndroidAppModel,
     requestQrScan: (onContents: (String) -> Unit) -> Unit,
+    requestNotifications: () -> Unit,
 ) {
     DisposableEffect(model, activity) {
         val observer = AndroidConnectionLifecycle(model::foreground, model::background)
@@ -52,10 +53,16 @@ internal fun RemoteAgentApp(
         onDispose { activity.lifecycle.removeObserver(observer) }
     }
     BackHandler(model.stack.size > 1) { model.back() }
+    LaunchedEffect(model.route, model.profileId) {
+        PushNotificationCenter.setVisibleThread(model.visibleThreadDeepLink())
+    }
+    LaunchedEffect(model.usageDeepLinkRequests) {
+        if (model.usageDeepLinkRequests > 0) model.openUsageRouteFromDeepLink()
+    }
+    LaunchedEffect(model.snapshot, model.profileId) {
+        model.requestPushPermissionIfNeeded(requestNotifications)
+    }
     AppMaterialTheme {
-        LaunchedEffect(model.snapshot.preferences().notificationMode.toString()) {
-            (activity as? MainActivity)?.requestNotificationPermissionIfNeeded()
-        }
         val context = LocalContext.current
         val root = model.snapshot.currentDirectory()
         val markdown =
@@ -118,7 +125,10 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
 
                     Route.ScheduledTasks -> ScheduledTasksScreen(model)
 
-                    Route.Usage -> UsageScreen(model)
+                    Route.Usage -> UsageScreen(
+                        model,
+                        initialTab = if (model.usageDeepLinkRequests > 0) UsageTab.LIMITS else UsageTab.USAGE,
+                    )
                     Route.Archived -> ArchivedScreen(model)
                 }
             }

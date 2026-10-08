@@ -39,6 +39,8 @@ internal object LocalNotifications {
             .setAutoCancel(true)
             .setNumber(1)
             .build()
-        manager.notify(body.hashCode(), notification)
+        // Keep the local Host health notice in one slot. Java String.hashCode
+        // can collide and would make an unrelated notice replace this one.
+        manager.notify(NotificationIds.id(context, "local-attention"), notification)
     }
 }

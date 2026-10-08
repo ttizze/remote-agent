@@ -34,23 +34,19 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             localNetworkGranted = granted
         }
-
-    internal fun requestNotificationPermissionIfNeeded() {
-        if (
-            android.os.Build.VERSION.SDK_INT >= 33 &&
-                model.notificationsEnabled() &&
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-                    PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            model.refreshPushRegistration()
         }
-    }
 
     override fun onResume() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-        requestNotificationPermissionIfNeeded()
+        // Reconcile notification permission changes made in system settings
+        // and replay every retained Host registration after a background
+        // interval. This does not request permission by itself.
+        model.refreshPushRegistration()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -62,10 +58,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         handleSurfaceIntent(intent)
         continueOverInternet = savedInstanceState?.getBoolean("continueOverInternet") ?: false
+        intent?.let(model::openPushDeepLink)
         setContent {
             if (localNetworkGranted || continueOverInternet) {
                 val requestQrScan = rememberAndroidQrScanner(this)
-                RemoteAgentApp(activity = this, model = model, requestQrScan = requestQrScan)
+                RemoteAgentApp(
+                    activity = this,
+                    model = model,
+                    requestQrScan = requestQrScan,
+                    requestNotifications = {
+                        requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    },
+                )
             } else {
                 AppMaterialTheme {
                     Column(Modifier.safeDrawingPadding().padding(24.dp)) {
@@ -96,6 +100,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        intent.let(model::openPushDeepLink)
         handleSurfaceIntent(intent)
     }
 
@@ -106,9 +111,7 @@ class MainActivity : ComponentActivity() {
                 val urls = buildList {
                     intent.getStringExtra(Intent.EXTRA_STREAM)?.let(::add)
                     intent.clipData?.let { clip ->
-                        repeat(clip.itemCount) { index ->
-                            clip.getItemAt(index).uri?.toString()?.let(::add)
-                        }
+                        repeat(clip.itemCount) { index -> clip.getItemAt(index).uri?.toString()?.let(::add) }
                     }
                 }
                 model.importShare(text, urls)

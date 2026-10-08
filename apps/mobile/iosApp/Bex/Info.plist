@@ -19,8 +19,11 @@
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ttizze.b-codex</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>remoteagent</string>
 				<string>remote-agent</string>
 			</array>
 		</dict>
@@ -35,9 +38,9 @@
 	<string>$(APP_RELEASE_CHANNEL)</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
 	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>

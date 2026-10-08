@@ -131,6 +131,7 @@ struct HostResources {
     commands: super::commands::CommandCache,
     search: crate::workspace_search::WorkspaceSearch,
     keybindings: Arc<crate::keybindings::Keybindings>,
+    push: Arc<super::push::PushService>,
     usage: crate::usage::UsageService,
     pull_requests: Arc<GitHubPullRequestService>,
     pull_request_watch_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
@@ -336,6 +337,9 @@ impl HostRpcService {
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
             projects.path().with_file_name("keybindings.json"),
         ));
+        let push = super::push::PushService::new(
+            projects.path().with_file_name("push-devices.json"),
+        )?;
         let pull_requests = Arc::new(GitHubPullRequestService::new(
             projects.path().with_file_name("pull-requests.sqlite"),
         )?);
@@ -384,6 +388,7 @@ impl HostRpcService {
             commands: Default::default(),
             search: Default::default(),
             keybindings,
+            push,
             usage: crate::usage::UsageService::new(&state_path),
             pull_requests,
             pull_request_watch_task: OnceLock::new(),
@@ -646,6 +651,7 @@ impl HostRpcService {
         }
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.start().await?;
+            self.inner.resources.push.start(conversation.runtime.clone());
         }
         self.start_pull_request_watch();
         Ok(())
@@ -977,6 +983,13 @@ impl HostRpcService {
         }
         Ok(gate)
     }
+
+    pub(crate) fn set_push_host_id(&self, host_id: String) {
+        self.inner.resources.push.set_host_id(host_id);
+    }
+    pub(crate) async fn remove_push_principal(&self, principal: &str) -> anyhow::Result<()> {
+        self.inner.resources.push.remove_principal(principal).await
+    }
     pub fn open_session(&self) -> HostSession {
         self.inner.connections.open_session()
     }
@@ -1053,6 +1066,7 @@ impl HostRpcService {
     }
     /// Stops provider processes after the conversation records the shutdown.
     pub(crate) async fn shutdown_owned_processes(&self) {
+        self.inner.resources.push.shutdown();
         self.inner.resources.background_stop.cancel();
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.shutdown().await;
@@ -1782,6 +1796,48 @@ impl HostRpcService {
             | Call::ReadAccountLogin(_)
             | Call::SubmitAccountLogin(_)
             | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
+            Call::RegisterPushDevice(params) => {
+                let principal = self
+                    .inner
+                    .connections
+                    .principal(session)
+                    .map_err(|error| Failure::new("connection_closed", error))?;
+                resources
+                    .push
+                    .register(&principal, params.clone())
+                    .await
+                    .map_err(|error| Failure::new("push_registration_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::UnregisterPushDevice(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let principal = self
+                    .inner
+                    .connections
+                    .principal(session)
+                    .map_err(|error| Failure::new("connection_closed", error))?;
+                resources
+                    .push
+                    .unregister(&principal, &params.device_id)
+                    .await
+                    .map_err(|error| Failure::new("push_registration_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::SetPushDeviceActive(params) => {
+                let principal = self
+                    .inner
+                    .connections
+                    .principal(session)
+                    .map_err(|error| Failure::new("connection_closed", error))?;
+                resources
+                    .push
+                    .set_active(&principal, params)
+                    .await
+                    .map_err(|error| Failure::new("push_registration_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
             Call::ReadAccountUsage(params) => self
                 .identity(params.provider)?
                 .usage(&params.id)

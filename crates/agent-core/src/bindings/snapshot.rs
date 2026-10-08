@@ -216,7 +216,6 @@ pub fn environment_load_balancing_route(
     EnvironmentLoadBalancingEvaluationView {
         candidate_count: evaluation.candidate_count as u64,
         pending_resources: evaluation.pending_resources,
-<<<<<<< HEAD
         route: evaluation
             .route
             .map(|route| EnvironmentLoadBalancedRouteView {

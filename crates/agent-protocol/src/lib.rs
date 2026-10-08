@@ -15,6 +15,7 @@ pub mod preview;
 pub mod provider;
 pub mod vcs;
 pub mod scheduled_tasks;
+pub mod push;
 pub mod usage;
 pub mod pull_requests;
 pub mod workspace;

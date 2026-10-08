@@ -31,6 +31,8 @@ final class BexAppViewModel: ObservableObject {
     private var composerKey = ""
     @Published var timelineRows: [TimelineRow] = []
     @Published var threadView: ThreadView?
+    /// Set by a WidgetKit URL and consumed by the native Usage navigation.
+    @Published private(set) var usageDeepLinkRequests = 0
     @Published var disclosure = TimelineDisclosure.empty {
         didSet {
             if disclosure != oldValue {
@@ -60,6 +62,16 @@ final class BexAppViewModel: ObservableObject {
     var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
+    private var pushRegistrations: [String: AgentPushRegistration] = [:]
+    private var pendingPushActive: [String: (deviceId: String, active: Bool)] = [:]
+    private var pushGenerations: [String: UInt64] = [:]
+    /// The Host store that has accepted the current registration. A retained
+    /// registration must be replayed when a profile switches stores, even if
+    /// its APNs token did not change.
+    private var registeredPushOwners: [String: AgentStore] = [:]
+    private var registeredPushConfigurations: [String: PushDeviceRegistration] = [:]
+    private var pendingPushThread: (hostId: String, threadId: String)?
+    private var activityUpdater: (([String: AgentActivityAttributes.ContentState]) -> Void)?
     private var incomingShareHandoffsInFlight: Set<URL> = []
     private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread?
     private var loadBalancingAttemptGeneration: UInt64 = 0
@@ -294,6 +306,7 @@ final class BexAppViewModel: ObservableObject {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do {
             let remaining = profiles.filter { $0.id != id }
+            let unregistration = unregisterPush(id)
             let background = backgroundOwners.removeValue(forKey: id)
             backgroundTasks.removeValue(forKey: id)?.cancel()
             environments.removeAll { $0.profileId == id }
@@ -308,13 +321,21 @@ final class BexAppViewModel: ObservableObject {
                 notice = nil
                 publish(AgentCore.Snapshot.empty())
                 Task { [weak self] in
+                    await unregistration?.value
                     do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
                 }
             }
             Task { [weak self] in
-                do { try await background?.shutdown() } catch { self?.notice = error.localizedDescription }
+                do {
+                    await unregistration?.value
+                    try await background?.shutdown()
+                } catch { self?.notice = error.localizedDescription }
             }
             profiles = remaining
+            // Removing a Host also removes its ActivityKit card and token
+            // association; the controller ends it before the Host store is
+            // allowed to shut down.
+            activityUpdater?(activityContentStatesForPush())
             publishUsageWidget()
             try HostProfile.save(profiles)
             startBackgroundProfiles(selectedProfileId)
@@ -372,6 +393,8 @@ final class BexAppViewModel: ObservableObject {
             )
             initialization = nil
             publish(owner.snapshot())
+            if let id = selectedProfileId { registerPushIfReady(id) }
+            openPendingPushThreadIfReady()
             let queued = pending
             pending.removeAll()
             for (intent, complete) in queued {
@@ -429,6 +452,7 @@ final class BexAppViewModel: ObservableObject {
                         backgroundOwners[profile.id] = created
                         owner = created
                     }
+                    registerPushIfReady(profile.id)
                     publishEnvironment(profile, owner.snapshot())
                     let identity = try DeviceIdentity.loadOrGenerate(profile.id)
                     try await owner.resume(connection: Connection(
@@ -491,6 +515,8 @@ final class BexAppViewModel: ObservableObject {
         )
         environments = (environments.filter { $0.profileId != profile.id } + [row])
             .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        activityUpdater?(activityContentStatesForPush())
+        if pushRegistrations[profile.id] != nil { registerPushIfReady(profile.id) }
         publishUsageWidget()
         retryPendingLoadBalancedNewThread()
     }
@@ -547,7 +573,9 @@ final class BexAppViewModel: ObservableObject {
                     selectedProfileId = id
                     store = owner
                     publish(owner.snapshot())
+                    if let id = selectedProfileId { registerPushIfReady(id) }
                     screen = .threads
+                    openPendingPushThreadIfReady()
                     pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
@@ -603,6 +631,252 @@ final class BexAppViewModel: ObservableObject {
                 }
             }
         } catch { completion(.failure(error)) }
+    }
+
+    func setActivityUpdater(_ updater: @escaping ([String: AgentActivityAttributes.ContentState]) -> Void) {
+        activityUpdater = updater
+        updater(activityContentStatesForPush())
+    }
+
+    /// Projects immutable core awareness snapshots into one ActivityKit record
+    /// per retained Host. Each record carries its environment id, so a Host
+    /// receives only its own activity token and cannot overwrite another card.
+    func activityContentStatesForPush() -> [String: AgentActivityAttributes.ContentState] {
+        var snapshots = environmentSnapshots
+        if let selectedProfileId {
+            snapshots[selectedProfileId] = snapshot
+        }
+        return snapshots.compactMapValues { activityContentState($0) }
+    }
+
+    private func activityContentState(_ source: AgentCore.Snapshot) -> AgentActivityAttributes.ContentState? {
+        let activities = source.awarenessActivities()
+        guard !activities.isEmpty else { return nil }
+        let items = activities.compactMap { activity -> AgentActivityAttributes.Item? in
+            let phase = canonicalActivityPhase(activity.phase)
+            let environmentId = activity.environmentId.isEmpty ? (source.environmentId() ?? "") : activity.environmentId
+            guard !environmentId.isEmpty, !activity.threadId.isEmpty else { return nil }
+            return AgentActivityAttributes.Item(
+                environmentId: environmentId,
+                threadId: activity.threadId,
+                projectTitle: activity.projectTitle,
+                threadTitle: activity.threadTitle,
+                modelTitle: activity.modelTitle ?? "Model",
+                phase: phase,
+                status: activityStatus(phase),
+                updatedAt: activityTimestamp(activity.updatedAtMs),
+                deepLink: AgentPushCenter.threadDeepLink(
+                    hostId: environmentId,
+                    threadId: activity.threadId
+                )
+            )
+        }
+        guard !items.isEmpty else { return nil }
+        let activeCount = items.reduce(into: UInt32(0)) { result, item in
+            if !["completed", "failed", "stale"].contains(item.phase) { result += 1 }
+        }
+        let subtitle: String
+        if activeCount == 1, let item = items.first, items.count == 1 {
+            subtitle = item.status
+        } else if activeCount > 0 {
+            subtitle = "\(activeCount) active agent activities"
+        } else {
+            subtitle = items.first?.status ?? "Agent activity"
+        }
+        return AgentActivityAttributes.ContentState(
+            title: items.first?.projectTitle ?? "Agent activity",
+            subtitle: subtitle,
+            activeCount: activeCount,
+            updatedAt: items.map(\.updatedAt).max() ?? activityTimestamp(0),
+            activities: items
+        )
+    }
+
+    private func canonicalActivityPhase(_ value: String) -> String {
+        switch value {
+        case "waitingApproval", "waiting_for_approval": return "waiting_for_approval"
+        case "waitingInput", "waiting_for_input": return "waiting_for_input"
+        case "starting", "running", "completed", "failed", "stale": return value
+        default: return "stale"
+        }
+    }
+
+    private func activityStatus(_ phase: String) -> String {
+        switch phase {
+        case "starting": return "Connecting"
+        case "running": return "Working"
+        case "waiting_for_approval": return "Approval"
+        case "waiting_for_input": return "Input"
+        case "completed": return "Done"
+        case "failed": return "Failed"
+        default: return "Waiting"
+        }
+    }
+
+    private func activityTimestamp(_ millis: Int64) -> String {
+        ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(max(0, millis)) / 1_000))
+    }
+
+    /// Core owns the notification mode for each retained Host; APNs
+    /// authorization is combined with it by AgentPushCenter.
+    func pushPreferences(hostId: String) -> AgentPushPreferences {
+        let source = hostId == selectedProfileId ? snapshot : environmentSnapshots[hostId]
+        let mode = source?.preferences().notificationMode
+        let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
+        return AgentPushPreferences(
+            notificationsEnabled: notificationsEnabled,
+            notifyOnApproval: notificationsEnabled,
+            notifyOnInput: notificationsEnabled,
+            notifyOnCompletion: notificationsEnabled,
+            notifyOnFailure: notificationsEnabled,
+            liveActivitiesEnabled: true
+        )
+    }
+
+    func pushHostIds() -> [String] { profiles.map(\.id).sorted() }
+
+    func registerPush(hostId: String, registration: AgentPushRegistration) {
+        guard profiles.contains(where: { $0.id == hostId }) else { return }
+        if pushRegistrations[hostId] != registration {
+            pushRegistrations[hostId] = registration
+            pushGenerations[hostId, default: 0] &+= 1
+            registeredPushOwners.removeValue(forKey: hostId)
+            registeredPushConfigurations.removeValue(forKey: hostId)
+        }
+        registerPushIfReady(hostId)
+    }
+
+    func setPushActive(hostId: String, deviceId: String, active: Bool) {
+        pendingPushActive[hostId] = (deviceId, active)
+        guard let current = pushRegistrations[hostId], current.deviceId == deviceId,
+              let owner = pushOwner(hostId) else { return }
+        pendingPushActive[hostId] = nil
+        dispatchPush(hostId: hostId, owner: owner, intent: .setPushDeviceActive(deviceId: deviceId, active: active))
+    }
+
+    func visiblePushThreadDeepLink() -> String? {
+        guard screen == .thread, let host = selectedProfileId, let thread = selectedThreadId else {
+            return nil
+        }
+        return AgentPushCenter.threadDeepLink(hostId: host, threadId: thread)
+    }
+
+    func openPushThread(hostId: String, threadId: String) {
+        guard profiles.contains(where: { $0.id == hostId }) else { return }
+        guard selectedProfileId == hostId, store != nil else {
+            pendingPushThread = (hostId, threadId)
+            if selectedProfileId != hostId {
+                selectProfile(hostId)
+            }
+            return
+        }
+        openThread(threadId)
+    }
+
+    func openUsageDeepLink() {
+        usageDeepLinkRequests += 1
+    }
+
+    /// The Usage root calls this after presenting the requested limits tab.
+    func consumeUsageDeepLinkRequest() {
+        guard usageDeepLinkRequests > 0 else { return }
+        usageDeepLinkRequests -= 1
+    }
+
+    private func pushOwner(_ hostId: String) -> AgentStore? {
+        if hostId == selectedProfileId { return store }
+        return backgroundOwners[hostId]
+    }
+
+    private func registerPushIfReady(_ hostId: String) {
+        guard let registration = pushRegistrations[hostId], let owner = pushOwner(hostId) else {
+            registeredPushOwners.removeValue(forKey: hostId)
+            applyPendingPushActiveIfReady(hostId)
+            return
+        }
+        let preferences = pushPreferences(hostId: hostId)
+        let native = PushDeviceRegistration(
+            deviceId: registration.deviceId,
+            platform: "ios",
+            token: registration.token,
+            liveActivityToken: registration.liveActivityToken,
+            pushToStartToken: registration.pushToStartToken,
+            bundleId: registration.bundleId,
+            apnsEnvironment: registration.apnsEnvironment,
+            notificationsEnabled: registration.notificationsEnabled && preferences.notificationsEnabled,
+            notifyOnApproval: preferences.notifyOnApproval,
+            notifyOnInput: preferences.notifyOnInput,
+            notifyOnCompletion: preferences.notifyOnCompletion,
+            notifyOnFailure: preferences.notifyOnFailure,
+            liveActivitiesEnabled: registration.liveActivitiesEnabled && preferences.liveActivitiesEnabled
+        )
+        if registeredPushOwners[hostId] === owner, registeredPushConfigurations[hostId] == native {
+            applyPendingPushActiveIfReady(hostId)
+            return
+        }
+        pushGenerations[hostId, default: 0] &+= 1
+        let generation = pushGenerations[hostId, default: 0]
+        dispatchPush(hostId: hostId, owner: owner, intent: .registerPushDevice(registration: native)) { [weak self] result in
+            guard let self,
+                  self.pushGenerations[hostId] == generation,
+                  self.pushRegistrations[hostId] == registration,
+                  self.pushOwner(hostId) === owner,
+                  case .success = result else { return }
+            self.registeredPushOwners[hostId] = owner
+            self.registeredPushConfigurations[hostId] = native
+            self.setPushActive(
+                hostId: hostId,
+                deviceId: registration.deviceId,
+                active: native.notificationsEnabled || native.liveActivitiesEnabled
+            )
+        }
+    }
+
+    private func dispatchPush(
+        hostId: String,
+        owner: AgentStore,
+        intent: Intent,
+        completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }
+    ) {
+        do {
+            let receipt = try owner.dispatch(intent: intent)
+            Task { [weak self] in
+                let result: Result<Outcome, Error>
+                do { result = try await .success(receipt.wait()) } catch { result = .failure(error) }
+                guard let self,
+                      self.pushOwner(hostId) === owner,
+                      !Task.isCancelled else { return }
+                completion(result)
+            }
+        } catch { completion(.failure(error)) }
+    }
+
+    private func applyPendingPushActiveIfReady(_ hostId: String) {
+        guard let pending = pendingPushActive[hostId] else { return }
+        setPushActive(hostId: hostId, deviceId: pending.deviceId, active: pending.active)
+    }
+
+    private func openPendingPushThreadIfReady() {
+        guard let pending = pendingPushThread,
+              pending.hostId == selectedProfileId,
+              store != nil else { return }
+        pendingPushThread = nil
+        openThread(pending.threadId)
+    }
+
+    private func unregisterPush(_ hostId: String) -> Task<Void, Never>? {
+        guard let registration = pushRegistrations[hostId] else { return nil }
+        pushGenerations[hostId, default: 0] &+= 1
+        pendingPushActive[hostId] = nil
+        pushRegistrations.removeValue(forKey: hostId)
+        registeredPushOwners.removeValue(forKey: hostId)
+        registeredPushConfigurations.removeValue(forKey: hostId)
+        guard let owner = pushOwner(hostId) else { return nil }
+        let deviceId = registration.deviceId
+        do {
+            let receipt = try owner.dispatch(intent: .unregisterPushDevice(deviceId: deviceId))
+            return Task { _ = try? await receipt.wait() }
+        } catch { return nil }
     }
 
     private func scopedValue(_ value: String?) -> (String?, String?) {
@@ -810,10 +1084,14 @@ extension BexAppViewModel {
                 )
             }
         }
+        let notificationModeChanged = snapshot.preferences().notificationMode != next.preferences().notificationMode
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
         if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
+        }
+        if notificationModeChanged {
+            if let id = selectedProfileId { registerPushIfReady(id) }
         }
         if threadChanged {
             threadView = nil

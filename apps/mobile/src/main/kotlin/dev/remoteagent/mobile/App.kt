@@ -1,11 +1,13 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
+import android.content.IntentFilter
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
+import com.google.firebase.messaging.FirebaseMessaging
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.ArtifactTemplate
 import dev.remoteagent.core.BrowserFrame
@@ -20,6 +22,7 @@ import dev.remoteagent.core.EnvironmentThreadListView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.PushDeviceRegistration
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.appendArtifactTemplateUsePrompt
 import dev.remoteagent.core.ShareContent
@@ -169,11 +172,27 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var composerText by mutableStateOf("")
         private set
 
+    /** Number of native Widget/notification requests waiting for Usage navigation. */
+    var usageDeepLinkRequests by mutableIntStateOf(0)
+        private set
+
+    var pushCapability by mutableStateOf(PushCapability.UnsupportedUnconfigured)
+        private set
+
     /** Counts requests to focus the composer with the cursor at the end of the draft. */
     var composerFocusRequests by mutableIntStateOf(0)
         private set
 
     private var followingFrom: String? = null
+    private var pendingPushThread: Pair<String, String>? = null
+    private var pushPermissionPrompted = false
+    private val pushRegistrations = mutableMapOf<String, PushDeviceRegistration>()
+    private val pushGenerations = mutableMapOf<String, Long>()
+    private val pendingPushActive = mutableMapOf<String, Pair<String, Boolean>>()
+    /** Store instances are replaced on profile switches; replay the retained
+     * registration to the new owner even when the FCM token is unchanged. */
+    private val registeredPushOwners = mutableMapOf<String, AgentStore>()
+    private val registeredPushConfigurations = mutableMapOf<String, PushDeviceRegistration>()
     private var owner: AgentStore? = null
     private val backgroundOwners = mutableMapOf<String, AgentStore>()
     private val backgroundJobs = mutableMapOf<String, Job>()
@@ -194,8 +213,18 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     .onFailure { error -> withContext(Dispatchers.Main) { notice = error.message } }
             }
         }
+    private val pushTokenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: android.content.Intent) {
+            if (intent.action == ACTION_PUSH_TOKEN_UPDATED) refreshPushRegistration()
+        }
+    }
 
     init {
+        context.registerReceiver(
+            pushTokenReceiver,
+            IntentFilter(ACTION_PUSH_TOKEN_UPDATED),
+            Context.RECEIVER_NOT_EXPORTED,
+        )
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
         if (profiles.isEmpty()) stack = listOf(Route.Pairing)
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
@@ -602,6 +631,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         navigate(Route.Thread(id))
     }
 
+    fun visibleThreadDeepLink(): String? {
+        val host = profileId ?: return null
+        val thread = route as? Route.Thread ?: return null
+        return "remoteagent://threads/${android.net.Uri.encode(host)}/${android.net.Uri.encode(thread.id)}"
+    }
+
     fun back() {
         val leaving = stack.lastOrNull() ?: return
         if (stack.size <= 1) return
@@ -645,6 +680,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         repository.selected = id
         publish(Snapshot.empty())
         scope.launch { runCatching { old?.shutdown(); background?.shutdown() } }
+
         initialization = scope.launch {
             try {
                 val store =
@@ -661,6 +697,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 owner = store
                 initialization = null
                 publish(store.snapshot())
+                refreshPushRegistration()
+                openPendingPushThreadIfReady()
                 while (pending.isNotEmpty()) {
                     val (intent, complete) = pending.removeFirst()
                     perform(intent, complete)
@@ -719,6 +757,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                                     repository.diagnosticsDirectory(profile.id),
                                 )
                             }
+                        registerPushForHost(profile.id)
                         val identity =
                             withContext(Dispatchers.IO) {
                                 AndroidCredentialStore(context, profile.id).loadOrCreate(::generateIdentity)
@@ -757,6 +796,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
+        val previous = environmentSnapshots[profile.id]
+        val pushPreferencesChanged = previous?.preferences()?.notificationMode != next.preferences().notificationMode
         environmentSnapshots = environmentSnapshots + (profile.id to next)
         val row = EnvironmentRow(
             profileId = profile.id,
@@ -779,6 +820,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         )
         environments = (environments.filterNot { it.profileId == profile.id } + row)
             .sortedBy { it.label.lowercase() }
+        if (pushPreferencesChanged || pushRegistrations[profile.id] == null) registerPushForHost(profile.id)
         publishUsageWidget()
         retryPendingLoadBalancedNewThread()
     }
@@ -789,26 +831,31 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun removeProfile(id: String) {
         runCatching {
-                val background = backgroundOwners.remove(id)
-                backgroundJobs.remove(id)?.cancel()
-                scope.launch { runCatching { background?.shutdown() } }
-                AndroidCredentialStore(context, id).remove()
-                if (profileId == id) {
-                    val old = detach()
-                    profileId = null
-                    repository.selected = null
-                    publish(Snapshot.empty())
-                    scope.launch { old?.shutdown() }
-                }
-                profiles = profiles.filterNot { it.id == id }
-                environments = environments.filterNot { it.profileId == id }
-                environmentSnapshots = environmentSnapshots - id
-                publishUsageWidget()
-                repository.saveProfiles(profiles)
-                File(repository.cacheDirectory(id)).deleteRecursively()
-                if (profiles.isEmpty()) stack = listOf(Route.Pairing)
+            val unregistration = unregisterPush(id)
+            val background = backgroundOwners.remove(id)
+            backgroundJobs.remove(id)?.cancel()
+            AndroidCredentialStore(context, id).remove()
+            var old: AgentStore? = null
+            if (profileId == id) {
+                old = detach()
+                profileId = null
+                repository.selected = null
+                publish(Snapshot.empty())
             }
-            .onFailure { notice = it.message }
+            profiles = profiles.filterNot { it.id == id }
+            environments = environments.filterNot { it.profileId == id }
+            environmentSnapshots = environmentSnapshots - id
+            renderActivityAggregate(removeActivityState(context, id))
+            publishUsageWidget()
+            repository.saveProfiles(profiles)
+            File(repository.cacheDirectory(id)).deleteRecursively()
+            scope.launch {
+                unregistration?.join()
+                runCatching { background?.shutdown() }
+                old?.shutdown()
+            }
+            if (profiles.isEmpty()) stack = listOf(Route.Pairing)
+        }.onFailure { notice = it.message }
     }
 
     fun preparePairing(contents: String) {
@@ -869,6 +916,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 owner = store
                 paired = null
                 publish(store.snapshot())
+                refreshPushRegistration()
+                openPendingPushThreadIfReady()
                 observe(store, id)
                 invitation = null
                 stack = listOf(Route.Home)
@@ -913,6 +962,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 if (profileId == profile.id && owner === store) {
                     publish(store.snapshot())
                     busy = false
+                    refreshPushRegistration()
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -948,6 +998,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
+        val notificationModeChanged =
+            snapshot.preferences().notificationMode != next.preferences().notificationMode
         val becameUnavailable = snapshot.error() == null && next.error() != null
         if (
             becameUnavailable &&
@@ -970,6 +1022,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         profileId?.let { id ->
             profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
         }
+        if (notificationModeChanged) refreshPushRegistration()
+
         val selected = next.selectedThreadId()
         val from = followingFrom
         if (from != null && selected != null && selected != from) {
@@ -1012,6 +1066,286 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         scope.launch { runCatching { store.flush() } }
     }
 
+    fun openPushDeepLink(intent: android.content.Intent) {
+        if (intent.getBooleanExtra(EXTRA_OPEN_USAGE, false)) {
+            openUsageDeepLink()
+            return
+        }
+        val value = intent.getStringExtra(EXTRA_PUSH_DEEP_LINK)
+            ?: intent.data?.takeIf { it.scheme == "remoteagent" }?.toString()
+            ?: return
+        val uri = runCatching { android.net.Uri.parse(value) }.getOrNull() ?: return
+        if (isUsageDeepLink(uri)) {
+            openUsageDeepLink()
+            return
+        }
+        if (uri.scheme != "remoteagent" || uri.host != "threads") return
+        if (uri.userInfo != null || uri.port != -1 || uri.fragment != null || uri.query != null) return
+        val parts = uri.encodedPath
+            ?.split('/')
+            ?.takeIf { values ->
+                values.size == 3 && values[0].isEmpty() && values[1].isNotEmpty() && values[2].isNotEmpty()
+            }
+            ?.drop(1)
+            ?.map { android.net.Uri.decode(it) }
+            ?.takeIf { values -> values.all(::validPushRouteSegment) }
+            ?: return
+        openPushThread(parts[0], parts[1])
+    }
+
+    private fun isUsageDeepLink(uri: android.net.Uri): Boolean =
+        uri.scheme == "remoteagent" &&
+            uri.host == "settings" &&
+            uri.encodedPath == "/usage" &&
+            uri.userInfo == null &&
+            uri.port == -1 &&
+            uri.fragment == null &&
+            uri.queryParameterNames == setOf("tab") &&
+            uri.getQueryParameter("tab") == "limits"
+
+    private fun validPushRouteSegment(value: String): Boolean =
+        value.isNotEmpty() && value != "." && value != ".." &&
+            value.none { it == '/' || it == '\\' || it.isISOControl() }
+
+    private fun openUsageDeepLink() {
+        usageDeepLinkRequests += 1
+    }
+
+    /** Widget/notification launches enter the real Usage screen before consumption. */
+    fun openUsageRouteFromDeepLink() {
+        if (route != Route.Usage) stack = stack + Route.Usage
+    }
+
+    /** Usage navigation consumes one launch request after selecting the limits tab. */
+    fun consumeUsageDeepLinkRequest() {
+        if (usageDeepLinkRequests > 0) usageDeepLinkRequests -= 1
+    }
+
+    private fun openPushThread(hostId: String, threadId: String) {
+        if (profiles.none { it.id == hostId }) return
+        if (profileId != hostId || owner == null) {
+            pendingPushThread = hostId to threadId
+            if (profileId != hostId) selectProfile(hostId)
+            return
+        }
+        openThread(threadId)
+    }
+
+    private fun openPendingPushThreadIfReady() {
+        val pending = pendingPushThread ?: return
+        if (profileId != pending.first || owner == null) return
+        pendingPushThread = null
+        openThread(pending.second)
+    }
+
+    fun refreshPushRegistration() {
+        val selectedPreferences = pushPreferences(profileId ?: "")
+        reconcileActivityNotificationPreferences()
+        if (!selectedPreferences.notificationsEnabled) pushCapability = PushCapability.DisabledByPreference
+        if (!FirebasePushBootstrap.ensure(context)) {
+            pushCapability = PushCapability.UnsupportedUnconfigured
+            deactivateRegisteredPush()
+            return
+        }
+        pushCapability = if (selectedPreferences.notificationsEnabled) PushCapability.Ready
+        else PushCapability.DisabledByPreference
+        val token = PushRegistrationStore.token(context)
+        if (token == null) {
+            requestPushToken()
+            return
+        }
+        profiles.forEach { registerPushForHost(it.id) }
+    }
+
+    private fun reconcileActivityNotificationPreferences() {
+        var changed = false
+        var aggregate: String? = null
+        profiles.forEach { profile ->
+            if (!pushPreferences(profile.id).liveActivitiesEnabled) {
+                changed = true
+                aggregate = removeActivityState(context, profile.id)
+            }
+        }
+        if (!changed) return
+        renderActivityAggregate(aggregate)
+    }
+
+    private fun renderActivityAggregate(aggregate: String?) {
+        val presentation = aggregate?.let(::parseActivityPresentation)
+        if (presentation == null) {
+            PushNotificationCenter.cancelActivity(context)
+        } else {
+            PushNotificationCenter.showActivity(
+                context,
+                presentation.title,
+                presentation.body,
+                presentation.deepLink,
+                presentation.active,
+            )
+        }
+    }
+
+    private fun pushOwner(hostId: String): AgentStore? =
+        if (hostId == profileId) owner else backgroundOwners[hostId]
+
+    private fun registerPushForHost(hostId: String) {
+        if (profiles.none { it.id == hostId }) return
+        val token = PushRegistrationStore.token(context) ?: return
+        if (!FirebasePushBootstrap.ensure(context)) return
+        val preferences = pushPreferences(hostId)
+        val registration = PushDeviceRegistration(
+            PushRegistrationStore.deviceId(context, hostId),
+            "android",
+            token,
+            null,
+            null,
+            null,
+            null,
+            preferences.notificationsEnabled,
+            preferences.notifyOnApproval,
+            preferences.notifyOnInput,
+            preferences.notifyOnCompletion,
+            preferences.notifyOnFailure,
+            preferences.liveActivitiesEnabled,
+        )
+        val changed = pushRegistrations[hostId] != registration
+        if (changed) {
+            pushRegistrations[hostId] = registration
+            pushGenerations[hostId] = (pushGenerations[hostId] ?: 0L) + 1L
+            registeredPushOwners.remove(hostId)
+            registeredPushConfigurations.remove(hostId)
+        }
+        val store = pushOwner(hostId) ?: return
+        if (registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration) {
+            pendingPushActive[hostId]?.let { setPushActive(hostId, it.first, it.second) }
+            return
+        }
+        pushGenerations[hostId] = (pushGenerations[hostId] ?: 0L) + 1L
+        val generation = pushGenerations[hostId] ?: 0L
+        dispatchPush(hostId, store, generation, Intent.RegisterPushDevice(registration)) { result ->
+            if (result.isSuccess && pushRegistrations[hostId] == registration &&
+                pushGenerations[hostId] == generation && pushOwner(hostId) === store
+            ) {
+                registeredPushOwners[hostId] = store
+                registeredPushConfigurations[hostId] = registration
+                setPushActive(hostId, registration.deviceId, registration.preferencesActive())
+            }
+        }
+    }
+
+    private fun PushDeviceRegistration.preferencesActive(): Boolean =
+        notificationsEnabled || liveActivitiesEnabled
+
+    private fun dispatchPush(
+        hostId: String,
+        store: AgentStore,
+        generation: Long,
+        intent: Intent,
+        complete: (Result<Outcome>) -> Unit = {},
+    ) {
+        val receipt = runCatching { store.dispatch(intent) }.getOrElse {
+            complete(Result.failure(it))
+            return
+        }
+        scope.launch {
+            val result = runCatching { receipt.wait() }
+            if (pushOwner(hostId) === store && pushGenerations[hostId] == generation) complete(result)
+        }
+    }
+
+    private fun setPushActive(hostId: String, deviceId: String, active: Boolean) {
+        pendingPushActive[hostId] = deviceId to active
+        val registration = pushRegistrations[hostId] ?: return
+        if (registration.deviceId != deviceId) return
+        val store = pushOwner(hostId) ?: return
+        pendingPushActive.remove(hostId)
+        val generation = pushGenerations[hostId] ?: return
+        dispatchPush(hostId, store, generation, Intent.SetPushDeviceActive(deviceId, active))
+    }
+
+    private fun deactivateRegisteredPush() {
+        pushRegistrations.keys.toList().forEach { hostId ->
+            val registration = pushRegistrations[hostId] ?: return@forEach
+            registeredPushOwners.remove(hostId)
+            registeredPushConfigurations.remove(hostId)
+            setPushActive(hostId, registration.deviceId, false)
+        }
+    }
+
+    private fun requestPushToken() {
+        if (!FirebasePushBootstrap.ensure(context)) {
+            pushCapability = PushCapability.UnsupportedUnconfigured
+            return
+        }
+        runCatching {
+            FirebaseMessaging.getInstance().token
+                .addOnSuccessListener { token ->
+                    if (token.isBlank()) {
+                        pushCapability = PushCapability.ProviderUnavailable
+                        return@addOnSuccessListener
+                    }
+                    PushRegistrationStore.saveToken(context, token)
+                    refreshPushRegistration()
+                }
+                .addOnFailureListener { pushCapability = PushCapability.ProviderUnavailable }
+        }.onFailure { pushCapability = PushCapability.ProviderUnavailable }
+    }
+
+    /** Core notification settings gate the OS prompt and provider registration. */
+    fun requestPushPermissionIfNeeded(request: () -> Unit) {
+        val wantsNotifications = profiles.any { profile -> notificationsOptedIn(profile.id) }
+        if (!wantsNotifications) {
+            if (pushRegistrations.isNotEmpty()) refreshPushRegistration()
+            return
+        }
+        if (!FirebasePushBootstrap.ensure(context)) {
+            pushCapability = PushCapability.UnsupportedUnconfigured
+            return
+        }
+        if (!PushNotificationCenter.canRequestPermission(context)) {
+            refreshPushRegistration()
+            return
+        }
+        if (pushPermissionPrompted) return
+        pushPermissionPrompted = true
+        request()
+    }
+
+    /** The settings branch maps this to Snapshot.preferences().notificationMode. */
+    private fun notificationsOptedIn(hostId: String = profileId ?: ""): Boolean =
+        when ((if (hostId == profileId) snapshot else environmentSnapshots[hostId] ?: Snapshot.empty())
+            .preferences().notificationMode) {
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS,
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
+            else -> false
+        }
+
+    private fun pushPreferences(hostId: String): PushRegistrationPreferences {
+        val enabled = notificationsOptedIn(hostId) && PushNotificationCenter.notificationsEnabled(context)
+        return PushRegistrationPreferences(
+            notificationsEnabled = enabled,
+            notifyOnApproval = enabled,
+            notifyOnInput = enabled,
+            notifyOnCompletion = enabled,
+            notifyOnFailure = enabled,
+            // Android has no ActivityKit token; this flag enables the
+            // persistent ongoing FCM presentation while the user opted in.
+            liveActivitiesEnabled = enabled && PushRegistrationStore.liveActivitiesEnabled(context),
+        )
+    }
+
+    private fun unregisterPush(hostId: String): Job? {
+        val registration = pushRegistrations.remove(hostId) ?: return null
+        pushGenerations[hostId] = (pushGenerations[hostId] ?: 0L) + 1L
+        pendingPushActive.remove(hostId)
+        registeredPushOwners.remove(hostId)
+        registeredPushConfigurations.remove(hostId)
+        val store = pushOwner(hostId) ?: return null
+        val receipt = runCatching { store.dispatch(Intent.UnregisterPushDevice(registration.deviceId)) }.getOrNull()
+            ?: return null
+        return scope.launch { runCatching { receipt.wait() } }
+    }
+
     private suspend fun <T> withStore(block: suspend (AgentStore) -> T): T {
         val store = owner ?: error("Host not connected")
         val host = profileId
@@ -1046,6 +1380,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     suspend fun browser(request: BrowserRequest): BrowserFrame = withStore { it.browser(request) }
 
     override fun onCleared() {
+        context.unregisterReceiver(pushTokenReceiver)
         observation?.cancel()
         connection?.cancel()
         initialization?.cancel()

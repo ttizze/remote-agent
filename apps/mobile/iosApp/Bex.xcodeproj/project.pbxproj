@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        D10000000000000000000001 /* AgentPushCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* AgentPushCenter.swift */; };
         B55D00000000000000000001 /* DraftRevision.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55D00000000000000000002; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
@@ -85,6 +86,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+        D10000000000000000000003 /* RemoteAgent.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RemoteAgent.entitlements; sourceTree = "<group>"; };
+        D10000000000000000000002 /* AgentPushCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPushCenter.swift; sourceTree = "<group>"; };
         B55D00000000000000000002 /* DraftRevision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRevision.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -181,6 +184,8 @@
 			isa = PBXGroup;
 			children = (
 				B55D00000000000000000002 /* DraftRevision.swift */,
+				D10000000000000000000002 /* AgentPushCenter.swift */,
+                D10000000000000000000003 /* RemoteAgent.entitlements */,
                 A10000000000000000000011 /* BexIOSApp.swift */,
 				A10000000000000000000012 /* PlatformServices.swift */,
 				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
@@ -358,6 +363,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B55D00000000000000000001 /* DraftRevision.swift in Sources */,
+                D10000000000000000000001 /* AgentPushCenter.swift in Sources */,
 				A71000000000000000000015, A71000000000000000000016, A71000000000000000000017,
                 A10000000000000000000001 /* BexIOSApp.swift in Sources */,
 				A10000000000000000000002 /* PlatformServices.swift in Sources */,
@@ -443,8 +449,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				APS_ENVIRONMENT = development;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = Bex/RemoteAgent.entitlements;
 				CURRENT_PROJECT_VERSION = 70;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
@@ -472,8 +480,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				APS_ENVIRONMENT = production;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = Bex/RemoteAgent.entitlements;
 				CURRENT_PROJECT_VERSION = 70;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";

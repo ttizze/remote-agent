@@ -5,6 +5,7 @@ import UIKit
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
     @State private var appearanceRevision = 0
+    @State private var showingUsage = false
 
     var body: some View {
         _ = appearanceRevision
@@ -36,6 +37,32 @@ struct BexSwiftUIRoot: View {
         .onReceive(NotificationCenter.default.publisher(for: .mobileAppearanceDidChange)) { _ in
             appearanceRevision += 1
         }
+        .onReceive(NotificationCenter.default.publisher(for: .agentPushDeepLink)) { notification in
+            guard let deepLink = notification.object as? String else { return }
+            openPushDeepLink(deepLink)
+        }
+        .onOpenURL {
+            let value = $0.absoluteString
+            if AgentPushCenter.isUsageDeepLink(value) {
+                model.openUsageDeepLink()
+            } else if let target = AgentPushCenter.threadTarget(from: value) {
+                model.openPushThread(hostId: target.hostId, threadId: target.threadId)
+            } else {
+                model.handleSurfaceURL($0)
+            }
+        }
+        .onChange(of: model.usageDeepLinkRequests) { _, count in
+            if count > 0 { showingUsage = true }
+        }
+        .sheet(isPresented: $showingUsage) {
+            NavigationStack {
+                UsageScreen(model: model, initialTab: .limits)
+                    .onAppear { model.consumeUsageDeepLinkRequest() }
+                    .onChange(of: model.usageDeepLinkRequests) { _, count in
+                        if count > 0 { model.consumeUsageDeepLinkRequest() }
+                    }
+            }
+        }
         .sheet(isPresented: $model.isScanning) {
             QRScannerSheet { model.scanned($0) }
                 .interactiveDismissDisabled()
@@ -51,6 +78,15 @@ struct BexSwiftUIRoot: View {
                       transcriptionRecipient: model.pairingInvitation?.transcriptionRecipient,
                       prepare: model.preparePairing, confirm: model.confirmPairing,
                       change: model.openPairing, cancel: model.dismissPairing)
+    }
+
+    private func openPushDeepLink(_ value: String) {
+        if AgentPushCenter.isUsageDeepLink(value) {
+            model.openUsageDeepLink()
+            return
+        }
+        guard let target = AgentPushCenter.threadTarget(from: value) else { return }
+        model.openPushThread(hostId: target.hostId, threadId: target.threadId)
     }
 }
 

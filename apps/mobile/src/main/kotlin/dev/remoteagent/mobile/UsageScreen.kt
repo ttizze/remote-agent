@@ -42,10 +42,16 @@ internal fun UsageLimitsRow(limits: ComposerUsageLimits, onClick: () -> Unit) {
 }
 
 @Composable
-internal fun UsageScreen(model: AndroidAppModel) {
+internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab.USAGE) {
     val view = model.snapshot.usagePage()
-    var tab by remember { mutableStateOf(UsageTab.USAGE) }
-    LaunchedEffect(Unit) { loadUsage(model) }
+    var tab by remember { mutableStateOf(initialTab) }
+    LaunchedEffect(model.usageDeepLinkRequests) {
+        if (model.usageDeepLinkRequests > 0) {
+            tab = UsageTab.LIMITS
+            model.consumeUsageDeepLinkRequest()
+        }
+        loadUsage(model)
+    }
     ScreenScaffold("Usage", onBack = model::back, actions = {
         TextButton(onClick = { loadUsage(model) }) { Text("Refresh") }
         TextButton(onClick = {
@@ -258,7 +264,7 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
     }
 }
 
-private enum class UsageTab {
+internal enum class UsageTab {
     USAGE,
     LIMITS,
 }
