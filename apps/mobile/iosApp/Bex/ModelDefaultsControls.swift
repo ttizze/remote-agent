@@ -10,7 +10,7 @@ struct NewChatDefaultModelMenu: View {
     var body: some View {
         let label = choices.first { $0.model == selected }?.displayName ?? selected?.id ?? "自動"
         Menu {
-            Button("自動（Codexのデフォルト）") { select(nil) }
+            Button("自動（利用可能なエージェントのデフォルト）") { select(nil) }
                 .accessibilityIdentifier("model.defaults.new-chat.automatic")
             ForEach(choices, id: \.model) { choice in
                 Button { select(choice.model) } label: {

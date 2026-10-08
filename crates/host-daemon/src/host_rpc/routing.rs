@@ -1169,7 +1169,7 @@ mod tests {
         let target = SessionRef::new(ProviderKind::Claude, "native".into()).unwrap();
         let (input, _receiver) = tokio::sync::mpsc::channel(1);
         let instance = uuid::Uuid::new_v4();
-        let adapted = super::super::requests::claude(
+        let adapted = crate::adapters::requests::claude(
             "request".into(),
             &"turn".into(),
             &crate::claude::SdkRequest::Elicitation {
@@ -1207,7 +1207,7 @@ mod tests {
         let _read = open(&router, "native");
         let instance = uuid::Uuid::new_v4();
         let request = || {
-            super::super::requests::codex(
+            crate::adapters::requests::codex(
                 "request".into(),
                 "item/commandExecution/requestApproval",
                 &json!({"turnId":"wanted","itemId":"tool","availableDecisions":["accept","decline"]}),
@@ -1790,14 +1790,14 @@ fn identical_native_request_ids_keep_their_source_instance() {
             },
         );
         let adapted = if provider == ProviderKind::Codex {
-            super::requests::codex(
+            crate::adapters::requests::codex(
                 uuid::Uuid::new_v4().to_string().into(),
                 "item/commandExecution/requestApproval",
                 &serde_json::json!({"turnId":"turn","availableDecisions":["accept","decline"]}),
             )
             .unwrap()
         } else {
-            super::requests::claude(
+            crate::adapters::requests::claude(
                 uuid::Uuid::new_v4().to_string().into(),
                 &"turn".into(),
                 &crate::claude::SdkRequest::Tool {
@@ -1833,12 +1833,16 @@ fn identical_native_request_ids_keep_their_source_instance() {
         serde_json::json!({"id":1,"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
     assert!(
-        super::codex::event_change(requests[0].0, &RpcMessage::parse(&malformed).unwrap()).is_err()
+        crate::adapters::codex::event_change(
+            requests[0].0,
+            &RpcMessage::parse(&malformed).unwrap()
+        )
+        .is_err()
     );
     let resolved =
         serde_json::json!({"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
-    super::codex::event_change(requests[0].0, &RpcMessage::parse(&resolved).unwrap())
+    crate::adapters::codex::event_change(requests[0].0, &RpcMessage::parse(&resolved).unwrap())
         .unwrap()
         .unwrap()
         .apply(&router)

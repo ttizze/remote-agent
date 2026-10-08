@@ -311,10 +311,7 @@ impl Snapshot {
         &self,
         provider: Option<crate::session::ProviderKind>,
     ) -> Vec<String> {
-        let provider = provider.map(|provider| match provider {
-            crate::session::ProviderKind::Codex => "codex",
-            crate::session::ProviderKind::Claude => "claude",
-        });
+        let provider = provider.map(crate::session::ProviderKind::key);
         self.model_errors
             .iter()
             .filter(|(key, _)| provider.is_none_or(|provider| provider == key.as_str()))
@@ -513,20 +510,20 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let key = DraftKey::Local { key: format!("new:{cwd}") };
             if !previous.drafts.contains_key(&key) {
                 let preferences = previous.model_defaults_for_cwd(&cwd);
-                let provider = preferences.new_chat_model.as_ref().map_or(
-                    crate::session::ProviderKind::Codex, |model| model.provider,
-                );
-                let defaults = preferences.providers.get(&provider).cloned().unwrap_or_default();
+                let provider = preferences.new_chat_model.as_ref().map(|model| model.provider)
+                    .or_else(|| previous.model_provider_for_draft(key.clone()));
+                let defaults = provider.and_then(|provider| preferences.providers.get(&provider))
+                    .cloned().unwrap_or_default();
                 let mut draft = Draft {
                     model: preferences.new_chat_model.or(defaults.model),
                     effort: defaults.effort,
                     service_tier: defaults.service_tier,
                     ..Default::default()
                 };
-                if !previous.models.is_empty() {
+                if provider.is_some() && !previous.models.is_empty() {
                     let (model, effort, tier) = supported_settings(
                         draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
-                        Some(provider), &previous.models, !previous.model_errors.is_empty(),
+                        provider, &previous.models, !previous.model_errors.is_empty(),
                     );
                     let settings = (model.cloned(), effort.map(str::to_owned), tier.map(str::to_owned));
                     (draft.model, draft.effort, draft.service_tier) = settings;
@@ -930,6 +927,50 @@ fn clear_session_status(thread: &mut Thread) {
     }
 }
 
+pub(crate) fn normalized_model_drafts(
+    drafts: &Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    models: &[crate::models::Model],
+    errors: &serde_json::Map<String, serde_json::Value>,
+    selected_accounts: Option<&std::collections::HashMap<crate::session::ProviderKind, String>>,
+) -> Arc<BTreeMap<DraftKey, Arc<Draft>>> {
+    let mut next = drafts.clone();
+    for (key, previous) in drafts.iter() {
+        let provider =
+            crate::presentation::model_settings::draft_provider(key, previous.model.as_ref())
+                .or_else(|| {
+                    crate::presentation::model_settings::automatic_provider(
+                        models,
+                        selected_accounts,
+                        errors,
+                    )
+                });
+        if provider.is_none() {
+            continue;
+        }
+        let (model, effort, tier) = supported_settings(
+            previous.model.as_ref(),
+            previous.effort.as_deref(),
+            previous.service_tier.as_deref(),
+            provider,
+            models,
+            !errors.is_empty(),
+        );
+        if (model, effort, tier)
+            != (
+                previous.model.as_ref(),
+                previous.effort.as_deref(),
+                previous.service_tier.as_deref(),
+            )
+        {
+            let draft = shared_mut(&mut next, key).expect("draft came from this map");
+            draft.model = model.cloned();
+            draft.effort = effort.map(str::to_owned);
+            draft.service_tier = tier.map(str::to_owned);
+        }
+    }
+    next
+}
+
 pub(crate) fn supported_settings<'a>(
     selected_model: Option<&'a crate::models::ModelRef>,
     selected_effort: Option<&'a str>,
@@ -1051,6 +1092,14 @@ fn submission(
     client_user_message_id: agent_protocol::ids::ClientInputId,
     clear_draft: Option<Arc<Draft>>,
 ) -> (Snapshot, Vec<Effect>) {
+    let provider =
+        crate::presentation::model_settings::draft_provider(&draft_key, draft.model.as_ref())
+            .or_else(|| previous.model_provider_for_draft(draft_key.clone()));
+    if thread_id.is_none() && provider.is_none() {
+        let mut next = previous.clone();
+        next.error = Some("利用可能なエージェントを選択してください。".into());
+        return (next, Vec::new());
+    }
     let mut next = previous.clone();
     next.error = None;
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
@@ -1099,10 +1148,7 @@ fn submission(
             draft,
         }),
         None => Effect::execute(op::StartSubmission {
-            provider: crate::presentation::model_settings::draft_provider(
-                &draft_key,
-                draft.model.as_ref(),
-            ),
+            provider: provider.expect("new submission has a provider"),
             draft_key,
             cwd: (!previous.navigation.cwd.trim().is_empty())
                 .then(|| previous.navigation.cwd.clone()),

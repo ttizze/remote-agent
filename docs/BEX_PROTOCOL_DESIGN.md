@@ -24,6 +24,14 @@ Host と core は同じ純粋な更新関数を利用し、それぞれ自分の
 native history は履歴の正本とする。Host に会話 DB、永続イベントログ、replay 基盤は追加しない。
 実行中の情報と配送証拠は native history だけでは判断できないため、Host が所有する。
 
+Host は起動済み adapter を opaque な `Backend` として受け取り、具体的な Codex のプロセス、
+アカウント保存形式、要求・回答の JSON を保持しない。Codex の実装は `adapters/codex/` に閉じる。
+音声入力だけは Codex の realtime 転写を直接使う。送信先の情報も adapter と音声入力の所有者が返す。
+
+新規会話の自動選択は、認証済みでモデル一覧を利用できる provider の一覧と既定モデルから core が決める。
+一覧が未取得、または利用可能な provider がない場合は未選択を保ち、送信時にも入力を失わない。
+高速サービスの native ID は adapter が `ServiceTier.fast` に変換し、core とクライアントはその値で判断する。
+
 ## 2. ID は構造を保つ
 
 ```rust

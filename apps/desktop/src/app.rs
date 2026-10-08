@@ -1377,9 +1377,13 @@ impl Desktop {
             return;
         };
         let cwd = self.snapshot.selected_directory();
-        let provider = self
+        let Some(provider) = self
             .snapshot
-            .model_provider_for_draft(self.draft_key().clone());
+            .model_provider_for_draft(self.draft_key().clone())
+        else {
+            self.error = "利用可能なエージェントを選択してください。".into();
+            return;
+        };
         let prompt = format!("次の選択範囲について詳しく説明してください。\n\n{text}");
         self.busy += 1;
         self.effect(

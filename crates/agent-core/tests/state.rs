@@ -495,7 +495,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
     let models = serde_json::from_value::<Vec<agent_protocol::models::Model>>(json!([{
         "id":"model", "model":{"provider": "codex", "id": "model"}, "displayName":"Model",
         "defaultReasoningEffort":"high", "supportedReasoningEfforts":[{"reasoningEffort":"high"}],
-        "defaultServiceTier":"priority", "serviceTiers":[{"id":"priority"}], "isDefault":true
+        "defaultServiceTier":"priority", "serviceTiers":[{"id":"priority","fast":true}], "isDefault":true
     }]))
     .unwrap();
     for catalog_first in [false, true] {
@@ -913,7 +913,7 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         let catalog = serde_json::from_value(json!({"data":[{
             "id":"codex-model","model":{"provider": "codex", "id": "codex-model"},"displayName":"Codex",
             "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}],
-            "serviceTiers":[{"id":"priority"}]
+            "serviceTiers":[{"id":"priority","fast":true}]
         }]})).unwrap();
         op::LoadModels {}.apply(&mut state, catalog);
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);

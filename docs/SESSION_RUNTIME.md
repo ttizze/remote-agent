@@ -47,7 +47,7 @@ Codex and Claude Code are the supported providers.
 
 Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong
-to `host_rpc/codex.rs`. Clients request normalized history pages; core joins
+to `adapters/codex/`. Clients request normalized history pages; core joins
 them to the current window without interpreting native cursors. Native request sources own their answer mappings and
 send resources; the Host validates normalized answers and arbitrates delivery.
 Accounts accept account commands and return account results, without a generic

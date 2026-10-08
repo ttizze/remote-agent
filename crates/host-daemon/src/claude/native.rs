@@ -542,7 +542,7 @@ mod tests {
                 if array_content {
                     parts.push(json!({"type":"image","url":"https://example.invalid/image.png"}));
                 }
-                let codex = crate::host_rpc::native::codex_item(json!({
+                let codex = crate::adapters::codex::native::parse_item(json!({
                     "type":"userMessage","id":"human","clientId":"human","content":parts,
                 })).unwrap();
                 prop_assert_eq!(input, Some(codex));
@@ -663,12 +663,12 @@ mod tests {
             ItemStatus::Unknown,
         )
         .unwrap();
-        let codex_command = crate::host_rpc::native::codex_item(json!({
+        let codex_command = crate::adapters::codex::native::parse_item(json!({
             "type":"commandExecution","id":"command","status":"failed","command":"false",
             "cwd":"/work","aggregatedOutput":"failed","exitCode":7,
         }))
         .unwrap();
-        let codex_answer = crate::host_rpc::native::codex_item(json!({
+        let codex_answer = crate::adapters::codex::native::parse_item(json!({
             "type":"agentMessage","id":"answer","status":"completed","text":"finished","phase":"final_answer",
         })).unwrap();
         assert_eq!(command, codex_command);

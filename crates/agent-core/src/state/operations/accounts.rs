@@ -36,6 +36,14 @@ impl Operation for ListAccounts {
                 })
             })
             .collect();
+        if !snapshot.models.is_empty() {
+            snapshot.drafts = normalized_model_drafts(
+                &snapshot.drafts,
+                &snapshot.models,
+                &snapshot.model_errors,
+                Some(&output.selected),
+            );
+        }
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(output));
         effects
     }
@@ -150,7 +158,7 @@ impl Operation for SelectAccountForDraft {
                     .iter()
                     .any(|model| model.model.provider == provider)
                 {
-                    if previous_provider != provider {
+                    if previous_provider != Some(provider) {
                         let defaults = snapshot.model_defaults_for_cwd(&snapshot.navigation.cwd);
                         let settings = defaults
                             .providers
@@ -295,6 +303,62 @@ mod account_model_tests {
     use super::*;
     use serde_json::json;
 
+    #[rstest::rstest]
+    fn catalogs_and_accounts_can_arrive_in_either_order(#[values(true, false)] models_first: bool) {
+        let mut snapshot = Snapshot::default();
+        let key = snapshot.navigation.draft_key.clone();
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            key.clone(),
+            Arc::new(Draft {
+                text: "keep this input".into(),
+                ..Default::default()
+            }),
+        );
+        let explicit_key = DraftKey::from("explicit");
+        let explicit = Arc::new(Draft {
+            model: Some(crate::models::ModelRef {
+                provider: crate::session::ProviderKind::Codex,
+                id: "gpt".into(),
+            }),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        Arc::make_mut(&mut snapshot.drafts).insert(explicit_key.clone(), explicit.clone());
+        let accounts: rpc::Accounts = serde_json::from_value(json!({
+            "accounts":[{"id":"b","provider":"claude"}], "selected":{"claude":"b"}
+        }))
+        .unwrap();
+        let models: rpc::ModelPage = serde_json::from_value(json!({"data":[
+            {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
+            {"id":"sonnet","model":{"provider":"claude","id":"sonnet"},"displayName":"Sonnet","isDefault":true,"defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+        ]})).unwrap();
+        if models_first {
+            LoadModels {}.apply(
+                &mut snapshot,
+                rpc::ModelPage {
+                    data: models.data.clone(),
+                    next_cursor: None,
+                    provider_errors: None,
+                },
+            );
+        } else {
+            ListAccounts {}.apply(&mut snapshot, accounts.clone());
+        }
+        assert!(snapshot.model_provider_for_draft(key.clone()).is_none());
+        assert_eq!(snapshot.drafts[&explicit_key], explicit);
+        if models_first {
+            ListAccounts {}.apply(&mut snapshot, accounts);
+        } else {
+            LoadModels {}.apply(&mut snapshot, models);
+        }
+        assert_eq!(
+            snapshot.model_provider_for_draft(key.clone()),
+            Some(crate::session::ProviderKind::Claude)
+        );
+        assert_eq!(snapshot.drafts[&key].text, "keep this input");
+        assert_eq!(snapshot.drafts[&explicit_key], explicit);
+    }
+
     #[test]
     fn usage_updates_only_its_account_and_survives_list_refresh() {
         let mut snapshot = Snapshot::default();
@@ -372,7 +436,7 @@ mod account_model_tests {
             "accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"},{"id":"claude:c","provider":"claude"}],
             "selected":{"codex":"a","claude":"claude:c"}
         })).unwrap()));
-        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
+        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast","fast":true}]})).unwrap();
         let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
         snapshot.models = Arc::new(vec![codex.clone(), claude.clone()]);
         Arc::make_mut(&mut snapshot.drafts).insert(

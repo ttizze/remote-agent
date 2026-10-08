@@ -52,22 +52,20 @@ impl Operation for Dictate {
             return self.stale(snapshot, output);
         }
         let (mut draft, output) = output;
-        let Self {
-            draft_key,
-            client_user_message_id,
-            ..
-        } = self;
         let clear_draft = draft.clone();
         append_transcript(&mut Arc::make_mut(&mut draft).text, &output.text);
         let (next, effects) = submission(
             snapshot,
             snapshot.navigation.thread_id.clone(),
-            draft_key,
+            self.draft_key.clone(),
             draft,
-            client_user_message_id,
-            Some(clear_draft),
+            self.client_user_message_id.clone(),
+            Some(clear_draft.clone()),
         );
         *snapshot = next;
+        if effects.is_empty() {
+            return self.stale(snapshot, (clear_draft, output));
+        }
         effects
     }
     fn stale(self, snapshot: &mut Snapshot, (_, output): Self::Output) -> Vec<Effect> {
@@ -378,5 +376,49 @@ impl Operation for UploadAttachment {
         self.attachment.path = path;
         add_attachment(snapshot, self.draft_key, self.attachment);
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod dictation_tests {
+    use super::*;
+
+    #[rstest::rstest]
+    fn transcription_stays_in_the_current_draft_without_an_available_agent(
+        #[values(true, false)] send: bool,
+    ) {
+        let mut snapshot = Snapshot::default();
+        let draft_key = snapshot.navigation.draft_key.clone();
+        let operation = Dictate {
+            draft_key: draft_key.clone(),
+            preparation: None,
+            audio: vec![],
+            send,
+            client_user_message_id: "voice".into(),
+        };
+        let captured = operation.capture(&snapshot).unwrap();
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            draft_key.clone(),
+            Arc::new(Draft {
+                text: "typed while recording".into(),
+                ..Default::default()
+            }),
+        );
+        let effects = operation.apply(
+            &mut snapshot,
+            (
+                captured,
+                rpc::Transcription {
+                    text: "recognized speech".into(),
+                },
+            ),
+        );
+        assert!(effects.is_empty());
+        assert!(snapshot.pending_submissions.is_empty());
+        assert_eq!(
+            snapshot.drafts[&draft_key].text,
+            "typed while recording\nrecognized speech"
+        );
+        assert_eq!(snapshot.error.is_some(), send);
     }
 }

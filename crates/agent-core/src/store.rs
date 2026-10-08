@@ -1436,7 +1436,18 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
-        let store = Store::offline(Snapshot::default());
+        let mut initial = Snapshot::default();
+        Arc::make_mut(&mut initial.drafts).insert(
+            initial.navigation.draft_key.clone(),
+            Arc::new(crate::state::Draft {
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Claude,
+                    id: "model".into(),
+                }),
+                ..Default::default()
+            }),
+        );
+        let store = Store::offline(initial);
         let draft_key = store.snapshot().navigation.draft_key.clone();
         store
             .dispatch(Intent::SetDraftText {

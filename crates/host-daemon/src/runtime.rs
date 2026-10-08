@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(config: StartupConfig) -> Result<()> {
-    // Reserve the shared instance before provisioning keys or launching Codex.
+    // Reserve the shared instance before provisioning keys or launching providers.
     let lease = tokio::task::spawn_blocking(move || {
         if config.isolated {
             HostLease::isolated(
@@ -53,43 +53,41 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     let endpoint = Endpoint::bind(credentials.host_identity().await, relays)
         .await
         .context("cannot bind Host endpoint")?;
-    let app_server_config = codex_app_server::AppServerConfig {
-        program: config.codex,
-        codex_home: config.codex_home,
-        ..Default::default()
-    };
-    let projects = ProjectStore::new(directory.join("bex-worktrees.json"));
-    let app_server = codex_app_server::CodexAppServer::spawn(app_server_config.clone())
-        .await
-        .map(Arc::new)
-        .map_err(|error| error.to_string());
-    if let Err(error) = &app_server {
-        tracing::error!(target: "bex", operation = "host.codex", message = %error);
-    }
     let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
-    let service = HostRpcService::new(app_server.clone(), projects);
+    let codex = host_daemon::adapters::codex::Codex::spawn(
+        host_daemon::adapters::codex::Config {
+            program: config.codex,
+            codex_home: config.codex_home,
+            ..Default::default()
+        },
+        account_directory.join("codex-accounts"),
+    )
+    .await;
+    let claude = match host_daemon::adapters::Claude::load(
+        config.claude,
+        account_directory.join("claude"),
+        config.claude_home,
+    )
+    .await
+    {
+        Ok(adapter) => adapter.into(),
+        Err(error) => {
+            tracing::error!(target: "bex", operation = "host.claude", message = %error);
+            host_daemon::adapters::Backend::unavailable(
+                agent_protocol::session::ProviderKind::Claude,
+                error,
+            )
+        }
+    };
+    let service = HostRpcService::new(
+        [codex.into(), claude],
+        ProjectStore::new(directory.join("bex-worktrees.json")),
+    );
     #[cfg(unix)]
     service
         .enable_browser(directory.join("browser"))
         .await
         .map_err(anyhow::Error::msg)?;
-    if let Err(error) = service
-        .enable_claude(
-            config.claude,
-            account_directory.join("claude"),
-            config.claude_home,
-        )
-        .await
-    {
-        tracing::error!(target:"bex", operation="host.claude", message=%error);
-    }
-    if app_server.is_ok()
-        && let Err(error) = service
-            .enable_accounts(account_directory.join("codex-accounts"), app_server_config)
-            .await
-    {
-        tracing::error!(target:"bex", operation="host.codex.accounts", message=%error);
-    }
     service.start();
     let local_ticket = endpoint.local_ticket();
     let runtime = Arc::new(
@@ -132,12 +130,6 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         }
     };
     drop(runtime);
-    if let Ok(app_server) = app_server {
-        app_server
-            .shutdown()
-            .await
-            .context("cannot shut down Codex app server")?;
-    }
     drop(lease);
     result
 }

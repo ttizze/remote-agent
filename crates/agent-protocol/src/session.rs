@@ -12,6 +12,15 @@ pub enum ProviderKind {
     Claude,
 }
 
+impl ProviderKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+}
+
 /// A native provider ID, scoped by provider. Paths and abbreviated IDs are not
 /// resolved here; only the provider adapter can resolve a native session.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

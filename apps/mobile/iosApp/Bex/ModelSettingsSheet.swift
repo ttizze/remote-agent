@@ -36,19 +36,17 @@ struct ModelSettingsScreen: View {
         scope != nil
     }
 
-    private var preferences: ProviderModelDefaults {
+    private func preferences(_ provider: ProviderKind) -> ProviderModelDefaults {
         model.snapshot.providerModelDefaults(scope: scope ?? .global, provider: provider)
     }
 
-    private var provider: ProviderKind {
-        if defaults || model.isNewThread, let providerOverride {
-            return providerOverride
-        }
-        return defaults ? .codex : model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
+    private var provider: ProviderKind? {
+        (defaults || model.isNewThread ? providerOverride : nil)
+            ?? model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
     }
 
     private var selectedModel: ModelRef? {
-        defaults ? preferences.model : model.selectedModel
+        defaults ? provider.flatMap { preferences($0).model } : model.selectedModel
     }
 
     private var disabled: Bool {
@@ -93,7 +91,7 @@ struct ModelSettingsScreen: View {
                         .padding(.bottom, 12)
                     }
                     Divider()
-                    if defaults {
+                    if defaults, let provider {
                         Text(provider == .codex ? "Codex のデフォルト" : "Claude のデフォルト")
                             .font(.headline).padding(.horizontal, 12).padding(.vertical, 8)
                     }
@@ -141,74 +139,83 @@ struct ModelSettingsScreen: View {
             search = ""
         }
     }
+}
 
+extension ModelSettingsScreen {
     @ViewBuilder
     private var quickControls: some View {
-        let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global, provider: provider)
-            : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
-        if defaults || selectedModel?.provider == provider, !controls.efforts.isEmpty || controls.toggleFastTo != nil {
-            Divider()
-            HStack(spacing: 16) {
-                if !controls.efforts.isEmpty {
-                    let effort = defaults ? preferences.effort ?? "自動" : controls.effort
-                    Menu {
-                        Picker("思考の深さ", selection: Binding<String?>(get: {
-                            defaults ? preferences.effort : controls.effort
-                        }, set: { value in
-                            if let scope {
-                                model.perform(.selectDefaultEffort(scope: scope, provider: provider, effort: value))
-                            } else if let value {
-                                model.chooseEffort(value)
+        if let provider {
+            let preferences = preferences(provider)
+            let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global, provider: provider)
+                : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
+            if defaults || selectedModel?.provider == provider,
+               !controls.efforts.isEmpty || controls.toggleFastTo != nil {
+                Divider()
+                HStack(spacing: 16) {
+                    if !controls.efforts.isEmpty {
+                        let effort = defaults ? preferences.effort ?? "自動" : controls.effort
+                        Menu {
+                            Picker("思考の深さ", selection: Binding<String?>(get: {
+                                defaults ? preferences.effort : controls.effort
+                            }, set: { value in
+                                if let scope {
+                                    model.perform(.selectDefaultEffort(scope: scope, provider: provider, effort: value))
+                                } else if let value {
+                                    model.chooseEffort(value)
+                                }
+                            })) {
+                                if defaults {
+                                    Text("自動").tag(String?.none)
+                                }
+                                ForEach(controls.efforts, id: \.self) { Text($0).tag(Optional($0)) }
                             }
-                        })) {
-                            if defaults {
-                                Text("自動").tag(String?.none)
-                            }
-                            ForEach(controls.efforts, id: \.self) { Text($0).tag(Optional($0)) }
+                            .pickerStyle(.inline).labelsHidden()
+                        } label: {
+                            ModelControlLabel(value: effort, icon: ReasoningStrengthIcon(level: controls.effortLevel,
+                                                                                         count: controls.efforts.count))
                         }
-                        .pickerStyle(.inline).labelsHidden()
-                    } label: {
-                        ModelControlLabel(value: effort, icon: ReasoningStrengthIcon(level: controls.effortLevel,
-                                                                                     count: controls.efforts.count))
+                        .accessibilityLabel("思考の深さ")
+                        .accessibilityIdentifier("model.sheet.effort")
+                        .accessibilityValue(effort)
+                        .disabled(disabled)
                     }
-                    .accessibilityLabel("思考の深さ")
-                    .accessibilityIdentifier("model.sheet.effort")
-                    .accessibilityValue(effort)
-                    .disabled(disabled)
-                }
-                if let tier = controls.fastServiceTier {
-                    let value = defaults && preferences.serviceTier == nil ? "自動" : controls.fast ? "高速" : "通常"
-                    Menu {
-                        Picker("速度", selection: Binding<String?>(get: {
-                            defaults ? preferences.serviceTier : controls.fast ? tier : "default"
-                        }, set: { value in
-                            if let scope {
-                                model.perform(.selectDefaultServiceTier(
-                                    scope: scope,
-                                    provider: provider,
-                                    serviceTier: value
-                                ))
-                            } else if let value {
-                                model.chooseServiceTier(value)
+                    if let tier = controls.fastServiceTier {
+                        let value = defaults && preferences.serviceTier == nil ? "自動" : controls.fast ? "高速" : "通常"
+                        Menu {
+                            Picker("速度", selection: Binding<String?>(get: {
+                                defaults ? preferences.serviceTier : controls.fast ? tier : "default"
+                            }, set: { value in
+                                if let scope {
+                                    model.perform(.selectDefaultServiceTier(
+                                        scope: scope,
+                                        provider: provider,
+                                        serviceTier: value
+                                    ))
+                                } else if let value {
+                                    model.chooseServiceTier(value)
+                                }
+                            })) {
+                                if defaults {
+                                    Text("自動").tag(String?.none)
+                                }
+                                Text("通常").tag(Optional("default"))
+                                Text("高速").tag(Optional(tier))
                             }
-                        })) {
-                            if defaults {
-                                Text("自動").tag(String?.none)
-                            }
-                            Text("通常").tag(Optional("default"))
-                            Text("高速").tag(Optional(tier))
+                            .pickerStyle(.inline).labelsHidden()
+                        } label: {
+                            ModelControlLabel(
+                                value: value,
+                                icon: Image(systemName: controls.fast ? "bolt.fill" : "bolt")
+                            )
                         }
-                        .pickerStyle(.inline).labelsHidden()
-                    } label: {
-                        ModelControlLabel(value: value, icon: Image(systemName: controls.fast ? "bolt.fill" : "bolt"))
+                        .accessibilityLabel("速度")
+                        .accessibilityIdentifier(defaults ? "model.defaults.speed" : "model.sheet.fast")
+                        .accessibilityValue(value).disabled(disabled)
                     }
-                    .accessibilityLabel("速度")
-                    .accessibilityIdentifier(defaults ? "model.defaults.speed" : "model.sheet.fast")
-                    .accessibilityValue(value).disabled(disabled)
                 }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12).padding(.top, 4)
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12).padding(.top, 4)
         }
     }
 
@@ -226,7 +233,7 @@ struct ModelSettingsScreen: View {
         let choices = model.snapshot.modelsMatching(provider: provider, query: search)
         ScrollView {
             LazyVStack(spacing: 0) {
-                if defaults {
+                if defaults, let provider {
                     Button {
                         if let scope {
                             model.perform(.selectDefaultModel(scope: scope, provider: provider, model: nil))
@@ -245,7 +252,11 @@ struct ModelSettingsScreen: View {
                 ForEach(choices, id: \.model) { choice in
                     Button {
                         if let scope {
-                            model.perform(.selectDefaultModel(scope: scope, provider: provider, model: choice.model))
+                            model.perform(.selectDefaultModel(
+                                scope: scope,
+                                provider: choice.model.provider,
+                                model: choice.model
+                            ))
                         } else {
                             model.chooseModel(choice.model)
                         }
@@ -283,7 +294,7 @@ struct ModelSettingsScreen: View {
 }
 
 private struct ModelAgentRail: View {
-    let provider: ProviderKind
+    let provider: ProviderKind?
     let disabled: Bool
     let select: (ProviderKind) -> Void
 

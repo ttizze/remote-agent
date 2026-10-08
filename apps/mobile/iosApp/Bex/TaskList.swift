@@ -105,7 +105,7 @@ struct ThreadsScreen: View {
 
             if model.threadLoadState == .ready, (model.list?.projects ?? []).isEmpty {
                 Section {
-                    Text("Codexに登録されたプロジェクトはありません")
+                    Text("登録されたプロジェクトはありません")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .taskListRowStyle()

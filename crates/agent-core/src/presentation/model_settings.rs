@@ -9,13 +9,28 @@ use agent_protocol::operations::UsageWindow;
 pub(crate) fn draft_provider(
     key: &crate::state::DraftKey,
     model: Option<&ModelRef>,
-) -> ProviderKind {
+) -> Option<ProviderKind> {
     match key {
-        crate::state::DraftKey::Session { session } => session.provider,
-        crate::state::DraftKey::Local { .. } => model
-            .map(|model| model.provider)
-            .unwrap_or(ProviderKind::Codex),
+        crate::state::DraftKey::Session { session } => Some(session.provider),
+        crate::state::DraftKey::Local { .. } => model.map(|model| model.provider),
     }
+}
+
+pub(crate) fn automatic_provider(
+    models: &[Model],
+    selected_accounts: Option<&std::collections::HashMap<ProviderKind, String>>,
+    errors: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ProviderKind> {
+    let selected_accounts = selected_accounts?;
+    let mut available = models.iter().filter(|model| {
+        let provider = model.model.provider;
+        !errors.contains_key(provider.key()) && selected_accounts.contains_key(&provider)
+    });
+    available
+        .clone()
+        .find(|model| model.is_default == Some(true))
+        .or_else(|| available.next())
+        .map(|model| model.model.provider)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,13 +169,26 @@ impl Snapshot {
         )
     }
 
-    pub fn model_provider_for_draft(&self, thread_id: crate::state::DraftKey) -> ProviderKind {
+    pub fn model_provider_for_draft(
+        &self,
+        thread_id: crate::state::DraftKey,
+    ) -> Option<ProviderKind> {
         draft_provider(
             &thread_id,
             self.drafts
                 .get(&thread_id)
                 .and_then(|draft| draft.model.as_ref()),
         )
+        .or_else(|| {
+            automatic_provider(
+                &self.models,
+                self.account
+                    .accounts
+                    .as_ref()
+                    .map(|accounts| &accounts.selected),
+                &self.model_errors,
+            )
+        })
     }
 
     pub fn models_matching(&self, provider: Option<ProviderKind>, query: String) -> Vec<Model> {
@@ -274,7 +302,7 @@ fn quick_controls(
         .as_deref()
         .unwrap_or_default()
         .iter()
-        .find(|tier| matches!(tier.id.as_str(), "priority" | "fast"));
+        .find(|tier| tier.fast);
     let fast = fast_tier.is_some_and(|fast| fast.id == tier);
     ModelQuickControls {
         efforts,
@@ -298,6 +326,127 @@ mod tests {
     use crate::state::Draft;
     use std::sync::Arc;
 
+    #[test]
+    fn automatic_provider_uses_catalog_defaults_and_speed_uses_metadata() {
+        use serde_json::json;
+        let mut models: Vec<Model> = serde_json::from_value(json!([
+            {"id":"first","model":{"provider":"codex","id":"first"},"displayName":"First",
+             "defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false},
+            {"id":"preferred","model":{"provider":"claude","id":"preferred"},"displayName":"Preferred",
+             "defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":true,
+             "serviceTiers":[{"id":"express","fast":true},{"id":"priority","fast":false}]}
+        ])).unwrap();
+        let errors = serde_json::Map::new();
+        let selected = [
+            (ProviderKind::Codex, "codex-account".into()),
+            (ProviderKind::Claude, "claude-account".into()),
+        ]
+        .into();
+        assert_eq!(automatic_provider(&models, None, &errors), None);
+        assert_eq!(
+            automatic_provider(&models, Some(&selected), &errors),
+            Some(ProviderKind::Claude)
+        );
+        let controls = quick_controls(Some(&models[1]), None, Some("express"));
+        assert!(controls.fast);
+        assert_eq!(controls.toggle_fast_to.as_deref(), Some("default"));
+        let controls = quick_controls(Some(&models[1]), None, Some("priority"));
+        assert!(!controls.fast);
+        assert_eq!(controls.toggle_fast_to.as_deref(), Some("express"));
+        models[1].is_default = Some(false);
+        assert_eq!(
+            automatic_provider(&models, Some(&selected), &errors),
+            Some(ProviderKind::Codex)
+        );
+        assert_eq!(
+            automatic_provider(&models, Some(&std::collections::HashMap::new()), &errors),
+            None
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn automatic_new_chats_use_the_authenticated_available_provider(
+            provider in proptest::sample::select(vec![ProviderKind::Codex, ProviderKind::Claude]),
+            failed in proptest::bool::ANY,
+            reversed in proptest::bool::ANY,
+        ) {
+            use crate::state::{Event, Intent, reduce};
+            use serde_json::json;
+            let other = if provider == ProviderKind::Codex { ProviderKind::Claude } else { ProviderKind::Codex };
+            let mut models: Vec<Model> = serde_json::from_value(json!([
+                {"id":"other", "model":{"provider":other,"id":"other"},"isDefault":true,"displayName":"Other","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
+                {"id":"available", "model":{"provider":provider,"id":"available"},"isDefault":true,"displayName":"Available","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+            ])).unwrap();
+            if reversed { models.reverse(); }
+            let selected = [(provider, "account".into())].into();
+            let errors = if failed { serde_json::Map::from_iter([(other.key().into(), json!({"message":"offline"}))]) } else { serde_json::Map::new() };
+            proptest::prop_assert_eq!(automatic_provider(&models, Some(&selected), &errors), Some(provider));
+            let snapshot = Snapshot {
+                models: Arc::new(models),
+                model_errors: Arc::new(errors),
+                account: Arc::new(crate::state::AccountState {
+                    accounts: Some(Arc::new(agent_protocol::operations::Accounts {
+                        accounts: Vec::new(), selected, error: None,
+                    })),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let (next, _) = reduce(&snapshot, Event::Intent(Intent::NewChat { cwd: "/project".into() }));
+            let key = crate::state::DraftKey::from("new:/project");
+            proptest::prop_assert_eq!(next.model_provider_for_draft(key.clone()), Some(provider));
+            proptest::prop_assert_eq!(next.drafts[&key].model.as_ref().unwrap().provider, provider);
+            proptest::prop_assert!(snapshot.drafts.is_empty());
+        }
+    }
+
+    #[test]
+    fn absent_or_failed_providers_preserve_unsent_input() {
+        use crate::state::{Event, Intent, reduce};
+        use serde_json::json;
+        for catalog in [
+            json!([]),
+            json!([{"id":"failed","model":{"provider":"claude","id":"failed"},"displayName":"Failed","defaultReasoningEffort":"","supportedReasoningEfforts":[]}]),
+        ] {
+            let snapshot = Snapshot {
+                models: Arc::new(serde_json::from_value(catalog).unwrap()),
+                model_errors: Arc::new(serde_json::Map::from_iter([(
+                    "claude".into(),
+                    json!({"message":"offline"}),
+                )])),
+                ..Default::default()
+            };
+            let (snapshot, _) = reduce(
+                &snapshot,
+                Event::Intent(Intent::NewChat {
+                    cwd: "/project".into(),
+                }),
+            );
+            let key = snapshot.navigation.draft_key.clone();
+            let (snapshot, _) = reduce(
+                &snapshot,
+                Event::Intent(Intent::SetDraftText {
+                    thread_id: key.clone(),
+                    text: "keep this input".into(),
+                }),
+            );
+            assert_eq!(snapshot.model_provider_for_draft(key.clone()), None);
+            assert!(snapshot.permission_control(&key).load_request.is_none());
+            let (next, effects) = reduce(
+                &snapshot,
+                Event::Intent(Intent::Submit {
+                    thread_id: None,
+                    client_user_message_id: "input".into(),
+                }),
+            );
+            assert!(effects.is_empty());
+            assert!(next.pending_submissions.is_empty());
+            assert_eq!(next.drafts[&key].text, "keep this input");
+            assert!(next.error.is_some());
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn identical_native_model_ids_keep_provider_choices_and_controls_separate(suffix in "[a-zA-Z0-9:_-]{1,40}") {
@@ -315,7 +464,7 @@ mod tests {
                 let selected = ModelRef { provider, id: id.clone() };
                 for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { provider, id: "session".into() }.into()] {
                     Arc::make_mut(&mut snapshot.drafts).insert(key.clone(), Arc::new(Draft {model:Some(selected.clone()),..Default::default()}));
-                    proptest::prop_assert_eq!(snapshot.model_provider_for_draft(key.clone()), provider);
+                    proptest::prop_assert_eq!(snapshot.model_provider_for_draft(key.clone()), Some(provider));
                     proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));
                     proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort, effort);
                 }
@@ -355,7 +504,7 @@ mod tests {
         let mut snapshot = Snapshot { models: Arc::new(serde_json::from_value(serde_json::json!([
             {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium",
              "supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-             "serviceTiers":[{"id":"priority"}]},
+             "serviceTiers":[{"id":"priority","fast":true}]},
             {"id":"claude:haiku","model":{"provider": "claude", "id": "haiku"},"displayName":"Haiku","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
         ])).unwrap()), ..Default::default() };
         Arc::make_mut(&mut snapshot.drafts).insert(

@@ -64,7 +64,7 @@ impl Browser {
         mcp::listen(&browser)?;
         Ok(browser)
     }
-    // Codex assigns the thread ID after accepting its MCP configuration.
+    // A provider can assign the session ID after accepting its MCP configuration.
     // Bind that startup scope before the first turn can run. Resume uses the ID directly.
     pub async fn bind_scope(&self, scope: String, thread: String) {
         self.state.lock().await.aliases.insert(scope, thread);

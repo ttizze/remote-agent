@@ -1,6 +1,12 @@
 //! Codex native protocol boundary: execution operations, one shared process,
 //! ordered request completion, native cursors and deferred item reads.
-use super::service::Failure;
+pub(crate) mod accounts;
+mod composer;
+pub(crate) mod native;
+mod permissions;
+mod usage;
+
+use crate::host_rpc::service::Failure;
 use agent_protocol::{
     models::{Item, ThreadResponse},
     operations as op,
@@ -30,7 +36,7 @@ struct ThreadListParams<'a> {
     pub cursor: Option<String>,
 }
 
-use super::agent::{
+use crate::host_rpc::agent::{
     Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionPage, SessionSummary,
     SubmissionState, emit, session_pages,
 };
@@ -41,14 +47,14 @@ use tokio::sync::broadcast;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct Page<T> {
+struct Page<T> {
     pub data: Vec<T>,
     pub next_cursor: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryItem {
-    #[serde(deserialize_with = "super::native::deserialize_item")]
+    #[serde(deserialize_with = "native::deserialize_item")]
     pub item: Arc<Item>,
     pub turn_id: Option<String>,
 }
@@ -61,8 +67,8 @@ fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) ->
             )
 }
 
-pub(super) struct Codex {
-    accounts: Arc<tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>>,
+pub struct Codex {
+    accounts: Arc<tokio::sync::Mutex<Option<crate::adapters::codex::accounts::Accounts>>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     directory: PathBuf,
     instance: uuid::Uuid,
@@ -70,8 +76,38 @@ pub(super) struct Codex {
     stopped: tokio_util::sync::CancellationToken,
     processed: tokio::sync::watch::Sender<u64>,
 }
+pub use codex_app_server::AppServerConfig as Config;
+
+impl From<Codex> for super::Backend {
+    fn from(agent: Codex) -> Self {
+        let dictation =
+            crate::dictation::Dictation::new(agent.process.clone(), agent.stopped.clone());
+        Self {
+            provider: ProviderKind::Codex,
+            agent: Ok(Arc::new(agent)),
+            dictation: Some(dictation),
+        }
+    }
+}
+
 impl Codex {
-    pub(super) fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
+    pub async fn spawn(config: Config, account_directory: PathBuf) -> Self {
+        let process = CodexAppServer::spawn(config.clone())
+            .await
+            .map(Arc::new)
+            .map_err(|error| error.to_string());
+        if let Err(error) = &process {
+            tracing::error!(target: "bex", operation = "host.codex", message = %error);
+        }
+        let available = process.is_ok();
+        let adapter = Self::new(process);
+        if available && let Err(error) = adapter.enable_accounts(account_directory, config).await {
+            tracing::error!(target: "bex", operation = "host.codex.accounts", message = %error);
+        }
+        adapter
+    }
+
+    pub fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
         let directory = process
             .as_ref()
             .ok()
@@ -92,12 +128,12 @@ impl Codex {
             processed: tokio::sync::watch::channel(0).0,
         }
     }
-    pub(super) async fn enable_accounts(
+    pub async fn enable_accounts(
         &self,
         directory: PathBuf,
         config: codex_app_server::AppServerConfig,
     ) -> Result<(), String> {
-        let accounts = crate::codex_accounts::Accounts::load(
+        let accounts = crate::adapters::codex::accounts::Accounts::load(
             directory,
             config,
             self.server().map_err(|error| error.to_string())?,
@@ -142,8 +178,7 @@ impl Codex {
         method: &str,
         params: &P,
     ) -> Result<ThreadResponse, Failure> {
-        super::native::codex_thread_response(self.request(method, params).await?)
-            .map_err(Into::into)
+        native::parse_thread_response(self.request(method, params).await?).map_err(Into::into)
     }
 
     async fn wait_for_events(&self, sequence: u64) -> Result<(), Failure> {
@@ -219,7 +254,7 @@ impl Codex {
         let mut turns = page
             .data
             .into_iter()
-            .map(super::native::codex_turn)
+            .map(native::parse_turn)
             .map(|turn| turn.map(Arc::new))
             .collect::<Result<Vec<_>, _>>()?;
         if turns.iter().any(|turn| {
@@ -262,7 +297,7 @@ impl Codex {
 
 fn native_failure(native: &serde_json::value::RawValue) -> Failure {
     let value: Value = serde_json::from_str(native.get()).unwrap_or_default();
-    let mut execution = super::native::codex_error(&value, false);
+    let mut execution = native::execution_error(&value, false);
     execution.message = agent_transport::diagnostics::sanitize(&execution.message);
     if execution.message.trim().is_empty() {
         execution.message = "接続先で操作に失敗しました。もう一度お試しください。".into();
@@ -308,17 +343,17 @@ fn notification_change(
     let turn_id: agent_protocol::ids::TurnId = value["turnId"].as_str().unwrap_or_default().into();
     let change = match method {
         "thread/status/changed" => SessionChange::Status {
-            status: super::native::session_status(&value["status"]),
+            status: native::session_status(&value["status"]),
         },
         "turn/started" | "turn/completed" => {
-            let turn = super::native::codex_turn(value["turn"].clone())?;
+            let turn = native::parse_turn(value["turn"].clone())?;
             SessionChange::Turn {
                 turn,
                 completed: method == "turn/completed",
             }
         }
         "item/started" | "item/completed" => {
-            let mut item = super::native::codex_item(value["item"].clone())?;
+            let mut item = native::parse_item(value["item"].clone())?;
             if item.status == agent_protocol::execution::ItemStatus::Unknown {
                 item.status = if method == "item/completed" {
                     agent_protocol::execution::ItemStatus::Completed
@@ -341,7 +376,7 @@ fn notification_change(
             } else {
                 SessionChange::Item {
                     turn_id,
-                    item: super::native::approval_review(
+                    item: native::approval_review(
                         id,
                         &value["review"],
                         &value["action"],
@@ -381,7 +416,7 @@ fn notification_change(
         },
         "error" => SessionChange::Error {
             turn_id,
-            error: super::native::codex_error(&value["error"], value["willRetry"] == true),
+            error: native::execution_error(&value["error"], value["willRetry"] == true),
         },
         _ => return Ok(None),
     };
@@ -392,7 +427,7 @@ fn notification_change(
 }
 
 /// Provider-specific notifications end at this adapter boundary.
-pub(super) fn event_change(
+pub(crate) fn event_change(
     instance: uuid::Uuid,
     message: &RpcMessage<'_>,
 ) -> Result<Option<AgentChange>, String> {
@@ -447,16 +482,16 @@ struct NativeRequest {
 struct RequestSource {
     process: Arc<CodexAppServer>,
     stopped: tokio_util::sync::CancellationToken,
-    answers: super::requests::NativeAnswers,
+    answers: crate::adapters::requests::NativeAnswers,
 }
 pub(crate) fn request_origin(
     instance: uuid::Uuid,
     native_id: Value,
     stopped: tokio_util::sync::CancellationToken,
     process: Arc<CodexAppServer>,
-    answers: super::requests::NativeAnswers,
-) -> super::requests::RequestOrigin {
-    super::requests::RequestOrigin {
+    answers: crate::adapters::requests::NativeAnswers,
+) -> crate::host_rpc::requests::RequestOrigin {
+    crate::host_rpc::requests::RequestOrigin {
         instance,
         native_id,
         provider: ProviderKind::Codex,
@@ -468,7 +503,7 @@ pub(crate) fn request_origin(
     }
 }
 #[async_trait::async_trait]
-impl super::requests::AnswerSource for RequestSource {
+impl crate::host_rpc::requests::AnswerSource for RequestSource {
     fn is_alive(&self) -> bool {
         !self.stopped.is_cancelled()
     }
@@ -509,7 +544,7 @@ fn request_change(
         .ok_or("request session ID is missing")?
         .to_owned();
     let session = SessionRef::new(ProviderKind::Codex, id).map_err(str::to_owned)?;
-    let adapted = super::requests::codex(
+    let adapted = crate::adapters::requests::codex(
         uuid::Uuid::new_v4().to_string().into(),
         &native.method,
         &params,
@@ -536,8 +571,8 @@ impl Identity for Codex {
     }
     async fn account(
         &self,
-        command: super::agent::AccountCommand,
-    ) -> Result<super::agent::AccountReply, Failure> {
+        command: crate::host_rpc::agent::AccountCommand,
+    ) -> Result<crate::host_rpc::agent::AccountReply, Failure> {
         let mut accounts = self.accounts.lock().await;
         accounts
             .as_mut()
@@ -561,8 +596,11 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
-    fn running_input(&self) -> super::submission::RunningInput {
-        super::submission::RunningInput::SteerOrQueue
+    fn data_recipient(&self) -> &'static str {
+        "OpenAI"
+    }
+    fn running_input(&self) -> crate::host_rpc::submission::RunningInput {
+        crate::host_rpc::submission::RunningInput::SteerOrQueue
     }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
@@ -603,8 +641,7 @@ impl Agent for Codex {
                 .cloned()
                 .map(|value| {
                     let branch = value["gitInfo"]["branch"].as_str().map(str::to_owned);
-                    super::native::codex_thread(value)
-                        .map(|thread| SessionSummary { thread, branch })
+                    native::parse_thread(value).map(|thread| SessionSummary { thread, branch })
                 })
                 .collect::<Result<_, _>>()?,
             next_cursor: serde_json::from_value(value["nextCursor"].clone())?,
@@ -738,7 +775,7 @@ impl Agent for Codex {
             .await
             .map_err(Failure::before_submission)?;
         let needs_reload = native["thread"]["status"]["type"] == "notLoaded";
-        let response = super::native::codex_thread_response(native)
+        let response = native::parse_thread_response(native)
             .map_err(|error| Failure::new("invalid_thread", error))?;
         Ok(SubmissionState {
             response,
@@ -748,15 +785,15 @@ impl Agent for Codex {
     async fn submit(
         &self,
         input: &op::Submission,
-        route: super::submission::SubmissionTarget<'_>,
+        route: crate::host_rpc::submission::SubmissionTarget<'_>,
         reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
-        use super::submission::SubmissionTarget;
+        use crate::host_rpc::submission::SubmissionTarget;
         let mut params = serde_json::json!({
             "threadId": input.thread_id.id,
             "clientUserMessageId": input.client_user_message_id,
-            "input": super::native::codex_input(&input.input),
+            "input": native::encode_input(&input.input),
         });
         let turn_id = match route {
             SubmissionTarget::Steer(turn) => {
@@ -803,16 +840,18 @@ impl Agent for Codex {
         .await
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let mut native: Value = self.request("model/list", params).await?;
-        let data = native["data"]
-            .as_array_mut()
-            .ok_or_else(|| Failure::new("invalid_models", "native model catalog is missing"))?;
-        for model in data {
-            let id = model["model"].take();
-            model["model"] = serde_json::json!({"provider":"codex","id":id});
-        }
-        serde_json::from_value(native).map_err(Into::into)
+        let page: Page<Value> = self.request("model/list", params).await?;
+        Ok(op::ModelPage {
+            data: page
+                .data
+                .into_iter()
+                .map(native::parse_model)
+                .collect::<Result<_, _>>()?,
+            next_cursor: page.next_cursor,
+            provider_errors: None,
+        })
     }
+
     async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
         self.composer_catalog(cwd).await
     }
@@ -1059,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn provider_process_events_cannot_mutate_host_owned_terminals() {
         use futures_util::FutureExt;
-        let router = super::super::routing::SessionRouter::new();
+        let router = crate::host_rpc::routing::SessionRouter::new();
         let mut connection = router.open_session();
         for method in ["process/outputDelta", "process/exited"] {
             let line = serde_json::json!({"method":method,"params":{"processHandle":"owned","deltaBase64":"aW5qZWN0ZWQ=","exitCode":0}}).to_string();

@@ -18,11 +18,11 @@ impl Desktop {
         );
         for agent in agents {
             let provider = agent.provider;
-            if login && provider == login_provider {
+            if login && Some(provider) == login_provider {
                 body = body.child(self.account_login_controls(Some(&agent.name), cx));
                 continue;
             }
-            let pending = self.account_busy && provider == login_provider;
+            let pending = self.account_busy && Some(provider) == login_provider;
             let mut row = h_flex()
                 .items_center()
                 .gap_3()

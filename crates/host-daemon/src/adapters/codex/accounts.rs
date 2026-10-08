@@ -178,7 +178,7 @@ impl Accounts {
                 .read(async {
                     let value =
                         rpc(helper.server().await?, "account/rateLimits/read", json!({})).await?;
-                    Ok(crate::account_usage::codex(&value))
+                    Ok(super::usage::windows(&value))
                 })
                 .await
         })

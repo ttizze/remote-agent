@@ -9,9 +9,9 @@ use agent_protocol::models::Thread;
 
 use agent_protocol::models::ThreadResponse;
 
+use crate::adapters::Backend;
 use agent_protocol::protocol::{Body, Call, Response};
 use agent_transport::peer::RpcMessageError;
-use codex_app_server::CodexAppServer;
 use serde::Serialize;
 
 use super::agent::{Agent, Identity, SessionSummary, session_pages};
@@ -81,12 +81,11 @@ pub struct HostRpcService {
 
 struct ServiceInner {
     browser: OnceLock<Arc<crate::browser::Browser>>,
-    agents: std::sync::RwLock<HashMap<ProviderKind, Arc<dyn Agent>>>,
-    startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
-    codex: Arc<super::codex::Codex>,
+    agents: HashMap<ProviderKind, Arc<dyn Agent>>,
+    startup_errors: HashMap<ProviderKind, Failure>,
     projects: ProjectStore,
     router: SessionRouter,
-    event_pumps: std::sync::Mutex<std::collections::HashSet<ProviderKind>>,
+    event_pumps: std::sync::Once,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
@@ -96,60 +95,63 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
-    pub fn new(codex: Result<Arc<CodexAppServer>, String>, projects: ProjectStore) -> Self {
+    pub fn new(backends: impl IntoIterator<Item = Backend>, projects: ProjectStore) -> Self {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
-        let adapter = Arc::new(super::codex::Codex::new(codex.clone()));
-        let agents = HashMap::from([(ProviderKind::Codex, adapter.clone() as Arc<dyn Agent>)]);
+        let mut agents = HashMap::new();
+        let mut startup_errors = HashMap::new();
+        let mut dictation = crate::dictation::Dictation::default();
+        for backend in backends {
+            match backend.agent {
+                Ok(agent) => {
+                    agents.insert(backend.provider, agent);
+                }
+                Err(error) => {
+                    startup_errors.insert(backend.provider, error);
+                }
+            }
+            if let Some(backend) = backend.dictation {
+                dictation = backend;
+            }
+        }
         Self {
             inner: Arc::new(ServiceInner {
                 browser: OnceLock::new(),
-                agents: std::sync::RwLock::new(agents),
-                startup_errors: Default::default(),
-                dictation: crate::dictation::Dictation::new(codex),
-                codex: adapter,
+                agents,
+                startup_errors,
+                dictation,
                 worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
                 permission_settings_access: Default::default(),
                 terminals: Default::default(),
                 projects,
                 router: SessionRouter::new(),
-                event_pumps: Default::default(),
+                event_pumps: std::sync::Once::new(),
                 files,
             }),
         }
     }
 
     fn agent(&self, provider: ProviderKind) -> Result<Arc<dyn Agent>, Failure> {
-        self.inner
-            .agents
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&provider)
-            .cloned()
-            .ok_or_else(|| {
-                self.inner
-                    .startup_errors
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .get(&provider)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Failure::new(
-                            "provider_unavailable",
-                            format!("{provider:?} is unavailable"),
-                        )
-                    })
-            })
+        self.inner.agents.get(&provider).cloned().ok_or_else(|| {
+            self.inner
+                .startup_errors
+                .get(&provider)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Failure::new(
+                        "provider_unavailable",
+                        format!("{provider:?} is unavailable"),
+                    )
+                })
+        })
     }
 
     fn agents(&self) -> Vec<(ProviderKind, Arc<dyn Agent>)> {
         let mut agents: Vec<_> = self
             .inner
             .agents
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(p, a)| (*p, a.clone()))
             .collect();
@@ -166,8 +168,6 @@ impl HostRpcService {
             let mut errors = self
                 .inner
                 .startup_errors
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
                 .values()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
@@ -228,49 +228,6 @@ impl HostRpcService {
             .transpose()
     }
 
-    pub async fn enable_accounts(
-        &self,
-        directory: std::path::PathBuf,
-        config: codex_app_server::AppServerConfig,
-    ) -> Result<(), String> {
-        self.inner.codex.enable_accounts(directory, config).await
-    }
-
-    pub async fn enable_claude(
-        &self,
-        program: std::path::PathBuf,
-        directory: std::path::PathBuf,
-        native_home: Option<std::path::PathBuf>,
-    ) -> anyhow::Result<()> {
-        let claude = crate::claude::Claude::load(program, directory, native_home)
-            .await
-            .inspect_err(|error| {
-                self.inner
-                    .startup_errors
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        ProviderKind::Claude,
-                        Failure::new("provider_unavailable", error),
-                    );
-            })?;
-        {
-            let mut agents = self.inner.agents.write().unwrap_or_else(|e| e.into_inner());
-            anyhow::ensure!(
-                !agents.contains_key(&ProviderKind::Claude),
-                "Claude Code is already configured"
-            );
-            agents.insert(ProviderKind::Claude, Arc::new(claude));
-            self.inner
-                .startup_errors
-                .write()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(&ProviderKind::Claude);
-        }
-        self.start_event_pumps();
-        Ok(())
-    }
-
     pub(crate) async fn shutdown_owned_processes(&self) {
         if let Some(browser) = self.inner.browser.get() {
             browser.shutdown().await;
@@ -308,18 +265,9 @@ impl HostRpcService {
             .agents()
             .into_iter()
             .filter(|(_, a)| a.availability().is_ok())
-            .map(|(p, _)| match p {
-                ProviderKind::Codex => "OpenAI".into(),
-                ProviderKind::Claude => "Anthropic".into(),
-            })
+            .map(|(_, agent)| agent.data_recipient().into())
             .collect();
-        (
-            ai,
-            self.agent(ProviderKind::Codex)
-                .ok()
-                .filter(|a| a.availability().is_ok())
-                .map(|_| "OpenAI".into()),
-        )
+        (ai, self.inner.dictation.data_recipient())
     }
     pub(crate) fn provider_errors(&self) -> serde_json::Value {
         let mut errors: serde_json::Map<_, _> = self
@@ -328,25 +276,18 @@ impl HostRpcService {
             .filter_map(|(p, a)| {
                 a.availability().err().map(|e| {
                     (
-                        provider_key(p),
+                        p.key().to_owned(),
                         serde_json::to_value(e).expect("failure serializes"),
                     )
                 })
             })
             .collect();
-        errors.extend(
-            self.inner
-                .startup_errors
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .map(|(provider, error)| {
-                    (
-                        provider_key(*provider),
-                        serde_json::to_value(error).expect("failure serializes"),
-                    )
-                }),
-        );
+        errors.extend(self.inner.startup_errors.iter().map(|(provider, error)| {
+            (
+                provider.key().to_owned(),
+                serde_json::to_value(error).expect("failure serializes"),
+            )
+        }));
         serde_json::Value::Object(errors)
     }
 
@@ -750,7 +691,7 @@ impl HostRpcService {
                     cwd: params.cwd.clone(),
                     ..Default::default()
                 };
-                for (provider, error) in self.inner.startup_errors.read().unwrap().iter() {
+                for (provider, error) in self.inner.startup_errors.iter() {
                     catalog.errors.insert(*provider, vec![error.to_string()]);
                 }
                 for result in results {
@@ -791,7 +732,7 @@ impl HostRpcService {
                         self.agents()
                             .into_iter()
                             .map(|(provider, _)| provider)
-                            .chain(self.inner.startup_errors.read().unwrap().keys().copied())
+                            .chain(self.inner.startup_errors.keys().copied())
                             .map(|provider| (provider, None))
                             .collect()
                     });
@@ -823,7 +764,7 @@ impl HostRpcService {
                         Err(error) => {
                             page.provider_errors
                                 .get_or_insert_default()
-                                .insert(provider_key(provider), serde_json::to_value(error)?);
+                                .insert(provider.key().to_owned(), serde_json::to_value(error)?);
                         }
                     }
                 }
@@ -1012,13 +953,7 @@ impl HostRpcService {
         if worktrees.is_empty() {
             return Ok(worktrees);
         }
-        for error in self
-            .inner
-            .startup_errors
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-        {
+        for error in self.inner.startup_errors.values() {
             for worktree in &mut worktrees {
                 worktree.blocked_reason =
                     Some(format!("稼働状況を確認できないため削除できません: {error}"));
@@ -1282,7 +1217,7 @@ impl HostRpcService {
         }
         for (provider, _, _, head) in listings {
             if let Err(error) = head {
-                provider_errors.insert(provider_key(provider), serde_json::to_value(error)?);
+                provider_errors.insert(provider.key().to_owned(), serde_json::to_value(error)?);
             }
         }
         if !successful && !provider_errors.is_empty() {
@@ -1404,27 +1339,21 @@ impl HostRpcService {
     }
 
     fn start_event_pumps(&self) {
-        let mut started = self
-            .inner
-            .event_pumps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for (provider, agent) in self.agents() {
-            if !started.insert(provider) {
-                continue;
-            }
-            if let Some(mut events) = agent.event_stream() {
-                let router = self.inner.router.clone();
-                tokio::spawn(async move {
-                    while let Some(event) = events.recv().await {
-                        let result = event.change.apply(&router);
-                        if let Some(applied) = event.applied {
-                            let _ = applied.send(result);
+        self.inner.event_pumps.call_once(|| {
+            for (_, agent) in self.agents() {
+                if let Some(mut events) = agent.event_stream() {
+                    let router = self.inner.router.clone();
+                    tokio::spawn(async move {
+                        while let Some(event) = events.recv().await {
+                            let result = event.change.apply(&router);
+                            if let Some(applied) = event.applied {
+                                let _ = applied.send(result);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
-        }
+        });
     }
 }
 
@@ -1468,7 +1397,7 @@ fn provider_storage_scope(
 ) -> Result<String, serde_json::Error> {
     let areas: std::collections::BTreeMap<_, _> = areas
         .into_iter()
-        .map(|(provider, path)| (provider_key(provider), path))
+        .map(|(provider, path)| (provider.key().to_owned(), path))
         .collect();
     let bytes = serde_json::to_vec(&areas)?;
     let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
@@ -1519,14 +1448,6 @@ async fn next_title(
                 "session listing timed out; results are partial",
             ))
         })
-}
-
-fn provider_key(provider: ProviderKind) -> String {
-    serde_json::to_value(provider)
-        .expect("provider serializes")
-        .as_str()
-        .unwrap()
-        .to_owned()
 }
 
 fn describe_thread(
@@ -1640,24 +1561,30 @@ mod tests {
         std::fs::write(&registry, "invalid registry").unwrap();
         let program = root.path().join("native-cli.exe");
         std::fs::write(&program, []).unwrap();
-        let service = HostRpcService::new(
-            Err("unavailable".into()),
-            ProjectStore::new(root.path().join("worktrees.json")),
-        );
         let configure = || {
-            service.enable_claude(
+            crate::adapters::Claude::load(
                 program.clone(),
                 directory.clone(),
                 Some(root.path().join("native")),
             )
         };
-        assert!(configure().await.is_err());
+        let error = match configure().await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid registry was accepted"),
+        };
+        let service = HostRpcService::new(
+            [Backend::unavailable(ProviderKind::Claude, error)],
+            ProjectStore::new(root.path().join("worktrees.json")),
+        );
         assert_eq!(
             service.provider_errors()["claude"]["code"],
             "provider_unavailable"
         );
         std::fs::write(&registry, r#"{"accounts":[],"selectedId":null}"#).unwrap();
-        configure().await.unwrap();
+        let service = HostRpcService::new(
+            [configure().await.unwrap().into()],
+            ProjectStore::new(root.path().join("worktrees.json")),
+        );
         assert!(service.provider_errors().get("claude").is_none());
         let session = service.open_session();
         let response = service
@@ -1692,18 +1619,17 @@ mod tests {
         };
         use futures_util::FutureExt;
         let root = tempfile::tempdir().unwrap();
+        let claude = crate::adapters::Claude::load(
+            root.path().join("unused-cli"),
+            root.path().join("claude"),
+            Some(root.path().join("native")),
+        )
+        .await
+        .unwrap();
         let service = HostRpcService::new(
-            Err("not used".into()),
+            [claude.into()],
             ProjectStore::new(root.path().join("worktrees.json")),
         );
-        service
-            .enable_claude(
-                root.path().join("unused-cli"),
-                root.path().join("claude"),
-                Some(root.path().join("native")),
-            )
-            .await
-            .unwrap();
         let connection = service.open_session();
         let router = &service.inner.router;
         let target =
@@ -1721,7 +1647,7 @@ mod tests {
             thread.requests.get(id).map(|request| request.delivery)
         };
         for native in ["cancelled", "interrupted", "written"] {
-            let adapted = super::super::requests::claude(
+            let adapted = crate::adapters::requests::claude(
                 uuid::Uuid::new_v4().to_string().into(),
                 &"unrelated".into(),
                 &crate::claude::SdkRequest::Elicitation {
@@ -1820,35 +1746,37 @@ mod tests {
             "stoppedCodex",
         ] {
             let root = tempfile::tempdir().unwrap();
-            let service = HostRpcService::new(
-                Err("unavailable".into()),
-                ProjectStore::new(root.path().join("worktrees.json")),
-            );
-            let connection = service.open_session();
             let claude = case.ends_with("Claude") || case == "invalidClaudeId";
             let provider = if claude {
                 ProviderKind::Claude
             } else {
                 ProviderKind::Codex
             };
-            if claude {
-                service
-                    .enable_claude(
-                        root.path().join("unused-cli"),
-                        root.path().join("claude"),
-                        Some(root.path().join("native")),
-                    )
-                    .await
-                    .unwrap();
-            }
+            let backend = if claude {
+                crate::adapters::Claude::load(
+                    root.path().join("unused-cli"),
+                    root.path().join("claude"),
+                    Some(root.path().join("native")),
+                )
+                .await
+                .unwrap()
+                .into()
+            } else {
+                Backend::unavailable(provider, "unavailable")
+            };
+            let service = HostRpcService::new(
+                [backend],
+                ProjectStore::new(root.path().join("worktrees.json")),
+            );
+            let connection = service.open_session();
             let target =
                 agent_protocol::session::SessionRef::new(provider, "native".into()).unwrap();
             let (input, mut receiver) = tokio::sync::mpsc::channel(1);
             let stopped = tokio_util::sync::CancellationToken::new();
             let adapted = if claude {
-                super::super::requests::claude("request".into(), &"turn".into(), &crate::claude::SdkRequest::Elicitation { server_name: String::new(), message: String::new(), mode: None, url: None, requested_schema: Some(serde_json::json!({"type":"object","properties":{}})) })
+                crate::adapters::requests::claude("request".into(), &"turn".into(), &crate::claude::SdkRequest::Elicitation { server_name: String::new(), message: String::new(), mode: None, url: None, requested_schema: Some(serde_json::json!({"type":"object","properties":{}})) })
             } else {
-                super::super::requests::codex("request".into(),"mcpServer/elicitation/request",&serde_json::json!({"mode":"form","requestedSchema":{"type":"object","properties":{}}}))
+                crate::adapters::requests::codex("request".into(),"mcpServer/elicitation/request",&serde_json::json!({"mode":"form","requestedSchema":{"type":"object","properties":{}}}))
             }.unwrap();
             let id = adapted.request.id.clone();
             let instance = uuid::Uuid::new_v4();
@@ -1940,18 +1868,17 @@ mod tests {
     async fn provider_capabilities_are_checked_before_provider_availability() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
+        let claude = crate::adapters::Claude::load(
+            root.path().join("missing-claude"),
+            root.path().join("claude"),
+            Some(root.path().join("native")),
+        )
+        .await
+        .unwrap();
         let service = HostRpcService::new(
-            Err("not available".into()),
+            [claude.into()],
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
-        service
-            .enable_claude(
-                root.path().join("missing-claude"),
-                root.path().join("claude"),
-                Some(root.path().join("native")),
-            )
-            .await
-            .unwrap();
         let session = service.open_session();
         for (method, expected) in [
             ("host/session/fork", "unsupported_operation"),
@@ -1974,7 +1901,7 @@ mod tests {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
-            Err("unavailable".into()),
+            [Backend::unavailable(ProviderKind::Codex, "unavailable")],
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         let session = service.open_session();
@@ -2007,18 +1934,17 @@ mod tests {
             include_str!("../../tests/fixtures/claude-2.1.266.jsonl"),
         )
         .unwrap();
+        let claude = crate::adapters::Claude::load(
+            root.path().join("does-not-exist"),
+            root.path().join("state"),
+            Some(native),
+        )
+        .await
+        .unwrap();
         let service = HostRpcService::new(
-            Err("unavailable".into()),
+            [claude.into()],
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
-        service
-            .enable_claude(
-                root.path().join("does-not-exist"),
-                root.path().join("state"),
-                Some(native),
-            )
-            .await
-            .unwrap();
         let session = service.open_session();
         let call =
             agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {

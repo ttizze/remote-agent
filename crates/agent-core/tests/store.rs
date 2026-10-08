@@ -546,7 +546,7 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
                 "id":"model", "model":{"provider": "codex", "id": "model"}, "displayName":"Model",
                 "defaultReasoningEffort":"medium", "defaultServiceTier":"priority",
                 "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"max"}],
-                "serviceTiers":[{"id":"priority"}]
+                "serviceTiers":[{"id":"priority","fast":true}]
             }])).unwrap()),
             drafts: Arc::new(BTreeMap::from([(SessionRef {provider: ProviderKind::Codex, id: "thread".into()}.into(), Arc::new(Draft {
                 text: "old".into(), model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "model".into() }), effort: Some("medium".into()),

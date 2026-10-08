@@ -23,15 +23,18 @@ impl Desktop {
                     .when(control.mode == Some(PermissionMode::FullAccess), |button| {
                         button.text_color(rgb(0xf58b42))
                     })
-                    .disabled(!self.snapshot.connected),
+                    .disabled(!self.snapshot.connected || control.provider.is_none()),
             )
             .on_open_change(move |open, _, cx| {
                 if *open {
                     let _ = opening.update(cx, |view, _| {
-                        let provider = view.snapshot.permission_control(view.draft_key()).provider;
-                        view.dispatch(Intent::ReadPermissionSettings(op::ReadPermissionSettings {
-                            provider,
-                        }));
+                        if let Some(provider) =
+                            view.snapshot.permission_control(view.draft_key()).provider
+                        {
+                            view.dispatch(Intent::ReadPermissionSettings(
+                                op::ReadPermissionSettings { provider },
+                            ));
+                        }
                     });
                 }
             })
@@ -52,8 +55,9 @@ impl Desktop {
                 .text_color(rgb(0x999999))
                 .pb_2()
                 .child(match provider {
-                    ProviderKind::Codex => "Codex の承認方法",
-                    ProviderKind::Claude => "Claude の承認方法",
+                    Some(ProviderKind::Codex) => "Codex の承認方法",
+                    Some(ProviderKind::Claude) => "Claude の承認方法",
+                    None => "エージェント未選択",
                 }),
         );
         for (index, (mode, label, description)) in PERMISSION_CHOICES.into_iter().enumerate() {
@@ -90,7 +94,7 @@ impl Desktop {
                     )
                     .disabled(control.loading || version.is_none() || !self.snapshot.connected)
                     .on_click(cx.listener(move |view, _, _, _| {
-                        if let Some(version) = &version {
+                        if let (Some(provider), Some(version)) = (provider, &version) {
                             view.dispatch(Intent::UpdatePermissionSettings(
                                 op::UpdatePermissionSettings {
                                     provider,
@@ -113,9 +117,11 @@ impl Desktop {
                     "再読み込み",
                     cx,
                     move |view, _, _| {
-                        view.dispatch(Intent::ReadPermissionSettings(op::ReadPermissionSettings {
-                            provider,
-                        }));
+                        if let Some(provider) = provider {
+                            view.dispatch(Intent::ReadPermissionSettings(
+                                op::ReadPermissionSettings { provider },
+                            ));
+                        }
                     },
                 ));
         }
@@ -170,7 +176,18 @@ mod tests {
                 )
             });
             desktop.update(cx, |view, _| {
-                Arc::make_mut(&mut view.snapshot).connected = true
+                let snapshot = Arc::make_mut(&mut view.snapshot);
+                snapshot.connected = true;
+                Arc::make_mut(&mut snapshot.drafts).insert(
+                    snapshot.navigation.draft_key.clone(),
+                    Arc::new(agent_core::state::Draft {
+                        model: Some(agent_protocol::models::ModelRef {
+                            provider: agent_protocol::session::ProviderKind::Codex,
+                            id: "model".into(),
+                        }),
+                        ..Default::default()
+                    }),
+                );
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
             ComposerView(desktop)

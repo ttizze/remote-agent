@@ -214,25 +214,24 @@ impl Accounts {
                         None,
                     )
                     .await?;
-                    let result = async {
-                        process.write(&super::process::Input::Usage).await?;
-                        while let Some(event) = process.read().await? {
-                            if let super::process::Event::Error { message } = event {
-                                return Err(message);
+                    let result =
+                        async {
+                            process.write(&super::process::Input::Usage).await?;
+                            while let Some(event) = process.read().await? {
+                                if let super::process::Event::Error { message } = event {
+                                    return Err(message);
+                                }
+                                if let super::process::Event::Usage { usage, error } = event {
+                                    return match (usage, error) {
+                                        (Some(usage), None) => Ok(super::usage::windows(&usage)),
+                                        (_, error) => Err(error
+                                            .unwrap_or_else(|| "Claude usage unavailable".into())),
+                                    };
+                                }
                             }
-                            if let super::process::Event::Usage { usage, error } = event {
-                                return match (usage, error) {
-                                    (Some(usage), None) => Ok(crate::account_usage::claude(&usage)),
-                                    (_, error) => {
-                                        Err(error
-                                            .unwrap_or_else(|| "Claude usage unavailable".into()))
-                                    }
-                                };
-                            }
+                            Err("Claude exited".into())
                         }
-                        Err("Claude exited".into())
-                    }
-                    .await;
+                        .await;
                     let _ = process.finish().await;
                     result
                 })

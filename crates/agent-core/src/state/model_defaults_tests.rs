@@ -3,7 +3,7 @@ use agent_core::{
     state::{
         DraftKey, Event, Intent, ModelDefaults, ModelDefaultsScope, ProviderModelDefaults,
         Snapshot,
-        operations::{LoadModels, Operation, SelectAccountForDraft},
+        operations::{ListAccounts, LoadModels, Operation, SelectAccountForDraft},
         reduce,
     },
     store::Store,
@@ -21,11 +21,11 @@ fn catalog() -> Vec<Model> {
         {"id":"gpt","model":{"provider":"codex","id":"shared"},"displayName":"GPT",
          "isDefault":true,"defaultReasoningEffort":"medium",
          "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-         "serviceTiers":[{"id":"priority"}]},
+         "serviceTiers":[{"id":"priority","fast":true}]},
         {"id":"claude","model":{"provider":"claude","id":"shared"},"displayName":"Claude",
          "isDefault":true,"defaultReasoningEffort":"medium",
          "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-         "serviceTiers":[{"id":"fast"}]}
+         "serviceTiers":[{"id":"fast","fast":true}]}
     ]))
     .unwrap()
 }
@@ -38,6 +38,13 @@ fn scoped_fixture() -> Snapshot {
     Snapshot {
         storage_scope: "vm:sessions".into(),
         models: Arc::new(catalog()),
+        account: Arc::new(agent_core::state::AccountState {
+            accounts: Some(Arc::new(serde_json::from_value(json!({
+                "accounts": [{"id":"a","provider":"codex"},{"id":"b","provider":"claude"}],
+                "selected": {"codex":"a","claude":"b"}
+            })).unwrap())),
+            ..Default::default()
+        }),
         threads: Some(Arc::new(serde_json::from_value(json!({
             "data": [], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false, "projects": [
                 {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}]},
@@ -89,6 +96,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(snapshot.model_defaults(project.clone()), snapshot.model_defaults(environment.clone()));
         snapshot.storage_scope = "different-vm".into();
         snapshot.models = Arc::new(catalog());
+        snapshot.account = scoped_fixture().account;
         let cwd = format!("/repo/other-{suffix}");
         snapshot = apply(&snapshot, Intent::NewChat { cwd: cwd.clone() });
         let draft = &snapshot.drafts[&DraftKey::from(format!("new:{cwd}"))];
@@ -172,10 +180,7 @@ proptest::proptest! {
 
 #[test]
 fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
-    let snapshot = Snapshot {
-        models: Arc::new(catalog()),
-        ..Default::default()
-    };
+    let snapshot = scoped_fixture();
     let snapshot = apply(
         &snapshot,
         Intent::SelectDefaultEffort {
@@ -378,7 +383,9 @@ proptest::proptest! {
         proptest::prop_assert_eq!(&snapshot.model_defaults.providers, &presets);
         let preferences = persistence::encode_model_preferences(&snapshot).unwrap();
         snapshot = persistence::decode(&persistence::apply_model_preferences(&[], &preferences).unwrap()).unwrap();
+        let automatic_provider = if reverse_catalog { ProviderKind::Claude } else { ProviderKind::Codex };
         snapshot.models = Arc::new(models);
+        snapshot.account = scoped_fixture().account;
         snapshot = apply(&snapshot, Intent::NewChat { cwd: "/independent".into() });
         let key = snapshot.navigation.draft_key.clone();
         proptest::prop_assert_eq!(snapshot.drafts[&key].model.as_ref(), Some(&starting_model));
@@ -397,7 +404,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(&snapshot.model_defaults.new_chat_model, &Some(starting_model));
         snapshot = apply(&snapshot, Intent::SelectNewChatModel { scope: ModelDefaultsScope::Global, model: None });
         snapshot = apply(&snapshot, Intent::NewChat { cwd: "/automatic".into() });
-        proptest::prop_assert_eq!(snapshot.drafts[&snapshot.navigation.draft_key].model.as_ref(), Some(&ModelRef { provider: ProviderKind::Codex, id: "alternate".into() }));
+        proptest::prop_assert_eq!(snapshot.drafts[&snapshot.navigation.draft_key].model.as_ref(), Some(&ModelRef { provider: automatic_provider, id: "alternate".into() }));
     }
 }
 
@@ -563,7 +570,7 @@ fn unavailable_provider_preset_falls_back_only_after_a_complete_catalog() {
 }
 
 #[test]
-fn automatic_new_chat_uses_codex_when_catalog_arrives_later_in_another_order() {
+fn automatic_new_chat_waits_for_accounts_and_uses_an_authenticated_provider() {
     let mut snapshot = apply(
         &Snapshot::default(),
         Intent::NewChat {
@@ -580,13 +587,25 @@ fn automatic_new_chat_uses_codex_when_catalog_arrives_later_in_another_order() {
             provider_errors: None,
         },
     );
+    assert!(
+        snapshot
+            .model_provider_for_draft(snapshot.navigation.draft_key.clone())
+            .is_none()
+    );
+    ListAccounts {}.apply(
+        &mut snapshot,
+        serde_json::from_value(json!({
+            "accounts": [{"id":"b","provider":"claude"}], "selected":{"claude":"b"}
+        }))
+        .unwrap(),
+    );
     assert_eq!(
         snapshot.drafts[&snapshot.navigation.draft_key]
             .model
             .as_ref()
             .unwrap()
             .provider,
-        ProviderKind::Codex
+        ProviderKind::Claude
     );
 }
 

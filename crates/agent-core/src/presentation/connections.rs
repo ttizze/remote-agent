@@ -38,10 +38,7 @@ fn availability(
     if !connected {
         return AgentAvailability::Checking;
     }
-    let key = match provider {
-        ProviderKind::Codex => "codex",
-        ProviderKind::Claude => "claude",
-    };
+    let key = provider.key();
     if errors.contains_key(key) {
         return AgentAvailability::Unavailable;
     }

@@ -205,6 +205,10 @@ mod tests {
                 desktop.update(cx, |view, cx| {
                     let snapshot = Arc::make_mut(&mut view.snapshot);
                     snapshot.connected = true;
+                    Arc::make_mut(&mut snapshot.drafts).insert(snapshot.navigation.draft_key.clone(), Arc::new(agent_core::state::Draft {
+                        model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "model".into() }),
+                        ..Default::default()
+                    }));
                     snapshot.composer_catalog = Some(Arc::new(ComposerCatalog {
                         cwd: snapshot.navigation.cwd.clone(), loading: true,
                         candidates: [
@@ -367,6 +371,16 @@ mod tests {
         view.update(cx, |view, window, cx| {
             let snapshot = Arc::make_mut(&mut view.snapshot);
             snapshot.connected = true;
+            Arc::make_mut(&mut snapshot.drafts).insert(
+                snapshot.navigation.draft_key.clone(),
+                Arc::new(agent_core::state::Draft {
+                    model: Some(agent_protocol::models::ModelRef {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        id: "model".into(),
+                    }),
+                    ..Default::default()
+                }),
+            );
             snapshot.composer_catalog = Some(Arc::new(ComposerCatalog {
                 cwd: snapshot.navigation.cwd.clone(),
                 candidates: vec![ComposerCandidate {

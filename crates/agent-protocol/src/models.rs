@@ -230,6 +230,7 @@ pub struct Model {
 pub struct ServiceTier {
     pub id: String,
     pub name: Option<String>,
+    pub fast: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -5,7 +5,7 @@ struct AgentSettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var model: BexAppViewModel
-    @State var provider: ProviderKind = .codex
+    @State var provider: ProviderKind?
     let close: () -> Void
     @State private var changingAccount = false
     @State private var loadingAccounts = false
@@ -16,7 +16,8 @@ struct AgentSettingsScreen: View {
     @State private var pollingLogin: Task<Void, Never>?
     @State private var signOutId: String?
     private var providerName: String {
-        (login?.provider ?? provider) == .codex ? "Codex" : "Claude Code"
+        guard let provider = login?.provider ?? provider else { return "エージェント" }
+        return provider == .codex ? "Codex" : "Claude Code"
     }
 
     private var accounts: [Account] {
@@ -55,8 +56,8 @@ struct AgentSettingsScreen: View {
             } else {
                 Section {
                     Picker("エージェント", selection: $provider) {
-                        Text("Codex").tag(ProviderKind.codex)
-                        Text("Claude Code").tag(ProviderKind.claude)
+                        Text("Codex").tag(Optional(ProviderKind.codex))
+                        Text("Claude Code").tag(Optional(ProviderKind.claude))
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("account.provider")
@@ -112,7 +113,15 @@ struct AgentSettingsScreen: View {
             Text("この環境に保存されたアカウントからサインアウトします。再び使うにはサインインが必要です。")
         }
         .interactiveDismissDisabled(loginInProgress)
-        .onAppear(perform: refresh)
+        .onAppear {
+            provider = provider ?? model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
+            refresh()
+        }
+        .onChange(of: model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)) { value in
+            if provider == nil {
+                provider = value
+            }
+        }
         .onChange(of: model.isConnected) { connected in
             if connected {
                 refresh()
@@ -186,7 +195,7 @@ extension AgentSettingsScreen {
                 Text("アカウント")
                 Spacer()
                 Button("追加", systemImage: "plus", action: startLogin)
-                    .accessibilityIdentifier("model.account.add").disabled(busy)
+                    .accessibilityIdentifier("model.account.add").disabled(busy || provider == nil)
                 Button(action: refresh) { Image(systemName: "arrow.clockwise") }
                     .accessibilityLabel("モデルと使用量を更新")
                     .accessibilityIdentifier("account.refresh")
@@ -199,6 +208,7 @@ extension AgentSettingsScreen {
     }
 
     private func chooseAccount(_ id: String) {
+        guard let provider else { return }
         changingAccount = true
         model.perform(.selectAccount(SelectAccount(provider: provider, id: id))) { _ in changingAccount = false }
     }
@@ -213,12 +223,14 @@ extension AgentSettingsScreen {
     }
 
     private func signOut(_ id: String) {
+        guard let provider else { return }
         signOutId = nil
         changingAccount = true
         model.perform(.logoutAccount(LogoutAccount(provider: provider, id: id))) { _ in changingAccount = false }
     }
 
     private func startLogin() {
+        guard let provider else { return }
         loginCode = ""
         loginRequestInFlight = true
         loginError = nil

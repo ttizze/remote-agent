@@ -1,7 +1,7 @@
 mod account_usage;
+pub mod adapters;
 pub mod browser;
 mod claude;
-mod codex_accounts;
 mod dictation;
 mod git;
 mod host_identity;

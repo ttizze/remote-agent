@@ -4,7 +4,9 @@ use agent_protocol::{execution::*, items::*};
 mod accounts;
 mod history;
 mod native;
+mod permissions;
 mod process;
+mod usage;
 
 use anyhow::Context;
 use std::{
@@ -92,7 +94,7 @@ impl From<&str> for OperationError {
     }
 }
 
-pub(crate) struct Claude {
+pub struct Claude {
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
@@ -141,7 +143,7 @@ impl Drop for Claude {
 }
 
 impl Claude {
-    pub(crate) async fn load(
+    pub async fn load(
         program: PathBuf,
         directory: PathBuf,
         native_home: Option<PathBuf>,
@@ -1074,7 +1076,7 @@ impl Worker {
     }
 
     async fn permission(&self, request_id: &str, request: &SdkRequest) -> Result<(), String> {
-        let adapted = crate::host_rpc::requests::claude(
+        let adapted = crate::adapters::requests::claude(
             Uuid::new_v4().to_string().into(),
             &self.turn_id,
             request,
@@ -1601,13 +1603,13 @@ impl crate::host_rpc::agent::Identity for Claude {
 
 struct RequestSource {
     input: tokio::sync::mpsc::Sender<Command>,
-    answers: crate::host_rpc::requests::NativeAnswers,
+    answers: crate::adapters::requests::NativeAnswers,
 }
 pub(crate) fn request_origin(
     instance: uuid::Uuid,
     native_id: Value,
     input: tokio::sync::mpsc::Sender<Command>,
-    answers: crate::host_rpc::requests::NativeAnswers,
+    answers: crate::adapters::requests::NativeAnswers,
 ) -> crate::host_rpc::requests::RequestOrigin {
     crate::host_rpc::requests::RequestOrigin {
         instance,
@@ -1671,6 +1673,9 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
 
 #[async_trait::async_trait]
 impl Agent for Claude {
+    fn data_recipient(&self) -> &'static str {
+        "Anthropic"
+    }
     fn running_input(&self) -> crate::host_rpc::submission::RunningInput {
         crate::host_rpc::submission::RunningInput::Queue
     }
@@ -1938,14 +1943,14 @@ impl Agent for Claude {
     async fn read_permissions(
         &self,
     ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        crate::host_rpc::permissions::read_claude_permissions(&self.native_home)
+        permissions::read_claude_permissions(&self.native_home)
     }
     async fn update_permissions(
         &self,
         mode: agent_protocol::permissions::PermissionMode,
         version: &str,
     ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        crate::host_rpc::permissions::update_claude_permissions(&self.native_home, mode, version)
+        permissions::update_claude_permissions(&self.native_home, mode, version)
     }
     async fn fork(
         &self,

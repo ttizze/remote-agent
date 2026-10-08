@@ -51,8 +51,15 @@ final class SideChatRequest: ObservableObject {
             if let threadId {
                 _ = try await model.outcome(for: .readThread(ReadThread(threadId: threadId, open: true)))
             } else {
+                guard let provider = model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey) else {
+                    throw NSError(
+                        domain: "Bex",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "利用可能なエージェントを選択してください。"]
+                    )
+                }
                 let result = try await model.outcome(for: .createSession(CreateSession(
-                    provider: model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey),
+                    provider: provider,
                     cwd: cwd,
                     model: nil
                 )))

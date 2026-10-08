@@ -20,7 +20,7 @@ pub(super) fn save_image(directory: &Path, image: Image) -> Result<String, Strin
     if passthrough {
         file.write_all(&image.bytes).map_err(|e| e.to_string())?;
     } else {
-        // macOS image copies can contain TIFF; Codex accepts the PNG conversion.
+        // macOS image copies can contain TIFF; providers receive the PNG conversion.
         image::load_from_memory(&image.bytes)
             .and_then(|image| image.write_to(file.as_file_mut(), image::ImageFormat::Png))
             .map_err(|e| e.to_string())?;

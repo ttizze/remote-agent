@@ -70,8 +70,35 @@ impl HostFixture {
             .await
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        let codex = host_daemon::adapters::codex::Codex::new(server.clone());
+        if accounts && server.is_ok() {
+            codex
+                .enable_accounts(directory.join("state/accounts"), config)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
+        let mut backends = vec![codex.into()];
+        if let Some(program) = claude {
+            let backend = match host_daemon::adapters::Claude::load(
+                program.to_owned(),
+                directory.join("claude"),
+                Some(directory.join("claude-native")),
+            )
+            .await
+            {
+                Ok(adapter) => adapter.into(),
+                Err(error) => {
+                    eprintln!("Claude fixture adapter unavailable: {error:#}");
+                    host_daemon::adapters::Backend::unavailable(
+                        agent_protocol::session::ProviderKind::Claude,
+                        error,
+                    )
+                }
+            };
+            backends.push(backend);
+        }
         let service = HostRpcService::new(
-            server.clone(),
+            backends,
             ProjectStore::new(directory.join("bex-worktrees.json")),
         );
         #[cfg(unix)]
@@ -79,23 +106,6 @@ impl HostFixture {
             .enable_browser(directory.join("browser"))
             .await
             .map_err(anyhow::Error::msg)?;
-        if let Some(program) = claude
-            && let Err(error) = service
-                .enable_claude(
-                    program.to_owned(),
-                    directory.join("claude"),
-                    Some(directory.join("claude-native")),
-                )
-                .await
-        {
-            eprintln!("Claude fixture adapter unavailable: {error:#}");
-        }
-        if accounts && server.is_ok() {
-            service
-                .enable_accounts(directory.join("state/accounts"), config)
-                .await
-                .map_err(anyhow::Error::msg)?;
-        }
         service.start();
         let runtime = Arc::new(
             HostRuntime::new(

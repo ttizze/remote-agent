@@ -31,7 +31,8 @@
         ],
         "serviceTiers": [
           {
-            "id": "priority"
+            "id": "priority",
+            "fast": true
           }
         ]
       }
@@ -120,7 +121,8 @@
         ],
         "serviceTiers": [
           {
-            "id": "priority"
+            "id": "priority",
+            "fast": true
           }
         ]
       }
@@ -191,7 +193,8 @@
         ],
         "serviceTiers": [
           {
-            "id": "priority"
+            "id": "priority",
+            "fast": true
           }
         ]
       },
@@ -214,7 +217,8 @@
         ],
         "serviceTiers": [
           {
-            "id": "priority"
+            "id": "priority",
+            "fast": true
           }
         ]
       }
@@ -266,7 +270,8 @@
         ],
         "serviceTiers": [
           {
-            "id": "priority"
+            "id": "priority",
+            "fast": true
           }
         ]
       },
@@ -289,7 +294,8 @@
         ],
         "serviceTiers": [
           {
-            "id": "priority"
+            "id": "priority",
+            "fast": true
           }
         ],
         "isDefault": true

@@ -49,6 +49,7 @@ struct Model {
 struct ServiceTier {
     pub id: String,
     pub name: Option<String>,
+    pub fast: bool,
 }
 #[uniffi::remote(Record)]
 struct ReasoningEffort {

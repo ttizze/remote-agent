@@ -581,7 +581,9 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 - Model settings store a separate model, reasoning and speed preset for each
   provider, plus an independent model for new chats. Changing one selection must
   not overwrite the others. New chats use the selected model and that provider's
-  supported preset options; automatic uses the Codex preset. Switching the agent
+  supported preset options; automatic chooses an available authenticated provider
+  from the Host catalog and uses its preset. If none is available, sending keeps
+  the input and asks for an agent selection. Switching the agent
   in a new draft uses the destination provider's preset. Existing chats and
   already-created drafts retain their choices when settings change. The existing
   global, environment and project scope inheritance applies to both preferences.

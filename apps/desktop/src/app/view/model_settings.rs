@@ -237,7 +237,7 @@ impl Desktop {
             .child(div().text_lg().font_semibold().child("新しい会話"))
             .child(h_flex().items_center().gap_5().p_4().rounded(px(14.)).border_1().border_color(rgb(0x2b2f35))
                 .child(v_flex().flex_1().min_w_0().gap_1().child("デフォルトモデル")
-                    .child(div().text_sm().text_color(rgb(0x949ca8)).child("新規チャットを開始するときのモデルです。自動はCodexのデフォルトを使います。")))
+                    .child(div().text_sm().text_color(rgb(0x949ca8)).child("新規チャットを開始するときのモデルです。自動は利用可能なエージェントのデフォルトを使います。")))
                 .child(self.default_model_picker(None, cx)))
             .child(div().text_lg().font_semibold().child("プロバイダごとのデフォルト"))
             .children([ProviderKind::Codex, ProviderKind::Claude].into_iter().map(|provider| self.provider_model_settings(provider, cx)))
@@ -367,7 +367,7 @@ impl Desktop {
                     },
                 )
                 .debug_selector(move || format!("model-provider-{label}"))
-                .selected(provider == value)
+                .selected(provider == Some(value))
                 .when(in_settings, |button| {
                     button.small().ghost().icon(provider_icon(value))
                 })
@@ -380,6 +380,11 @@ impl Desktop {
             .gap_3()
             .when(in_settings, |body| body.gap_5())
             .when(manage, |body| body.child(services));
+        let Some(provider) = provider else {
+            return body
+                .child("エージェントを選択してください。")
+                .into_any_element();
+        };
         if self.snapshot.account.login.is_some() {
             body = body.child(self.account_login_controls(None, cx));
         } else {
@@ -592,11 +597,19 @@ impl Desktop {
 }
 
 impl Desktop {
-    pub(super) fn account_provider(&self) -> ProviderKind {
-        self.model_provider.unwrap_or_else(|| {
-            self.snapshot
-                .model_provider_for_draft(self.draft_key().clone())
-        })
+    pub(super) fn account_provider(&self) -> Option<ProviderKind> {
+        self.model_provider
+            .or_else(|| {
+                self.snapshot
+                    .account
+                    .login
+                    .as_ref()
+                    .map(|login| login.provider)
+            })
+            .or_else(|| {
+                self.snapshot
+                    .model_provider_for_draft(self.draft_key().clone())
+            })
     }
 
     pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
@@ -875,8 +888,8 @@ impl Desktop {
                     .w(px(44.))
                     .h(px(44.))
                     .rounded(px(8.))
-                    .selected(provider == value)
-                    .when(provider == value, |button| button.bg(rgb(0x262626)))
+                    .selected(provider == Some(value))
+                    .when(provider == Some(value), |button| button.bg(rgb(0x262626)))
                     .accessibility_label(label)
                     .tooltip(label)
                     .debug_selector(move || format!("model-agent-{label}"))
@@ -897,16 +910,16 @@ impl Desktop {
                     })),
             );
         }
-        let account =
-            self.snapshot
-                .account
-                .accounts
-                .as_ref()
-                .and_then(|accounts| {
-                    accounts.accounts.iter().find(|account| {
-                        account.provider == provider && accounts.is_selected(account)
-                    })
-                });
+        let account = self
+            .snapshot
+            .account
+            .accounts
+            .as_ref()
+            .and_then(|accounts| {
+                accounts.accounts.iter().find(|account| {
+                    Some(account.provider) == provider && accounts.is_selected(account)
+                })
+            });
         body = body.child(
             Button::new("model-account-summary")
                 .accessibility_label("アカウントと週間残量")
@@ -963,10 +976,9 @@ impl Desktop {
                     .large()
                     .aria_label("モデルを検索"),
             );
-        let models = self.snapshot.models_matching(
-            Some(provider),
-            self.model_search.read(cx).value().to_string(),
-        );
+        let models = self
+            .snapshot
+            .models_matching(provider, self.model_search.read(cx).value().to_string());
         let mut list = v_flex()
             .id("model-catalog")
             .max_h(px(264.))
@@ -1023,7 +1035,7 @@ impl Desktop {
             .child(list)
             .children(
                 self.snapshot
-                    .model_error_messages(Some(provider))
+                    .model_error_messages(provider)
                     .into_iter()
                     .map(|error| {
                         div()
@@ -1041,7 +1053,7 @@ impl Desktop {
                 )
             })
             .when(
-                self.draft().model.as_ref().map(|model| model.provider) == Some(provider),
+                self.draft().model.as_ref().map(|model| model.provider) == provider,
                 |body| {
                     body.child(
                         h_flex()
@@ -1322,7 +1334,7 @@ mod tests {
                     {"provider":"claude","id":"claude:second"}],"selected":{"codex":"first","claude":"claude:second"}
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
+                    {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority","fast":true}]},
                     {"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
                 ])).unwrap());
                 Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "gpt".into() }), ..Default::default() }));
@@ -1473,7 +1485,7 @@ mod tests {
                     {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT-6-Astra",
                      "isDefault":true,"defaultReasoningEffort":"medium",
                      "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-                     "serviceTiers":[{"id":"priority"}]}
+                     "serviceTiers":[{"id":"priority","fast":true}]}
                 ])).unwrap());
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();

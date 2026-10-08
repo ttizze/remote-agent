@@ -34,7 +34,7 @@ struct Registration {
     ready: bool,
 }
 
-/// Keep this lease until Codex and the Host have both stopped.
+/// Keep this lease until the providers and Host have stopped.
 pub struct HostLease {
     directory: PathBuf,
     registry: LocalHostRegistry,

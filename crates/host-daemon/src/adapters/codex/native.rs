@@ -25,6 +25,19 @@ fn take_string(value: &mut Value, key: &str) -> String {
         _ => String::new(),
     }
 }
+pub(super) fn parse_model(
+    mut value: Value,
+) -> Result<agent_protocol::models::Model, serde_json::Error> {
+    if let Some(tiers) = value["serviceTiers"].as_array_mut() {
+        for tier in tiers {
+            tier["fast"] = serde_json::json!(tier["id"] == "priority");
+        }
+    }
+    let id = value["model"].take();
+    value["model"] = serde_json::json!({"provider":ProviderKind::Codex,"id":id});
+    serde_json::from_value(value)
+}
+
 pub(crate) fn session_status(value: &Value) -> SessionStatus {
     match value["type"].as_str() {
         Some("active") => SessionStatus::Running,
@@ -53,7 +66,7 @@ pub(crate) fn item_status(value: Option<&str>) -> ItemStatus {
     }
 }
 
-pub(crate) fn codex_error(value: &Value, retrying: bool) -> ExecutionError {
+pub(crate) fn execution_error(value: &Value, retrying: bool) -> ExecutionError {
     let info = &value["codexErrorInfo"];
     let code = info.as_str().or_else(|| {
         info.as_object()
@@ -161,7 +174,7 @@ pub(crate) fn message_parts(value: &Value) -> Vec<MessagePart> {
         .collect()
 }
 
-pub(crate) fn codex_item(mut value: Value) -> Result<Item, serde_json::Error> {
+pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
     let id = field(&value, "id")?;
     let status = item_status(value["status"].as_str());
     let client_input_id = field(&value, "clientId")?;
@@ -407,7 +420,7 @@ pub(crate) fn approval_review(
     ))
 }
 
-pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
+pub(crate) fn parse_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
     let mut turn = Turn {
         id: field(&value, "id")?,
         status: turn_status(value["status"].as_str()),
@@ -415,7 +428,7 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
             .map(|items| {
                 items
                     .into_iter()
-                    .map(codex_item)
+                    .map(parse_item)
                     .map(|v| v.map(Arc::new))
                     .collect()
             })
@@ -426,7 +439,7 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
         error: value
             .get("error")
             .filter(|v| !v.is_null())
-            .map(|error| codex_error(error, error["willRetry"] == true)),
+            .map(|error| execution_error(error, error["willRetry"] == true)),
         started_at_ms: field(&value, "startedAtMs")?,
         completed_at_ms: field(&value, "completedAtMs")?,
     };
@@ -443,7 +456,7 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
     Ok(turn)
 }
 
-pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error> {
+pub(crate) fn parse_thread(mut value: Value) -> Result<Thread, serde_json::Error> {
     Ok(Thread {
         id: Some(
             SessionRef::new(ProviderKind::Codex, field(&value, "id")?)
@@ -456,7 +469,7 @@ pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error
             .map(|turns| {
                 turns
                     .into_iter()
-                    .map(codex_turn)
+                    .map(parse_turn)
                     .map(|v| v.map(Arc::new))
                     .collect()
             })
@@ -468,7 +481,7 @@ pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error
         ..Default::default()
     })
 }
-pub(crate) fn codex_thread_response(mut value: Value) -> Result<ThreadResponse, serde_json::Error> {
+pub(crate) fn parse_thread_response(mut value: Value) -> Result<ThreadResponse, serde_json::Error> {
     Ok(ThreadResponse {
         model: field::<Option<String>>(&value, "model")?.map(|id| {
             agent_protocol::models::ModelRef {
@@ -476,19 +489,19 @@ pub(crate) fn codex_thread_response(mut value: Value) -> Result<ThreadResponse, 
                 id,
             }
         }),
-        thread: codex_thread(value["thread"].take())?,
+        thread: parse_thread(value["thread"].take())?,
     })
 }
 
 pub(super) fn deserialize_item<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Arc<Item>, D::Error> {
-    codex_item(Value::deserialize(deserializer)?)
+    parse_item(Value::deserialize(deserializer)?)
         .map(Arc::new)
         .map_err(serde::de::Error::custom)
 }
 /// Codex's native tagged input is constructed only at the provider IO boundary.
-pub(super) fn codex_input(input: &[agent_protocol::operations::Input]) -> Vec<Value> {
+pub(super) fn encode_input(input: &[agent_protocol::operations::Input]) -> Vec<Value> {
     use agent_protocol::operations::Input;
     input
         .iter()
@@ -510,8 +523,26 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn model_speed_is_normalized_at_the_native_boundary() {
+        let model = parse_model(json!({
+            "id":"entry","model":"native-model","displayName":"Model",
+            "defaultReasoningEffort":"medium","supportedReasoningEfforts":[],
+            "serviceTiers":[{"id":"priority","name":"Fast"},{"id":"flex"},{"id":"unknown"}]
+        }))
+        .unwrap();
+        assert_eq!(model.model.provider, ProviderKind::Codex);
+        assert_eq!(model.model.id, "native-model");
+        let tiers = model.service_tiers.unwrap();
+        assert_eq!(
+            tiers.iter().map(|tier| tier.fast).collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        assert_eq!(tiers[0].name.as_deref(), Some("Fast"));
+    }
+
+    #[test]
     fn codex_items_keep_phase_indexes_tool_metadata_and_scoped_subagents() {
-        let assistant = codex_item(
+        let assistant = parse_item(
             json!({"id":"a","type":"agentMessage","text":"answer","phase":"final_answer"}),
         )
         .unwrap();
@@ -522,29 +553,29 @@ mod tests {
                 ..
             }
         ));
-        let reasoning = codex_item(
+        let reasoning = parse_item(
             json!({"id":"r","type":"reasoning","content":["first","second"],"summary":["summary"]}),
         )
         .unwrap();
         assert!(
             matches!(reasoning.body(),ItemBody::Reasoning {content,summary} if content == &vec!["first","second"] && summary == &vec!["summary"])
         );
-        let command = codex_item(json!({"id":"c","type":"commandExecution","command":"cat file","cwd":"/work","status":"completed","exitCode":3})).unwrap();
+        let command = parse_item(json!({"id":"c","type":"commandExecution","command":"cat file","cwd":"/work","status":"completed","exitCode":3})).unwrap();
         assert_eq!(command.status, ItemStatus::Completed);
         assert!(
             matches!(command.body(),ItemBody::CommandExecution {cwd:Some(cwd),exit_code:Some(3),..} if cwd == "/work")
         );
-        let tool = codex_item(json!({"id":"t","type":"mcpToolCall","tool":"read","server":"server","arguments":{},"mcpAppResourceUri":"ui://tool","pluginId":"plugin","result":{"content":[{"type":"text","text":"result"}]}})).unwrap();
+        let tool = parse_item(json!({"id":"t","type":"mcpToolCall","tool":"read","server":"server","arguments":{},"mcpAppResourceUri":"ui://tool","pluginId":"plugin","result":{"content":[{"type":"text","text":"result"}]}})).unwrap();
         assert!(
             matches!(tool.body(),ItemBody::ToolCall {resource_uri:Some(uri),plugin_id:Some(plugin),result:Some(result),..} if uri == "ui://tool" && plugin == "plugin" && result["content"][0]["text"] == "result")
         );
-        let subagent = codex_item(json!({"id":"s","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"same","receiverThreadIds":["same"],"agentsStates":{"same":{"status":"pendingInit"}}})).unwrap();
+        let subagent = parse_item(json!({"id":"s","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"same","receiverThreadIds":["same"],"agentsStates":{"same":{"status":"pendingInit"}}})).unwrap();
         assert!(
             matches!(subagent.body(),ItemBody::Subagent {states,..} if states[0].session.provider == ProviderKind::Codex && states[0].status == TurnStatus::Running)
         );
         let future = json!({"id":"u","type":"futureItem","unknown":[1,2,3]});
         assert!(
-            matches!(codex_item(future.clone()).unwrap().body(),ItemBody::Custom {value,..} if value == &future)
+            matches!(parse_item(future.clone()).unwrap().body(),ItemBody::Custom {value,..} if value == &future)
         );
     }
     #[test]
@@ -555,11 +586,12 @@ mod tests {
             ("unauthorized", ErrorCategory::Auth),
         ] {
             assert_eq!(
-                codex_error(&json!({"message":"failure","codexErrorInfo":code}), false).category,
+                execution_error(&json!({"message":"failure","codexErrorInfo":code}), false)
+                    .category,
                 category
             );
         }
-        let error = codex_error(
+        let error = execution_error(
             &json!({"message":"retry","codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":429}}}),
             true,
         );
@@ -567,7 +599,7 @@ mod tests {
         assert!(error.retry.unwrap().overloaded);
         let future = json!({"futureFailure":{"detail":[1,{"unknown":true}]}});
         assert_eq!(
-            codex_error(
+            execution_error(
                 &json!({"message":"future failure","codexErrorInfo":future}),
                 false
             )

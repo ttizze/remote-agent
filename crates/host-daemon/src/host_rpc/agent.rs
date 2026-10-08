@@ -105,6 +105,7 @@ pub(crate) trait Identity: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Agent: Identity {
+    fn data_recipient(&self) -> &'static str;
     fn running_input(&self) -> super::submission::RunningInput;
     fn capabilities(&self) -> Capabilities;
     fn availability(&self) -> Result<(), Failure>;

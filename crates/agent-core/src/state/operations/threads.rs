@@ -46,10 +46,7 @@ impl Operation for ListSessions {
                 let Some(id) = cached.id.as_ref() else {
                     continue;
                 };
-                let provider = match id.provider {
-                    crate::session::ProviderKind::Codex => "codex",
-                    crate::session::ProviderKind::Claude => "claude",
-                };
+                let provider = id.provider.key();
                 if errors.contains_key(provider)
                     && !threads
                         .data
@@ -601,33 +598,16 @@ impl Operation for LoadModels {
             .as_ref()
             .cloned()
             .unwrap_or_default();
-        let drafts = snapshot.drafts.clone();
-        for (id, previous_draft) in drafts.iter() {
-            let provider = Some(crate::presentation::model_settings::draft_provider(
-                id,
-                previous_draft.model.as_ref(),
-            ));
-            let settings = supported_settings(
-                previous_draft.model.as_ref(),
-                previous_draft.effort.as_deref(),
-                previous_draft.service_tier.as_deref(),
-                provider,
-                &models,
-                !errors.is_empty(),
-            );
-            if settings
-                != (
-                    previous_draft.model.as_ref(),
-                    previous_draft.effort.as_deref(),
-                    previous_draft.service_tier.as_deref(),
-                )
-                && let Some(draft) = shared_mut(&mut snapshot.drafts, id)
-            {
-                draft.model = settings.0.cloned();
-                draft.effort = settings.1.map(str::to_owned);
-                draft.service_tier = settings.2.map(str::to_owned);
-            }
-        }
+        snapshot.drafts = normalized_model_drafts(
+            &snapshot.drafts,
+            &models,
+            &errors,
+            snapshot
+                .account
+                .accounts
+                .as_ref()
+                .map(|accounts| &accounts.selected),
+        );
         snapshot.models = Arc::new(models);
         snapshot.model_errors = Arc::new(errors);
         Vec::new()

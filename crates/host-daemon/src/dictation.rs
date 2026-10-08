@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{codex_accounts::AuthToken, host_rpc::SessionId};
+use crate::{adapters::codex::accounts::AuthToken, host_rpc::SessionId};
 use async_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
@@ -67,14 +67,34 @@ impl Prepared {
 // drops its task and socket; another client's preparation remains independent.
 pub(crate) struct Dictation {
     backend: Result<Arc<CodexAppServer>, String>,
+    stopped: tokio_util::sync::CancellationToken,
     prepared: Mutex<HashMap<SessionId, Prepared>>,
 }
+impl Default for Dictation {
+    fn default() -> Self {
+        Self::new(
+            Err("音声入力のバックエンドを利用できません。".into()),
+            Default::default(),
+        )
+    }
+}
 impl Dictation {
-    pub(crate) fn new(backend: Result<Arc<CodexAppServer>, String>) -> Self {
+    pub(crate) fn new(
+        backend: Result<Arc<CodexAppServer>, String>,
+        stopped: tokio_util::sync::CancellationToken,
+    ) -> Self {
         Self {
             backend,
+            stopped,
             prepared: Default::default(),
         }
+    }
+    pub(crate) fn data_recipient(&self) -> Option<String> {
+        self.backend
+            .as_ref()
+            .ok()
+            .filter(|_| !self.stopped.is_cancelled())
+            .map(|_| "OpenAI".into())
     }
     pub(crate) fn prepare(&self, session: SessionId, id: String) -> Result<(), String> {
         uuid::Uuid::parse_str(&id).map_err(|_| "録音の識別子が無効です。")?;
@@ -85,7 +105,7 @@ impl Dictation {
             .clone();
         let connection = async move {
             let AuthToken::ChatGpt(token) =
-                crate::codex_accounts::auth_token(&app_server, false).await?
+                crate::adapters::codex::accounts::auth_token(&app_server, false).await?
             else {
                 // API-key transcription is a single HTTP file request. It has no
                 // idle WebSocket to prepare; keep that request at recording stop.
@@ -175,7 +195,7 @@ async fn transcribe_request(
     }
     // Re-read the selected account at stop. Never use the prepared socket after
     // an account switch or refreshed token. Credentials stay exclusively on Host.
-    let text = match crate::codex_accounts::auth_token(app_server, false).await? {
+    let text = match crate::adapters::codex::accounts::auth_token(app_server, false).await? {
         AuthToken::ApiKey(key) => {
             drop(prepared);
             transcribe_recording(&key, RecordingService::OpenAi, pcm, API_TRANSCRIBE_URL).await?
@@ -347,7 +367,7 @@ async fn transcribe_recording(
                 .header("originator", "Codex Desktop")
                 .header("User-Agent", user_agent);
             // Claims select a header only; the service verifies the token.
-            if let Some(claims) = crate::codex_accounts::token_claims(token)
+            if let Some(claims) = crate::adapters::codex::accounts::token_claims(token)
                 && let Some(account_id) =
                     claims["https://api.openai.com/auth"]["chatgpt_account_id"].as_str()
             {
@@ -648,7 +668,7 @@ mod tests {
 
     #[tokio::test]
     async fn preparation_ownership_is_scoped_to_client_and_recording() {
-        let dictation = Dictation::new(Err("isolated backend".into()));
+        let dictation = Dictation::new(Err("isolated backend".into()), Default::default());
         for session in [1, 2] {
             dictation.prepared.lock().unwrap().insert(
                 session,

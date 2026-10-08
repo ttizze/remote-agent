@@ -56,7 +56,7 @@ impl Snapshot {
             .into_iter()
             .flat_map(|c| &c.candidates)
             .filter(|c| {
-                c.invocation.provider == provider
+                Some(c.invocation.provider) == provider
                     && c.invocation.kind == kind
                     && (c.invocation.name.to_lowercase().contains(&filter)
                         || c.description.to_lowercase().contains(&filter))
@@ -67,11 +67,11 @@ impl Snapshot {
             None => Some("候補を読み込み中…".into()),
             Some(c) if c.loading && candidates.is_empty() => Some("候補を読み込み中…".into()),
             Some(c)
-                if c.errors
-                    .get(&provider)
+                if provider
+                    .and_then(|provider| c.errors.get(&provider))
                     .is_some_and(|errors| !errors.is_empty()) =>
             {
-                Some(c.errors[&provider].join("\n"))
+                Some(c.errors[&provider.unwrap()].join("\n"))
             }
             Some(_) if candidates.is_empty() => Some("該当する候補がありません".into()),
             _ => None,
@@ -239,6 +239,15 @@ mod tests {
             })),
             ..Default::default()
         };
+        std::sync::Arc::make_mut(
+            std::sync::Arc::make_mut(&mut snapshot.drafts)
+                .entry(snapshot.navigation.draft_key.clone())
+                .or_default(),
+        )
+        .model = Some(agent_protocol::models::ModelRef {
+            provider: ProviderKind::Codex,
+            id: "model".into(),
+        });
         let suggestions = snapshot.composer_suggestions("/".into(), 1).unwrap();
         assert_eq!(suggestions.candidates[0].invocation, codex);
         assert_eq!(suggestions.candidates.len(), 1);
@@ -392,6 +401,10 @@ mod tests {
                 })),
                 ..Default::default()
             };
+            std::sync::Arc::make_mut(&mut snapshot.drafts).insert(snapshot.navigation.draft_key.clone(), std::sync::Arc::new(crate::state::Draft {
+                model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "model".into() }),
+                ..Default::default()
+            }));
             crate::state::operations::LoadComposerCatalog { cwd: String::new() }.prepare(&mut snapshot).unwrap();
             let text = format!("/{filter}");
             let suggestions = snapshot.composer_suggestions(text.clone(), text.len() as u32).unwrap();

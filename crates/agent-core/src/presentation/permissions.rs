@@ -24,7 +24,7 @@ pub const PERMISSION_CHOICES: [(PermissionMode, &str, &str); 3] = [
 ];
 
 pub struct PermissionControl<'a> {
-    pub provider: ProviderKind,
+    pub provider: Option<ProviderKind>,
     pub load_request: Option<ReadPermissionSettings>,
     pub label: &'static str,
     pub mode: Option<PermissionMode>,
@@ -38,14 +38,15 @@ impl Snapshot {
         let state = self
             .permission_settings
             .as_ref()
-            .filter(|state| state.provider == provider);
+            .filter(|state| Some(state.provider) == provider);
         let result = state.and_then(|state| state.result.as_ref());
         let settings = result.and_then(|result| result.as_ref().ok());
         let mode = settings.and_then(|settings| settings.mode);
         PermissionControl {
             provider,
-            load_request: (self.connected && state.is_none())
-                .then_some(ReadPermissionSettings { provider }),
+            load_request: provider
+                .filter(|_| self.connected && state.is_none())
+                .map(|provider| ReadPermissionSettings { provider }),
             label: match mode {
                 Some(mode) => {
                     PERMISSION_CHOICES
@@ -54,6 +55,7 @@ impl Snapshot {
                         .unwrap()
                         .1
                 }
+                None if provider.is_none() => "エージェント未選択",
                 None if settings.is_some() => "カスタム・未設定",
                 None if result.is_some() => "取得できません",
                 None => "読み込み中…",
@@ -83,6 +85,22 @@ mod tests {
                 .is_none()
         );
         snapshot.connected = true;
+        assert!(
+            snapshot
+                .permission_control(&"draft".into())
+                .load_request
+                .is_none()
+        );
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            "draft".into(),
+            Arc::new(Draft {
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: ProviderKind::Codex,
+                    id: "gpt".into(),
+                }),
+                ..Default::default()
+            }),
+        );
         assert_eq!(
             snapshot
                 .permission_control(&crate::state::DraftKey::from("draft"))
@@ -147,6 +165,16 @@ mod tests {
             })),
             ..Default::default()
         };
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            "draft".into(),
+            Arc::new(Draft {
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: ProviderKind::Codex,
+                    id: "gpt".into(),
+                }),
+                ..Default::default()
+            }),
+        );
         assert_eq!(
             snapshot
                 .permission_control(&crate::state::DraftKey::from("draft"))
@@ -164,7 +192,7 @@ mod tests {
             }),
         );
         let control = snapshot.permission_control(&crate::state::DraftKey::from("draft"));
-        assert_eq!(control.provider, ProviderKind::Claude);
+        assert_eq!(control.provider, Some(ProviderKind::Claude));
         assert_eq!(control.label, "読み込み中…");
         assert_eq!(control.version, None);
         let session = crate::session::SessionRef {
@@ -174,7 +202,7 @@ mod tests {
         let key = crate::state::DraftKey::from(session);
         assert_eq!(
             snapshot.permission_control(&key).provider,
-            ProviderKind::Claude
+            Some(ProviderKind::Claude)
         );
         Arc::make_mut(&mut snapshot.drafts).insert(
             key.clone(),
@@ -188,7 +216,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.permission_control(&key).provider,
-            ProviderKind::Claude
+            Some(ProviderKind::Claude)
         );
         let bytes = crate::persistence::encode(&snapshot).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("native-version"));
