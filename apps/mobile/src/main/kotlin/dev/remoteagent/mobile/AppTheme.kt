@@ -3,6 +3,7 @@
 package dev.remoteagent.mobile
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -29,11 +30,14 @@ import dev.remoteagent.core.mobileAssignTheme
 import dev.remoteagent.core.mobileThemeColors
 import dev.remoteagent.core.mobileTypography
 import dev.remoteagent.core.normalizeMobileAppearance
+import java.util.Locale
 
 /** `#rrggbb` or `#rrggbbaa`, as the core theme writes colors. */
 internal fun parseThemeColor(value: String): Color {
     val hex = value.removePrefix("#")
-    require(value.startsWith("#") && (hex.length == 6 || hex.length == 8)) { "Unexpected color $value" }
+    require(value.startsWith("#") && (hex.length == 6 || hex.length == 8)) {
+        "Unexpected color $value"
+    }
     fun channel(index: Int) = hex.substring(index * 2, index * 2 + 2).toInt(16)
     return Color(channel(0), channel(1), channel(2), if (hex.length == 8) channel(3) else 255)
 }
@@ -144,34 +148,49 @@ internal object AppTheme {
 
     private fun resolvedTypography() = mobileTypography(appearance.toCore())
 
-    private fun style(size: Double, line: Double, weight: FontWeight = FontWeight.Normal): TextStyle {
+    private fun fontSize(size: Double, resolved: dev.remoteagent.core.MobileTypography): Double =
+        when (size) {
+            11.0 -> resolved.microFontSize
+            12.0 -> resolved.captionFontSize
+            13.0 -> resolved.labelFontSize
+            14.0 -> resolved.footnoteFontSize
+            16.0 -> resolved.bodyFontSize
+            18.0 -> resolved.headlineFontSize
+            21.0 -> resolved.titleFontSize
+            26.0 -> resolved.largeTitleFontSize
+            30.0 -> resolved.displayFontSize
+            else -> size * resolved.baseFontSize / 16.0
+        }
+
+    private fun lineHeight(
+        size: Double,
+        line: Double,
+        resolved: dev.remoteagent.core.MobileTypography,
+    ): Double =
+        when (line) {
+            14.0 -> resolved.microLineHeight
+            16.0 -> resolved.captionLineHeight
+            17.0 -> resolved.labelLineHeight
+            19.0 -> resolved.footnoteLineHeight
+            23.0 -> if (size == 18.0) resolved.headlineLineHeight else resolved.bodyLineHeight
+            28.0 -> resolved.titleLineHeight
+            32.0 -> resolved.largeTitleLineHeight
+            36.0 -> resolved.displayLineHeight
+            else -> line * resolved.baseFontSize / 16.0
+        }
+
+    private fun style(
+        size: Double,
+        line: Double,
+        weight: FontWeight = FontWeight.Normal,
+    ): TextStyle {
         val resolved = resolvedTypography()
-        val fontSize =
-            when (size) {
-                11.0 -> resolved.microFontSize
-                12.0 -> resolved.captionFontSize
-                13.0 -> resolved.labelFontSize
-                14.0 -> resolved.footnoteFontSize
-                16.0 -> resolved.bodyFontSize
-                18.0 -> resolved.headlineFontSize
-                21.0 -> resolved.titleFontSize
-                26.0 -> resolved.largeTitleFontSize
-                30.0 -> resolved.displayFontSize
-                else -> size * resolved.baseFontSize / 16.0
-            }
-        val lineHeight =
-            when (line) {
-                14.0 -> resolved.microLineHeight
-                16.0 -> resolved.captionLineHeight
-                17.0 -> resolved.labelLineHeight
-                19.0 -> resolved.footnoteLineHeight
-                23.0 -> if (size == 18.0) resolved.headlineLineHeight else resolved.bodyLineHeight
-                28.0 -> resolved.titleLineHeight
-                32.0 -> resolved.largeTitleLineHeight
-                36.0 -> resolved.displayLineHeight
-                else -> line * resolved.baseFontSize / 16.0
-            }
-        return TextStyle(fontFamily = fonts, fontWeight = weight, fontSize = fontSize.sp, lineHeight = lineHeight.sp)
+        return TextStyle(
+            fontFamily = fonts,
+            fontWeight = weight,
+            fontSize = fontSize(size, resolved).sp,
+            lineHeight = lineHeight(size, line, resolved).sp,
+        )
     }
 
     // micro, caption, label, footnote, body, headline, title, largeTitle, display.
@@ -257,6 +276,72 @@ internal object AppTheme {
         )
 }
 
+private fun dynamicThemeTokens(scheme: ColorScheme): Map<String, String> =
+    mapOf(
+        "mobileScreen" to scheme.background.toHex(),
+        "mobileSheet" to scheme.surface.toHex(),
+        "mobileCard" to scheme.surfaceContainerHigh.toHex(),
+        "mobileGroupedCard" to scheme.surfaceContainer.toHex(),
+        "mobileCardAlt" to scheme.surfaceContainerHighest.toHex(),
+        "mobileComposerPanel" to scheme.surface.toHex(),
+        "mobileComposerSurface" to scheme.surfaceContainer.toHex(),
+        "mobileComposerBorder" to scheme.outlineVariant.toHex(),
+        "mobileForeground" to scheme.onBackground.toHex(),
+        "mobileForegroundSecondary" to scheme.onSurfaceVariant.toHex(),
+        "mobileForegroundMuted" to scheme.onSurfaceVariant.toHex(),
+        "mobileForegroundTertiary" to scheme.outline.toHex(),
+        "mobileBorder" to scheme.outline.toHex(),
+        "mobileBorderSubtle" to scheme.outlineVariant.toHex(),
+        "mobileSeparator" to scheme.outlineVariant.toHex(),
+        "mobileSubtle" to scheme.surfaceContainerLow.toHex(),
+        "mobileSubtleStrong" to scheme.surfaceContainerHigh.toHex(),
+        "mobilePrimary" to scheme.primary.toHex(),
+        "mobilePrimaryForeground" to scheme.onPrimary.toHex(),
+        "mobilePrimaryText" to scheme.primary.toHex(),
+        "mobileSecondary" to scheme.secondaryContainer.toHex(),
+        "mobileSecondaryForeground" to scheme.onSecondaryContainer.toHex(),
+        "mobileMarkdownLink" to scheme.primary.toHex(),
+        "mobileMarkdownCode" to scheme.surfaceContainerHighest.toHex(),
+        "mobileMarkdownBlockquoteBorder" to scheme.outlineVariant.toHex(),
+        "mobileMarkdownRule" to scheme.outlineVariant.toHex(),
+        "mobileUserBubble" to scheme.primaryContainer.toHex(),
+        "mobileUserBubbleForeground" to scheme.onPrimaryContainer.toHex(),
+        "mobileDrawer" to scheme.surfaceContainerLow.toHex(),
+        "mobileChevron" to scheme.onSurfaceVariant.toHex(),
+        "mobileWarning" to scheme.tertiaryContainer.toHex(),
+        "mobileWarningBorder" to scheme.outlineVariant.toHex(),
+        "mobileWarningForeground" to scheme.onTertiaryContainer.toHex(),
+        "mobileDanger" to scheme.errorContainer.toHex(),
+        "mobileDangerBorder" to scheme.outlineVariant.toHex(),
+        "mobileDangerForeground" to scheme.error.toHex(),
+        "terminalBackground" to scheme.surfaceContainerLowest.toHex(),
+        "terminalForeground" to scheme.onSurface.toHex(),
+        "terminalCursor" to scheme.primary.toHex(),
+        "mobileBackdrop" to scheme.scrim.toHex(),
+    )
+
+private fun materialColorScheme(palette: Palette, dynamicScheme: ColorScheme?): ColorScheme =
+    (dynamicScheme ?: if (palette.dark) darkColorScheme() else lightColorScheme()).copy(
+        primary = palette.primary,
+        onPrimary = palette.primaryForeground,
+        background = palette.screen,
+        onBackground = palette.foreground,
+        surface = palette.screen,
+        onSurface = palette.foreground,
+        surfaceVariant = palette.groupedCard,
+        onSurfaceVariant = palette.foregroundSecondary,
+        surfaceContainer = palette.groupedCard,
+        surfaceContainerLow = palette.sheet,
+        surfaceContainerHigh = palette.cardAlt,
+        outline = palette.border,
+        outlineVariant = palette.border,
+        error = palette.dangerForeground,
+        errorContainer = palette.danger,
+        secondary = palette.foregroundSecondary,
+        secondaryContainer = palette.secondary,
+        onSecondaryContainer = palette.secondaryForeground,
+    )
+
 @Composable
 internal fun AppMaterialTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
@@ -274,74 +359,9 @@ internal fun AppMaterialTheme(content: @Composable () -> Unit) {
             if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         } else null
     val baseTokens = mobileThemeColors(AppTheme.appearance.themeFor(dark), dark)
-    val tokens =
-        if (dynamicScheme == null) baseTokens
-        else
-            baseTokens +
-                mapOf(
-                    "mobileScreen" to dynamicScheme.background.toHex(),
-                    "mobileSheet" to dynamicScheme.surface.toHex(),
-                    "mobileCard" to dynamicScheme.surfaceContainerHigh.toHex(),
-                    "mobileGroupedCard" to dynamicScheme.surfaceContainer.toHex(),
-                    "mobileCardAlt" to dynamicScheme.surfaceContainerHighest.toHex(),
-                    "mobileComposerPanel" to dynamicScheme.surface.toHex(),
-                    "mobileComposerSurface" to dynamicScheme.surfaceContainer.toHex(),
-                    "mobileComposerBorder" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileForeground" to dynamicScheme.onBackground.toHex(),
-                    "mobileForegroundSecondary" to dynamicScheme.onSurfaceVariant.toHex(),
-                    "mobileForegroundMuted" to dynamicScheme.onSurfaceVariant.toHex(),
-                    "mobileForegroundTertiary" to dynamicScheme.outline.toHex(),
-                    "mobileBorder" to dynamicScheme.outline.toHex(),
-                    "mobileBorderSubtle" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileSeparator" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileSubtle" to dynamicScheme.surfaceContainerLow.toHex(),
-                    "mobileSubtleStrong" to dynamicScheme.surfaceContainerHigh.toHex(),
-                    "mobilePrimary" to dynamicScheme.primary.toHex(),
-                    "mobilePrimaryForeground" to dynamicScheme.onPrimary.toHex(),
-                    "mobilePrimaryText" to dynamicScheme.primary.toHex(),
-                    "mobileSecondary" to dynamicScheme.secondaryContainer.toHex(),
-                    "mobileSecondaryForeground" to dynamicScheme.onSecondaryContainer.toHex(),
-                    "mobileMarkdownLink" to dynamicScheme.primary.toHex(),
-                    "mobileMarkdownCode" to dynamicScheme.surfaceContainerHighest.toHex(),
-                    "mobileMarkdownBlockquoteBorder" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileMarkdownRule" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileUserBubble" to dynamicScheme.primaryContainer.toHex(),
-                    "mobileUserBubbleForeground" to dynamicScheme.onPrimaryContainer.toHex(),
-                    "mobileDrawer" to dynamicScheme.surfaceContainerLow.toHex(),
-                    "mobileChevron" to dynamicScheme.onSurfaceVariant.toHex(),
-                    "mobileWarning" to dynamicScheme.tertiaryContainer.toHex(),
-                    "mobileWarningBorder" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileWarningForeground" to dynamicScheme.onTertiaryContainer.toHex(),
-                    "mobileDanger" to dynamicScheme.errorContainer.toHex(),
-                    "mobileDangerBorder" to dynamicScheme.outlineVariant.toHex(),
-                    "mobileDangerForeground" to dynamicScheme.error.toHex(),
-                    "terminalBackground" to dynamicScheme.surfaceContainerLowest.toHex(),
-                    "terminalForeground" to dynamicScheme.onSurface.toHex(),
-                    "terminalCursor" to dynamicScheme.primary.toHex(),
-                    "mobileBackdrop" to dynamicScheme.scrim.toHex(),
-                )
+    val tokens = dynamicScheme?.let { baseTokens + dynamicThemeTokens(it) } ?: baseTokens
     val palette = Palette(dark, tokens)
-    val scheme =
-        (dynamicScheme ?: if (palette.dark) darkColorScheme() else lightColorScheme()).copy(
-            primary = palette.primary,
-            onPrimary = palette.primaryForeground,
-            background = palette.screen,
-            onBackground = palette.foreground,
-            surface = palette.screen,
-            onSurface = palette.foreground,
-            surfaceVariant = palette.groupedCard,
-            onSurfaceVariant = palette.foregroundSecondary,
-            surfaceContainer = palette.groupedCard,
-            surfaceContainerLow = palette.sheet,
-            surfaceContainerHigh = palette.cardAlt,
-            outline = palette.border,
-            outlineVariant = palette.border,
-            error = palette.dangerForeground,
-            errorContainer = palette.danger,
-            secondary = palette.foregroundSecondary,
-            secondaryContainer = palette.secondary,
-            onSecondaryContainer = palette.secondaryForeground,
-        )
+    val scheme = materialColorScheme(palette, dynamicScheme)
     CompositionLocalProvider(LocalPalette provides palette) {
         MaterialTheme(colorScheme = scheme, typography = AppTheme.typography(), content = content)
     }
@@ -350,6 +370,7 @@ internal fun AppMaterialTheme(content: @Composable () -> Unit) {
 private fun Color.toHex(): String {
     val argb = toArgb()
     return String.format(
+        Locale.ROOT,
         "#%02x%02x%02x%02x",
         (argb shr 16) and 0xff,
         (argb shr 8) and 0xff,
@@ -418,10 +439,18 @@ internal data class MobileAppearanceSettings(
             )
 
         fun load(context: android.content.Context): MobileAppearanceSettings {
-            val prefs = context.getSharedPreferences("mobile-appearance", android.content.Context.MODE_PRIVATE)
+            val prefs =
+                context.getSharedPreferences(
+                    "mobile-appearance",
+                    android.content.Context.MODE_PRIVATE,
+                )
             return MobileAppearanceSettings(
                     colorScheme =
-                        runCatching { MobileColorScheme.valueOf(prefs.getString("colorScheme", null) ?: "SYSTEM") }
+                        runCatching {
+                                MobileColorScheme.valueOf(
+                                    prefs.getString("colorScheme", null) ?: "SYSTEM"
+                                )
+                            }
                             .getOrDefault(MobileColorScheme.SYSTEM),
                     theme = prefs.getString("theme", null),
                     lightTheme = prefs.getString("lightTheme", null),

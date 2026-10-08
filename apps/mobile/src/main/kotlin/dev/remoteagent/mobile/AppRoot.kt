@@ -59,7 +59,9 @@ internal fun RemoteAgentApp(
     LaunchedEffect(model.usageDeepLinkRequests) {
         if (model.usageDeepLinkRequests > 0) model.openUsageRouteFromDeepLink()
     }
-    LaunchedEffect(model.snapshot, model.profileId) { model.requestPushPermissionIfNeeded(requestNotifications) }
+    LaunchedEffect(model.snapshot, model.profileId) {
+        model.requestPushPermissionIfNeeded(requestNotifications)
+    }
     AppMaterialTheme {
         val context = LocalContext.current
         val root = model.snapshot.currentDirectory()
@@ -80,8 +82,12 @@ internal fun RemoteAgentApp(
                                     )
                                 )
                         is dev.remoteagent.core.MarkdownLinkAction.HostFile ->
-                            if (dev.remoteagent.core.isPdfFile(target.path)) model.navigate(Route.Pdf(target.path))
-                            else model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
+                            if (dev.remoteagent.core.isPdfFile(target.path))
+                                model.navigate(Route.Pdf(target.path))
+                            else
+                                model.navigate(
+                                    Route.Workspace(WorkspaceTab.Files, target.path, target.line)
+                                )
                         is dev.remoteagent.core.MarkdownLinkAction.External ->
                             runCatching {
                                     context.startActivity(
@@ -97,44 +103,23 @@ internal fun RemoteAgentApp(
                 },
                 model::downloadBytes,
             )
-        CompositionLocalProvider(LocalSnapshot provides model.snapshot, LocalMarkdownActions provides markdown) {
+        CompositionLocalProvider(
+            LocalSnapshot provides model.snapshot,
+            LocalMarkdownActions provides markdown,
+        ) {
             AppSurface(model, requestQrScan)
         }
     }
 }
 
 @Composable
-private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (String) -> Unit) -> Unit) {
+private fun AppSurface(
+    model: AndroidAppModel,
+    requestQrScan: (onContents: (String) -> Unit) -> Unit,
+) {
     Surface(Modifier.fillMaxSize(), color = AppTheme.colors.header) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-            key(model.profileId) {
-                when (val route = model.route) {
-                    Route.Hosts -> HostsScreen(model)
-                    Route.Pairing -> PairingScreen(model, requestQrScan)
-                    Route.Home -> HomeScreen(model)
-                    is Route.Thread -> ThreadScreen(model, route.id)
-                    is Route.Device -> DeviceScreen(model, route.threadId)
-                    Route.ChooseProject -> ChooseProjectScreen(model)
-                    Route.AddProject -> AddProjectScreen(model)
-                    Route.AddProjectLocal -> LocalFolderScreen(model)
-                    Route.NewTask -> NewTaskScreen(model)
-                    is Route.Terminal ->
-                        TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
-                    is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file, route.line)
-                    is Route.Pdf -> PdfScreen(model, route.file)
-                    is Route.Settings -> SettingsScreen(model, route.projectId)
-                    Route.Appearance -> AppearanceScreen(model)
-
-                    Route.ScheduledTasks -> ScheduledTasksScreen(model)
-
-                    Route.Usage ->
-                        UsageScreen(
-                            model,
-                            initialTab = if (model.usageDeepLinkRequests > 0) UsageTab.LIMITS else UsageTab.USAGE,
-                        )
-                    Route.Archived -> ArchivedScreen(model)
-                }
-            }
+            key(model.profileId) { AppRoute(model, requestQrScan) }
             model.notice?.let { notice ->
                 Snackbar(
                     Modifier.align(Alignment.BottomCenter).padding(16.dp),
@@ -152,6 +137,38 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AppRoute(
+    model: AndroidAppModel,
+    requestQrScan: (onContents: (String) -> Unit) -> Unit,
+) {
+    when (val route = model.route) {
+        Route.Hosts -> HostsScreen(model)
+        Route.Pairing -> PairingScreen(model, requestQrScan)
+        Route.Home -> HomeScreen(model)
+        is Route.Thread -> ThreadScreen(model, route.id)
+        is Route.Device -> DeviceScreen(model, route.threadId)
+        Route.ChooseProject -> ChooseProjectScreen(model)
+        Route.AddProject -> AddProjectScreen(model)
+        Route.AddProjectLocal -> LocalFolderScreen(model)
+        Route.NewTask -> NewTaskScreen(model)
+        is Route.Terminal ->
+            TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
+        is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file, route.line)
+        is Route.Pdf -> PdfScreen(model, route.file)
+        is Route.Settings -> SettingsScreen(model, route.projectId)
+        Route.Appearance -> AppearanceScreen(model)
+        Route.ScheduledTasks -> ScheduledTasksScreen(model)
+        Route.Usage ->
+            UsageScreen(
+                model,
+                initialTab =
+                    if (model.usageDeepLinkRequests > 0) UsageTab.LIMITS else UsageTab.USAGE,
+            )
+        Route.Archived -> ArchivedScreen(model)
     }
 }
 
@@ -182,83 +199,106 @@ private fun HostsScreen(model: AndroidAppModel) {
     ScreenScaffold(
         "Environments",
         onBack = null,
-        actions = { HeaderIconButton(Icons.Outlined.QrCodeScanner, "Add environment", onClick = model::openPairing) },
+        actions = {
+            HeaderIconButton(
+                Icons.Outlined.QrCodeScanner,
+                "Add environment",
+                onClick = model::openPairing,
+            )
+        },
     ) {
-        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(model.profiles, key = { it.id }) { profile ->
-                val environment = model.environments.firstOrNull { it.profileId == profile.id }
-                Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth().clickable { model.selectProfile(profile.id) }.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(profile.name, style = AppTheme.headline, color = AppTheme.colors.foreground)
-                            Text(
-                                environment?.let { current ->
-                                    listOfNotNull(
-                                            current.state,
-                                            current.platform,
-                                            current.machine,
-                                            current.capabilities
-                                                .takeIf { it.isNotEmpty() }
-                                                ?.let { "${it.size} capabilities" },
-                                        )
-                                        .joinToString(" · ")
-                                } ?: if (profile.id == model.profileId) "Connected device" else "Paired",
-                                style = AppTheme.caption,
-                                color = AppTheme.colors.foregroundSecondary,
-                            )
-                            environment
-                                ?.reconnectReason
-                                ?.takeIf { it.isNotBlank() }
-                                ?.let { reason ->
-                                    Text(reason, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
-                                }
-                        }
-                        IconButton(onClick = { model.removeProfile(profile.id) }) {
-                            Icon(Icons.Outlined.Delete, "Remove ${profile.name}", tint = AppTheme.colors.iconMuted)
-                        }
-                    }
-                }
-            }
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(model.profiles, key = { it.id }) { profile -> HostCard(model, profile) }
             val activities =
                 model.environments.flatMap { environment ->
                     environment.activities.map { activity -> environment to activity }
                 }
             if (activities.isNotEmpty()) {
-                item {
-                    Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
-                        Column(
-                            Modifier.fillMaxWidth().padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text("Agent activity", style = AppTheme.headline, color = AppTheme.colors.foreground)
-                            activities.forEach { (environment, activity) ->
-                                Column {
-                                    Text(
-                                        "${environment.label} · ${activity.title}",
-                                        style = AppTheme.body,
-                                        color = AppTheme.colors.foreground,
-                                    )
-                                    Text(
-                                        "${activity.phase}: ${activity.headline}",
-                                        style = AppTheme.caption,
-                                        color = AppTheme.colors.foregroundSecondary,
-                                    )
-                                    activity.detail
-                                        ?.takeIf { it.isNotBlank() }
-                                        ?.let { detail ->
-                                            Text(
-                                                detail,
-                                                style = AppTheme.caption,
-                                                color = AppTheme.colors.foregroundSecondary,
-                                            )
-                                        }
-                                }
-                            }
-                        }
+                item { ActivitySummary(activities) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HostCard(model: AndroidAppModel, profile: HostProfile) {
+    val environment = model.environments.firstOrNull { it.profileId == profile.id }
+    Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickable { model.selectProfile(profile.id) }.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(profile.name, style = AppTheme.headline, color = AppTheme.colors.foreground)
+                Text(
+                    environment?.let { current ->
+                        listOfNotNull(
+                                current.state,
+                                current.platform,
+                                current.machine,
+                                current.capabilities
+                                    .takeIf { it.isNotEmpty() }
+                                    ?.let { "${it.size} capabilities" },
+                            )
+                            .joinToString(" · ")
+                    } ?: if (profile.id == model.profileId) "Connected device" else "Paired",
+                    style = AppTheme.caption,
+                    color = AppTheme.colors.foregroundSecondary,
+                )
+                environment
+                    ?.reconnectReason
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { reason ->
+                        Text(
+                            reason,
+                            style = AppTheme.caption,
+                            color = AppTheme.colors.foregroundSecondary,
+                        )
                     }
+            }
+            IconButton(onClick = { model.removeProfile(profile.id) }) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    "Remove ${profile.name}",
+                    tint = AppTheme.colors.iconMuted,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivitySummary(activities: List<Pair<EnvironmentRow, EnvironmentActivityRow>>) {
+    Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
+        Column(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Agent activity", style = AppTheme.headline, color = AppTheme.colors.foreground)
+            activities.forEach { (environment, activity) ->
+                Column {
+                    Text(
+                        "${environment.label} · ${activity.title}",
+                        style = AppTheme.body,
+                        color = AppTheme.colors.foreground,
+                    )
+                    Text(
+                        "${activity.phase}: ${activity.headline}",
+                        style = AppTheme.caption,
+                        color = AppTheme.colors.foregroundSecondary,
+                    )
+                    activity.detail
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { detail ->
+                            Text(
+                                detail,
+                                style = AppTheme.caption,
+                                color = AppTheme.colors.foregroundSecondary,
+                            )
+                        }
                 }
             }
         }
@@ -272,7 +312,10 @@ private fun PairingScreen(model: AndroidAppModel, scan: (onContents: (String) ->
         if (model.invitation == null) "Add Environment" else "Pairing",
         onBack = if (model.profiles.isEmpty()) null else model::back,
     ) {
-        Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(
+            Modifier.fillMaxSize().padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
             val invitation = model.invitation
             if (invitation == null) {
                 Text(
@@ -280,7 +323,9 @@ private fun PairingScreen(model: AndroidAppModel, scan: (onContents: (String) ->
                     style = AppTheme.footnote,
                     color = AppTheme.colors.foregroundSecondary,
                 )
-                PrimaryButton("QRコードを読み取る", enabled = !model.busy) { scan { model.preparePairing(it) } }
+                PrimaryButton("QRコードを読み取る", enabled = !model.busy) {
+                    scan { model.preparePairing(it) }
+                }
                 SettingsField(contents, { contents = it }, "接続情報", minLines = 3)
                 PrimaryButton("接続先を確認", enabled = contents.isNotBlank() && !model.busy) {
                     model.preparePairing(contents)
@@ -288,7 +333,10 @@ private fun PairingScreen(model: AndroidAppModel, scan: (onContents: (String) ->
                 }
             } else {
                 Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
-                    Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         Text(
                             invitation.hostName,
                             style = AppTheme.title,
@@ -296,12 +344,23 @@ private fun PairingScreen(model: AndroidAppModel, scan: (onContents: (String) ->
                             color = AppTheme.colors.foreground,
                         )
                         Text("メッセージと作業に必要な内容をこの PC と AI サービスに送信します。", style = AppTheme.footnote)
-                        Text("AI処理: ${invitation.aiRecipients.joinToString("、")}", style = AppTheme.footnote)
-                        invitation.transcriptionRecipient?.let { Text("音声入力: $it", style = AppTheme.footnote) }
+                        Text(
+                            "AI処理: ${invitation.aiRecipients.joinToString("、")}",
+                            style = AppTheme.footnote,
+                        )
+                        invitation.transcriptionRecipient?.let {
+                            Text("音声入力: $it", style = AppTheme.footnote)
+                        }
                     }
                 }
-                PrimaryButton(if (model.busy) "Pairing..." else "同意して接続", enabled = !model.busy, onClick = model::pair)
-                TextButton(onClick = model::openPairing) { Text("変更", color = AppTheme.colors.foreground) }
+                PrimaryButton(
+                    if (model.busy) "Pairing..." else "同意して接続",
+                    enabled = !model.busy,
+                    onClick = model::pair,
+                )
+                TextButton(onClick = model::openPairing) {
+                    Text("変更", color = AppTheme.colors.foreground)
+                }
             }
         }
     }
