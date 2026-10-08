@@ -1434,13 +1434,6 @@ impl BackgroundOwner {
         }
     }
 
-    pub(crate) async fn has_demand(&self, scope: &BackgroundScope) -> bool {
-        let snapshot = self.snapshot().await;
-        snapshot
-            .active_scope_keys
-            .contains(&agent_domain::scope_key(scope))
-    }
-
     /// Returns whether a scope currently has a lease that may perform work.
     /// The caller owns the actual work and supplies its own interval clock.
     pub(crate) async fn should_run_scope_work(&self, scope: &BackgroundScope) -> bool {
@@ -1455,11 +1448,6 @@ impl BackgroundOwner {
             .await
             .values()
             .any(|lease| lease_may_run_scoped_work(lease, scope, &at, &policy))
-    }
-
-    /// A cheap gate for owner-managed opportunistic refreshes.
-    pub(crate) async fn should_run_opportunistic_work(&self) -> bool {
-        self.snapshot().await.should_run_opportunistic_work
     }
 
     /// Active VCS leases are the Host's source of truth for which checkouts
@@ -2126,6 +2114,7 @@ pub async fn sample_desktop_power(stop: &CancellationToken) -> HostPowerSnapshot
     snapshot
 }
 
+#[cfg(target_os = "linux")]
 async fn sample_linux_power(stop: &CancellationToken) -> PowerProbe {
     let mut probe = PowerProbe::unknown(HostPowerSource::NodeLinux);
     let (observed_power_supply, on_battery, speed_limit_percent) =
@@ -2154,6 +2143,7 @@ async fn sample_linux_power(stop: &CancellationToken) -> PowerProbe {
     probe
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn linux_power_contact(
     observed_power_supply: bool,
     idle: BackgroundBooleanState,
@@ -2162,6 +2152,7 @@ fn linux_power_contact(
     observed_power_supply || idle != BackgroundBooleanState::Unknown || speed_observed
 }
 
+#[cfg(target_os = "linux")]
 fn sample_linux_native_power() -> (bool, BackgroundBooleanState, Option<u8>) {
     let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
         return (false, BackgroundBooleanState::Unknown, None);
@@ -2197,6 +2188,7 @@ fn sample_linux_native_power() -> (bool, BackgroundBooleanState, Option<u8>) {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn linux_speed_limit_percent() -> Option<u8> {
     let entries = std::fs::read_dir("/sys/devices/system/cpu").ok()?;
     let mut total = 0.0;
@@ -2455,11 +2447,7 @@ async fn sample_windows_power(_stop: &CancellationToken) -> PowerProbe {
     .unwrap_or_else(|_| PowerProbe::unknown(HostPowerSource::NodeWindows))
 }
 
-#[cfg(not(target_os = "windows"))]
-async fn sample_windows_power(_stop: &CancellationToken) -> PowerProbe {
-    PowerProbe::unknown(HostPowerSource::NodeWindows)
-}
-
+#[cfg(any(target_os = "windows", test))]
 fn parse_windows_ac_line_status(value: u8) -> BackgroundBooleanState {
     match value {
         0 => BackgroundBooleanState::True,
@@ -2468,6 +2456,7 @@ fn parse_windows_ac_line_status(value: u8) -> BackgroundBooleanState {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn parse_windows_system_status(value: u8) -> BackgroundBooleanState {
     match value {
         0 => BackgroundBooleanState::False,
@@ -2476,6 +2465,7 @@ fn parse_windows_system_status(value: u8) -> BackgroundBooleanState {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn parse_windows_input_desktop_name(name: &[u16]) -> BackgroundBooleanState {
     match name {
         [87, 105, 110, 108, 111, 103, 111, 110] => BackgroundBooleanState::True,

@@ -197,6 +197,7 @@ async fn run_platform_source(mailbox: Arc<LifecycleMailbox>, stop: CancellationT
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn send_lifecycle_event(
     mailbox: &LifecycleMailbox,
     stop: &CancellationToken,

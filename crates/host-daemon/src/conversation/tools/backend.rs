@@ -192,16 +192,6 @@ pub(crate) trait Orchestration: Send + Sync {
             Err("scheduled tasks are unavailable".into())
         })
     }
-    fn set_scheduled_task_enabled(
-        &self,
-        id: String,
-        enabled: bool,
-    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
-        Box::pin(async move {
-            let _ = (id, enabled);
-            Err("scheduled tasks are unavailable".into())
-        })
-    }
     fn delete_scheduled_task(&self, id: String) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
             let _ = id;
@@ -278,20 +268,6 @@ impl Orchestration for HostOrchestration {
             self.runtime
                 .scheduled_tasks()
                 .upsert(input)
-                .await
-                .map_err(|error| error.to_string())
-        })
-    }
-
-    fn set_scheduled_task_enabled(
-        &self,
-        id: String,
-        enabled: bool,
-    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
-        Box::pin(async move {
-            self.runtime
-                .scheduled_tasks()
-                .set_enabled(&id, enabled)
                 .await
                 .map_err(|error| error.to_string())
         })
