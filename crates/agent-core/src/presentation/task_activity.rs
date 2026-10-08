@@ -1,23 +1,56 @@
 //! Compact task state for system surfaces. Never expose message or command bodies.
-use crate::models::{task_active, task_title};
+use crate::models::task_active;
 use crate::{models::SessionStatus, session::SessionRef, state::Snapshot};
-use agent_protocol::live_activity::task_phase;
+use agent_protocol::live_activity::{TaskActivitySummary, task_phase};
 use std::collections::BTreeSet;
+
+struct TaskActivity {
+    session: SessionRef,
+    status: &'static str,
+    ongoing: bool,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct TaskActivity {
-    pub session: SessionRef,
-    pub title: String,
-    pub status: String,
-    pub status_label: String,
-    pub ongoing: bool,
+pub struct TaskActivityOverview {
+    pub summary: TaskActivitySummary,
+    pub sessions: Vec<SessionRef>,
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    /// Unknown or missing state retains a previously active task until completion is observed.
+    pub fn task_activity_overview(
+        &self,
+        previous_sessions: Vec<SessionRef>,
+    ) -> TaskActivityOverview {
+        let tasks = self.task_activities();
+        let mut statuses = Vec::new();
+        let mut sessions = BTreeSet::new();
+        for task in &tasks {
+            if task.ongoing
+                || (task.status == "unknown" && previous_sessions.contains(&task.session))
+            {
+                statuses.push(task.status);
+                sessions.insert(task.session.clone());
+            }
+        }
+        for previous in previous_sessions {
+            if !tasks.iter().any(|task| task.session == previous) {
+                statuses.push("unknown");
+                sessions.insert(previous);
+            }
+        }
+        TaskActivityOverview {
+            summary: TaskActivitySummary::from_statuses(statuses),
+            sessions: sessions.into_iter().collect(),
+        }
+    }
+}
+
+impl Snapshot {
     /// Include observed sessions even when search or pagination hides their list row.
-    pub fn task_activities(&self) -> Vec<TaskActivity> {
+    fn task_activities(&self) -> Vec<TaskActivity> {
         let summaries = self
             .threads
             .as_ref()
@@ -54,21 +87,15 @@ impl Snapshot {
                             thread.list_stale != Some(true)
                                 && thread.status != SessionStatus::Unknown
                         }));
-                let (status, status_label, ongoing) = task_phase(
+                let (status, _, ongoing) = task_phase(
                     known,
                     task_active(observed, session_status),
                     waiting && observed != Some(false),
                     latest.map(|turn| turn.status),
                 );
-                let title_source = summary.or(conversation);
                 TaskActivity {
                     session: id.clone(),
-                    title: crate::models::compact_title(task_title(
-                        title_source.and_then(|thread| thread.name.as_deref()),
-                        title_source.and_then(|thread| thread.preview.as_deref()),
-                    )),
-                    status: status.into(),
-                    status_label: status_label.into(),
+                    status,
                     ongoing,
                 }
             })
@@ -86,6 +113,22 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn overview_retains_only_previously_active_unknown_tasks_and_clears_observed_completion() {
+        let running = snapshot("running", "running");
+        let overview = running.task_activity_overview(vec![]);
+        assert_eq!(overview.summary.running, 1);
+        let unknown = snapshot("unavailable", "completed");
+        assert!(!unknown.task_activity_overview(vec![]).summary.ongoing());
+        let retained = unknown.task_activity_overview(overview.sessions);
+        assert_eq!(retained.summary.unknown, 1);
+        let absent = Snapshot::default().task_activity_overview(retained.sessions);
+        assert_eq!(absent.summary.unknown, 1);
+        let ended = snapshot("idle", "completed").task_activity_overview(absent.sessions);
+        assert!(!ended.summary.ongoing());
+        assert!(ended.sessions.is_empty());
+    }
 
     fn snapshot(status: &str, turn: &str) -> Snapshot {
         let thread: Thread = serde_json::from_value(json!({
@@ -149,7 +192,7 @@ mod tests {
         );
         let request = serde_json::from_value(json!({"id":"request", "target":"session", "delivery":"awaiting", "body":{"question":{"questions":[]}}})).unwrap();
         thread.requests.insert("request".into(), Arc::new(request));
-        assert_eq!(state.task_activities()[0].status_label, "確認待ち");
+        assert_eq!(state.task_activities()[0].status, "waiting");
         let thread = Arc::make_mut(
             Arc::make_mut(&mut state.conversations)
                 .values_mut()
@@ -167,7 +210,7 @@ mod tests {
         state.subscriptions = Arc::default();
         let id = state.task_activities()[0].session.clone();
         Arc::make_mut(&mut state.activity).active.insert(id, false);
-        assert_eq!(state.task_activities()[0].status_label, "更新待ち");
+        assert_eq!(state.task_activities()[0].status, "unknown");
         let disconnected = reduce(&state, Event::Disconnected("offline".into())).0;
         assert_eq!(disconnected.task_activities()[0].status, "unknown");
     }
@@ -214,22 +257,6 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|task| task.ongoing));
         assert_ne!(tasks[0].session, tasks[1].session);
-        assert_eq!(
-            tasks
-                .iter()
-                .find(|task| task.session.provider == crate::session::ProviderKind::Codex)
-                .unwrap()
-                .title,
-            "無題のタスク"
-        );
-        assert_eq!(
-            tasks
-                .iter()
-                .find(|task| task.session.provider == crate::session::ProviderKind::Claude)
-                .unwrap()
-                .title,
-            "Claude task"
-        );
         state.threads = None;
         assert_eq!(state.task_activities()[0].status, "unknown");
     }
@@ -247,18 +274,5 @@ mod tests {
         let id = state.task_activities()[0].session.clone();
         Arc::make_mut(&mut state.activity).active.insert(id, true);
         assert_eq!(state.task_activities()[0].status, "running");
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn titles_are_bounded_without_exposing_later_lines(title in ".{0,400}") {
-            let mut state = snapshot("running", "running");
-            let thread = Arc::make_mut(Arc::make_mut(&mut state.conversations).values_mut().next().unwrap());
-            thread.name = Some(format!("{title}\nprivate body"));
-            let tasks = state.task_activities();
-            proptest::prop_assert!(tasks[0].title.chars().count() <= 121);
-            proptest::prop_assert!(!tasks[0].title.contains('\n'));
-            proptest::prop_assert!(!tasks[0].title.contains("private body"));
-        }
     }
 }

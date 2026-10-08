@@ -131,7 +131,7 @@ running the same conversation on both Hosts at once.
 
 On Mac and iPhone, select assistant text to quote it into the draft or ask about it in a side chat. Closing an iPhone side chat restores the original conversation and draft. Mac also supports right-click Copy and Google Search, and own-message hover actions for copying or returning text to the composer. Command activity starts collapsed while running and after reopening; explicit expansion is preserved. See the [conversation display contract](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md).
 
-iPhone starts a Live Activity for running tasks on the selected PC. The Lock Screen and Dynamic Island show the task title and running, awaiting confirmation, completed, failed or interrupted state; tapping opens that task. Final state remains on the Lock Screen for one minute. Switching PCs dismisses the previous PC's activities. Live Activities must be enabled in iOS Settings.
+iPhone starts one Live Activity for the selected PC's ongoing tasks. The collapsed Dynamic Island shows one status icon per task, split across its two sides; up to twelve icons fit, with additional tasks represented by a count badge. The Lock Screen and expanded island show running and awaiting-confirmation counts. Tapping opens that PC's task list. The activity ends only after every task finishes and remains on the Lock Screen for one minute. Switching PCs dismisses the previous PC's activity. Live Activities must be enabled in iOS Settings.
 
 For updates while the iPhone app is suspended, enable the app's Push Notifications capability in Apple Developer and configure APNs on the Host. Put `bex-apns.json` in the Host state directory (alongside `identity.keys`):
 
@@ -139,7 +139,7 @@ For updates while the iPhone app is suspended, enable the app's Push Notificatio
 {
   "key_id": "YOURKEYID1",
   "team_id": "K65K9J8686",
-  "bundle_id": "com.ttizze.b-codex",
+  "bundle_id": "dev.remoteagent.mobile.ios",
   "key_file": "/absolute/path/outside/the/repository/AuthKey.p8",
   "environment": "production"
 }

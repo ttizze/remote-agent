@@ -119,41 +119,28 @@ impl Apns {
         &self,
         owner: &str,
         params: &RegisterLiveActivity,
-        title: &str,
-        phase: (&str, &str, bool),
+        tasks: Vec<(SessionRef, String)>,
     ) -> Result<(), &'static str> {
         let content = Content {
-            title: agent_protocol::models::compact_title(title),
-            status: phase.0.into(),
-            status_label: phase.1.into(),
-            connected: phase.0 != "unknown",
+            summary: Default::default(),
+            connected: true,
             host_name: self.host_name.clone(),
         };
-        self.registry
+        let mut registry = self
+            .registry
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .register(
-                owner,
-                params,
-                content,
-                phase.2 || phase.0 == "unknown",
-                now(),
-            )?;
+            .unwrap_or_else(|error| error.into_inner());
+        let timestamp = now();
+        registry.seed(tasks, timestamp);
+        registry.register(owner, params, content, timestamp)?;
         self.wake.notify_one();
         Ok(())
     }
-    pub fn update(&self, session: &SessionRef, phase: (&str, &str, bool)) {
+    pub fn update(&self, session: &SessionRef, status: &str) {
         self.registry
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .update(session, phase, now());
-        self.wake.notify_one();
-    }
-    pub fn rename(&self, session: &SessionRef, title: &str) {
-        self.registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .rename(session, title, now());
+            .update(session, status, now());
         self.wake.notify_one();
     }
     pub fn unregister(&self, owner: &str, activity: &str) {

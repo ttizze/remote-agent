@@ -1,6 +1,9 @@
 //! Per-device registrations survive a phone connection closing, but expire with the activity.
 use super::client::ResultKind;
-use agent_protocol::{live_activity::RegisterLiveActivity, session::SessionRef};
+use agent_protocol::{
+    live_activity::{RegisterLiveActivity, TaskActivitySummary},
+    session::SessionRef,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use zeroize::Zeroizing;
@@ -9,14 +12,11 @@ const LIFETIME: u64 = 8 * 60 * 60;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Content {
-    pub title: String,
-    pub status: String,
-    pub status_label: String,
+    pub summary: TaskActivitySummary,
     pub connected: bool,
     pub host_name: String,
 }
 struct Registration {
-    session: SessionRef,
     token: Zeroizing<Vec<u8>>,
     content: Content,
     ongoing: bool,
@@ -39,6 +39,7 @@ pub(super) struct Delivery {
 pub(super) struct Registry {
     entries: HashMap<(String, String), Registration>,
     generation: u64,
+    tasks: HashMap<SessionRef, String>,
 }
 impl Registry {
     pub fn register(
@@ -46,15 +47,14 @@ impl Registry {
         owner: &str,
         params: &RegisterLiveActivity,
         mut content: Content,
-        mut ongoing: bool,
         now: u64,
     ) -> Result<(), &'static str> {
         params.validate()?;
+        content.summary = self.summary();
+        content.connected = content.summary.unknown == 0;
+        let mut ongoing = content.summary.ongoing();
         let key = (owner.to_owned(), params.activity_id.clone());
         if let Some(entry) = self.entries.get(&key) {
-            if entry.session != params.session {
-                return Err("Live Activity session cannot change");
-            }
             if !entry.ongoing {
                 content = entry.content.clone();
                 ongoing = false;
@@ -77,12 +77,11 @@ impl Registry {
             .get(&key)
             .map_or(now + LIFETIME, |entry| entry.expires);
         let sent_at = self.entries.get(&key).map_or(0, |entry| entry.sent_at);
-        let urgent = !ongoing || content.status == "waiting";
+        let urgent = !ongoing || content.summary.waiting > 0;
         self.generation += 1;
         self.entries.insert(
             key,
             Registration {
-                session: params.session.clone(),
                 token: Zeroizing::new(params.token.clone()),
                 content,
                 ongoing,
@@ -103,45 +102,48 @@ impl Registry {
     pub fn revoke(&mut self, owner: &str) {
         self.entries.retain(|(principal, _), _| principal != owner);
     }
-    pub fn update(&mut self, session: &SessionRef, phase: (&str, &str, bool), now: u64) {
-        for entry in self
-            .entries
-            .values_mut()
-            .filter(|entry| &entry.session == session)
-        {
-            // Once this activity ends, a new run needs its own activity identity.
-            if !entry.ongoing {
-                continue;
-            }
-            let connected = phase.0 != "unknown";
-            if entry.content.connected == connected
-                && (!connected || (entry.content.status == phase.0 && entry.ongoing == phase.2))
-            {
-                continue;
-            }
-            if connected {
-                entry.content.status = phase.0.into();
-                entry.content.status_label = phase.1.into();
-                entry.ongoing = phase.2;
-            }
-            entry.content.connected = connected;
-            entry.urgent = !entry.ongoing || (connected && phase.0 == "waiting");
-            self.generation += 1;
-            entry.generation = self.generation;
-            entry.due = now.max(entry.sent_at + 1);
-        }
+    fn summary(&self) -> TaskActivitySummary {
+        TaskActivitySummary::from_statuses(self.tasks.values().map(String::as_str))
     }
-    pub fn rename(&mut self, session: &SessionRef, title: &str, now: u64) {
-        let title = agent_protocol::models::compact_title(title);
-        for entry in self
-            .entries
-            .values_mut()
-            .filter(|entry| &entry.session == session)
+    pub fn seed(&mut self, tasks: Vec<(SessionRef, String)>, now: u64) {
+        // Changes received while the native list was loading are authoritative.
+        for (session, status) in tasks {
+            if status != "unknown"
+                && TaskActivitySummary::from_statuses([status.as_str()]).ongoing()
+            {
+                self.tasks.entry(session).or_insert(status);
+            }
+        }
+        self.refresh(now);
+    }
+    pub fn update(&mut self, session: &SessionRef, next_status: &str, now: u64) {
+        if self
+            .tasks
+            .get(session)
+            .is_some_and(|status| status == next_status)
         {
-            if entry.content.title == title {
+            return;
+        }
+        if next_status == "unknown"
+            && !self.tasks.get(session).is_some_and(|status| {
+                TaskActivitySummary::from_statuses([status.as_str()]).ongoing()
+            })
+        {
+            return;
+        }
+        self.tasks.insert(session.clone(), next_status.into());
+        self.refresh(now);
+    }
+    fn refresh(&mut self, now: u64) {
+        let summary = self.summary();
+        for entry in self.entries.values_mut().filter(|entry| entry.ongoing) {
+            if entry.content.summary == summary {
                 continue;
             }
-            entry.content.title = title.clone();
+            entry.content.summary = summary;
+            entry.content.connected = summary.unknown == 0;
+            entry.ongoing = summary.ongoing();
+            entry.urgent = !entry.ongoing || summary.waiting > 0;
             self.generation += 1;
             entry.generation = self.generation;
             entry.due = now.max(entry.sent_at + 1);
@@ -166,7 +168,7 @@ impl Registry {
                 } else {
                     now
                 });
-                aps["relevance-score"] = serde_json::json!(if entry.content.status == "waiting" {
+                aps["relevance-score"] = serde_json::json!(if entry.content.summary.waiting > 0 {
                     100
                 } else {
                     50
@@ -217,12 +219,14 @@ impl Registry {
 mod tests {
     use super::*;
     use agent_protocol::{live_activity::PushEnvironment, session::ProviderKind};
+    fn session(provider: ProviderKind) -> SessionRef {
+        SessionRef {
+            provider,
+            id: "task".into(),
+        }
+    }
     fn params(activity: &str, token: u8) -> RegisterLiveActivity {
         RegisterLiveActivity {
-            session: SessionRef {
-                provider: ProviderKind::Codex,
-                id: "task".into(),
-            },
             activity_id: activity.into(),
             token: vec![token; 32],
             environment: PushEnvironment::Sandbox,
@@ -230,24 +234,27 @@ mod tests {
     }
     fn content() -> Content {
         Content {
-            title: "タスク".into(),
-            status: "running".into(),
-            status_label: "実行中".into(),
+            summary: TaskActivitySummary::default(),
             connected: true,
             host_name: "PC".into(),
         }
+    }
+    fn registry() -> Registry {
+        let mut registry = Registry::default();
+        registry.update(&session(ProviderKind::Codex), "running", 100);
+        registry
     }
     fn aps(delivery: &Delivery) -> serde_json::Value {
         serde_json::from_slice::<serde_json::Value>(&delivery.payload).unwrap()["aps"].clone()
     }
     #[test]
-    fn rotation_replaces_only_its_device_and_stale_completions_cannot_remove_new_tokens() {
-        let mut registry = Registry::default();
+    fn rotation_is_owned_by_its_device_and_fences_inflight_deliveries() {
+        let mut registry = registry();
         registry
-            .register("phone", &params("activity", 1), content(), true, 100)
+            .register("phone", &params("activity", 1), content(), 100)
             .unwrap();
         registry
-            .register("other", &params("activity", 2), content(), true, 100)
+            .register("other", &params("activity", 2), content(), 100)
             .unwrap();
         let old = registry
             .deliveries(100)
@@ -255,7 +262,7 @@ mod tests {
             .find(|d| d.owner == "phone")
             .unwrap();
         registry
-            .register("phone", &params("activity", 3), content(), true, 101)
+            .register("phone", &params("activity", 3), content(), 101)
             .unwrap();
         assert!(!registry.current(&old));
         registry.complete(&old, ResultKind::Expired, 101);
@@ -267,177 +274,123 @@ mod tests {
             &[3; 32]
         );
         registry.unregister("other", "activity");
-        assert_eq!(registry.entries.len(), 1);
         registry.revoke("phone");
         assert!(registry.deliveries(101).is_empty());
     }
     #[test]
-    fn terminal_push_contains_final_content_and_is_not_replaced_by_later_idle_or_rotation() {
-        for phase in [
-            ("completed", "完了", false),
-            ("failed", "失敗", false),
-            ("interrupted", "中断", false),
-        ] {
-            let mut registry = Registry::default();
-            let params = params("activity", 1);
-            registry
-                .register("phone", &params, content(), true, 100)
-                .unwrap();
-            registry.update(&params.session, phase, 101);
-            registry.update(&params.session, ("finished", "終了", false), 102);
-            registry
-                .register("phone", &params, content(), true, 102)
-                .unwrap();
-            let delivery = registry.deliveries(102).remove(0);
-            assert!(delivery.urgent);
-            assert_eq!(
-                aps(&delivery),
-                serde_json::json!({"timestamp":102,"event":"end","dismissal-date":162,"content-state":{"title":"タスク","status":phase.0,"statusLabel":phase.1,"connected":true,"hostName":"PC"}})
-            );
-            registry.complete(&delivery, ResultKind::Retry, 102);
-            assert!(registry.deliveries(111).is_empty());
-            let retry = registry.deliveries(112).remove(0);
-            registry.complete(&retry, ResultKind::Accepted, 112);
-            assert!(registry.deliveries(200).is_empty());
-        }
-    }
-    #[test]
-    fn heartbeat_unknown_state_and_title_changes_do_not_falsely_end_or_flood_updates() {
-        let mut registry = Registry::default();
-        let params = params("activity", 1);
+    fn all_providers_share_one_activity_and_only_the_last_task_ends_it() {
+        let mut registry = registry();
+        let codex = session(ProviderKind::Codex);
+        let claude = session(ProviderKind::Claude);
+        registry.update(&claude, "waiting", 100);
         registry
-            .register("phone", &params, content(), true, 100)
+            .register("phone", &params("activity", 1), content(), 100)
             .unwrap();
         let first = registry.deliveries(100).remove(0);
-        assert!(!first.urgent);
+        assert_eq!(
+            aps(&first)["content-state"]["summary"],
+            serde_json::json!({"running":1,"waiting":1,"unknown":0})
+        );
+        assert!(first.urgent);
+        registry.complete(&first, ResultKind::Accepted, 100);
+        registry.update(&codex, "failed", 101);
+        let remaining = registry.deliveries(101).remove(0);
+        assert_eq!(aps(&remaining)["event"], "update");
+        assert_eq!(aps(&remaining)["content-state"]["summary"]["waiting"], 1);
+        registry.complete(&remaining, ResultKind::Accepted, 101);
+        registry.update(&claude, "completed", 102);
+        registry.update(&claude, "running", 103);
+        registry
+            .register("phone", &params("activity", 2), content(), 103)
+            .unwrap();
+        let final_push = registry.deliveries(103).remove(0);
+        assert_eq!(aps(&final_push)["event"], "end");
+        assert_eq!(aps(&final_push)["dismissal-date"], 163);
+        registry.complete(&final_push, ResultKind::Retry, 103);
+        assert!(registry.deliveries(112).is_empty());
+        let retry = registry.deliveries(113).remove(0);
+        registry.complete(&retry, ResultKind::Accepted, 113);
+        assert!(registry.deliveries(200).is_empty());
+    }
+    #[test]
+    fn unknown_state_retains_an_active_icon_without_ending_or_flooding() {
+        let mut registry = registry();
+        registry
+            .register("phone", &params("activity", 1), content(), 100)
+            .unwrap();
+        let first = registry.deliveries(100).remove(0);
         assert_eq!(aps(&first)["stale-date"], 220);
         registry.complete(&first, ResultKind::Accepted, 100);
-        registry.rename(&params.session, "タスク", 101);
         assert!(registry.deliveries(159).is_empty());
         let heartbeat = registry.deliveries(160).remove(0);
         registry.complete(&heartbeat, ResultKind::Accepted, 160);
-        registry.update(&params.session, ("unknown", "更新待ち", false), 161);
+        let codex = session(ProviderKind::Codex);
+        registry.update(&codex, "unknown", 161);
         let stale = registry.deliveries(161).remove(0);
         assert_eq!(aps(&stale)["event"], "update");
-        assert_eq!(aps(&stale)["content-state"]["status"], "running");
-        assert_eq!(aps(&stale)["content-state"]["connected"], false);
+        assert_eq!(aps(&stale)["content-state"]["summary"]["unknown"], 1);
         assert_eq!(aps(&stale)["stale-date"], 161);
         registry.complete(&stale, ResultKind::Accepted, 161);
-        registry.update(&params.session, ("unknown", "更新待ち", false), 162);
+        registry.update(&codex, "unknown", 162);
         assert!(registry.deliveries(162).is_empty());
-        registry.rename(&params.session, "新しい名前\n本文", 163);
-        assert_eq!(
-            aps(&registry.deliveries(163).remove(0))["content-state"]["title"],
-            "新しい名前"
-        );
-        registry.update(&params.session, ("waiting", "確認待ち", true), 164);
+        registry.seed(vec![(codex.clone(), "running".into())], 163);
+        assert_eq!(registry.summary().unknown, 1);
+        registry.update(&codex, "waiting", 164);
         let waiting = registry.deliveries(164).remove(0);
-        assert!(waiting.urgent);
         assert_eq!(aps(&waiting)["relevance-score"], 100);
-        assert_eq!(aps(&waiting)["content-state"]["connected"], true);
         registry.complete(&waiting, ResultKind::Accepted, 164);
         assert!(!registry.deliveries(224).remove(0).urgent);
     }
     #[test]
-    fn expired_tokens_capacity_and_activity_lifetime_are_bounded() {
-        let mut registry = Registry::default();
-        for n in 0..16 {
+    fn registration_capacity_expiry_and_payload_size_are_bounded() {
+        let mut registry = registry();
+        for i in 0..16 {
             registry
-                .register("phone", &params(&n.to_string(), 1), content(), true, 100)
+                .register("phone", &params(&i.to_string(), 1), content(), 100)
                 .unwrap();
         }
         assert!(
             registry
-                .register("phone", &params("17", 1), content(), true, 100)
+                .register("phone", &params("overflow", 1), content(), 100)
                 .is_err()
         );
-        registry
-            .register("phone", &params("0", 2), content(), true, 200)
-            .unwrap();
-        let delivery = registry
-            .deliveries(200)
-            .into_iter()
-            .find(|d| d.activity == "0")
-            .unwrap();
-        registry.complete(&delivery, ResultKind::Expired, 200);
-        assert_eq!(registry.entries.len(), 15);
-        assert_eq!(registry.deliveries(100 + LIFETIME - 1).len(), 15);
-        assert!(registry.deliveries(100 + LIFETIME).is_empty());
-    }
-    #[test]
-    fn failed_pushes_back_off_and_success_restores_the_normal_heartbeat() {
-        let mut registry = Registry::default();
-        registry
-            .register("phone", &params("activity", 1), content(), true, 100)
-            .unwrap();
-        let mut time = 100;
-        for delay in [10, 20, 40, 80, 160, 300, 300] {
-            let delivery = registry.deliveries(time).remove(0);
-            registry.complete(&delivery, ResultKind::Retry, time);
-            assert!(registry.deliveries(time + delay - 1).is_empty());
-            time += delay;
-        }
-        let delivery = registry.deliveries(time).remove(0);
-        registry.complete(&delivery, ResultKind::Accepted, time);
-        assert!(registry.deliveries(time + 59).is_empty());
-        let heartbeat = registry.deliveries(time + 60).remove(0);
-        registry.complete(&heartbeat, ResultKind::Retry, time + 60);
-        assert!(registry.deliveries(time + 69).is_empty());
-        assert_eq!(registry.deliveries(time + 70).len(), 1);
-    }
-    #[test]
-    fn provider_identity_and_global_capacity_prevent_cross_task_updates_and_unbounded_registrations()
-     {
-        let mut registry = Registry::default();
-        let params = params("activity", 1);
-        registry
-            .register("phone", &params, content(), true, 100)
-            .unwrap();
-        let mut other_provider = params.clone();
-        other_provider.session.provider = ProviderKind::Claude;
-        assert!(
-            registry
-                .register("phone", &other_provider, content(), true, 100)
-                .is_err()
-        );
-        registry.update(&other_provider.session, ("failed", "失敗", false), 101);
-        assert_eq!(
-            aps(&registry.deliveries(101).remove(0))["content-state"]["status"],
-            "running"
-        );
-        registry.revoke("phone");
-        for owner in 0..16 {
+        for i in 1..16 {
             for activity in 0..16 {
-                let mut registration = params.clone();
-                registration.activity_id = activity.to_string();
                 registry
-                    .register(&owner.to_string(), &registration, content(), true, 100)
+                    .register(
+                        &format!("phone{i}"),
+                        &params(&activity.to_string(), 1),
+                        content(),
+                        100,
+                    )
                     .unwrap();
             }
         }
         assert!(
             registry
-                .register("new-phone", &params, content(), true, 100)
+                .register("last", &params("overflow", 1), content(), 100)
                 .is_err()
         );
-        registry.unregister("0", "0");
         registry
-            .register("new-phone", &params, content(), true, 100)
+            .register("phone", &params("0", 2), content(), 100 + LIFETIME - 1)
             .unwrap();
-        assert_eq!(registry.deliveries(100).len(), 256);
+        assert!(registry.deliveries(100 + LIFETIME).is_empty());
+        registry
+            .register("phone", &params("new", 1), content(), 100 + LIFETIME)
+            .unwrap();
+        let delivery = registry.deliveries(100 + LIFETIME).remove(0);
+        registry.complete(&delivery, ResultKind::Expired, 100 + LIFETIME);
+        assert!(registry.entries.is_empty());
     }
     proptest::proptest! {
         #[test]
-        fn revoke_and_unregister_never_touch_another_devices_registration(operations in proptest::collection::vec((proptest::bool::ANY, 0u8..8), 0..80)) {
+        fn counts_fit_push_payload_even_with_many_tasks(count in 1u32..10000) {
             let mut registry = Registry::default();
-            for id in 0..8 { registry.register("other", &params(&id.to_string(), 2), content(), true, 100).unwrap(); }
-            for (remove, id) in operations {
-                let activity = id.to_string();
-                if remove { registry.unregister("phone", &activity); } else { registry.register("phone", &params(&activity, 1), content(), true, 100).unwrap(); }
-                registry.revoke("phone");
-                proptest::prop_assert_eq!(registry.deliveries(100).len(), 8);
-                proptest::prop_assert!(registry.entries.keys().all(|(owner, _)| owner == "other"));
-            }
+            registry.seed((0..count).map(|i| (SessionRef { provider: ProviderKind::Codex, id:i.to_string() }, "running".into())).collect(), 100);
+            registry.register("phone", &params("activity", 1), content(), 100).unwrap();
+            let delivery = registry.deliveries(100).remove(0);
+            proptest::prop_assert!(delivery.payload.len() < 4096);
+            proptest::prop_assert_eq!(aps(&delivery)["content-state"]["summary"]["running"].as_u64(), Some(u64::from(count)));
         }
     }
 }

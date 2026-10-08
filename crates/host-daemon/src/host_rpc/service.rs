@@ -648,19 +648,16 @@ impl HostRpcService {
                     .apns()
                     .is_some_and(|apns| apns.environment() == params.environment);
                 if enabled {
-                    let _lease = self
-                        .inner
-                        .router
-                        .retain_execution(params.session.clone())
-                        .map_err(|error| Failure::new("invalid_params", error))?;
-                    let thread = self
-                        .agent(params.session.provider)?
-                        .open(&params.session.id, 1, false)
-                        .await?
-                        .thread;
+                    let list = self
+                        .host_title_list(agent_protocol::models::ListQuery {
+                            project_limit: u32::MAX,
+                            chat_limit: u32::MAX,
+                            ..Default::default()
+                        })
+                        .await?;
                     self.inner
                         .router
-                        .register_live_activity(session, params, thread)
+                        .register_live_activity(session, params, list.data)
                         .map_err(|error| Failure::new("live_activity_failed", error))?;
                 }
                 agent_protocol::live_activity::LiveActivityRegistration { enabled }.into()
@@ -973,9 +970,6 @@ impl HostRpcService {
                     .agent(target.provider)?
                     .rename(&target.id, &params.name)
                     .await?;
-                if let Some(apns) = self.inner.router.apns() {
-                    apns.rename(target, &params.name);
-                }
                 result.into()
             }
             _ => {
@@ -1532,7 +1526,6 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
         Call::ReadItem(p) => (Some(&p.thread_id), None),
         Call::ReadTurnItems(p) => (Some(&p.session), None),
         Call::RenameSession(p) => (Some(&p.thread_id), None),
-        Call::RegisterLiveActivity(p) => (Some(&p.session), None),
         _ => (None, None),
     }
 }
@@ -1565,9 +1558,8 @@ mod tests {
     #[tokio::test]
     async fn live_activity_registration_falls_back_without_apns_and_rejects_malformed_tokens() {
         use super::*;
-        use agent_protocol::{
-            live_activity::{LiveActivityRegistration, PushEnvironment, RegisterLiveActivity},
-            session::SessionRef,
+        use agent_protocol::live_activity::{
+            LiveActivityRegistration, PushEnvironment, RegisterLiveActivity,
         };
         let directory = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
@@ -1576,10 +1568,6 @@ mod tests {
         );
         let connection = service.open_session();
         let mut params = RegisterLiveActivity {
-            session: SessionRef {
-                provider: ProviderKind::Codex,
-                id: "task".into(),
-            },
             activity_id: "activity".into(),
             token: vec![1; 32],
             environment: PushEnvironment::Sandbox,

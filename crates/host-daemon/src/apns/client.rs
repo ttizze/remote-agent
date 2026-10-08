@@ -208,7 +208,7 @@ impl Client {
             config: Config {
                 key_id: "TESTKEY001".into(),
                 team_id: "TESTTEAM01".into(),
-                bundle_id: "com.ttizze.b-codex".into(),
+                bundle_id: "dev.remoteagent.mobile.ios".into(),
                 key_file: PathBuf::new(),
                 environment: PushEnvironment::Sandbox,
             },
@@ -246,7 +246,7 @@ mod tests {
                 );
                 assert_eq!(
                     request.headers()["apns-topic"],
-                    "com.ttizze.b-codex.push-type.liveactivity"
+                    "dev.remoteagent.mobile.ios.push-type.liveactivity"
                 );
                 assert_eq!(request.headers()["apns-push-type"], "liveactivity");
                 assert_eq!(

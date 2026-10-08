@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>BexTaskURLScheme</key>
+    <string>$(BEX_TASK_URL_SCHEME)</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
@@ -32,9 +34,9 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>com.ttizze.b-codex.task</string>
+            <string>$(PRODUCT_BUNDLE_IDENTIFIER).task</string>
             <key>CFBundleURLSchemes</key>
-            <array><string>bex</string></array>
+            <array><string>$(BEX_TASK_URL_SCHEME)</string></array>
         </dict>
     </array>
     <key>NSAppTransportSecurity</key>
