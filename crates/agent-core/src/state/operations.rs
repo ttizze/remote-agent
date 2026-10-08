@@ -199,6 +199,7 @@ pub enum StalePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    TaskActivity,
     LiveActivity {
         activity_id: String,
     },
@@ -269,6 +270,7 @@ pub struct OperationState {
 pub enum Scheduling {
     Concurrent,
     Control,
+    LatestTaskActivity,
     LatestList(crate::models::ListQuery),
     LatestAgents(crate::session::SessionRef),
     LatestProject(String),
@@ -279,6 +281,7 @@ pub enum Scheduling {
 impl Scheduling {
     pub(crate) fn latest_key(&self) -> Option<OperationKey> {
         match self {
+            Self::LatestTaskActivity => Some(OperationKey::TaskActivity),
             Self::LatestList(_) => Some(OperationKey::SessionList),
             Self::LatestProject(project_id) => Some(OperationKey::ProjectList {
                 project_id: project_id.clone(),

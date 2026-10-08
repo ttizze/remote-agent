@@ -38,7 +38,7 @@ async fn exercise(command: &[&str], expected: Value) {
             if handled
                 && matches!(
                     request["method"].as_str(),
-                    Some("host/model/list" | "host/account/list")
+                    Some("host/model/list" | "host/account/list" | "host/taskActivity/read")
                 )
             {
                 continue;
@@ -60,6 +60,9 @@ async fn exercise(command: &[&str], expected: Value) {
                 }
                 Some("host/model/list") => json!({"data":[],"nextCursor":null}),
                 Some("host/account/list") => json!({"accounts":[], "selected":{}}),
+                Some("host/taskActivity/read") => {
+                    json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                }
                 Some("host/session/list") => {
                     lists += 1;
                     let (limit, search) = if mode == "list" {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Show the latest 30 root tasks first on desktop, iPhone and Android. Load older project titles only when expanded, keep their loading and failures independent, and refresh only open projects after publishing recent results. Stop scanning old pages to fill small projects or finish timestamp ties, page Claude transcript metadata before reading it, and fetch child-agent metadata only for the visible fleet. Advance the binary protocol for the new scoped list requests; Host and clients use the same revision.
+- Show the latest 30 root tasks first on desktop, iPhone and Android. Load older project titles only when expanded, keep their loading and failures independent, and refresh only open projects after publishing recent results. Stop scanning old pages to fill small projects or finish timestamp ties, page Claude transcript metadata before reading it, and fetch child-agent metadata only for the visible fleet. Read task activity from loaded provider sessions independently of recent titles, without walking archived history. Advance the binary protocol for the new scoped list requests; Host and clients use the same revision.
 
 - Show iPhone task status on the Lock Screen and Dynamic Island with Live Activities. Share task-state decisions with Host APNs updates, retain authenticated update-token registrations while the phone is disconnected, and open the matching PC/task when tapped. Configure an external APNs `.p8` key for background delivery; stale updates remain visible without falsely completing tasks.
 

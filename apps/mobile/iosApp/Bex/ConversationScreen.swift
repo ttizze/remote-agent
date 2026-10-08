@@ -204,13 +204,15 @@ struct ThreadScreen: View {
                         }
                     }
                 } else if model.isNewThread {
-                    ScrollView {
-                        newThreadContext
-                            .padding(24)
+                    GeometryReader { geometry in
+                        ScrollView {
+                            newThreadContext
+                                .padding(24)
+                                .frame(maxWidth: .infinity)
+                                .frame(minHeight: geometry.size.height)
+                        }
+                        .accessibilityIdentifier("task.empty")
                     }
-                    .defaultScrollAnchor(.center, for: .alignment)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("task.empty")
                 } else if let id = model.selectedThreadId, model.notice != nil {
                     Button("再試行") { model.openThread(id) }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

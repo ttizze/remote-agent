@@ -587,6 +587,7 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
                     "name":format!("Conversation {index}: {running}"),
                     "updatedAt":index,
                     "status":{"type":if index == 0 && running { "active" } else { "idle" }},
+                    "loaded":index == 0,
                 })
             })
             .collect();
@@ -777,6 +778,16 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(listing.has_more);
     assert!(listing.provider_errors.is_none());
     assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
+    local
+        .peer
+        .call(&agent_protocol::live_activity::ReadTaskActivity {})
+        .await
+        .unwrap();
+    assert_eq!(
+        page_reads(),
+        1,
+        "activity bootstrap must not scan historical titles"
+    );
     let descendant_roots = list_reads()
         .iter()
         .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
@@ -802,9 +813,9 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(
         list_reads()
             .iter()
-            .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
+            .filter_map(|entry| entry["ancestorThreadId"].as_str())
             .collect::<Vec<_>>(),
-        [selected.id.clone()],
+        [selected.id.as_str()],
         "fleet reads must target only the selected parent"
     );
     let expanded = local

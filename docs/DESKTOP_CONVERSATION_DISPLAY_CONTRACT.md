@@ -73,6 +73,10 @@ hydration must not change this default.
   read. Project pages use the same title search as recent tasks. Project loading
   and failure stay local to that section; the recent list
   remains usable and its green loading indicator does not wait for project reads.
+- The Host reads task activity from loaded provider sessions and its owned
+  executions, without listing archived titles or reading conversation bodies.
+  This metadata refresh is independent of task navigation and never holds a
+  recent-list receipt or turns its failure into a whole-list error.
 - Recent limits, search and project expansion are not persisted. Reopening
   restores 30 recent titles and closed projects. Live navigation and reconnection
   retain the current selection; recent titles publish before open projects refresh.

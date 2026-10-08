@@ -11,14 +11,16 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("title-fixture")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"]
+            .waitForExistence(timeout: 20))
         let project = app.buttons["tasks.project.pagination-project-16"]
         scrollToListElement(project, in: app)
         XCTAssertEqual(project.value as? String, "閉じています")
         project.tap()
         let newest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-16"]
         XCTAssertTrue(newest.waitForExistence(timeout: 15))
-        scrollToListElement(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-12"], in: app)
+        let lastInitial = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-12"]
+        scrollToListElement(lastInitial, in: app)
         let more = app.buttons["tasks.project.pagination-project-16.more"]
         for last in [2, 1] {
             scrollToListElement(more, in: app)
@@ -44,9 +46,12 @@ extension BexLaunchUITests {
         scrollToListElement(otherProject, in: app)
         XCTAssertEqual(otherProject.value as? String, "閉じています")
         otherProject.tap()
-        scrollToListElement(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-12"], in: app)
+        let otherLastInitial = app
+            .descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-12"]
+        scrollToListElement(otherLastInitial, in: app)
         scrollToListElement(app.buttons["tasks.project.pagination-project-15.more"], in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"]
+            .exists)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Only the selected project's titles expanded and retained after returning")
     }
@@ -71,7 +76,8 @@ extension BexLaunchUITests {
         oldProject.tap()
         scrollToListElement(oldTask, in: app)
         oldTask.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-1"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-1"]
+            .waitForExistence(timeout: 20))
         app.navigationBars.buttons.element(boundBy: 0).tap()
         scrollToEarlierListElement(recent, in: app, attempts: 60)
         let more = app.buttons["tasks.recent.more"]
@@ -81,7 +87,8 @@ extension BexLaunchUITests {
         scrollToListElement(oldest, in: app)
         XCTAssertFalse(more.exists)
         oldest.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-1"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-1"]
+            .waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Recent task pagination and old project loading remain independent")
     }

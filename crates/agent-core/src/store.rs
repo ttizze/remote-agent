@@ -803,15 +803,18 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
         // belong to their query; view work belongs to the navigation epoch.
         let current = match &completed.scheduling {
             op::Scheduling::LatestList(query) => query == snapshot.list_query.as_ref(),
-            op::Scheduling::LatestProject(_) => {
+            op::Scheduling::LatestProject(_) | op::Scheduling::LatestTaskActivity => {
                 generation_current(completed.scope.operation.as_ref(), &snapshot.operations)
             }
             _ => completed
                 .scope
                 .current(snapshot.epoch, &snapshot.operations),
         };
-        let global_error =
-            current && !matches!(&completed.scheduling, op::Scheduling::LatestProject(_));
+        let global_error = current
+            && !matches!(
+                &completed.scheduling,
+                op::Scheduling::LatestProject(_) | op::Scheduling::LatestTaskActivity
+            );
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
             Ok(applied) => match applied.application.apply(&mut next, current) {
@@ -1038,6 +1041,10 @@ async fn run(
         }
         for mut scheduled in std::mem::take(&mut effects) {
             let unobserved = match &scheduled.effect.scheduling {
+                op::Scheduling::LatestTaskActivity => !generation_current(
+                    scheduled.scope.operation.as_ref(),
+                    &updates.borrow().operations,
+                ),
                 op::Scheduling::LatestProject(project_id) => {
                     let snapshot = updates.borrow();
                     !snapshot.expanded_projects.contains_key(project_id)
@@ -1091,6 +1098,7 @@ async fn run(
                 }
                 op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
                 op::Scheduling::Concurrent
+                | op::Scheduling::LatestTaskActivity
                 | op::Scheduling::LatestList(_)
                 | op::Scheduling::LatestAgents(_)
                 | op::Scheduling::LatestProject(_)

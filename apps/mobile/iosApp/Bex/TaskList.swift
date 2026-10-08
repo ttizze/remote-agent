@@ -89,7 +89,9 @@ struct ThreadsScreen: View {
                     }
                     .taskListRowStyle()
                     if project.expanded {
-                        if project.loading { ProgressView().taskListRowStyle() }
+                        if project.loading {
+                            ProgressView().taskListRowStyle()
+                        }
                         if let error = project.error {
                             BexNotice(text: error).taskListRowStyle()
                             Button("再試行") {
@@ -121,7 +123,6 @@ struct ThreadsScreen: View {
                 }
                 .listSectionSeparator(.hidden)
             }
-
         }
         .onChange(of: model.threadLoadState) { _, state in
             if state == .ready {
@@ -247,7 +248,9 @@ private struct ThreadListRow: View {
         "\(thread.id.provider == .codex ? "codex" : "claude"):\(thread.id.id)"
     }
 
-    private var accessibilityPrefix: String { indented ? "tasks.project" : "tasks" }
+    private var accessibilityPrefix: String {
+        indented ? "tasks.project" : "tasks"
+    }
 
     var body: some View {
         Button(action: open) {

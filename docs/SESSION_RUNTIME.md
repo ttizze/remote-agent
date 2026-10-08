@@ -45,7 +45,7 @@ Codex and Claude Code are the supported providers.
 
 ## Provider boundaries
 
-The current transport ALPN is `remote-agent/streams/6`; Host and clients must use
+The current transport ALPN is `remote-agent/streams/7`; Host and clients must use
 the same request layout. The task list reads the newest 30 root titles with one lookahead, then stops.
 Project headers come from the Host-owned registry; old project contents are not
 part of initial completion. `host/project/sessions` reads the selected project's
