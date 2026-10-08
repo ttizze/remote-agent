@@ -2522,6 +2522,8 @@ pub enum Intent {
     StopDeviceRecording {
         host_id: Option<String>,
         device_id: String,
+        recording_id: u64,
+        session_epoch: String,
     },
     SubscribeDevice,
     UnsubscribeDevice,
