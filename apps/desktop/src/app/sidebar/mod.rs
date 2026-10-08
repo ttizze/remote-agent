@@ -496,7 +496,7 @@ impl Desktop {
                 div()
                     .px_2()
                     .pb_1()
-                    .text_2xs()
+                    .text_size(px(10.))
                     .text_color(color("sidebarMutedForeground"))
                     .child(format!("All environments · {inbox_count} active")),
             );
@@ -543,7 +543,7 @@ impl Desktop {
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_2xs()
+                                            .text_size(px(10.))
                                             .text_color(color("sidebarMutedForeground"))
                                             .child(format!("{label} · {headline}")),
                                     ),
@@ -601,7 +601,7 @@ impl Desktop {
                     )
                     .child(
                         div()
-                            .text_2xs()
+                            .text_size(px(10.))
                             .text_color(color("sidebarMutedForeground"))
                             .child(status),
                     ),
@@ -659,7 +659,7 @@ impl Desktop {
                     .child(
                         div()
                             .truncate()
-                            .text_2xs()
+                            .text_size(px(10.))
                             .text_color(color("sidebarMutedForeground"))
                             .child(preview),
                     ),
@@ -701,7 +701,7 @@ impl Desktop {
                     .child(
                         div()
                             .truncate()
-                            .text_2xs()
+                            .text_size(px(10.))
                             .text_color(color("sidebarMutedForeground"))
                             .child(format!("{environment} · {project}")),
                     ),

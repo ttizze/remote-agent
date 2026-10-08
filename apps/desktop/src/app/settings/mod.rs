@@ -399,16 +399,19 @@ impl Desktop {
                                     .text_color(tint("textMuted", 0.8))
                                     .child(format!("{connection} · {platform}")),
                             )
-                            .child(div().text_2xs().text_color(tint("textMuted", 0.7)).child(
-                                format!(
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(tint("textMuted", 0.7))
+                                    .child(format!(
                                         "{} host settings · {} capabilities",
                                         entry.settings.sections.len(),
                                         agent_core::environment::capability_names(
                                             &entry.summary.descriptor.capabilities
                                         )
                                         .len()
-                                    ),
-                            )),
+                                    )),
+                            ),
                     )
                     .when(!selected, |row| {
                         row.cursor_pointer()
@@ -530,14 +533,14 @@ impl Desktop {
                 self.perform(Intent::LoadUpdateStatus {
                     target: agent_protocol::models::UpdateTarget::Desktop,
                 });
-                let request = super::about::check_request(
+                let request = self::about::check_request(
                     agent_protocol::models::UpdateTarget::Host,
-                    super::about::default_channel(),
+                    self::about::default_channel(),
                 );
                 self.perform(Intent::CheckUpdate { request });
-                let request = super::about::check_request(
+                let request = self::about::check_request(
                     agent_protocol::models::UpdateTarget::Desktop,
-                    super::about::default_channel(),
+                    self::about::default_channel(),
                 );
                 self.perform(Intent::CheckUpdate { request });
             }

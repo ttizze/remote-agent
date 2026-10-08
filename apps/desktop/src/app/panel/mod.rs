@@ -252,7 +252,7 @@ pub(crate) struct PanelState {
     preview_browsers: HashMap<u64, Entity<crate::browser::HostBrowser>>,
     next_browser: u64,
     diff: diff::DiffState,
-    files: files::FilesState,
+    pub(super) files: files::FilesState,
     terminals: terminal_drawer::TerminalState,
     device: device::DeviceState,
     details: details::DetailsState,

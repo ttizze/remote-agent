@@ -834,7 +834,7 @@ impl Desktop {
                 .child(
                     div()
                         .flex_1()
-                        .text_2xs()
+                        .text_size(px(10.))
                         .text_color(color("textMuted"))
                         .child(format!("{}: {}", host.label, detail)),
                 )
@@ -885,7 +885,7 @@ impl Desktop {
                         .gap_1()
                         .child(
                             div()
-                                .text_2xs()
+                                .text_size(px(10.))
                                 .text_color(color("textMuted"))
                                 .child(target),
                         )
@@ -1277,7 +1277,7 @@ impl Desktop {
                         .when_some(duo_status, |row, status| {
                             row.child(
                                 div()
-                                    .text_2xs()
+                                    .text_size(px(10.))
                                     .text_color(color("textMuted"))
                                     .child(status),
                             )
@@ -1396,7 +1396,7 @@ impl Desktop {
                 panel
                     .child(
                         div()
-                            .text_2xs()
+                            .text_size(px(10.))
                             .text_color(color("textMuted"))
                             .child(format!("Host status: {}", view.status)),
                     )
@@ -1437,7 +1437,7 @@ impl Desktop {
                     .when_some(view.status_detail.clone(), |panel, detail| {
                         panel.child(
                             div()
-                                .text_2xs()
+                                .text_size(px(10.))
                                 .text_color(color("textMuted"))
                                 .child(detail),
                         )
@@ -1526,7 +1526,7 @@ impl Desktop {
                                 })
                                 .map(|foreground| {
                                     div()
-                                        .text_2xs()
+                                        .text_size(px(10.))
                                         .text_color(color("textMuted"))
                                         .child(format!(
                                             "Foreground {}:{} · {}",
@@ -1548,7 +1548,7 @@ impl Desktop {
                                 })
                                 .map(|screen| {
                                     div()
-                                        .text_2xs()
+                                        .text_size(px(10.))
                                         .text_color(color("textMuted"))
                                         .child(format!(
                                             "Screen {} · {}×{} · {}{}",
@@ -1582,9 +1582,13 @@ impl Desktop {
                                         .filter(|element| !element.label.is_empty())
                                         .take(20)
                                         .map(|element| {
-                                            div().text_2xs().text_color(color("textMuted")).child(
-                                                format!("{} · {}", element.role, element.label),
-                                            )
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(color("textMuted"))
+                                                .child(format!(
+                                                    "{} · {}",
+                                                    element.role, element.label
+                                                ))
                                         })
                                 })),
                         )
@@ -1601,7 +1605,7 @@ impl Desktop {
                                 )
                                 .children(view.event_log.iter().rev().take(20).map(|entry| {
                                     div()
-                                        .text_2xs()
+                                        .text_size(px(10.))
                                         .text_color(color("textMuted"))
                                         .child(format!("{} · {}", entry.kind, entry.summary))
                                 })),
@@ -1617,12 +1621,15 @@ impl Desktop {
                             panel.child(
                                 h_flex()
                                     .gap_1()
-                                    .child(div().text_2xs().text_color(color("textMuted")).child(
-                                        format!(
-                                            "Recording ready · {} frames · {} bytes",
-                                            recording.frame_count, recording.byte_count
-                                        ),
-                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(color("textMuted"))
+                                            .child(format!(
+                                                "Recording ready · {} frames · {} bytes",
+                                                recording.frame_count, recording.byte_count
+                                            )),
+                                    )
                                     .child(
                                         Button::new("device-attach-recording")
                                             .label("Attach recording")
@@ -1640,8 +1647,12 @@ impl Desktop {
                     .when_some(
                         self.panels.device.decoder.error().map(str::to_owned),
                         |panel, error| {
-                            panel
-                                .child(div().text_2xs().text_color(color("textMuted")).child(error))
+                            panel.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(color("textMuted"))
+                                    .child(error),
+                            )
                         },
                     )
                     .child(if frame_images.is_empty() {

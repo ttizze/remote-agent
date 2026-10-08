@@ -358,14 +358,14 @@ impl Desktop {
                                         .child(
                                             div()
                                                 .truncate()
-                                                .text_2xs()
+                                                .text_size(px(10.))
                                                 .text_color(color("textMuted"))
                                                 .child(item.line_content),
                                         ),
                                 )
                                 .child(
                                     div()
-                                        .text_2xs()
+                                        .text_size(px(10.))
                                         .text_color(color("textMuted"))
                                         .child(format!("{line}")),
                                 )

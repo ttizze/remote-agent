@@ -2520,7 +2520,7 @@ impl Render for Desktop {
                     .child(main),
             )
             .children(snapshot_overlay)
-            .children(self.panels.render_preview_mini_player(cx))
+            .children(self.render_preview_mini_player(cx))
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(
                 window, cx,
