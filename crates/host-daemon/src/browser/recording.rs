@@ -28,6 +28,7 @@ use tokio::{
 const FRAME_MAX_BYTES: usize = 4 * 1024 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTPUT_FPS: f64 = 30.0;
 const MAX_ENCODED_FRAMES: u64 = PREVIEW_RECORDING_MAX_DURATION_SECONDS * 30;
 const MAX_ENCODED_INPUT_BYTES: u64 = PREVIEW_RECORDING_MAX_BYTES * 4;
@@ -279,9 +280,19 @@ async fn run_capture(
                 }
                 let mut push_error = None;
                 for _ in 0..repeats {
-                    if let Err(error) = encoder.push(&frame).await {
-                        push_error = Some(error);
-                        break;
+                    match tokio::time::timeout(ENCODER_WRITE_TIMEOUT, encoder.push(&frame)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            push_error = Some(error);
+                            break;
+                        }
+                        Err(_) => {
+                            push_error = Some(format!(
+                                "recording encoder write timed out after {}ms",
+                                ENCODER_WRITE_TIMEOUT.as_millis()
+                            ));
+                            break;
+                        }
                     }
                 }
                 if let Some(error) = push_error {
@@ -342,6 +353,9 @@ async fn next_screencast_frame(
             Message::Close(_) => return Err("recording screencast connection closed".to_owned()),
             _ => continue,
         };
+        if text.len() > FRAME_MAX_BYTES.saturating_mul(2) {
+            return Err("recording screencast message exceeds 8 MiB".to_owned());
+        }
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| format!("recording screencast response is invalid: {error}"))?;
         if value["method"] != "Page.screencastFrame" {
