@@ -296,6 +296,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             roots: vec![],
+            favicon_png: None,
         }
     }
 

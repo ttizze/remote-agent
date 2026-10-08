@@ -3,17 +3,150 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct SidebarSection {
     pub(super) label: &'static str,
-    pub(super) menu: SidebarMenu,
+    pub(super) menu: Vec<SidebarRow>,
+    pub(super) collapsed: bool,
     pub(super) add_project: Option<(WeakEntity<Desktop>, bool)>,
+}
+
+#[derive(Clone)]
+pub(super) enum SidebarRow {
+    Item(Box<SidebarMenuItem>),
+    Project {
+        id: String,
+        name: String,
+        icon_png: Option<Vec<u8>>,
+        monogram: String,
+        color: u32,
+        root: String,
+        expanded: bool,
+        connected: bool,
+        desktop: WeakEntity<Desktop>,
+    },
+}
+
+impl From<SidebarMenuItem> for SidebarRow {
+    fn from(item: SidebarMenuItem) -> Self {
+        Self::Item(Box::new(item))
+    }
+}
+
+impl SidebarRow {
+    fn render(self, id: String, collapsed: bool, window: &mut Window, cx: &mut App) -> AnyElement {
+        match self {
+            Self::Item(item) => item
+                .collapsed(collapsed)
+                .render(id, window, cx)
+                .into_any_element(),
+            Self::Project {
+                id: project_id,
+                name,
+                icon_png,
+                monogram,
+                color,
+                root,
+                expanded,
+                connected,
+                desktop,
+            } => {
+                let icon = if let Some(png) = icon_png {
+                    img(Arc::new(Image::from_bytes(ImageFormat::Png, png)))
+                        .size_4()
+                        .flex_shrink_0()
+                        .object_fit(ObjectFit::Contain)
+                        .rounded(px(4.))
+                        .into_any_element()
+                } else {
+                    div()
+                        .debug_selector(|| "project-monogram".into())
+                        .size_4()
+                        .flex_shrink_0()
+                        .rounded(px(4.))
+                        .bg(rgb(color).opacity(0.15))
+                        .text_color(rgb(color))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(8.))
+                        .font_bold()
+                        .child(monogram)
+                        .into_any_element()
+                };
+                let target = desktop.clone();
+                let selector = format!("project-{project_id}");
+                h_flex()
+                    .id(id)
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        Button::new("heading")
+                            .debug_selector(move || selector.clone())
+                            .ghost()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(44.))
+                            .px_2()
+                            .gap_2()
+                            .accessibility_label(name.clone())
+                            .when(collapsed, |button| button.tooltip(name.clone()))
+                            .child(icon)
+                            .when(!collapsed, |button| {
+                                button
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .text_left()
+                                            .text_ellipsis()
+                                            .child(name),
+                                    )
+                                    .child(
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(px(12.)),
+                                    )
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = target.update(cx, |desktop, cx| {
+                                    toggle_set(&mut desktop.expanded_projects, &project_id);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .when(!collapsed, |row| {
+                        row.child(
+                            Button::new("new-project-chat")
+                                .icon(new_chat_icon())
+                                .xsmall()
+                                .ghost()
+                                .tooltip("このプロジェクトで新しいチャット")
+                                .accessibility_label("このプロジェクトで新しいチャット")
+                                .disabled(!connected)
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    let _ = desktop.update(cx, |desktop, cx| {
+                                        desktop.new_chat(root.clone(), window, cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+                    .into_any_element()
+            }
+        }
+    }
 }
 
 impl Collapsible for SidebarSection {
     fn is_collapsed(&self) -> bool {
-        self.menu.is_collapsed()
+        self.collapsed
     }
 
     fn collapsed(mut self, collapsed: bool) -> Self {
-        self.menu = self.menu.collapsed(collapsed);
+        self.collapsed = collapsed;
         self
     }
 }
@@ -25,6 +158,7 @@ impl SidebarItem for SidebarSection {
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
+        let id = id.into();
         v_flex()
             .when(!self.is_collapsed(), |section| {
                 section.child(
@@ -54,7 +188,13 @@ impl SidebarItem for SidebarSection {
                         }),
                 )
             })
-            .child(self.menu.render(id, window, cx))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .children(self.menu.into_iter().enumerate().map(|(index, row)| {
+                        row.render(format!("{id}-{index}"), self.collapsed, window, cx)
+                    })),
+            )
     }
 }
 
@@ -85,7 +225,7 @@ impl Desktop {
 
     fn conversation_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
         let list = self.snapshot.thread_list();
-        let mut projects = SidebarMenu::new().gap_1();
+        let mut projects = Vec::new();
         for project in list
             .as_ref()
             .map(|page| page.projects.as_slice())
@@ -94,44 +234,22 @@ impl Desktop {
             let id = project.id.clone();
             let expanded = self.expanded_projects.contains(&id)
                 || !self.snapshot.list_query.search_term.is_empty();
-            let toggle = id.clone();
             let new_root = project
                 .roots
                 .first()
                 .map(|root| root.path.clone())
                 .unwrap_or_default();
-            let entity = cx.entity().downgrade();
-            let connected = self.snapshot.connected;
-            projects = projects.child(
-                SidebarMenuItem::new(project.name.clone())
-                    .icon(if expanded {
-                        IconName::FolderOpen
-                    } else {
-                        IconName::FolderClosed
-                    })
-                    .on_click(cx.listener(move |s, _, _, cx| {
-                        toggle_set(&mut s.expanded_projects, &toggle);
-                        cx.notify();
-                    }))
-                    .suffix(move |_, _| {
-                        let entity = entity.clone();
-                        let path = new_root.clone();
-                        Button::new("new-project-chat")
-                            .icon(new_chat_icon())
-                            .xsmall()
-                            .ghost()
-                            .tooltip("このプロジェクトで新しいチャット")
-                            .accessibility_label("このプロジェクトで新しいチャット")
-                            .disabled(!connected)
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                let _ = entity.update(cx, |s, cx| {
-                                    s.new_chat(path.clone(), window, cx);
-                                    cx.notify();
-                                });
-                            })
-                    }),
-            );
+            projects.push(SidebarRow::Project {
+                id: id.clone(),
+                name: project.name.clone(),
+                icon_png: project.icon_png.clone(),
+                monogram: project.monogram.clone(),
+                color: project.icon_color,
+                root: new_root,
+                expanded,
+                connected: self.snapshot.connected,
+                desktop: cx.entity().downgrade(),
+            });
             if expanded {
                 for button in self.thread_buttons(
                     list.as_ref()
@@ -140,13 +258,13 @@ impl Desktop {
                     Some(&project.id),
                     cx,
                 ) {
-                    projects = projects.child(button);
+                    projects.push(button.into());
                 }
                 if list
                     .as_ref()
                     .is_some_and(|page| page.more_project_ids.contains(&project.id))
                 {
-                    projects = projects.child(
+                    projects.push(
                         SidebarMenuItem::new("もっと表示する")
                             .icon(Icon::empty().size_4())
                             .on_click(cx.listener(move |s, _, _, cx| {
@@ -155,23 +273,26 @@ impl Desktop {
                                     projects: false,
                                 });
                                 cx.notify();
-                            })),
+                            }))
+                            .into(),
                     );
                 }
             }
         }
         if list.as_ref().is_some_and(|page| page.has_more_projects) {
-            projects = projects.child(SidebarMenuItem::new("もっとプロジェクトを表示").on_click(
-                cx.listener(|s, _, _, cx| {
-                    s.dispatch(Intent::ExpandThreadList {
-                        project_id: None,
-                        projects: true,
-                    });
-                    cx.notify();
-                }),
-            ));
+            projects.push(
+                SidebarMenuItem::new("もっとプロジェクトを表示")
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.dispatch(Intent::ExpandThreadList {
+                            project_id: None,
+                            projects: true,
+                        });
+                        cx.notify();
+                    }))
+                    .into(),
+            );
         }
-        let mut chats = SidebarMenu::new().gap_1();
+        let mut chats = Vec::new();
         for button in self.thread_buttons(
             list.as_ref()
                 .map(|page| page.threads.as_slice())
@@ -179,18 +300,20 @@ impl Desktop {
             None,
             cx,
         ) {
-            chats = chats.child(button);
+            chats.push(button.into());
         }
         if list.as_ref().is_some_and(|page| page.has_more_chats) {
-            chats = chats.child(SidebarMenuItem::new("もっと表示する").on_click(cx.listener(
-                |s, _, _, cx| {
-                    s.dispatch(Intent::ExpandThreadList {
-                        project_id: None,
-                        projects: false,
-                    });
-                    cx.notify();
-                },
-            )));
+            chats.push(
+                SidebarMenuItem::new("もっと表示する")
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.dispatch(Intent::ExpandThreadList {
+                            project_id: None,
+                            projects: false,
+                        });
+                        cx.notify();
+                    }))
+                    .into(),
+            );
         }
         Sidebar::new("desktop-sidebar")
             .header(
@@ -229,6 +352,7 @@ impl Desktop {
             .child(SidebarSection {
                 label: "プロジェクト",
                 menu: projects,
+                collapsed: false,
                 add_project: Some((
                     cx.entity().downgrade(),
                     self.snapshot.connected && self.remote.is_none(),
@@ -237,6 +361,7 @@ impl Desktop {
             .child(SidebarSection {
                 label: "チャット",
                 menu: chats,
+                collapsed: false,
                 add_project: None,
             })
             .footer(
@@ -418,6 +543,13 @@ mod tests {
                 id: "fixture".into(),
             };
             let snapshot = Arc::make_mut(&mut desktop.snapshot);
+            snapshot.threads = Some(Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "data":[], "projects":[{"id":"brand", "name":"remote-agent", "roots":[]}],
+                    "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
+                }))
+                .unwrap(),
+            ));
             Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
             Arc::make_mut(&mut snapshot.navigation).draft_key = session.clone().into();
             Arc::make_mut(&mut snapshot.drafts).insert(
@@ -432,6 +564,17 @@ mod tests {
         window.simulate_resize(size(px(1000.), px(700.)));
         window.run_until_parked();
         let original = window.debug_bounds("desktop-sidebar-shell").unwrap();
+        let project = window.debug_bounds("project-brand").unwrap().center();
+        let icon = window.debug_bounds("project-monogram").unwrap();
+        assert_eq!(icon.size, size(px(16.), px(16.)));
+        for expanded in [true, false] {
+            window.simulate_click(project, Modifiers::default());
+            window.run_until_parked();
+            view.update(window, |view, _| {
+                assert_eq!(view.expanded_projects.contains("brand"), expanded);
+            });
+            assert_eq!(window.debug_bounds("project-monogram").unwrap(), icon);
+        }
         let settings = window.debug_bounds("sidebar-settings").unwrap().center();
         window.simulate_click(settings, Modifiers::default());
         window.run_until_parked();

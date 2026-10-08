@@ -1,7 +1,11 @@
 package dev.remoteagent.mobile
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -25,10 +30,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListQuery
 import dev.remoteagent.core.ListSessions
@@ -122,7 +133,14 @@ private fun LazyListScope.projectThreads(
     projects.forEach { project ->
         item(key = "project:${project.id}") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("📁 ${project.name}", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    ProjectIcon(project.iconPng, project.monogram, project.iconColor)
+                    Text(project.name, style = MaterialTheme.typography.titleMedium)
+                }
                 TextButton(
                     onClick = { openConversation(Intent.NewChat(project.roots.firstOrNull()?.path.orEmpty())) }
                 ) {
@@ -140,4 +158,20 @@ private fun LazyListScope.projectThreads(
     }
     if (list?.hasMoreProjects == true)
         item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, true)) }) { Text("もっと見る") } }
+}
+
+@Composable
+private fun ProjectIcon(png: ByteArray?, monogram: String, colorRgb: UInt) {
+    val bitmap = remember(png) {
+        png?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    val color = Color(colorRgb.toInt()).copy(alpha = 1f)
+    val modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)).clearAndSetSemantics {}
+    if (bitmap != null) {
+        Image(bitmap, contentDescription = null, modifier = modifier)
+    } else {
+        Box(modifier.background(color.copy(alpha = 0.15f)), contentAlignment = Alignment.Center) {
+            Text(monogram, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
+    }
 }

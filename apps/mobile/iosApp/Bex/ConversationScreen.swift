@@ -239,7 +239,7 @@ struct ThreadScreen: View {
 
 /// Conversation navigation
 extension ThreadScreen {
-    private var project: Project? {
+    private var project: ProjectSummary? {
         let directory = model.selectedDirectory
         return model.list?.projects.first { $0.roots.contains { $0.path == directory } }
     }

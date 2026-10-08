@@ -203,6 +203,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
+    /// Host-resolved PNG thumbnail for every native client.
+    pub favicon_png: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectRoot {
