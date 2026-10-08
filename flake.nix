@@ -13,44 +13,56 @@
       # image/WebM muxers, pipe I/O, and swscale without shipping the full
       # codec/filter closure. The staging script verifies the resulting binary
       # rather than trusting this option list alone.
-      ffmpegRuntime = pkgs: pkgs.ffmpeg.override {
-        ffmpegVariant = "small";
-        withHeadlessDeps = false;
-        withSmallDeps = false;
-        withFullDeps = false;
-        withVpx = true;
-        withGPL = true;
-        withVersion3 = true;
-        withNetwork = false;
-        withStatic = false;
-        withShared = true;
-        withSmallBuild = true;
-        buildFfmpeg = true;
-        buildFfplay = false;
-        buildFfprobe = false;
-        buildQtFaststart = false;
-        buildAvcodec = true;
-        buildAvdevice = false;
-        buildAvfilter = true;
-        buildAvformat = true;
-        buildAvresample = false;
-        buildAvutil = true;
-        # The pinned FFmpeg 9.0 test suite compiles tests/pixelutils.c even
-        # for the small variant; keep the built-in utility enabled so checks
-        # and the runtime use the same configured subsystem.
-        withPixelutils = true;
-        buildPostproc = false;
-        buildSwresample = true;
-        # H.264/MJPEG frames need pixel-format and size conversion before the
-        # MJPEG output used by desktop/device previews. Keep this enabled in
-        # every pinned release build.
-        buildSwscale = true;
-        withDocumentation = false;
-        withHtmlDoc = false;
-        withManPages = false;
-        withPodDoc = false;
-        withTxtDoc = false;
-      };
+      ffmpegRuntime = pkgs:
+        (pkgs.ffmpeg.override {
+          ffmpegVariant = "small";
+          withHeadlessDeps = false;
+          withSmallDeps = false;
+          withFullDeps = false;
+          withVpx = true;
+          withGPL = true;
+          withVersion3 = true;
+          withNetwork = false;
+          withStatic = false;
+          withShared = true;
+          withSmallBuild = true;
+          buildFfmpeg = true;
+          buildFfplay = false;
+          buildFfprobe = false;
+          buildQtFaststart = false;
+          buildAvcodec = true;
+          buildAvdevice = false;
+          buildAvfilter = true;
+          buildAvformat = true;
+          buildAvresample = false;
+          buildAvutil = true;
+          # The pinned FFmpeg 9.0 test suite compiles tests/pixelutils.c even
+          # for the small variant; keep the built-in utility enabled so checks
+          # and the runtime use the same configured subsystem.
+          withPixelutils = true;
+          buildPostproc = false;
+          buildSwresample = true;
+          # H.264/MJPEG frames need pixel-format and size conversion before the
+          # MJPEG output used by desktop/device previews. Keep this enabled in
+          # every pinned release build.
+          buildSwscale = true;
+          withDocumentation = false;
+          withHtmlDoc = false;
+          withManPages = false;
+          withPodDoc = false;
+          withTxtDoc = false;
+        }).overrideAttrs (old: {
+          # FFmpeg's upstream tools list unconditionally builds uncoded_frame,
+          # but that helper calls avdevice_register_all. The release runtime
+          # intentionally omits libavdevice, so gate only this incompatible
+          # helper and retain the rest of the check suite.
+          postPatch = (old.postPatch or "") + ''
+            substituteInPlace tools/Makefile \
+              --replace-fail \
+                "TOOLS = enc_recon_frame_test enum_options qt-faststart scale_slice_test trasher uncoded_frame" \
+                "TOOLS = enc_recon_frame_test enum_options qt-faststart scale_slice_test trasher"
+          '';
+        });
       supportedSystems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
       forEachSystem = function:
         nixpkgs.lib.genAttrs supportedSystems (system:
