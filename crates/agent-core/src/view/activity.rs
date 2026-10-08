@@ -1,3 +1,7 @@
+use agent_domain::{
+    ACTIVITY_LINK_LIMIT, ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT,
+    bounded_activity_text,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize)]
@@ -160,7 +164,8 @@ fn display(
     };
     let deep_link = rows.first().and_then(|row| {
         let url = url::Url::parse(&row.deep_link).ok()?;
-        (url.scheme() == "remoteagent"
+        (row.deep_link.encode_utf16().count() <= ACTIVITY_LINK_LIMIT
+            && url.scheme() == "remoteagent"
             && url.host_str() == Some("threads")
             && url.username().is_empty()
             && url.password().is_none()
@@ -190,13 +195,13 @@ fn display(
         deep_link,
         rows: rows
             .into_iter()
-            .take(5)
+            .take(ACTIVITY_ROWS_LIMIT)
             .map(|row| ActivityDisplayRow {
                 glyph: glyph(&row.phase),
                 color: color(&row.phase, light, monochrome, reduced),
-                project: row.project_title,
-                title: row.thread_title,
-                status: row.status,
+                project: bounded_activity_text(&row.project_title, ACTIVITY_SUMMARY_LIMIT),
+                title: bounded_activity_text(&row.thread_title, ACTIVITY_SUMMARY_LIMIT),
+                status: bounded_activity_text(&row.status, ACTIVITY_STATUS_LIMIT),
             })
             .collect(),
     }
@@ -255,6 +260,28 @@ mod tests {
             Some("remoteagent://threads/host/input")
         );
         assert_eq!(view.rows[1].color, "#7dd3fc");
+    }
+    #[test]
+    fn system_display_bounds_preserve_unicode_and_never_truncate_navigation_ids() {
+        let mut oversized = row("running", &"😀".repeat(300));
+        oversized.project_title = format!(" {} ", "p".repeat(121));
+        oversized.status = "s".repeat(41);
+        let view = display(
+            ActivityContent {
+                active_count: 9,
+                activities: vec![oversized; 9],
+            },
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(view.rows.len(), 5);
+        assert_eq!(view.headline, "9 active agents");
+        assert_eq!(view.rows[0].project, format!("{}...", "p".repeat(117)));
+        assert_eq!(view.rows[0].title, format!("{}...", "😀".repeat(58)));
+        assert_eq!(view.rows[0].status, format!("{}...", "s".repeat(37)));
+        assert!(view.deep_link.is_none());
     }
     #[test]
     fn stale_live_work_preserves_terminal_outcomes_and_reduces_treatment() {
