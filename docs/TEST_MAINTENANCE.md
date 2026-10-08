@@ -255,6 +255,13 @@ transfer server just to delete that check would reverse A14.
   accessibility frame. Text-copy gestures wait for the message frame to settle
   after scrolling; native menus, clipboard contents and selected-text assertions
   remain unchanged.
+  Model-default navigation waits for the task menu and its Settings item to
+  settle before tapping, then waits for the Models destination. Long-history
+  scrolling observes only the latest-visible boundary; the native size-change
+  anchor follows growing content while following latest. This avoids feeding
+  lazy-stack content-size estimates back into repeated programmatic scrolling.
+  History paging, detached reading, latest navigation and reopen assertions
+  remain unchanged.
   The shared connection fixture confirms that a previous client has terminated
   before launching the next client, retaining the initial readiness deadline.
   Maestro 2.11.0 and Java 21 are

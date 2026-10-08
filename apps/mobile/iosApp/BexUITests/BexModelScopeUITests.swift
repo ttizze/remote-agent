@@ -3,8 +3,7 @@ import XCTest
 extension BexLaunchUITests {
     func testSimulatorModelDefaultsInheritAndPersistAcrossScopes() throws {
         let app = try connectedSimulatorApp()
-        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
-        app.buttons["settings.models"].tap()
+        openModelDefaults(app)
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
         app.buttons["model.sheet.effort"].tap(); app.buttons["medium"].tap()
@@ -25,8 +24,7 @@ extension BexLaunchUITests {
         XCTAssertEqual(app.buttons["model.effort"].value as? String, "high")
         XCTAssertEqual(app.buttons["model.fast"].value as? String, "オン")
         app.buttons["BackButton"].tap()
-        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
-        app.buttons["settings.models"].tap()
+        openModelDefaults(app)
         app.buttons["settings.scope.projects"].tap()
         app.buttons["settings.scope.projects.simulator-project"].tap()
         app.buttons["model.sheet.effort"].tap(); app.buttons["medium"].tap()
@@ -34,8 +32,7 @@ extension BexLaunchUITests {
         app.buttons["model.settings"].tap(); XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
         app.terminate(); app.launch()
         XCTAssertTrue(app.buttons["tasks.menu"].waitForExistence(timeout: 20))
-        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
-        app.buttons["settings.models"].tap()
+        openModelDefaults(app)
         app.buttons["settings.scope.projects"].tap()
         app.buttons["settings.scope.projects.simulator-project"].tap()
         XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "medium")
@@ -88,10 +85,7 @@ extension BexLaunchUITests {
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("Keep this existing draft")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        app.buttons["tasks.menu"].tap()
-        app.buttons["tasks.settings"].tap()
-        let models = app.buttons["settings.models"]
-        XCTAssertTrue(models.waitForExistence(timeout: 10)); models.tap()
+        openModelDefaults(app)
         XCTAssertTrue(app.buttons["model.choice.automatic"].waitForExistence(timeout: 10))
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
@@ -119,10 +113,17 @@ extension BexLaunchUITests {
         dismissModelSettings(app)
         app.terminate(); app.launch()
         XCTAssertTrue(app.buttons["tasks.menu"].waitForExistence(timeout: 20))
-        app.buttons["tasks.menu"].tap()
-        app.buttons["tasks.settings"].tap()
-        app.buttons["settings.models"].tap()
+        openModelDefaults(app)
         assertPersistedIndependentModelDefaults(app)
+    }
+
+    private func openModelDefaults(_ app: XCUIApplication) {
+        let menu = app.descendants(matching: .any)["tasks.menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 10)); waitForStableFrame(menu); menu.tap()
+        let settings = app.buttons["tasks.settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10)); waitForStableFrame(settings); settings.tap()
+        let models = app.buttons["settings.models"]
+        XCTAssertTrue(models.waitForExistence(timeout: 10)); models.tap()
     }
 
     private func assertPersistedIndependentModelDefaults(_ app: XCUIApplication) {
