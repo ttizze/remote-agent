@@ -2720,32 +2720,36 @@ impl Owner {
                     alt,
                 } = action
                 {
-                    let plan = self.state.device.key_input_plan(
-                        self.selected()?,
-                        host_id,
-                        device_id,
-                        code,
-                        key,
-                        session_epoch,
-                        down,
-                        DeviceModifierFacts {
-                            shift,
-                            alt,
-                            meta,
-                            ctrl,
-                        },
-                    ).map_err(invalid)?;
+                    let plan = self
+                        .state
+                        .device
+                        .key_input_plan(
+                            self.selected()?,
+                            host_id,
+                            device_id,
+                            code,
+                            key,
+                            session_epoch,
+                            down,
+                            DeviceModifierFacts {
+                                shift,
+                                alt,
+                                meta,
+                                ctrl,
+                            },
+                        )
+                        .map_err(invalid)?;
                     return Ok(match plan.inputs.len() {
                         0 => Next::Done,
                         _ => Next::DeviceInputs(plan.inputs, plan.target),
                     });
                 }
                 let thread_id = self.selected()?;
-                let target =
-                    self.state
-                        .device
-                        .session_target(&thread_id, host_id.as_deref(), &device_id)
-                        .map_err(invalid)?;
+                let target = self
+                    .state
+                    .device
+                    .session_target(&thread_id, host_id.as_deref(), &device_id)
+                    .map_err(invalid)?;
                 let action = device_action(action)?;
                 match action {
                     d::DeviceActionKind::Input(input) => Next::DeviceInputs(
@@ -2775,12 +2779,11 @@ impl Owner {
                 device_id,
                 session_epoch,
             } => {
-                let plan = self.state.device.release_input_plan(
-                    self.selected()?,
-                    host_id,
-                    device_id,
-                    session_epoch,
-                ).map_err(invalid)?;
+                let plan = self
+                    .state
+                    .device
+                    .release_input_plan(self.selected()?, host_id, device_id, session_epoch)
+                    .map_err(invalid)?;
                 match plan {
                     None => Next::Done,
                     Some(plan) if plan.inputs.is_empty() => Next::Done,

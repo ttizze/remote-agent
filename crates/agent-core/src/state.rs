@@ -1337,9 +1337,7 @@ impl Snapshot {
                         && provider.status == agent_protocol::models::ProviderStatus::Ready,
                 })
                 .collect::<Vec<_>>();
-            let seed = crate::view::load_balancing::seed(
-                project_id.unwrap_or(CHATS_PROJECT),
-            );
+            let seed = crate::view::load_balancing::seed(project_id.unwrap_or(CHATS_PROJECT));
             if let Some(instance) = crate::view::load_balancing::select_instance(
                 &candidates,
                 draft.driver,
