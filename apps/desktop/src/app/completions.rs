@@ -131,7 +131,7 @@ impl Desktop {
                     .px_2()
                     .py_1()
                     .cursor_pointer()
-                    .when(selected, |row| row.bg(rgb(0x444444)))
+                    .when(selected, |row| row.bg(rgb(appearance::SELECTED)))
                     .when(
                         candidate.invocation.kind
                             == agent_protocol::composer::InvocationKind::Skill,
@@ -155,7 +155,7 @@ impl Desktop {
                             .min_w_0()
                             .text_sm()
                             .truncate()
-                            .text_color(rgb(0xaaaaaa))
+                            .text_color(rgb(appearance::MUTED))
                             .child(candidate_label(&candidate.description)),
                     )
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -264,7 +264,7 @@ mod tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),

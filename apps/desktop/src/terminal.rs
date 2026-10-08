@@ -394,13 +394,13 @@ impl Render for Terminal {
         v_flex()
             .size_full()
             .min_h_0()
-            .bg(rgb(0x181818))
+            .bg(rgb(crate::appearance::BACKGROUND))
             .child(
                 h_flex()
                     .px_3()
                     .py_2()
                     .text_xs()
-                    .text_color(rgb(0xaaaaaa))
+                    .text_color(rgb(crate::appearance::MUTED))
                     .child(div().flex_1().child(self.cwd.clone()))
                     .child(status)
                     .child(

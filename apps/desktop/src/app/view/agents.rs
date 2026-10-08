@@ -18,7 +18,7 @@ impl Desktop {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0x999999))
+                            .text_color(rgb(appearance::MUTED))
                             .child(format!("{working} 件が実行中")),
                     ),
             )
@@ -35,7 +35,7 @@ impl Desktop {
                                 list.child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(0x999999))
+                                        .text_color(rgb(appearance::MUTED))
                                         .child("サブエージェントが起動するとここに表示されます。"),
                                 )
                             })
@@ -48,8 +48,8 @@ impl Desktop {
                                     .p_3()
                                     .rounded(px(8.))
                                     .border_1()
-                                    .border_color(rgb(0x383838))
-                                    .bg(rgb(0x232323))
+                                    .border_color(rgb(appearance::BORDER))
+                                    .bg(rgb(appearance::RAISED))
                                     .child(
                                         h_flex()
                                             .h(px(20.))
@@ -76,7 +76,7 @@ impl Desktop {
                                             .child(
                                                 div()
                                                     .text_xs()
-                                                    .text_color(rgb(0x999999))
+                                                    .text_color(rgb(appearance::MUTED))
                                                     .child(agent.status),
                                             ),
                                     )
@@ -85,14 +85,14 @@ impl Desktop {
                                             .h(px(20.))
                                             .text_sm()
                                             .text_ellipsis()
-                                            .text_color(rgb(0xaaaaaa))
+                                            .text_color(rgb(appearance::MUTED))
                                             .child(agent.detail.unwrap_or_default()),
                                     )
                                     .child(
                                         div()
                                             .h(px(16.))
                                             .text_xs()
-                                            .text_color(rgb(0x999999))
+                                            .text_color(rgb(appearance::MUTED))
                                             .child(agent.model.unwrap_or_default()),
                                     )
                             })),
@@ -115,7 +115,7 @@ mod tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::default(),

@@ -36,7 +36,12 @@ pub(super) fn section_heading(title: &'static str, description: &'static str) ->
     v_flex()
         .gap_1()
         .child(div().text_lg().font_semibold().child(title))
-        .child(div().text_sm().text_color(rgb(0x949ca8)).child(description))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(appearance::MUTED))
+                .child(description),
+        )
 }
 
 fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
@@ -100,7 +105,7 @@ fn user_message_bubble() -> Div {
         .max_w(px(560.))
         .p_4()
         .rounded(px(18.))
-        .bg(rgb(0x303030))
+        .bg(rgb(appearance::RAISED))
 }
 
 fn review_counts(additions: Option<u64>, deletions: Option<u64>) -> AnyElement {
@@ -111,7 +116,7 @@ fn review_counts(additions: Option<u64>, deletions: Option<u64>) -> AnyElement {
             .child(div().text_color(rgb(0xff6259)).child(format!("−{deleted}")))
             .into_any_element(),
         _ => counts
-            .text_color(rgb(0x999999))
+            .text_color(rgb(appearance::MUTED))
             .child("バイナリ")
             .into_any_element(),
     }
@@ -163,8 +168,8 @@ impl Render for Desktop {
             let gallery = self.image_gallery_view(window, cx);
             return h_flex()
                 .size_full()
-                .bg(rgb(0x181818))
-                .text_color(rgb(0xececec))
+                .bg(rgb(appearance::BACKGROUND))
+                .text_color(rgb(appearance::FOREGROUND))
                 .text_size(px(14.))
                 .child(gallery);
         }
@@ -188,8 +193,8 @@ impl Render for Desktop {
         h_flex()
             .size_full()
             .items_stretch()
-            .bg(rgb(0x181818))
-            .text_color(rgb(0xececec))
+            .bg(rgb(appearance::BACKGROUND))
+            .text_color(rgb(appearance::FOREGROUND))
             .text_size(px(14.))
             .font_weight(FontWeight::NORMAL)
             .when(self.sidebar && !self.side_chat_mode, |body| {

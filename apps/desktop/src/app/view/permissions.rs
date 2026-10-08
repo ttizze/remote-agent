@@ -8,9 +8,9 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         let opening = entity.clone();
         popover::Popover::new("permission-controls")
-            .bg(rgb(0x2b2b2b))
+            .bg(rgb(appearance::SURFACE))
             .rounded(px(16.))
-            .border_color(rgb(0x3b3b3b))
+            .border_color(rgb(appearance::BORDER))
             .anchor(Anchor::BottomLeft)
             .trigger(
                 Button::new("composer-permissions")
@@ -52,7 +52,7 @@ impl Desktop {
         let mut body = v_flex().w(px(430.)).p_3().gap_1().child(
             div()
                 .text_xs()
-                .text_color(rgb(0x999999))
+                .text_color(rgb(appearance::MUTED))
                 .pb_2()
                 .child(match provider {
                     Some(ProviderKind::Codex) => "Codex の承認方法",
@@ -81,7 +81,7 @@ impl Desktop {
                                 div()
                                     .text_xs()
                                     .whitespace_normal()
-                                    .text_color(rgb(0x999999))
+                                    .text_color(rgb(appearance::MUTED))
                                     .child(description),
                             ),
                     )
@@ -152,7 +152,7 @@ mod tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),
