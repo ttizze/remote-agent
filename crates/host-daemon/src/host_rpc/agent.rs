@@ -151,7 +151,11 @@ pub(crate) trait Agent: Identity {
     async fn interrupt(&self, id: &str, turn: &TurnId) -> Result<Empty, Failure>;
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure>;
     async fn catalog(&self, cwd: &str) -> ComposerCatalog;
-    async fn active_sessions_in(&self, dir: &Path) -> Result<Vec<SessionRef>, Failure>;
+    /// Explain uncertainty when native history cannot prove inactivity. Providers
+    /// with authoritative listed status need no additional check.
+    async fn workspace_idle_warning(&self, _id: &str) -> Option<&'static str> {
+        None
+    }
     async fn discard_workspace_processes(&self, dir: &Path) -> Result<(), Failure>;
     async fn read_permissions(&self) -> Result<PermissionSettings, Failure>;
     async fn update_permissions(

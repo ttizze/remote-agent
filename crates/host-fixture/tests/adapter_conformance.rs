@@ -502,6 +502,128 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let repository = root.join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "--quiet",
+        "-m",
+        "fixture",
+    ]);
+    let paths = [
+        root.join("first"),
+        root.join("second"),
+        root.join("deleted"),
+    ];
+    let mut mappings = serde_json::Map::new();
+    for (index, path) in paths.iter().enumerate() {
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            &format!("task-{index}"),
+            path.to_str().unwrap(),
+        ]);
+        mappings.insert(
+            path.to_string_lossy().into_owned(),
+            serde_json::json!(repository),
+        );
+    }
+    git(&["worktree", "remove", paths[2].to_str().unwrap()]);
+    std::fs::write(
+        root.join("bex-worktrees.json"),
+        serde_json::json!({"workspaceRoots":mappings}).to_string(),
+    )
+    .unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let reads = || {
+        std::fs::read_to_string(root.join("rpc-trace.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|entry| entry["method"] == "thread/list")
+            .count()
+    };
+    for running in [true, false] {
+        let threads: Vec<_> = (0..101)
+            .map(|index| {
+                serde_json::json!({
+                    "id":format!("page-{index}"),
+                    "cwd":if index == 0 { &paths[0] } else { &paths[1] },
+                    "name":format!("Conversation {index}: {running}"),
+                    "updatedAt":index,
+                    "status":{"type":if index == 0 && running { "active" } else { "idle" }},
+                })
+            })
+            .collect();
+        std::fs::write(
+            root.join("list-fixture.json"),
+            serde_json::to_vec(&threads).unwrap(),
+        )
+        .unwrap();
+        let before = reads();
+        let entries: Vec<agent_protocol::models::Worktree> = local
+            .peer
+            .request(&Call::ListWorktrees(Empty {}))
+            .await
+            .unwrap();
+        assert_eq!(
+            reads() - before,
+            2,
+            "worktree count must not multiply native history reads"
+        );
+        assert_eq!(entries.len(), 3);
+        let first = entries
+            .iter()
+            .find(|entry| Path::new(&entry.path) == paths[0])
+            .unwrap();
+        assert_eq!(first.threads.len(), 1);
+        assert_eq!(first.threads[0].active, running);
+        assert_eq!(first.blocked_reason.is_some(), running);
+        assert_eq!(first.threads[0].name, format!("Conversation 0: {running}"));
+        let second = entries
+            .iter()
+            .find(|entry| Path::new(&entry.path) == paths[1])
+            .unwrap();
+        assert_eq!(second.threads.len(), 100);
+        assert!(second.threads.iter().all(|thread| !thread.active));
+        assert!(second.blocked_reason.is_none());
+        let deleted = entries
+            .iter()
+            .find(|entry| Path::new(&entry.path) == paths[2])
+            .unwrap();
+        assert_eq!(deleted.branch, "削除済み");
+        assert!(deleted.blocked_reason.is_none() && deleted.threads.is_empty());
+    }
+    local.close().await;
+    host.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_order() {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();

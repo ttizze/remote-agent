@@ -1003,8 +1003,7 @@ impl HostRpcService {
             }
         }
         let mut threads = Vec::new();
-        let agents = self.agents();
-        for (_, agent) in &agents {
+        for (_, agent) in self.agents() {
             let pages = session_pages(agent.as_ref(), "", None);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
@@ -1020,27 +1019,6 @@ impl HostRpcService {
                     }
                 }
             }
-        }
-        let mut active_sessions = std::collections::HashSet::new();
-        for worktree in &mut worktrees {
-            let directory = std::path::Path::new(&worktree.path);
-            let mut active = std::collections::HashSet::new();
-            for (_, agent) in &agents {
-                match agent.active_sessions_in(directory).await {
-                    Ok(sessions) => active.extend(sessions),
-                    Err(error) => {
-                        worktree.blocked_reason =
-                            Some(format!("稼働状況を確認できないため削除できません: {error}"))
-                    }
-                }
-            }
-            if !active.is_empty() {
-                worktree.blocked_reason = Some(
-                    "このワークツリーで作業を実行中です。完了または停止してから削除してください。"
-                        .into(),
-                );
-            }
-            active_sessions.extend(active);
         }
         // Providers can omit a first, still-running turn from their history list.
         // Resolve every retained execution before allowing any checkout removal.
@@ -1069,16 +1047,12 @@ impl HostRpcService {
                 Some(id) => self.inner.router.overlay_execution(&id, thread),
                 None => thread,
             };
-            let active = thread
-                .id
-                .as_ref()
-                .is_some_and(|id| active_sessions.contains(id))
-                || worktree_active(
-                    thread.status,
-                    thread.turns.as_deref().unwrap_or_default(),
-                    !thread.requests.is_empty(),
-                    thread.submissions.values(),
-                );
+            let active = worktree_active(
+                thread.status,
+                thread.turns.as_deref().unwrap_or_default(),
+                !thread.requests.is_empty(),
+                thread.submissions.values(),
+            );
             let Some(cwd) = thread.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) else {
                 if active {
                     return Err(Failure::new(
@@ -1092,12 +1066,31 @@ impl HostRpcService {
                 .await
                 .unwrap_or_else(|_| std::path::PathBuf::from(cwd));
             let cwd = dunce::simplified(&cwd);
-            for worktree in &mut worktrees {
-                if !cwd.starts_with(&worktree.path) {
-                    continue;
-                }
+            let matching: Vec<_> = worktrees
+                .iter()
+                .enumerate()
+                .filter_map(|(index, tree)| cwd.starts_with(&tree.path).then_some(index))
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            // Resolve provider-specific uncertainty once per matching session,
+            // reusing the history scan instead of rereading it for every tree.
+            let idle_warning = if !active && let Some(id) = &thread.id {
+                self.agent(id.provider)?
+                    .workspace_idle_warning(&id.id)
+                    .await
+            } else {
+                None
+            };
+            for index in matching {
+                let worktree = &mut worktrees[index];
                 if active {
                     worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
+                } else if let Some(warning) = idle_warning {
+                    worktree.blocked_reason = Some(format!(
+                        "稼働状況を確認できないため削除できません: {warning}"
+                    ));
                 }
                 if let Some(id) = &thread.id {
                     worktree
@@ -2131,6 +2124,116 @@ mod tests {
                 assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn worktree_listing_blocks_only_checkouts_with_unverified_claude_activity() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        crate::git::text(&repository, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        crate::git::text(
+            &repository,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        let native = root.path().join("native");
+        let project = native.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let claude = crate::adapters::Claude::load(
+            root.path().join("unused-cli"),
+            root.path().join("state"),
+            Some(native),
+        )
+        .await
+        .unwrap();
+        let service = HostRpcService::new(
+            [claude.into()],
+            ProjectStore::new(root.path().join("projects.json")),
+        );
+        service
+            .inner
+            .worktrees
+            .settings(Some(agent_protocol::models::WorktreeSettings {
+                create_on_new_session: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let first = service
+            .inner
+            .worktrees
+            .prepare(repository.to_str())
+            .await
+            .unwrap()
+            .unwrap();
+        let other = service
+            .inner
+            .worktrees
+            .prepare(repository.to_str())
+            .await
+            .unwrap()
+            .unwrap();
+        let id = "12345678-1234-4234-8234-123456789abc";
+        let transcript = project.join(format!("{id}.jsonl"));
+        let history = include_str!("../../tests/fixtures/claude-2.1.266.jsonl")
+            .lines()
+            .map(|line| {
+                let mut entry: serde_json::Value = serde_json::from_str(line).unwrap();
+                entry["cwd"] = serde_json::json!(first);
+                entry.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&transcript, history).unwrap();
+        let entries = service.worktree_list().await.unwrap();
+        let first_entry = entries
+            .iter()
+            .find(|entry| std::path::Path::new(&entry.path) == first)
+            .unwrap();
+        assert_eq!(first_entry.threads[0].id.id, id);
+        assert!(!first_entry.threads[0].active);
+        assert!(
+            first_entry
+                .blocked_reason
+                .as_ref()
+                .unwrap()
+                .contains("native transcript does not expose external process activity")
+        );
+        let other_entry = entries
+            .iter()
+            .find(|entry| std::path::Path::new(&entry.path) == other)
+            .unwrap();
+        assert!(other_entry.blocked_reason.is_none());
+        assert!(
+            service
+                .remove_worktree(first_entry.path.clone())
+                .await
+                .is_err()
+        );
+        assert!(first.is_dir());
+        std::fs::remove_file(transcript).unwrap();
+        assert!(
+            service
+                .worktree_list()
+                .await
+                .unwrap()
+                .iter()
+                .all(|entry| entry.blocked_reason.is_none())
+        );
     }
 
     #[tokio::test]
