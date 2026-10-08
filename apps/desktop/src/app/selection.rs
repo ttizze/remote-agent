@@ -264,7 +264,7 @@ mod tests {
     }
 
     fn setup(cx: &mut TestAppContext) -> (Entity<ConversationSelection>, &mut VisualTestContext) {
-        cx.update(gpui_kit::init);
+        cx.update(crate::appearance::init);
         let selection = cx.new(|_| ConversationSelection::new(true));
         let entity = selection.clone();
         let (_, window) = cx.add_window_view(|window, cx| {
@@ -406,7 +406,7 @@ mod tests {
 
     #[gpui::test]
     fn adding_a_quote_emits_the_draft_change_and_keeps_the_existing_text(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(crate::appearance::init);
         let (composer, cx) = cx.add_window_view(TextareaState::new);
         cx.update(|window, cx| {
             composer.update(cx, |input, cx| input.set_value("unsent draft", window, cx))

@@ -95,7 +95,7 @@ impl Desktop {
                 .with_fallback(|| {
                     div()
                         .text_sm()
-                        .text_color(rgb(0xaaaaaa))
+                        .text_color(rgb(appearance::MUTED))
                         .child("画像を表示できません")
                         .into_any_element()
                 });
@@ -121,7 +121,7 @@ impl Desktop {
         } else if let Some(error) = &state.error {
             div()
                 .text_sm()
-                .text_color(rgb(0xaaaaaa))
+                .text_color(rgb(appearance::MUTED))
                 .child(error.clone())
                 .into_any_element()
         } else {
@@ -515,7 +515,7 @@ mod file_panel_tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),
@@ -604,7 +604,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_tables_keep_every_shared_cell_in_desktop_selection(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(crate::appearance::init);
         let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../crates/agent-core/tests/fixtures/markdown/table.md"
