@@ -163,6 +163,74 @@ fn separator() -> Div {
         .bg(color("border"))
 }
 
+const MODEL_PICKER_MAX_LABEL_WIDTH: f32 = 200.;
+const MODEL_PICKER_MIN_LABEL_WIDTH: f32 = 48.;
+
+#[derive(Clone, Copy)]
+struct ModelPickerWidths {
+    natural: f32,
+    minimum: f32,
+}
+
+impl ModelPickerWidths {
+    /// Keep the fixed controls' minimum while replacing the estimated natural
+    /// width with the actual laid-out width.
+    fn with_natural(self, natural: f32) -> Self {
+        Self {
+            natural,
+            minimum: self.minimum.min(natural),
+        }
+    }
+}
+
+fn model_picker_label_measurement(
+    window: &Window,
+    instance_id: &str,
+    label: &str,
+) -> (f32, String) {
+    let style = window.text_style();
+    let font_size = px(f32::from(window.rem_size()) * 0.875);
+    let mut label_font = font(style.font_family.clone());
+    label_font.features = style.font_features.clone();
+    label_font.fallbacks = style.font_fallbacks.clone();
+    label_font.style = style.font_style;
+    label_font.weight = FontWeight::MEDIUM;
+    let run = TextRun {
+        len: label.len(),
+        font: label_font,
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let width = f32::from(
+        window
+            .text_system()
+            .shape_line(label.into(), font_size, &[run], None)
+            .width,
+    );
+    let key = format!(
+        "{instance_id}:{label}:{:?}:{font_size:?}:{:?}:{:?}:{:?}",
+        style.font_family, style.font_features, style.font_fallbacks, style.font_style,
+    );
+    (width, key)
+}
+
+fn model_picker_fixed_width(trigger: &ModelPickerTrigger) -> f32 {
+    // The button has 20px of horizontal padding, a 16px caret and a 4px
+    // content gap. The instance mark is 20px wide and adds one more gap; the
+    // trigger keeps its existing -10px leading margin.
+    20. + 16. + 4. + if trigger.instance.is_some() { 24. } else { 0. } - 10.
+}
+
+fn model_picker_widths(fixed_width: f32, label_width: f32) -> ModelPickerWidths {
+    let natural = fixed_width + label_width.min(MODEL_PICKER_MAX_LABEL_WIDTH);
+    ModelPickerWidths {
+        natural,
+        minimum: (fixed_width + MODEL_PICKER_MIN_LABEL_WIDTH).min(natural),
+    }
+}
+
 /// An `#rrggbb` accent color.
 fn accent_color(hex: &str) -> Option<Hsla> {
     let value = u32::from_str_radix(hex.strip_prefix('#')?, 16).ok()?;
@@ -445,7 +513,7 @@ impl Desktop {
     pub(super) fn composer_controls(
         &mut self,
         composer: &ComposerView,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = cx.entity().downgrade();
@@ -582,6 +650,15 @@ impl Desktop {
         let block_count = blocks.len();
         let layout = self.composer.footer_layout;
         let hidden = layout.hidden_count.min(block_count);
+        let picker_compact = hidden == block_count;
+        let picker_label = composer.model_trigger.label.clone();
+        let (picker_label_width, picker_measurement_key) = model_picker_label_measurement(
+            window,
+            &composer.model_trigger.instance_id,
+            &picker_label,
+        );
+        let picker_fixed_width = model_picker_fixed_width(&composer.model_trigger);
+        let estimated_picker_widths = model_picker_widths(picker_fixed_width, picker_label_width);
         let traits_hidden = has_traits && hidden >= block_count;
         let mode_hidden = hidden >= 1;
         let overflow =
@@ -604,8 +681,11 @@ impl Desktop {
             })
             .child(
                 div()
-                    .flex_none()
-                    .child(self.composer_model_picker(composer, cx)),
+                    .when(!picker_compact, |picker| picker.flex_none())
+                    .when(picker_compact, |picker| {
+                        picker.flex_1().min_w_0().overflow_hidden()
+                    })
+                    .child(self.composer_model_picker(composer, picker_compact, cx)),
             )
             .children(blocks.into_iter().enumerate().map(|(index, block)| {
                 let hidden_block = index >= block_count - hidden;
@@ -632,14 +712,36 @@ impl Desktop {
                 if widths.len() != block_count + 2 {
                     return;
                 }
-                let measurement = agent_core::view::composer::footer_layout::FooterMeasurement {
-                    gap: 4.,
-                    natural_fixed_width: widths[0],
-                    minimum_fixed_width: widths[0],
-                    block_widths: widths[1..=block_count].to_vec(),
-                    overflow_width: widths[block_count + 1],
-                };
+                let widths = widths.clone();
                 let _ = owner.update(cx, |view, cx| {
+                    let (natural_fixed_width, minimum_fixed_width) = if picker_compact {
+                        view.composer
+                            .footer_picker_measurement
+                            .as_ref()
+                            .filter(|(key, _, _)| key == &picker_measurement_key)
+                            .map(|(_, natural, minimum)| (*natural, *minimum))
+                            .unwrap_or((
+                                estimated_picker_widths.natural,
+                                estimated_picker_widths.minimum,
+                            ))
+                    } else {
+                        let natural = widths[0];
+                        let measured = estimated_picker_widths.with_natural(natural);
+                        (measured.natural, measured.minimum)
+                    };
+                    view.composer.footer_picker_measurement = Some((
+                        picker_measurement_key.clone(),
+                        natural_fixed_width,
+                        minimum_fixed_width,
+                    ));
+                    let measurement =
+                        agent_core::view::composer::footer_layout::FooterMeasurement {
+                            gap: 4.,
+                            natural_fixed_width,
+                            minimum_fixed_width,
+                            block_widths: widths[1..=block_count].to_vec(),
+                            overflow_width: widths[block_count + 1],
+                        };
                     let previous = view.composer.footer_layout;
                     let next = agent_core::view::composer::footer_layout::resolve_footer_layout(
                         &measurement,
@@ -721,6 +823,7 @@ impl Desktop {
     fn composer_model_picker(
         &mut self,
         composer: &ComposerView,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = cx.entity().downgrade();
@@ -751,13 +854,16 @@ impl Desktop {
         let query = self.composer.picker.query.clone();
         let focus = query.read(cx).focus_handle(cx);
         let button = control("composer-model-picker")
+            .max_w_full()
             .ml(px(-10.))
             .when_some(trigger.instance.as_ref(), |button, instance| {
                 button.child(instance_icon(instance, 16.))
             })
             .child(
                 div()
-                    .max_w(px(200.))
+                    .min_w_0()
+                    .max_w(px(MODEL_PICKER_MAX_LABEL_WIDTH))
+                    .when(compact, |label| label.max_w_full())
                     .truncate()
                     .child(trigger.label.clone()),
             )
@@ -1655,4 +1761,22 @@ fn model_row(
                 }),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_picker_widths;
+
+    #[test]
+    fn model_picker_measurement_keeps_a_distinct_readable_minimum() {
+        let widths = model_picker_widths(60., 200.);
+        assert_eq!(widths.natural, 260.);
+        assert_eq!(widths.minimum, 108.);
+        assert!(widths.minimum < widths.natural);
+    }
+
+    #[test]
+    fn model_picker_minimum_does_not_exceed_a_short_label() {
+        assert_eq!(model_picker_widths(60., 24.).minimum, 84.);
+    }
 }

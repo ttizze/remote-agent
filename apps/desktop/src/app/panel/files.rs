@@ -38,6 +38,9 @@ impl FilesState {
         subscriptions: &mut Vec<Subscription>,
     ) -> Self {
         let editor = cx.new(|cx| EditorState::new(window, cx));
+        if !crate::app::ui_word_wrap() {
+            editor.update(cx, |editor, cx| editor.set_soft_wrap(false, window, cx));
+        }
         subscriptions.push(cx.subscribe(&editor, |view, input, event, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value().to_string();
@@ -60,6 +63,16 @@ impl FilesState {
         self.pending = None;
         self.listed_for = None;
         self.reveal = None;
+    }
+
+    pub(crate) fn set_word_wrap(
+        &mut self,
+        wrap: bool,
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        self.editor
+            .update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
     }
 }
 
