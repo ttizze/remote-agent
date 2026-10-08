@@ -7,17 +7,28 @@ struct TaskActivityAttributes: ActivityAttributes, Hashable {
         var waiting: UInt32
         var unknown: UInt32
 
-        var total: Int { Int(running) + Int(waiting) + Int(unknown) }
+        var total: Int {
+            Int(running) + Int(waiting) + Int(unknown)
+        }
+
         var statusLabel: String {
-            if total == 0 { return "すべてのタスクが終了" }
-            if unknown > 0 { return "更新待ち" }
-            if waiting > 0 { return "確認待ち \(waiting)件 · 実行中 \(running)件" }
+            if total == 0 {
+                return "すべてのタスクが終了"
+            }
+            if unknown > 0 {
+                return "更新待ち"
+            }
+            if waiting > 0 {
+                return "確認待ち \(waiting)件 · 実行中 \(running)件"
+            }
             return "実行中 \(running)件"
         }
 
-        // Keep the widget cheap and legible; additional tasks share a count badge.
+        /// Keep the widget cheap and legible; additional tasks share a count badge.
         var icons: [String] {
-            if total == 0 { return ["checkmark.circle.fill"] }
+            if total == 0 {
+                return ["checkmark.circle.fill"]
+            }
             var result = [String]()
             for (count, symbol) in [(waiting, "person.crop.circle.badge.questionmark"),
                                     (running, "circle.dotted"), (unknown, "arrow.clockwise.circle")] {
