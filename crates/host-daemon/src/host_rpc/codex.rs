@@ -24,7 +24,9 @@ struct ThreadListParams<'a> {
     pub sort_key: &'a str,
     pub sort_direction: &'a str,
     pub use_state_db_only: bool,
-    pub source_kinds: [&'static str; 6],
+    pub source_kinds: &'static [&'static str],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestor_thread_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_term: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -582,7 +584,12 @@ impl Agent for Codex {
     fn storage_directory(&self) -> &std::path::Path {
         &self.directory
     }
-    async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure> {
+    async fn list(
+        &self,
+        search: &str,
+        cursor: Option<String>,
+        ancestor: Option<&str>,
+    ) -> Result<SessionPage, Failure> {
         let value: Value = self
             .request(
                 "thread/list",
@@ -591,14 +598,19 @@ impl Agent for Codex {
                     sort_key: "updated_at",
                     sort_direction: "desc",
                     use_state_db_only: true,
-                    source_kinds: [
-                        "cli",
-                        "vscode",
-                        "exec",
-                        "appServer",
-                        "unknown",
-                        "subAgentThreadSpawn",
-                    ],
+                    source_kinds: if ancestor.is_some() {
+                        &["subAgentThreadSpawn"]
+                    } else {
+                        &[
+                            "cli",
+                            "vscode",
+                            "exec",
+                            "appServer",
+                            "unknown",
+                            "subAgentThreadSpawn",
+                        ]
+                    },
+                    ancestor_thread_id: ancestor,
                     search_term: (!search.trim().is_empty()).then_some(search),
                     cursor,
                 },
@@ -827,7 +839,7 @@ impl Agent for Codex {
     }
     async fn active_sessions_in(&self, dir: &std::path::Path) -> Result<Vec<SessionRef>, Failure> {
         let mut active = Vec::new();
-        let pages = session_pages(self, "");
+        let pages = session_pages(self, "", None);
         futures_util::pin_mut!(pages);
         while let Some(page) = pages.try_next().await? {
             for summary in page {

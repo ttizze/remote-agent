@@ -1702,7 +1702,18 @@ impl Agent for Claude {
     fn storage_directory(&self) -> &Path {
         &self.native_home
     }
-    async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure> {
+    async fn list(
+        &self,
+        search: &str,
+        cursor: Option<String>,
+        ancestor: Option<&str>,
+    ) -> Result<SessionPage, Failure> {
+        if ancestor.is_some() {
+            return Ok(SessionPage {
+                data: vec![],
+                next_cursor: None,
+            });
+        }
         if cursor.is_some() {
             return Err(Failure::new("invalid_cursor", "unexpected session cursor"));
         }
