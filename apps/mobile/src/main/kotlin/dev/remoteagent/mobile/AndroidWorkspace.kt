@@ -101,6 +101,7 @@ import kotlinx.coroutines.withContext
 
 private const val BROWSER_REFRESH_MILLIS = 500L
 private const val PDF_PAGE_WIDTH = 1200
+private const val PDF_PAGE_HEIGHT = 1600
 private const val PDF_PAGE_CACHE_SIZE = 4
 
 /** Downloads a Host PDF into the resource cache and renders its pages locally. */
@@ -123,7 +124,8 @@ internal fun PdfScreen(model: AndroidAppModel, path: String) {
         }
     }
     DisposableEffect(local) {
-        onDispose { local?.delete() }
+        val downloaded = local
+        onDispose { downloaded?.delete() }
     }
     ScreenScaffold(File(path).name, onBack = model::back) {
         when {
@@ -210,34 +212,41 @@ private fun PdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>) {
 private suspend fun renderPdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>): Bitmap {
     cache.get(index)?.let { return it }
     currentCoroutineContext().ensureActive()
-    val bitmap = withContext(Dispatchers.IO) {
-        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            PdfRenderer(descriptor).use { renderer ->
-                require(index in 0 until renderer.pageCount) { "PDF page is unavailable" }
-                renderer.openPage(index).use { page ->
-                    val height =
-                        (PDF_PAGE_WIDTH * page.height.toFloat() / page.width).toInt().coerceAtLeast(1)
-                    Bitmap.createBitmap(PDF_PAGE_WIDTH, height, Bitmap.Config.ARGB_8888).also { candidate ->
-                        try {
+    // Keep ownership outside withContext: its prompt cancellation can discard
+    // a successfully rendered result before control returns to the UI thread.
+    var pending: Bitmap? = null
+    try {
+        val bitmap = withContext(Dispatchers.IO) {
+            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                PdfRenderer(descriptor).use { renderer ->
+                    require(index in 0 until renderer.pageCount) { "PDF page is unavailable" }
+                    renderer.openPage(index).use { page ->
+                        val size = requireNotNull(
+                            dev.remoteagent.core.fitImageDisplaySize(
+                                page.width.toDouble(), page.height.toDouble(),
+                                PDF_PAGE_WIDTH.toDouble(), PDF_PAGE_HEIGHT.toDouble(),
+                            )
+                        ) { "PDF page dimensions are invalid" }
+                        Bitmap.createBitmap(
+                            size.width.toInt().coerceAtLeast(1),
+                            size.height.toInt().coerceAtLeast(1),
+                            Bitmap.Config.ARGB_8888,
+                        ).also { candidate ->
+                            pending = candidate
                             page.render(candidate, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                             currentCoroutineContext().ensureActive()
-                        } catch (failure: Throwable) {
-                            candidate.recycle()
-                            throw failure
                         }
                     }
                 }
             }
         }
-    }
-    try {
         currentCoroutineContext().ensureActive()
         cache.put(index, bitmap)
-    } catch (cancellation: CancellationException) {
-        bitmap.recycle()
-        throw cancellation
+        pending = null
+        return bitmap
+    } finally {
+        pending?.recycle()
     }
-    return bitmap
 }
 
 /** The open thread's files, diff and browser, each as its own screen. */

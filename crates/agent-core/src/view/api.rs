@@ -651,6 +651,22 @@ pub fn markdown_image_source(
     )
 }
 
+/// Fits image or document pixels inside explicit rendering bounds.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn fit_image_display_size(
+    source_width: f64,
+    source_height: f64,
+    max_width: f64,
+    max_height: f64,
+) -> Option<crate::presentation::markdown::image_size::ImageDisplaySize> {
+    crate::presentation::markdown::image_size::fit_image_display_size(
+        source_width,
+        source_height,
+        max_width,
+        max_height,
+    )
+}
+
 /// How large a conversation image of the given pixel size is drawn.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn markdown_image_display_size(
