@@ -52,6 +52,7 @@ final class BexAppViewModel: ObservableObject {
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
     private var incomingShareHandoffsInFlight: Set<URL> = []
+    private let usageWidget = UsageWidgetPublisher()
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
@@ -501,6 +502,8 @@ extension BexAppViewModel {
         if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
         }
+        do { try usageWidget.publish(next.subscriptionUsageWidgetJson(nowMs: 0, maxWindows: 6)) }
+        catch { notice = error.localizedDescription }
         if threadChanged {
             threadView = nil
             showScrollToEnd = false

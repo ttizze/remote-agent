@@ -1,5 +1,6 @@
 //! View models: pure functions of the published snapshot and the clock that
 //! native clients render without re-deriving them.
+pub mod activity;
 pub mod agents;
 pub mod api;
 pub mod appearance;

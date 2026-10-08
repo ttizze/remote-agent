@@ -7,6 +7,7 @@ pub mod merge;
 pub mod page;
 pub mod preferences;
 pub mod price_table;
+pub mod widget;
 
 pub use limits::{
     ComposerUsageLimits, UsageLimitAccount, UsageLimitWindow, composer_usage_limits, usage_limits,

@@ -90,6 +90,10 @@ pub struct RefsEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffPreviewEntry {
     pub request: w::DiffPreview,
+    /// The checkout selected when the preview was requested. A Host may
+    /// answer from its configured environment cwd after rejecting this path,
+    /// but that fallback must not be shown after the selected checkout moves.
+    pub active_cwd: String,
     pub result: Option<Arc<w::DiffPreviewResult>>,
     pub error: Option<String>,
 }

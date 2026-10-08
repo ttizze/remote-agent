@@ -1650,7 +1650,7 @@ UniFFI の公開（`bindings/views.rs`）:
 | web `ModelPickerContent.tsx` legacySection | `ModelPickerView.legacy`（`ModelPickerOptions.toggled_legacy`）。`legacy_models_fold_under_a_row_that_opens_for_a_legacy_selection`。 |
 | mobile `use-composer-command-menu.ts`（workspace snapshot の取得と 10 秒の再試行）、`queries.ts` useComposerPathSearch、web `queries.ts`、`ComposerCommandMenu.tsx` と mobile `ComposerCommandPopover.tsx` の文言、client-runtime `providerSkills.ts` | `Intent::UpdateComposerMenu`、`connection::workspace`（`ensure_provider_commands`、debounce した `host/workspace/searchEntries`）、`view::composer::menu`。`the_menu_lists_the_providers_skills_commands_and_found_paths`、`an_empty_menu_names_what_its_trigger_searched`。 |
 | web `ChatView.tsx` の Compact context と `ContextWindowMeter.logic.ts` providerSupportsManualCompaction | `view::composer::view::compact_control`、`Intent::CompactContext`（`/compact` を送る）。 |
-| web `DiffPanel.tsx`（diffPreview・vcs status・listRefs）、`lib/baseRefChoices.ts` | `Intent::LoadDiff` が `host/review/diffPreview` と `host/vcs/status` を読む。`view::checkpoints::{git_diff_view, build_base_ref_choices}`、`Intent::SearchDiffBaseRefs`。`base_choices_pair_local_branches_with_their_origin_twin`、`the_git_view_reads_the_preview_source_its_scope_picks`、`uncommitted_reads_the_working_tree_preview`。 |
+| web `DiffPanel.tsx`（diffPreview・vcs status・listRefs）、`lib/baseRefChoices.ts` | `Intent::LoadDiff` が `host/review/diffPreview` と `host/vcs/status` を読む。`EnvironmentDescriptor.cwd` を設定 cwd の再試行に使い、desktop は window activation で branch / working-tree preview を再読する。`view::checkpoints::{git_diff_view, build_base_ref_choices}`、`Intent::SearchDiffBaseRefs`。`base_choices_pair_local_branches_with_their_origin_twin`、`the_git_view_reads_the_preview_source_its_scope_picks`、`uncommitted_reads_the_working_tree_preview`。 |
 | mobile `new-task-flow-provider.tsx`、`new-task-context-presentation.ts`、`projectThreadCreationValidation.ts` | `Draft.workspace`（`DraftWorkspace`）、`NewThreadView.workspace`、`view::new_thread::{new_thread_launch_workspace, branch_worktree_path, new_task_branch_label, new_task_workspace_label}`、`Intent::{SetNewThreadWorkspace, SelectNewThreadBranch, SetNewThreadStartFromOrigin, SearchNewThreadBranches, NewThreadOnBranch}`。`a_local_draft_works_on_the_checked_out_branch_and_a_worktree_starts_from_the_default`、`a_branch_checked_out_in_another_worktree_runs_there_locally`。 |
 | mobile `checkout-new-task-branch.ts`、`queries.ts` usePaginatedBranches、server `GitVcsDriverCore.ts` switchRef | `host/vcs/switchRef`（`vcs::switch_ref`）、`Intent::LoadMoreNewThreadBranches`。`switching_refs_checks_out_local_and_remote_branches`、`picking_another_local_branch_switches_the_checkout_first`、`a_later_branch_page_joins_the_first`。 |
 | desktop `composer/controls.rs` branch picker | `NewThreadWorkspaceView::create_ref` is rendered by `branch_list` and dispatches `Intent::CreateNewThreadBranch`; `connection::workspace::create_new_thread_branch` calls `host/vcs/createRef` and applies the returned switch. |
@@ -1666,6 +1666,7 @@ UniFFI の公開（`bindings/views.rs`）:
  - diff の window focus は preview と遅延 file patches を無効化して再読み込みし、環境 cwd が後から届いた場合は pending selection を再試行する。
  - provider ごとの runtime mode capability と draft の現在値。
  - diff の window focus での再読み込み、環境 cwd での再試行。
+- 追加の未接続項目はない。
 
 truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 
@@ -1691,3 +1692,12 @@ Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced
 - `crate_boundaries` は `agent-domain` の依存が純粋な crate だけであること、`agent-core`（bindings の有無とも）と `agent-ffi` が `agent-runtime`・`agent-providers`・`rusqlite` を含まないことを確かめる。
 - 旧ランタイムを記述した文書（`SESSION_RUNTIME.md`、`BEX_PROTOCOL_DESIGN.md`、`BEX_PROTOCOL_NATIVE_CONTRACTS.md`、`CRATE_BOUNDARIES.md`、`IMPLEMENTATION.md`、`PLAN.md` の設計の節）を現在の設計に書き直し、旧コードの地図 `BEX_ARCHITECTURE_MAP.md` と、削除したテストを根拠にした `PR55_REVIEW.md`、この文書の「中断時の12ファイルの採否」を削除した。
 - どこからも参照されない core と runtime の定数・関数を削除した。T3 から移植してテストだけが使う関数（minimap、drag、citation など）は、未接続の T3 の挙動として残す。
+### 段階 6: OS ウィジェットと Live Activity（2026-10-08）
+
+| 固定ソース・テスト | 接続先と検証 |
+| --- | --- |
+| mobile `widgets/subscriptionUsageSnapshot.ts` と同テスト、`shared/usageLimits.ts` | `agent-core/view/usage/widget.rs`。メールの正規化と最新値による重複排除、kind/id ごとの平均残量、session/weekly の優先、保存上限、reset と15分の期限で別々に空になる timeline、API key・失敗・未取得の区別。OS へ渡す JSON にアカウント ID・メール・エラー・認証情報を入れない。unit と proptest を実装した。 |
+| mobile `widgets/SubscriptionUsage*` と `publishSubscriptionUsage*` | iOS `ActivityExtension/SubscriptionUsageWidget.swift` と AppGroup の atomic publication、Android `SubscriptionUsageWidget.kt` と RemoteViews・期限 alarm。共通関数が期限・period・family の quota 選択を返し、native は日付のローカライズと表示を行う。タップは Usage 画面へ渡す。 |
+| mobile `widgets/AgentActivity.tsx` と同テスト | `agent-core/view/activity.rs` と iOS `Shared/AgentActivityAttributes.swift`・`ActivityExtension/AgentActivityWidget.swift`。attention-first の順、失敗優先の終了表示、期限切れの進行状態、明暗・monochrome・Always On の色、アプリ内だけのリンク、Lock Screen・Dynamic Island・small family の描画。ActivityKit token と request/update/end は push owner と統合する。 |
+
+Swift 構文と plist/project 構造、固定 formatter、diff の検証を実施した。新しい共通 binding と native build・unit test の最終結果は統合後に記録する。

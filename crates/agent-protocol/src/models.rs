@@ -443,6 +443,9 @@ pub struct EnvironmentCapabilities {
 pub struct EnvironmentDescriptor {
     pub environment_id: String,
     pub label: String,
+    /// The Host process' configured working directory. Diff previews can use
+    /// this when a stale client checkout path is rejected by the VCS service.
+    pub cwd: String,
     pub platform: EnvironmentPlatform,
     pub server_version: String,
     pub orchestration_protocol_version: Option<u32>,

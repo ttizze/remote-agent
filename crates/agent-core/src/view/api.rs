@@ -176,6 +176,22 @@ impl Snapshot {
         crate::view::usage::usage_limits(self.accounts.as_ref())
     }
 
+    pub fn subscription_usage_widget_json(&self, now_ms: i64, max_windows: u32) -> String {
+        let configured = crate::view::usage::widget::configured_widget_providers(
+            self.providers.as_deref().unwrap_or_default(),
+        );
+        let view = crate::view::usage::widget::subscription_widget(
+            self.accounts
+                .as_ref()
+                .map(|accounts| accounts.accounts.as_slice())
+                .unwrap_or_default(),
+            &configured,
+            now_ms,
+            max_windows as usize,
+        );
+        serde_json::to_string(&view).expect("widget display data serializes")
+    }
+
     pub fn composer_usage_limits(
         &self,
         provider: crate::provider::ProviderKind,

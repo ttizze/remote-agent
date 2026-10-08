@@ -545,6 +545,7 @@ impl Owner {
                     }
                     Call::DiffPreview(request) => {
                         self.diff_preview_finished(request, Err(&error), diff_generation)
+                        self.retry_diff_preview_at_environment_cwd(request, &error);
                     }
                     Call::Search(params) => self.search_finished(&params.query, None),
                     Call::ListPullRequests(request) => {

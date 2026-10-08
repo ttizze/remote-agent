@@ -502,8 +502,11 @@ pub struct EnvironmentSettingsView {
 pub struct EnvironmentUsageInput {
     pub environment: EnvironmentDescriptor,
     pub accounts: Vec<Account>,
-    pub enabled_provider_kinds: Vec<ProviderKind>,
-    pub installed_provider_kinds: Vec<ProviderKind>,
+    /// Provider drivers configured on this Host and usable for subscription
+    /// usage. Eligibility is evaluated per instance before environments are
+    /// combined, so enabled and installed flags from different Hosts cannot
+    /// be paired accidentally.
+    pub configured_provider_kinds: Vec<ProviderKind>,
 }
 
 /// The combined account/provider snapshot consumed by a client-wide usage
@@ -513,8 +516,7 @@ pub struct EnvironmentUsageInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnvironmentUsageSnapshot {
     pub accounts: Vec<Account>,
-    pub enabled_provider_kinds: Vec<ProviderKind>,
-    pub installed_provider_kinds: Vec<ProviderKind>,
+    pub configured_provider_kinds: Vec<ProviderKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -796,16 +798,13 @@ impl EnvironmentRegistry {
                             .collect()
                     });
                 let providers = entry.snapshot.providers.as_deref().unwrap_or_default();
-                let enabled_provider_kinds = providers
+                let configured_provider_kinds = providers
                     .iter()
-                    .filter(|provider| provider.enabled)
-                    .map(provider_kind)
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                let installed_provider_kinds = providers
-                    .iter()
-                    .filter(|provider| provider.installed)
+                    .filter(|provider| {
+                        provider.enabled
+                            && provider.installed
+                            && provider.unavailable_reason.as_deref() != Some("unsupported")
+                    })
                     .map(provider_kind)
                     .collect::<BTreeSet<_>>()
                     .into_iter()
@@ -813,8 +812,7 @@ impl EnvironmentRegistry {
                 Some(EnvironmentUsageInput {
                     environment,
                     accounts,
-                    enabled_provider_kinds,
-                    installed_provider_kinds,
+                    configured_provider_kinds,
                 })
             })
             .collect();
@@ -838,17 +836,14 @@ impl EnvironmentRegistry {
     pub fn usage_snapshot(&self) -> EnvironmentUsageSnapshot {
         let inputs = self.usage_inputs();
         let mut accounts = Vec::new();
-        let mut enabled_provider_kinds = BTreeSet::new();
-        let mut installed_provider_kinds = BTreeSet::new();
+        let mut configured_provider_kinds = BTreeSet::new();
         for input in inputs {
             accounts.extend(input.accounts);
-            enabled_provider_kinds.extend(input.enabled_provider_kinds);
-            installed_provider_kinds.extend(input.installed_provider_kinds);
+            configured_provider_kinds.extend(input.configured_provider_kinds);
         }
         EnvironmentUsageSnapshot {
             accounts,
-            enabled_provider_kinds: enabled_provider_kinds.into_iter().collect(),
-            installed_provider_kinds: installed_provider_kinds.into_iter().collect(),
+            configured_provider_kinds: configured_provider_kinds.into_iter().collect(),
         }
     }
 
@@ -881,6 +876,7 @@ mod tests {
         EnvironmentDescriptor {
             environment_id: id.into(),
             label: label.into(),
+            cwd: "/repo".into(),
             platform: EnvironmentPlatform {
                 os: "linux".into(),
                 arch: "x64".into(),
@@ -1147,11 +1143,56 @@ mod tests {
         assert_eq!(registry.usage_inputs()[1].accounts[0].id, "z:account");
         let usage = registry.usage_snapshot();
         assert_eq!(usage.accounts[0].id, "z:account");
-        assert_eq!(usage.enabled_provider_kinds, vec![ProviderKind::Codex]);
-        assert_eq!(
-            usage.installed_provider_kinds,
-            vec![ProviderKind::Codex, ProviderKind::Claude]
-        );
+        assert_eq!(usage.configured_provider_kinds, vec![ProviderKind::Codex]);
+
+        let provider = |driver, enabled, installed, unavailable_reason| ProviderInstance {
+            instance: format!("{driver:?}"),
+            driver,
+            display_name: format!("{driver:?}"),
+            accent_color: None,
+            enabled,
+            installed,
+            version: None,
+            status: if enabled && installed {
+                ProviderStatus::Ready
+            } else {
+                ProviderStatus::Disabled
+            },
+            message: None,
+            unavailable_reason,
+            show_interaction_mode_toggle: false,
+            reports_context_window: false,
+            supported_runtime_modes: Vec::new(),
+            models: Vec::new(),
+        };
+        let mut split = EnvironmentRegistry::default();
+        let mut enabled_only = (*snapshot("enabled", "Enabled")).clone();
+        enabled_only.providers = Some(vec![provider(
+            agent_domain::Driver::Codex,
+            true,
+            false,
+            None,
+        )]);
+        split.update(Arc::new(enabled_only));
+        let mut installed_only = (*snapshot("installed", "Installed")).clone();
+        installed_only.providers = Some(vec![provider(
+            agent_domain::Driver::Codex,
+            false,
+            true,
+            None,
+        )]);
+        split.update(Arc::new(installed_only));
+        assert!(split.usage_snapshot().configured_provider_kinds.is_empty());
+
+        let mut unsupported = (*snapshot("unsupported", "Unsupported")).clone();
+        unsupported.providers = Some(vec![provider(
+            agent_domain::Driver::Claude,
+            true,
+            true,
+            Some("unsupported".into()),
+        )]);
+        split.update(Arc::new(unsupported));
+        assert!(split.usage_snapshot().configured_provider_kinds.is_empty());
         assert_eq!(
             registry
                 .sidebar_filtered(0, SidebarOptions::default(), "a")

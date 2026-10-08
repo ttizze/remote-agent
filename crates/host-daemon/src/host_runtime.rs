@@ -37,7 +37,10 @@ impl HostRuntime {
         invitation_lifetime: Duration,
     ) -> Self {
         let local_node = credentials.local_identity().await.node_id();
-        let environment = environment_descriptor(endpoint.node_id().to_string(), name.clone());
+        let cwd = std::env::current_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let environment = environment_descriptor(endpoint.node_id().to_string(), name.clone(), cwd);
         Self {
             service,
             endpoint,
@@ -519,11 +522,16 @@ impl HostRuntime {
     }
 }
 
-fn environment_descriptor(environment_id: String, label: String) -> EnvironmentDescriptor {
+fn environment_descriptor(
+    environment_id: String,
+    label: String,
+    cwd: String,
+) -> EnvironmentDescriptor {
     let machine = detect_machine_kind();
     EnvironmentDescriptor {
         environment_id,
         label,
+        cwd,
         platform: EnvironmentPlatform {
             os: match std::env::consts::OS {
                 "macos" => "darwin",

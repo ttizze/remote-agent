@@ -117,6 +117,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         private set
 
     private val draftEdits = DraftRevision()
+    private val usageWidget = UsageWidgetPublisher(context)
     private var composerKey = ""
 
     var profiles by mutableStateOf(emptyList<HostProfile>())
@@ -673,6 +674,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         profileId?.let { id ->
             profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
         }
+        usageWidget.publish(next.subscriptionUsageWidgetJson(0, UInt.MAX_VALUE))
         val selected = next.selectedThreadId()
         val from = followingFrom
         if (from != null && selected != null && selected != from) {
