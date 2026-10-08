@@ -223,6 +223,16 @@ mod tests {
         file.set_len(MAX_FILE_BYTES + 1).unwrap();
         assert!(resolve(&root).is_none());
         assert!(resolve(Path::new(".")).is_none());
+        std::fs::write(
+            root.join("favicon.svg"),
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><image href="{}" width="64" height="64"/></svg>"#,
+                directory.path().join("private.svg").display()
+            ),
+        )
+        .unwrap();
+        assert!(decoded(&root).pixels().all(|pixel| pixel.0[3] == 0));
+        std::fs::remove_file(root.join("favicon.svg")).unwrap();
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(
