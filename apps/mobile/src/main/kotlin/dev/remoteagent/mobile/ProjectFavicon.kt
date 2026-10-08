@@ -29,7 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** The snapshot the screens draw, for leaf views that only read core. */
-internal val LocalSnapshot = staticCompositionLocalOf { Snapshot.empty() }
+internal val LocalSnapshot = staticCompositionLocalOf { Snapshot.empty(byteArrayOf()) }
 
 private const val ICON_CACHE_ENTRIES = 64
 private const val ICON_RADIUS_RATIO = 0.16f

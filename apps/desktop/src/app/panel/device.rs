@@ -1,4 +1,5 @@
 //! The Device surface: Host-owned discovery, setup and live device frames.
+#[path = "device_decoder.rs"]
 mod device_decoder;
 
 use super::PanelTab;
@@ -13,12 +14,12 @@ use agent_core::state::{
 use gpui_kit::{
     component::{
         Sizable,
-        button::{Button, ButtonVariants},
+        button::Button,
         h_flex,
         input::{Input, InputState},
         v_flex,
     },
-    prelude::FluentBuilder,
+    prelude::{FluentBuilder, StatefulInteractiveElement as _},
     *,
 };
 use std::{
@@ -38,7 +39,7 @@ struct ActiveDeviceTouch {
 pub(super) struct DeviceState {
     thread: Option<String>,
     loaded: bool,
-    subscribed: bool,
+    pub(super) subscribed: bool,
     detail_requests: BTreeSet<String>,
     accessibility_requests: BTreeSet<String>,
     event_log_requests: BTreeSet<String>,
@@ -237,7 +238,6 @@ impl Desktop {
             });
         }
         cx.stop_propagation();
-        cx.notify();
     }
 
     fn send_device_touch_end(&mut self) -> bool {
@@ -271,11 +271,8 @@ impl Desktop {
         true
     }
 
-    fn cancel_device_touch(&mut self, cx: &mut App) {
-        if !self.send_device_touch_end() {
-            return;
-        }
-        cx.notify();
+    fn cancel_device_touch(&mut self) {
+        self.send_device_touch_end();
     }
 
     fn device_key_down(
@@ -465,7 +462,7 @@ impl Desktop {
     ) {
         let Some((extension, mime_type)) = recording_file_type(&recording) else {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
-            self.stage(draft_key, move || {
+            self.stage(draft_key, None, None, move || {
                 Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
             });
             return;
@@ -473,7 +470,7 @@ impl Desktop {
         let name = format!("device-recording-{draft_key}.{extension}");
         let bytes = recording.bytes;
         let directory = self.attachments.directory.clone();
-        self.stage(draft_key, move || {
+        self.stage(draft_key, None, None, move || {
             let path = directory
                 .path()
                 .join(format!("{}-{}", uuid::Uuid::new_v4(), name));
@@ -717,7 +714,7 @@ impl Desktop {
             .panels
             .device
             .frames
-            .values()
+            .iter()
             .map(|((host_id, device_id, screen_id), (_, image))| {
                 let (width, height) = frame_sizes
                     .get(&(host_id.clone(), device_id.clone(), *screen_id))
@@ -1711,8 +1708,13 @@ impl Desktop {
                                         })
                                         .flat_map(|tree| tree.elements.iter())
                                         .filter(|element| !element.label.is_empty())
-                                        .map(|element| {
+                                        .enumerate()
+                                        .map(|(element_index, element)| {
                                             div()
+                                                .id(SharedString::from(format!(
+                                                    "device-a11y-{host_id}-{device_id}-{screen_id}-{element_index}"
+                                                )))
+                                                .role(Role::Label)
                                                 .absolute()
                                                 .left(relative(element.x))
                                                 .top(relative(element.y))
@@ -1722,17 +1724,8 @@ impl Desktop {
                                                 .border_color(tint("accent", 0.9))
                                                 .aria_label(element.label.clone())
                                         });
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "device-frame-{host_id}-{device_id}-{screen_id}"
-                                        )))
-                                        .relative()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .on_prepaint(move |bounds, _, cx| {
+                                    let frame_bounds = canvas(
+                                        move |bounds, _, cx| {
                                             let _ = bounds_owner.update(cx, |view, cx| {
                                                 if view
                                                     .panels
@@ -1748,7 +1741,22 @@ impl Desktop {
                                                     cx.notify();
                                                 }
                                             });
-                                        })
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0();
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "device-frame-{host_id}-{device_id}-{screen_id}"
+                                        )))
+                                        .relative()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(frame_bounds)
                                         .track_focus(&self.panels.device.focus)
                                         .on_key_down(cx.listener(
                                             move |view, event: &KeyDownEvent, _, cx| {
@@ -1861,7 +1869,7 @@ impl Desktop {
                                                             && touch.screen_id == screen_id
                                                     })
                                                 {
-                                                    view.cancel_device_touch(cx);
+                                                    view.cancel_device_touch();
                                                 }
                                             }),
                                         )
@@ -1873,7 +1881,7 @@ impl Desktop {
                                                         && touch.screen_id == screen_id
                                                 },
                                             ) {
-                                                view.cancel_device_touch(cx);
+                                                view.cancel_device_touch();
                                             }
                                         }))
                                         .child(

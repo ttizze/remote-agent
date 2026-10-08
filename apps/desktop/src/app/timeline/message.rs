@@ -103,7 +103,7 @@ impl Desktop {
                         .id(SharedString::from(format!("automation-{id}")))
                         .mr_1()
                         .text_color(tint("textMuted", 0.7))
-                        .child(text_2xs(automation.label)),
+                        .child(text_2xs(div().child(automation.label))),
                 )
             })
             .when_some(decorations.attribution.clone(), |message, attribution| {

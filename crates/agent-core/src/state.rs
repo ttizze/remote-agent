@@ -1158,6 +1158,23 @@ mod preview_state_tests {
 }
 
 impl Snapshot {
+    /// Creates a fresh device snapshot with the canonical client-global
+    /// preferences applied before it is exposed to a native owner.
+    ///
+    /// Host-scoped drafts and cache data stay at their fresh defaults. Empty
+    /// bytes keep those defaults; malformed bytes preserve them and carry the
+    /// same recovery notice used by persistence.
+    pub fn with_client_preferences(client_preferences: &[u8]) -> Self {
+        let mut snapshot = Self::default();
+        if !client_preferences.is_empty()
+            && crate::persistence::apply_model_preferences(&mut snapshot, client_preferences)
+                .is_err()
+        {
+            snapshot.error = Some(crate::persistence::MODEL_PREFERENCES_RECOVERY_ERROR.into());
+        }
+        snapshot
+    }
+
     pub fn accepts_after(&self, previous: &Snapshot) -> bool {
         self.store_id != previous.store_id || self.revision >= previous.revision
     }
@@ -2625,6 +2642,12 @@ pub enum Intent {
     /// The permissions new threads start with; an open thread keeps its own.
     SetDefaultRuntimeMode {
         mode: RuntimeMode,
+    },
+    /// Replaces the Host-owned provider instance map atomically.
+    SetProviderInstances {
+        /// JSON for the complete map. The binding-safe intent keeps the
+        /// protocol config map behind a string boundary for native clients.
+        provider_instances_json: String,
     },
     ToggleFavoriteModel {
         instance_id: String,

@@ -68,32 +68,42 @@ extension BexAppViewModel {
         }
     }
 
-    func publish(_ next: AgentCore.Snapshot) {
-        if !next.supersedes(previous: snapshot) {
-            return
-        }
-        if next === snapshot {
-            return
-        }
-        if let name = next.hostName(),
-           let index = profiles.firstIndex(where: { $0.id == selectedProfileId }),
-           profiles[index].name != name {
-            profiles[index].name = name
-            do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
-        }
+    func publish(
+        _ next: AgentCore.Snapshot,
+        syncClientPreferences: Bool = true
+    ) {
+        guard next.supersedes(previous: snapshot), next !== snapshot else { return }
+        updateSelectedHostName(from: next)
         if snapshot.error() != next.error() {
             notice = next.error()
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
-        if syncClientPreferences {
-            synchronizeClientPreferences(next)
-        }
-        if syncClientPreferences,
-           let id = selectedProfileId,
-           let profile = profiles.first(where: { $0.id == id }) {
-            publishEnvironment(profile, next)
-        }
+        publishEnvironmentIfNeeded(next, syncClientPreferences: syncClientPreferences)
+        updatePublishedDraft(from: next, threadChanged: threadChanged)
+        schedulePresentation()
+        schedulePersistence()
+    }
+
+    private func updateSelectedHostName(from next: AgentCore.Snapshot) {
+        guard let name = next.hostName(),
+              let index = profiles.firstIndex(where: { $0.id == selectedProfileId }),
+              profiles[index].name != name else { return }
+        profiles[index].name = name
+        do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
+    }
+
+    private func publishEnvironmentIfNeeded(
+        _ next: AgentCore.Snapshot,
+        syncClientPreferences: Bool
+    ) {
+        guard syncClientPreferences,
+              let id = selectedProfileId,
+              let profile = profiles.first(where: { $0.id == id }) else { return }
+        publishEnvironment(profile, next)
+    }
+
+    private func updatePublishedDraft(from next: AgentCore.Snapshot, threadChanged: Bool) {
         if threadChanged {
             threadView = nil
             showScrollToEnd = false
@@ -103,11 +113,12 @@ extension BexAppViewModel {
         if key != composerKey {
             draftEdits.reset(); composerKey = key
         }
-        if draftEdits.pending == nil {
-            composerText = next.draft().text
-            draftEdits.base = composerText
-        }
-        schedulePresentation()
+        guard draftEdits.pending == nil else { return }
+        composerText = next.draft().text
+        draftEdits.base = composerText
+    }
+
+    private func schedulePersistence() {
         persistence?.cancel()
         persistence = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
@@ -186,55 +197,151 @@ extension BexAppViewModel {
         synchronizeClientPreferences(owner.snapshot())
     }
 
-    private func synchronizeClientPreferences(
+    func clearSelectedClientPreferencesHandoff() {
+        selectedClientPreferencesRetry?.cancel()
+        selectedClientPreferencesRetry = nil
+        pendingSelectedClientPreferences = nil
+    }
+
+    private func beginSelectedClientPreferencesHandoff(
+        owner: AgentStore,
+        data: Data
+    ) -> UInt64 {
+        selectedClientPreferencesRetry?.cancel()
+        selectedClientPreferencesRetry = nil
+        nextClientPreferencesHandoffToken &+= 1
+        let token = nextClientPreferencesHandoffToken
+        pendingSelectedClientPreferences = .init(
+            owner: owner,
+            data: data,
+            token: token,
+            minimumRevision: owner.snapshot().revision() &+ 1
+        )
+        return token
+    }
+
+    private func retrySelectedClientPreferences(
+        owner: AgentStore,
+        data: Data,
+        token: UInt64
+    ) {
+        selectedClientPreferencesRetry?.cancel()
+        selectedClientPreferencesRetry = Task { [weak self, owner] in
+            var delayNanoseconds: UInt64 = 250_000_000
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: delayNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self,
+                      let pending = pendingSelectedClientPreferences,
+                      pending.owner === owner,
+                      pending.token == token,
+                      pending.data == data,
+                      store === owner,
+                      clientPreferencesData == data else {
+                    return
+                }
+                do {
+                    let receipt = try owner.applyClientPreferences(preferences: data)
+                    _ = try await receipt.wait()
+                    return
+                } catch {
+                    delayNanoseconds = min(delayNanoseconds * 2, 300_000_000_000)
+                }
+            }
+        }
+    }
+
+    func synchronizeClientPreferences(
         _ source: AgentCore.Snapshot,
-        includeSelected: Bool = false
+        includeSelected: Bool = false,
+        allowPendingSelected: Bool = false
     ) {
         guard let data = try? source.serializeModelPreferences() else {
             return
         }
-        if !includeSelected,
-           let pending = pendingSelectedClientPreferences,
-           let selected = store,
-           selected === pending.owner,
-           data != pending.data {
-            return
-        }
-        let selectedNeedsSync = includeSelected && store.map { selected in
-            guard let pending = pendingSelectedClientPreferences else { return true }
-            return pending.owner !== selected || pending.data != data
-        } ?? false
+        guard admitsClientPreferences(
+            source: source,
+            data: data,
+            includeSelected: includeSelected,
+            allowPendingSelected: allowPendingSelected
+        ) else { return }
+        let selectedNeedsSync = includeSelected && selectedClientPreferencesNeedSync(data)
         let changed = data != clientPreferencesData
         guard changed || selectedNeedsSync else { return }
         if changed {
-            clientPreferencesData = data
-            clientPreferencesGeneration &+= 1
-            let previous = persistenceWrite
-            persistenceWrite = Task { [weak self] in
-                await previous?.value
-                do {
-                    try await SnapshotFiles.saveModelPreferences(data)
-                } catch { self?.notice = error.localizedDescription }
+            persistClientPreferences(data)
+        }
+        if includeSelected {
+            applyClientPreferencesToSelected(data)
+        }
+        if changed {
+            applyClientPreferencesToBackground(data)
+        }
+    }
+
+    private func admitsClientPreferences(
+        source: AgentCore.Snapshot,
+        data: Data,
+        includeSelected: Bool,
+        allowPendingSelected: Bool
+    ) -> Bool {
+        if allowPendingSelected {
+            clearSelectedClientPreferencesHandoff()
+            return true
+        }
+        guard !includeSelected,
+              let pending = pendingSelectedClientPreferences,
+              let selected = store,
+              selected === pending.owner else { return true }
+        if data == pending.data {
+            guard source.revision() >= pending.minimumRevision else { return false }
+            clearSelectedClientPreferencesHandoff()
+            return true
+        }
+        return false
+    }
+
+    private func selectedClientPreferencesNeedSync(_ data: Data) -> Bool {
+        guard let selected = store else { return false }
+        guard let pending = pendingSelectedClientPreferences else { return true }
+        return pending.owner !== selected || pending.data != data
+    }
+
+    private func persistClientPreferences(_ data: Data) {
+        clientPreferencesData = data
+        clientPreferencesGeneration &+= 1
+        let previous = persistenceWrite
+        persistenceWrite = Task { [weak self] in
+            await previous?.value
+            do {
+                try await SnapshotFiles.saveModelPreferences(data)
+            } catch { self?.notice = error.localizedDescription }
+        }
+    }
+
+    private func applyClientPreferencesToSelected(_ data: Data) {
+        guard let selected = store else { return }
+        let token = beginSelectedClientPreferencesHandoff(owner: selected, data: data)
+        guard let receipt = try? selected.applyClientPreferences(preferences: data) else {
+            retrySelectedClientPreferences(owner: selected, data: data, token: token)
+            return
+        }
+        Task { [weak self, selected] in
+            do {
+                _ = try await receipt.wait()
+            } catch {
+                self?.retrySelectedClientPreferences(owner: selected, data: data, token: token)
             }
         }
-        var owners: [AgentStore] = changed ? Array(backgroundOwners.values) : []
-        if includeSelected, let store {
-            pendingSelectedClientPreferences = (store, data)
-            owners.append(store)
-        }
-        for owner in owners {
+    }
+
+    private func applyClientPreferencesToBackground(_ data: Data) {
+        for owner in backgroundOwners.values {
             guard let receipt = try? owner.applyClientPreferences(preferences: data) else { continue }
-            let isSelected = includeSelected && owner === store
-            Task { [weak self, owner] in
-                guard await (try? receipt.wait()) != nil else { return }
-                guard isSelected, let self,
-                      let pending = pendingSelectedClientPreferences,
-                      pending.owner === owner,
-                      pending.data == data,
-                      clientPreferencesData == data
-                else { return }
-                pendingSelectedClientPreferences = nil
-            }
+            Task { _ = try? await receipt.wait() }
         }
     }
 

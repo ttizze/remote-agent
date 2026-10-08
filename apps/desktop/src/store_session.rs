@@ -10,7 +10,19 @@ use tokio::{sync::watch, task::JoinHandle};
 #[derive(Clone)]
 pub(crate) struct ClientPreferences {
     bytes: Arc<Mutex<Vec<u8>>>,
-    pending_selected: Arc<Mutex<Option<Vec<u8>>>>,
+    pending_selected: Arc<Mutex<PendingSelectedSync>>,
+}
+
+struct PendingSelectedSync {
+    next_token: u64,
+    pending: Option<SelectedSync>,
+}
+
+struct SelectedSync {
+    owner: usize,
+    token: u64,
+    minimum_revision: u64,
+    bytes: Vec<u8>,
 }
 
 impl ClientPreferences {
@@ -23,7 +35,10 @@ impl ClientPreferences {
             .unwrap_or_default();
         Self {
             bytes: Arc::new(Mutex::new(bytes)),
-            pending_selected: Arc::new(Mutex::new(None)),
+            pending_selected: Arc::new(Mutex::new(PendingSelectedSync {
+                next_token: 0,
+                pending: None,
+            })),
         }
     }
 
@@ -31,7 +46,10 @@ impl ClientPreferences {
     fn from_path(path: PathBuf) -> Self {
         Self {
             bytes: Arc::new(Mutex::new(std::fs::read(path).unwrap_or_default())),
-            pending_selected: Arc::new(Mutex::new(None)),
+            pending_selected: Arc::new(Mutex::new(PendingSelectedSync {
+                next_token: 0,
+                pending: None,
+            })),
         }
     }
 
@@ -53,30 +71,83 @@ impl ClientPreferences {
         true
     }
 
-    pub(crate) fn selected_sync_blocks(&self, bytes: &[u8]) -> bool {
+    fn owner_id(store: &Arc<Store>) -> usize {
+        Arc::as_ptr(store) as usize
+    }
+
+    pub(crate) fn selected_sync_blocks(&self, owner: &Arc<Store>, bytes: &[u8]) -> bool {
+        let owner = Self::owner_id(owner);
         self.pending_selected
             .lock()
-            .map(|pending| pending.as_deref().is_some_and(|current| current != bytes))
+            .map(|state| {
+                state.pending.as_ref().is_some_and(|pending| {
+                    pending.owner == owner && pending.bytes.as_slice() != bytes
+                })
+            })
             .unwrap_or(false)
     }
 
-    pub(crate) fn mark_selected_sync(&self, bytes: &[u8]) {
-        if let Ok(mut pending) = self.pending_selected.lock() {
-            *pending = Some(bytes.to_vec());
+    pub(crate) fn observe_selected_sync(
+        &self,
+        owner: &Arc<Store>,
+        revision: u64,
+        bytes: &[u8],
+    ) -> bool {
+        let owner = Self::owner_id(owner);
+        let Ok(mut state) = self.pending_selected.lock() else {
+            return false;
+        };
+        if state.pending.as_ref().is_some_and(|pending| {
+            pending.owner == owner
+                && revision >= pending.minimum_revision
+                && pending.bytes.as_slice() == bytes
+        }) {
+            state.pending = None;
+            true
+        } else {
+            false
         }
     }
 
-    pub(crate) fn complete_selected_sync(&self, bytes: &[u8]) {
-        if let Ok(mut pending) = self.pending_selected.lock()
-            && pending.as_deref() == Some(bytes)
-        {
-            *pending = None;
-        }
+    pub(crate) fn mark_selected_sync(&self, owner: &Arc<Store>, bytes: &[u8]) -> u64 {
+        let minimum_revision = owner.snapshot().revision.saturating_add(1);
+        let owner = Self::owner_id(owner);
+        let Ok(mut state) = self.pending_selected.lock() else {
+            return 0;
+        };
+        state.next_token = state.next_token.wrapping_add(1);
+        let token = state.next_token;
+        state.pending = Some(SelectedSync {
+            owner,
+            token,
+            minimum_revision,
+            bytes: bytes.to_vec(),
+        });
+        token
+    }
+
+    pub(crate) fn selected_sync_matches(
+        &self,
+        owner: &Arc<Store>,
+        token: u64,
+        bytes: &[u8],
+    ) -> bool {
+        let owner = Self::owner_id(owner);
+        self.pending_selected
+            .lock()
+            .map(|state| {
+                state.pending.as_ref().is_some_and(|pending| {
+                    pending.owner == owner
+                        && pending.token == token
+                        && pending.bytes.as_slice() == bytes
+                })
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn clear_selected_sync(&self) {
-        if let Ok(mut pending) = self.pending_selected.lock() {
-            *pending = None;
+        if let Ok(mut state) = self.pending_selected.lock() {
+            state.pending = None;
         }
     }
 
@@ -287,19 +358,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn selected_preference_sync_blocks_a_stale_snapshot_until_receipt_completes() {
+    #[tokio::test]
+    async fn selected_preference_sync_blocks_a_stale_snapshot_until_receipt_completes() {
         let preferences = ClientPreferences {
             bytes: Arc::new(Mutex::new(Vec::new())),
-            pending_selected: Arc::new(Mutex::new(None)),
+            pending_selected: Arc::new(Mutex::new(PendingSelectedSync {
+                next_token: 0,
+                pending: None,
+            })),
         };
         let current = b"current";
         let stale = b"stale";
-        preferences.mark_selected_sync(current);
-        assert!(preferences.selected_sync_blocks(stale));
-        assert!(!preferences.selected_sync_blocks(current));
-        preferences.complete_selected_sync(current);
-        assert!(!preferences.selected_sync_blocks(stale));
+        let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));
+        let token = preferences.mark_selected_sync(&store, current);
+        assert!(preferences.selected_sync_blocks(&store, stale));
+        assert!(!preferences.selected_sync_blocks(&store, current));
+        assert!(preferences.selected_sync_matches(&store, token, current));
+        assert!(!preferences.observe_selected_sync(&store, 0, current));
+        assert!(preferences.observe_selected_sync(&store, 1, current));
+        assert!(!preferences.selected_sync_blocks(&store, stale));
+        let replacement = Arc::new(Store::offline(Snapshot::default(), Default::default()));
+        let replacement_token = preferences.mark_selected_sync(&replacement, current);
+        assert!(!preferences.selected_sync_matches(&store, replacement_token, current));
+        assert!(!preferences.observe_selected_sync(&replacement, 0, current));
+        assert!(preferences.observe_selected_sync(&replacement, 1, current));
+        store.close().await.unwrap();
+        replacement.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -463,7 +463,7 @@ impl Desktop {
 
     /// The draft that picked or dropped files join: the answer being typed
     /// to a question, else the composer's.
-    fn composer_attachment_target(&self) -> Option<String> {
+    pub(super) fn composer_attachment_target(&self) -> Option<String> {
         if let Some(thread) = shown_thread(&self.views, self.snapshot.selected_thread.as_ref())
             && let Some(questions) = &thread.requests.questions
             && let Some(active) = &questions.active

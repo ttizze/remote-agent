@@ -3016,7 +3016,7 @@ impl DeviceService {
         };
         for (_, source) in capture_sources {
             source.cancel.cancel();
-            let mut task = source.task;
+            let task = source.task;
             if tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
@@ -8107,7 +8107,7 @@ mod tests {
         let (sender, receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let (mut socket, _) = async_tungstenite::tokio::accept_async(stream)
+            let mut socket = async_tungstenite::tokio::accept_async(stream)
                 .await
                 .unwrap();
             if let Some(Ok(message)) = socket.next().await {
@@ -8153,7 +8153,7 @@ mod tests {
         let (closed_sender, closed_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let (mut socket, _) = async_tungstenite::tokio::accept_async(stream)
+            let mut socket = async_tungstenite::tokio::accept_async(stream)
                 .await
                 .unwrap();
             socket
@@ -8390,6 +8390,7 @@ mod tests {
                 device_id: "simulator".into(),
                 platform: DevicePlatform::Ios,
                 opened_at: "now".into(),
+                session_epoch: "epoch".into(),
             });
 
         assert!(service.has_active_tasks());

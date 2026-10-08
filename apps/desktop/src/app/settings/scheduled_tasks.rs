@@ -9,13 +9,13 @@ use agent_core::{
     state::{Intent, ScheduledTaskDraft, ScheduledTaskScheduleDraft, ScheduledTaskWorkspaceDraft},
     view::{
         composer::controls::runtime_mode_choices,
-        models::{ProviderStatus, traits::TraitControl},
+        models::{catalog, traits::TraitControl},
     },
 };
 use agent_domain::RuntimeMode;
 use gpui_kit::{
     component::{
-        Sizable,
+        Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -74,14 +74,14 @@ impl ScheduledTasksState {
                 if matches!(event, InputEvent::Change)
                     && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
                 {
-                    draft.title = input.read(cx).value();
+                    draft.title = input.read(cx).value().to_string();
                 }
             }),
             cx.subscribe_in(&prompt, window, |view, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change)
                     && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
                 {
-                    draft.prompt = input.read(cx).value();
+                    draft.prompt = input.read(cx).value().to_string();
                 }
             }),
             cx.subscribe_in(&time, window, |view, input, event: &InputEvent, _, cx| {
@@ -90,7 +90,7 @@ impl ScheduledTasksState {
                     && let ScheduledTaskScheduleDraft::FixedTime { time_of_day, .. } =
                         &mut draft.schedule
                 {
-                    *time_of_day = input.read(cx).value();
+                    *time_of_day = input.read(cx).value().to_string();
                 }
             }),
             cx.subscribe_in(
@@ -115,7 +115,7 @@ impl ScheduledTasksState {
                     if let ScheduledTaskWorkspaceDraft::Worktree { base_ref, .. } =
                         &mut draft.workspace
                     {
-                        *base_ref = value;
+                        *base_ref = value.to_string();
                     }
                 }
             }),
@@ -131,7 +131,7 @@ impl ScheduledTasksState {
                             worktree_path, ..
                         } = &mut draft.workspace
                         {
-                            *worktree_path = value;
+                            *worktree_path = value.to_string();
                         }
                     }
                 },
@@ -273,7 +273,7 @@ impl Desktop {
                     view.settings.scheduled_tasks.error = None;
                 } else {
                     view.settings.scheduled_tasks.error =
-                        result.err().map(|error| error.to_string());
+                        result.as_ref().err().map(|error| error.to_string());
                 }
                 cx.notify();
             },
@@ -311,7 +311,12 @@ impl Desktop {
                             .flex_1()
                             .min_w_0()
                             .gap_1()
-                            .child(div().text_sm().font_medium().child(task.title.clone()))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(task.title.clone()),
+                            )
                             .child(
                                 div()
                                     .text_xs()
@@ -452,28 +457,20 @@ impl Desktop {
                 selected: project.id == draft.project_id,
             })
             .collect();
-        let models = self
-            .snapshot
-            .providers
-            .as_ref()
-            .into_iter()
-            .flat_map(|providers| providers.iter())
-            .filter(|provider| {
-                provider.enabled
-                    && provider.installed
-                    && provider.available
-                    && !matches!(
-                        provider.status,
-                        ProviderStatus::Error | ProviderStatus::Disabled
-                    )
+        let model_catalog = catalog(&self.snapshot);
+        let models = model_catalog
+            .models
+            .iter()
+            .filter_map(|model| {
+                let provider = model_catalog.instance(&model.instance_id)?;
+                provider.picker_ready().then_some((provider, model))
             })
-            .flat_map(|provider| provider.models.iter().map(move |model| (provider, model)))
             .map(|(provider, model)| Choice {
-                id: format!("{}\n{}", provider.instance, model.slug),
+                id: format!("{}\n{}", provider.instance_id, model.slug),
                 label: format!("{} · {}", provider.display_name, model.name),
                 description: None,
                 icon: Some("bot"),
-                selected: provider.instance == draft.instance_id && model.slug == draft.model,
+                selected: provider.instance_id == draft.instance_id && model.slug == draft.model,
             })
             .collect();
         let runtime_choices = self

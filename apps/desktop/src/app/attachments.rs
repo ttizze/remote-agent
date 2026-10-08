@@ -36,7 +36,7 @@ pub(crate) enum Update {
 /// Local copies of Host attachments, by attachment id; `None` while one
 /// downloads.
 pub(crate) struct AttachmentCache {
-    directory: Arc<tempfile::TempDir>,
+    pub(super) directory: Arc<tempfile::TempDir>,
     images: BTreeMap<String, Option<PathBuf>>,
 }
 impl AttachmentCache {

@@ -1473,62 +1473,78 @@ mod tests {
         assert!(!partial.exists());
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum FakeCdpPhase {
-        Connected,
-        Attached,
-        Encoding,
-        Screencasting,
-        Stopping,
-        Finished,
-    }
+    #[tokio::test]
+    async fn cleanup_cdp_runs_both_commands_after_detachment_and_reports_errors() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
 
-    fn fake_cleanup_actions(phase: FakeCdpPhase) -> (bool, bool, bool) {
-        (
-            matches!(
-                phase,
-                FakeCdpPhase::Encoding | FakeCdpPhase::Screencasting | FakeCdpPhase::Stopping
-            ),
-            matches!(
-                phase,
-                FakeCdpPhase::Attached
-                    | FakeCdpPhase::Encoding
-                    | FakeCdpPhase::Screencasting
-                    | FakeCdpPhase::Stopping
-            ),
-            matches!(
-                phase,
-                FakeCdpPhase::Encoding | FakeCdpPhase::Screencasting | FakeCdpPhase::Stopping
-            ),
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = async_tungstenite::tokio::accept_async(stream)
+                .await
+                .unwrap();
+
+            let first = socket.next().await.unwrap().unwrap();
+            let Message::Text(first) = first else {
+                panic!("cleanup sent a non-text CDP command");
+            };
+            let first: Value = serde_json::from_str(&first).unwrap();
+            assert_eq!(first["id"], 1);
+            assert_eq!(first["method"], "Page.stopScreencast");
+            assert_eq!(first["sessionId"], "recording-session");
+            socket
+                .send(Message::Text(
+                    json!({
+                        "method": "Target.detachedFromTarget",
+                        "params": {
+                            "targetId": "recording-target",
+                            "sessionId": "recording-session"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let second = socket.next().await.unwrap().unwrap();
+            let Message::Text(second) = second else {
+                panic!("cleanup did not send Target.detachFromTarget");
+            };
+            let second: Value = serde_json::from_str(&second).unwrap();
+            assert_eq!(second["id"], 2);
+            assert_eq!(second["method"], "Target.detachFromTarget");
+            assert_eq!(second["params"]["sessionId"], "recording-session");
+            socket
+                .send(Message::Text(
+                    json!({
+                        "id": 2,
+                        "error": {"message": "detach failed"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let (mut client, _) = async_tungstenite::tokio::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let mut next_id = 0;
+        let result = cleanup_cdp(
+            &mut client,
+            &mut next_id,
+            "recording-target",
+            "recording-session",
         )
-    }
-
-    #[test]
-    fn fake_cdp_lifecycle_always_detaches_and_aborts_started_encoders() {
-        assert_eq!(
-            fake_cleanup_actions(FakeCdpPhase::Connected),
-            (false, false, false)
-        );
-        assert_eq!(
-            fake_cleanup_actions(FakeCdpPhase::Attached),
-            (false, true, false)
-        );
-        assert_eq!(
-            fake_cleanup_actions(FakeCdpPhase::Encoding),
-            (true, true, true)
-        );
-        assert_eq!(
-            fake_cleanup_actions(FakeCdpPhase::Screencasting),
-            (true, true, true)
-        );
-        assert_eq!(
-            fake_cleanup_actions(FakeCdpPhase::Stopping),
-            (true, true, true)
-        );
-        assert_eq!(
-            fake_cleanup_actions(FakeCdpPhase::Finished),
-            (false, false, false)
-        );
+        .await;
+        let error = result.unwrap_err();
+        assert!(error.contains("target detached"));
+        assert!(error.contains("detach failed"));
+        server.await.unwrap();
     }
 
     #[test]

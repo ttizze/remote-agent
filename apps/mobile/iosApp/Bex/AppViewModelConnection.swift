@@ -20,7 +20,7 @@ extension BexAppViewModel {
         cancelInitialization()
         let old = store
         store = nil
-        pendingSelectedClientPreferences = nil
+        clearSelectedClientPreferencesHandoff()
         return old
     }
 
@@ -60,21 +60,7 @@ extension BexAppViewModel {
                 phase: .clientBuild,
                 value: UInt64(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0") ?? 0
             )
-            initialization = nil
-            publish(owner.snapshot())
-            if let id = selectedProfileId {
-                registerPushIfReady(id)
-            }
-            openPendingPushThreadIfReady()
-            let queued = pending
-            pending.removeAll()
-            for (intent, complete) in queued {
-                perform(intent, completion: complete)
-            }
-            observe(owner, host: id)
-            connect()
-            startBackgroundProfiles(id)
-            ingestIncomingShareHandoffs()
+            exposeInitializedStore(owner, id: id)
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
@@ -86,6 +72,24 @@ extension BexAppViewModel {
             }
         }
         _ = await previousClosed
+    }
+
+    private func exposeInitializedStore(_ owner: AgentStore, id: String) {
+        initialization = nil
+        publish(owner.snapshot())
+        if let id = selectedProfileId {
+            registerPushIfReady(id)
+        }
+        openPendingPushThreadIfReady()
+        let queued = pending
+        pending.removeAll()
+        for (intent, complete) in queued {
+            perform(intent, completion: complete)
+        }
+        observe(owner, host: id)
+        connect()
+        startBackgroundProfiles(id)
+        ingestIncomingShareHandoffs()
     }
 
     /// Keeps each saved Host's cached snapshot and transport supervised while
@@ -170,25 +174,33 @@ extension BexAppViewModel {
                 throw CancellationError()
             }
             publishEnvironment(profile, owner.snapshot())
-            var previous = owner.snapshot()
-            while ownsBackground(profile, owner: owner, generation: generation) {
-                _ = try await owner.nextSnapshot(previous: previous)
-                guard ownsBackground(profile, owner: owner, generation: generation) else {
-                    throw CancellationError()
-                }
-                let latest = owner.snapshot()
-                publishEnvironment(profile, latest)
-                if !latest.connected() {
-                    break
-                }
-                previous = latest
-            }
+            try await observeBackgroundProfile(profile, owner: owner, generation: generation)
         } catch {
             if let createdOwner, backgroundOwners[profile.id] === createdOwner {
                 backgroundOwners.removeValue(forKey: profile.id)
                 try? await createdOwner.shutdown()
             }
             throw error
+        }
+    }
+
+    private func observeBackgroundProfile(
+        _ profile: HostProfile,
+        owner: AgentStore,
+        generation: UInt64
+    ) async throws {
+        var previous = owner.snapshot()
+        while ownsBackground(profile, owner: owner, generation: generation) {
+            _ = try await owner.nextSnapshot(previous: previous)
+            guard ownsBackground(profile, owner: owner, generation: generation) else {
+                throw CancellationError()
+            }
+            let latest = owner.snapshot()
+            publishEnvironment(profile, latest)
+            if !latest.connected() {
+                break
+            }
+            previous = latest
         }
     }
 
@@ -283,33 +295,13 @@ extension BexAppViewModel {
         let expectedStore = store
         let expectedProfile = selectedProfileId
         do {
-            persist()
-            await persistenceWrite?.value
-            // The new store reads the state the current one keeps for this Host.
-            if selectedProfileId == id {
-                try? await store?.flush()
-            }
-            let owner = try await AgentStore.connect(connection: Connection(
-                ticket: invitation.endpoint,
-                identity: DeviceIdentity.loadOrGenerate(id),
-                invitation: invitation.invitation,
-                useRelays: true
-            ), stateFile: SnapshotFiles.stateFile(id), modelDefaults: clientPreferencesData,
-            cacheDirectory: SnapshotFiles.cacheDirectory(id),
-            diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
-            guard !Task.isCancelled else { try? await owner.shutdown(); return }
-            do {
-                try await applyClientPreferences(to: owner)
-            } catch {
-                try? await owner.shutdown()
-                throw error
-            }
+            let owner = try await preparePairedOwner(id: id, invitation: invitation)
             guard !Task.isCancelled, selectedProfileId == expectedProfile, store === expectedStore else {
                 try? await owner.shutdown()
                 return
             }
             let old = detachStore()
-            publish(AgentCore.Snapshot.empty())
+            publish(AgentCore.Snapshot.empty(clientPreferences: clientPreferencesData), syncClientPreferences: false)
             profiles.removeAll { $0.id == id }
             profiles.append(HostProfile(id: id, name: invitation.hostName, ticket: invitation.endpoint))
             try HostProfile.save(profiles)
@@ -333,6 +325,37 @@ extension BexAppViewModel {
             isConnecting = false
             pairingError = error.localizedDescription
         }
+    }
+
+    private func preparePairedOwner(id: String, invitation: Invitation) async throws -> AgentStore {
+        persist()
+        await persistenceWrite?.value
+        if selectedProfileId == id {
+            try? await store?.flush()
+        }
+        let owner = try await AgentStore.connect(
+            connection: Connection(
+                ticket: invitation.endpoint,
+                identity: DeviceIdentity.loadOrGenerate(id),
+                invitation: invitation.invitation,
+                useRelays: true
+            ),
+            stateFile: SnapshotFiles.stateFile(id),
+            modelDefaults: clientPreferencesData,
+            cacheDirectory: SnapshotFiles.cacheDirectory(id),
+            diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id)
+        )
+        guard !Task.isCancelled else {
+            try? await owner.shutdown()
+            throw CancellationError()
+        }
+        do {
+            try await applyClientPreferences(to: owner)
+        } catch {
+            try? await owner.shutdown()
+            throw error
+        }
+        return owner
     }
 
     func confirmPairing() {

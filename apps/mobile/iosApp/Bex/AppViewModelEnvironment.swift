@@ -75,16 +75,34 @@ extension BexAppViewModel {
     func setLoadBalancingEnabled(_ enabled: Bool) {
         perform(.setLoadBalancingEnabled(enabled: enabled))
         for (profile, owner) in backgroundOwners {
+            let generation = backgroundTaskGenerations[profile, default: 0]
+            let preferencesGeneration = clientPreferencesGeneration
+            let beforePreferences = clientPreferencesData
+            let beforeStorePreferences = try? owner.snapshot().serializeModelPreferences()
             guard let receipt = try? owner.dispatch(intent: .setLoadBalancingEnabled(enabled: enabled)) else {
                 continue
             }
             Task { [weak self, owner] in
-                _ = try? await receipt.wait()
-                guard let self, let host = profiles.first(where: { $0.id == profile }) else {
+                let result = try? await receipt.wait()
+                guard result != nil else { return }
+                guard let self,
+                      backgroundTaskGenerations[profile] == generation,
+                      backgroundOwners[profile] === owner,
+                      selectedProfileId != profile,
+                      clientPreferencesGeneration == preferencesGeneration,
+                      let host = profiles.first(where: { $0.id == profile }) else {
                     return
                 }
-                synchronizeClientPreferences(owner.snapshot(), includeSelected: true)
-                publishEnvironment(host, owner.snapshot())
+                let updated = owner.snapshot()
+                guard beforeStorePreferences == beforePreferences,
+                      let afterStorePreferences = try? updated.serializeModelPreferences(),
+                      afterStorePreferences != beforePreferences else { return }
+                synchronizeClientPreferences(
+                    updated,
+                    includeSelected: true,
+                    allowPendingSelected: true
+                )
+                publishEnvironment(host, updated)
             }
         }
     }
@@ -97,14 +115,32 @@ extension BexAppViewModel {
         if profile == selectedProfileId {
             perform(intent)
         } else if let owner = backgroundOwners[profile] {
+            let generation = backgroundTaskGenerations[profile, default: 0]
+            let preferencesGeneration = clientPreferencesGeneration
+            let beforePreferences = clientPreferencesData
+            let beforeStorePreferences = try? owner.snapshot().serializeModelPreferences()
             guard let receipt = try? owner.dispatch(intent: intent) else { return }
             Task { [weak self, owner] in
-                _ = try? await receipt.wait()
-                guard let self, let host = profiles.first(where: { $0.id == profile }) else {
+                let result = try? await receipt.wait()
+                guard result != nil else { return }
+                guard let self,
+                      backgroundTaskGenerations[profile] == generation,
+                      backgroundOwners[profile] === owner,
+                      selectedProfileId != profile,
+                      clientPreferencesGeneration == preferencesGeneration,
+                      let host = profiles.first(where: { $0.id == profile }) else {
                     return
                 }
-                synchronizeClientPreferences(owner.snapshot(), includeSelected: true)
-                publishEnvironment(host, owner.snapshot())
+                let updated = owner.snapshot()
+                guard beforeStorePreferences == beforePreferences,
+                      let afterStorePreferences = try? updated.serializeModelPreferences(),
+                      afterStorePreferences != beforePreferences else { return }
+                synchronizeClientPreferences(
+                    updated,
+                    includeSelected: true,
+                    allowPendingSelected: true
+                )
+                publishEnvironment(host, updated)
             }
         } else {
             perform(intent)

@@ -333,8 +333,11 @@ impl Desktop {
             .child(section(
                 Some("Load balancing".into()),
                 Some(
-                    "Choose how often each connected environment receives automatic new threads."
-                        .into(),
+                    div()
+                        .child(
+                            "Choose how often each connected environment receives automatic new threads.",
+                        )
+                        .into_any_element(),
                 ),
                 None,
                 rows,

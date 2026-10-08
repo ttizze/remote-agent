@@ -271,8 +271,8 @@ pub fn notification_events(
 #[uniffi::export]
 impl Snapshot {
     #[uniffi::constructor]
-    pub fn empty() -> Arc<Self> {
-        Arc::default()
+    pub fn empty(client_preferences: Vec<u8>) -> Arc<Self> {
+        Arc::new(Self::with_client_preferences(&client_preferences))
     }
     #[uniffi::constructor]
     pub fn restore(bytes: Vec<u8>) -> Result<Arc<Self>, AgentError> {

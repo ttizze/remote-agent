@@ -866,15 +866,18 @@ impl Desktop {
                     .child(div().flex_1().text_sm().child(profile.name.clone()));
                 if profile.id != "incognito" {
                     row = row.child(
-                        Button::new(("browser-profile-select", profile.id.clone()))
-                            .outline()
-                            .small()
-                            .label(if is_default { "Default" } else { "Use" })
-                            .on_click(cx.listener(move |view, _, _, _| {
-                                view.perform(Intent::SetBrowserDefaultProfile {
-                                    profile_id: profile_id.clone(),
-                                });
-                            })),
+                        Button::new(SharedString::from(format!(
+                            "browser-profile-select-{}",
+                            profile.id
+                        )))
+                        .outline()
+                        .small()
+                        .label(if is_default { "Default" } else { "Use" })
+                        .on_click(cx.listener(move |view, _, _, _| {
+                            view.perform(Intent::SetBrowserDefaultProfile {
+                                profile_id: profile_id.clone(),
+                            });
+                        })),
                     );
                 }
                 if !built_in {
@@ -883,11 +886,15 @@ impl Desktop {
                     let remove_id = profile.id.clone();
                     row = row
                         .child(
-                            Button::new(("browser-profile-rename", profile.id.clone()))
-                                .outline()
-                                .small()
-                                .label("Rename")
-                                .on_click(cx.listener(move |view, _, window, cx| {
+                            Button::new(SharedString::from(format!(
+                                "browser-profile-rename-{}",
+                                profile.id
+                            )))
+                            .outline()
+                            .small()
+                            .label("Rename")
+                            .on_click(cx.listener(
+                                move |view, _, window, cx| {
                                     view.settings.general.browser_profile_edit_id =
                                         Some(edit_id.clone());
                                     view.settings
@@ -896,16 +903,22 @@ impl Desktop {
                                         .update(cx, |input, cx| {
                                             input.set_value(edit_name.clone(), window, cx)
                                         });
-                                })),
+                                },
+                            )),
                         )
                         .child(
-                            Button::new(("browser-profile-remove", profile.id.clone()))
-                                .outline()
-                                .small()
-                                .label("Remove")
-                                .on_click(cx.listener(move |view, _, window, cx| {
+                            Button::new(SharedString::from(format!(
+                                "browser-profile-remove-{}",
+                                profile.id
+                            )))
+                            .outline()
+                            .small()
+                            .label("Remove")
+                            .on_click(cx.listener(
+                                move |view, _, window, cx| {
                                     view.remove_browser_profile(remove_id.clone(), window, cx);
-                                })),
+                                },
+                            )),
                         );
                 }
                 row

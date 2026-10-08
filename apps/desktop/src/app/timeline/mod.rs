@@ -36,7 +36,7 @@ use agent_domain::Timestamp;
 use chrono::{DateTime, Local, TimeZone};
 use gpui_kit::{
     component::{
-        ActiveTheme, Sizable,
+        ActiveTheme, Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         shimmer::ShimmerText,

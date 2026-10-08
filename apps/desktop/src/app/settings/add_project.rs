@@ -32,23 +32,24 @@ pub(super) fn open(view: &mut Desktop, window: &mut Window, cx: &mut Context<Des
     let local = view.remote.is_none();
     // The local Host runs as this user, so its home folder is ours; a remote
     // Host's is unknown until the Host lists paths with `~`.
-    let home = local
-        .then(|| {
-            directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_string_lossy().into_owned())
-        })
+    let home_path = local
+        .then(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
         .flatten();
+    let home = home_path
+        .as_deref()
+        .map(|path| path.to_string_lossy().into_owned());
     let configured_base_directory = view
         .snapshot
         .host_settings
         .as_ref()
         .map(|settings| settings.add_project_base_directory.trim().to_owned());
     let initial = match configured_base_directory.as_deref() {
-        Some(base_directory) => add_project_initial_query(Some(base_directory.to_owned())),
-        None => add_project_initial_query(home.clone()),
+        Some(base_directory) => add_project_initial_query(Some(base_directory)),
+        None => add_project_initial_query(home.as_deref()),
     };
     let initial_directory = configured_base_directory
         .as_deref()
-        .and_then(|base_directory| expand_local_directory(base_directory, home.as_deref()));
+        .and_then(|base_directory| expand_local_directory(base_directory, home_path.as_deref()));
     let platform = if local { std::env::consts::OS } else { "" };
     let desktop = cx.entity().downgrade();
     let form = cx.new(|cx| {

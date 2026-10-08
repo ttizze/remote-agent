@@ -40,6 +40,7 @@ use workspace_review::inspect_workspace;
 pub use host_runtime::HostRuntime;
 
 pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_local_identity};
+pub use device_stream::jpeg_bounds;
 
 pub use host_rpc::service::ConversationSettings;
 pub use host_rpc::{HostRpcService, HostSession, SessionId};

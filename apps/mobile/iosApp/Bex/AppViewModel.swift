@@ -5,6 +5,13 @@ import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
+    struct PendingClientPreferencesHandoff {
+        let owner: AgentStore
+        let data: Data
+        let token: UInt64
+        let minimumRevision: UInt64
+    }
+
     struct PushActivitySource: Encodable {
         let environmentId: String
         let threadId: String
@@ -24,7 +31,8 @@ final class BexAppViewModel: ObservableObject {
         let generation: UInt64
     }
 
-    @Published var snapshot = AgentCore.Snapshot.empty()
+    var clientPreferencesData = SnapshotFiles.modelDefaults()
+    @Published var snapshot = AgentCore.Snapshot.empty(clientPreferences: clientPreferencesData)
     @Published var screen: AppScreen = .profiles
     @Published var isScanning = false
     @Published var isConnecting = false
@@ -73,9 +81,10 @@ final class BexAppViewModel: ObservableObject {
     var observation: Task<Void, Never>?
     var persistence: Task<Void, Never>?
     var persistenceWrite: Task<Void, Never>?
-    var clientPreferencesData = SnapshotFiles.modelDefaults()
     var clientPreferencesGeneration: UInt64 = 0
-    var pendingSelectedClientPreferences: (owner: AgentStore, data: Data)?
+    var pendingSelectedClientPreferences: PendingClientPreferencesHandoff?
+    var nextClientPreferencesHandoffToken: UInt64 = 0
+    var selectedClientPreferencesRetry: Task<Void, Never>?
     var connection: Task<Void, Never>?
     var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     var operations: [UUID: Task<Void, Never>] = [:]

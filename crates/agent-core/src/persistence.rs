@@ -22,6 +22,9 @@ pub const STATE_WRITE_DELAY_MS: u64 = 250;
 /// A failed write is tried again after this.
 pub const STATE_RETRY_MS: u64 = 1_000;
 
+pub(crate) const MODEL_PREFERENCES_RECOVERY_ERROR: &str =
+    "Saved model preferences could not be read. Choose a model again.";
+
 #[derive(Default, Serialize, Deserialize)]
 struct LocalState {
     drafts: BTreeMap<String, Draft>,
@@ -166,10 +169,7 @@ fn recover(saved: Option<&[u8]>, client_preferences: &[u8]) -> Snapshot {
     if !client_preferences.is_empty() {
         match apply_model_preferences(&mut state, client_preferences) {
             Ok(()) => {}
-            Err(_) => {
-                state.error =
-                    Some("Saved model preferences could not be read. Choose a model again.".into())
-            }
+            Err(_) => state.error = Some(MODEL_PREFERENCES_RECOVERY_ERROR.into()),
         }
     }
     for draft in state.drafts.values_mut() {
@@ -368,6 +368,38 @@ mod tests {
         let unreadable = load(directory.path(), &preferences);
         assert_eq!(unreadable.default_draft.model, "valid model");
         assert!(unreadable.error.is_some());
+    }
+
+    #[test]
+    fn default_snapshot_seeding_uses_current_preferences_without_io() {
+        let mut source = Snapshot::default();
+        source.default_draft.model = "current model".into();
+        source.preferences.notification_mode =
+            crate::view::notifications::NotificationMode::Notifications;
+        let bytes = encode_model_preferences(&source).unwrap();
+
+        let seeded = Snapshot::with_client_preferences(&bytes);
+        assert_eq!(seeded.default_draft.model, "current model");
+        assert_eq!(
+            seeded.preferences.notification_mode,
+            crate::view::notifications::NotificationMode::Notifications
+        );
+        assert!(seeded.drafts.is_empty());
+        assert!(seeded.error.is_none());
+
+        let fresh = Snapshot::with_client_preferences(&[]);
+        assert_eq!(fresh.default_draft, Snapshot::default().default_draft);
+        assert!(fresh.error.is_none());
+    }
+
+    #[test]
+    fn malformed_default_preferences_keep_fresh_state_and_recovery_notice() {
+        let seeded = Snapshot::with_client_preferences(b"malformed preferences");
+        assert_eq!(seeded.default_draft, Snapshot::default().default_draft);
+        assert_eq!(
+            seeded.error.as_deref(),
+            Some(MODEL_PREFERENCES_RECOVERY_ERROR)
+        );
     }
 
     #[test]

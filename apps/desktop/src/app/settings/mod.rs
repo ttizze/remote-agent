@@ -24,7 +24,7 @@ use super::{
 use agent_core::state::Intent;
 use gpui_kit::{
     component::{
-        Sizable, StyledExt,
+        Disableable, Sizable, StyledExt,
         button::{Button, ButtonVariants},
         h_flex,
         menu::{DropdownMenu, PopupMenuItem},
@@ -414,7 +414,8 @@ impl Desktop {
                             ),
                     )
                     .when(!selected, |row| {
-                        row.cursor_pointer()
+                        row.id(SharedString::from(format!("environment-row-{id}")))
+                            .cursor_pointer()
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 if view.promote_environment(&id) {
                                     view.environment_registry.select(&id);

@@ -7,7 +7,7 @@
 //! images.
 
 use agent_core::view::device::DeviceVideoFrameView;
-use host_daemon::device_stream::jpeg_bounds;
+use host_daemon::jpeg_bounds;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};

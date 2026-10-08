@@ -81,7 +81,7 @@ enum Update {
         snapshot: Arc<Snapshot>,
     },
     Views(Box<Views>),
-    Completed(Option<Done>, Result<Outcome, String>),
+    Completed(Option<Done>, Result<Outcome, String>, bool, bool),
     PersistenceError(String),
     Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
@@ -469,13 +469,17 @@ impl Desktop {
                 }
             },
         ));
+        let client_preferences = ClientPreferences::from_disk();
+        let initial_snapshot = Arc::new(Snapshot::with_client_preferences(
+            &client_preferences.current(),
+        ));
         let mut view = Self {
             session: None,
-            snapshot: Arc::default(),
-            notification_snapshot: Arc::default(),
+            snapshot: initial_snapshot.clone(),
+            notification_snapshot: initial_snapshot.clone(),
             active_notification_tags: BTreeMap::new(),
             views: Arc::new(Views::derive(
-                &Snapshot::default(),
+                &initial_snapshot,
                 &EnvironmentRegistry::default(),
                 &ViewInputs {
                     sidebar: SidebarOptions::default(),
@@ -485,7 +489,7 @@ impl Desktop {
                 ui::now_ms(),
             )),
             runtime,
-            client_preferences: ClientPreferences::from_disk(),
+            client_preferences,
             environment_registry: EnvironmentRegistry::default(),
             updates,
             epoch: 0,
@@ -572,17 +576,22 @@ impl Desktop {
         self.last_host_power = None;
         self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
         self.epoch += 1;
+        self.browser_profile_removal_generation =
+            self.browser_profile_removal_generation.wrapping_add(1);
         self.views_running = false;
         self.connecting = true;
         self.invalidate_load_balancing_attempt();
+        let remote_id = remote.as_ref().map(|remote| remote.id.clone());
         self.remote = remote;
         self.client_preferences.clear_selected_sync();
         self.session.take();
-        if let Some(remote) = &remote {
-            self.background_sessions.remove(&remote.id);
-            self.background_connecting.remove(&remote.id);
+        if let Some(remote_id) = remote_id {
+            self.background_sessions.remove(&remote_id);
+            self.background_connecting.remove(&remote_id);
         }
-        self.snapshot = Arc::default();
+        self.snapshot = Arc::new(Snapshot::with_client_preferences(
+            &self.client_preferences.current(),
+        ));
         self.notification_snapshot = self.snapshot.clone();
         if let Some(environment_id) = previous_environment_id {
             self.dismiss_environment_notifications(&environment_id, cx);
@@ -624,7 +633,7 @@ impl Desktop {
                         .as_ref()
                         .map(|connected| connected.local_host_supervised)
                         .unwrap_or(false);
-                    StoreSession::publish(
+                    StoreSession::publish_with_preferences(
                         connected.map(|connected| connected.store),
                         runtime.clone(),
                         tx,
@@ -668,7 +677,7 @@ impl Desktop {
     /// profile has its own cache directory and event stream; a failed profile
     /// never replaces the selected Host's session.
     fn start_background_connections(&mut self, cx: &mut Context<Self>) {
-        let selected = self.remote.as_ref().map(|remote| remote.id.as_str());
+        let selected = self.remote.as_ref().map(|remote| remote.id.clone());
         let remotes = self.snapshot.remote_hosts.clone();
         let known: BTreeSet<_> = remotes.iter().map(|remote| remote.id.clone()).collect();
         let stale: Vec<_> = self
@@ -695,7 +704,7 @@ impl Desktop {
             {
                 continue;
             }
-            if selected == Some(remote.id.as_str())
+            if selected.as_deref() == Some(remote.id.as_str())
                 || self.background_sessions.contains_key(&remote.id)
                 || !self.background_connecting.insert(remote.id.clone())
             {
@@ -782,10 +791,11 @@ impl Desktop {
             });
             let connected_profile = profile_id.clone();
             let snapshot_profile = profile_id.clone();
-            StoreSession::publish(
-                connections
-                    .connect(Some(&remote.ticket), snapshot, options)
-                    .await,
+            let connected = connections
+                .connect(Some(&remote.ticket), snapshot, options)
+                .await;
+            StoreSession::publish_with_preferences(
+                connected.map(|connected| connected.store),
                 runtime,
                 tx,
                 move |result| Update::EnvironmentConnected {
@@ -823,6 +833,8 @@ impl Desktop {
         let Some(session) = self.background_sessions.remove(&profile_id) else {
             return false;
         };
+        self.browser_profile_removal_generation =
+            self.browser_profile_removal_generation.wrapping_add(1);
         self.client_preferences.clear_selected_sync();
         let previous_profile_id = self.remote.as_ref().map(|remote| remote.id.clone());
         if let Some(previous_session) = self.session.take()
@@ -902,18 +914,27 @@ impl Desktop {
         };
         if let Some(session) = self.background_sessions.get(profile_id) {
             let store = session.store.clone();
+            let before_preferences = self.client_preferences.current();
+            let before_store_preferences =
+                agent_core::persistence::encode_model_preferences(&store.snapshot()).ok();
             let receipt = store.dispatch(intent);
             let updates = self.updates.clone();
             let epoch = self.epoch;
             let done: Done = Box::new(move |view, result, _window, cx| {
-                if result.is_ok()
+                let snapshot = store.snapshot();
+                let after_store_preferences =
+                    agent_core::persistence::encode_model_preferences(&snapshot).ok();
+                let updates_client_preferences = result.is_ok()
+                    && before_store_preferences.as_ref() == Some(&before_preferences)
+                    && before_store_preferences.as_ref() != after_store_preferences.as_ref();
+                if updates_client_preferences
                     && view
                         .background_sessions
                         .values()
                         .any(|session| Arc::ptr_eq(&session.store, &store))
+                    && view.client_preferences.current() == before_preferences
                 {
-                    let snapshot = store.snapshot();
-                    view.synchronize_client_preferences_from(&snapshot);
+                    view.synchronize_client_preferences_from(&snapshot, true);
                     view.environment_registry.update(snapshot);
                     view.generation += 1;
                     view.schedule_views(cx);
@@ -925,7 +946,7 @@ impl Desktop {
                     .map_err(|error| error.to_string())
                     .and_then(|result| result.map_err(|error| error.to_string()));
                 let _ = updates
-                    .send((epoch, Update::Completed(Some(done), result)))
+                    .send((epoch, Update::Completed(Some(done), result, false, false)))
                     .await;
             });
         } else {
@@ -1018,19 +1039,7 @@ impl Desktop {
                     .map(|store| (environment_id.clone(), store.clone()))
             })
             .collect::<Vec<_>>();
-        let canonical_store = self
-            .session
-            .as_ref()
-            .and_then(|session| {
-                session
-                    .store
-                    .snapshot()
-                    .environment
-                    .as_ref()
-                    .map(|environment| environment.environment_id.clone())
-                    .and_then(|environment_id| stores.get(&environment_id).cloned())
-            })
-            .or_else(|| targets.first().map(|(_, store)| store.clone()));
+        let expected_stores = targets.clone();
         let clear_targets = targets.clone();
         self.spawn_task(
             async move {
@@ -1084,17 +1093,9 @@ impl Desktop {
                 } else {
                     Vec::new()
                 };
-                let canonical = if decision
-                    == agent_core::view::browser::BrowserProfileRemovalDecision::Ready
-                    && removed.iter().all(|(_, result)| result.is_ok())
-                {
-                    canonical_store.map(|store| store.snapshot())
-                } else {
-                    None
-                };
-                (plan, decision, removed, canonical)
+                (plan, decision, removed)
             },
-            move |view, (_plan, decision, removed, canonical), window, cx| {
+            move |view, (_plan, decision, removed), window, cx| {
                 if view.browser_profile_removal_generation != generation {
                     return;
                 }
@@ -1111,8 +1112,10 @@ impl Desktop {
                                 window,
                                 cx,
                             );
-                        } else if let Some(canonical) = canonical {
-                            view.synchronize_client_preferences_from(&canonical);
+                        } else if view.browser_profile_stores_are_current(&expected_stores)
+                            && let Some(store) = view.canonical_browser_profile_store(&expected_stores)
+                        {
+                            view.synchronize_client_preferences_from(&store.snapshot(), true);
                         }
                     }
                     agent_core::view::browser::BrowserProfileRemovalDecision::Failed => {
@@ -1127,6 +1130,70 @@ impl Desktop {
                 }
             },
         );
+    }
+
+    fn current_browser_profile_stores(&self) -> BTreeMap<String, Arc<Store>> {
+        let mut stores = BTreeMap::new();
+        if let Some(session) = &self.session {
+            let snapshot = session.store.snapshot();
+            if snapshot.connected
+                && let Some(environment_id) = snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+            {
+                stores.insert(environment_id, session.store.clone());
+            }
+        }
+        for session in self.background_sessions.values() {
+            let snapshot = session.store.snapshot();
+            if snapshot.connected
+                && let Some(environment_id) = snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+            {
+                stores.insert(environment_id, session.store.clone());
+            }
+        }
+        stores
+    }
+
+    fn browser_profile_stores_are_current(&self, expected: &[(String, Arc<Store>)]) -> bool {
+        let current = self.current_browser_profile_stores();
+        current.len() == expected.len()
+            && expected.iter().all(|(environment_id, expected_store)| {
+                current
+                    .get(environment_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, expected_store))
+            })
+    }
+
+    fn canonical_browser_profile_store(
+        &self,
+        expected: &[(String, Arc<Store>)],
+    ) -> Option<Arc<Store>> {
+        let selected_environment = self.session.as_ref().and_then(|session| {
+            session
+                .store
+                .snapshot()
+                .environment
+                .as_ref()
+                .map(|environment| environment.environment_id.clone())
+        });
+        selected_environment
+            .and_then(|environment_id| {
+                expected
+                    .iter()
+                    .find(|(id, _)| id == &environment_id)
+                    .map(|(_, store)| store.clone())
+            })
+            .or_else(|| {
+                expected
+                    .iter()
+                    .min_by(|(left, _), (right, _)| left.cmp(right))
+                    .map(|(_, store)| store.clone())
+            })
     }
 
     /// Sends an intent and runs `done` once it resolves.
@@ -1144,7 +1211,10 @@ impl Desktop {
         let Some(session) = &self.session else {
             return;
         };
-        let receipt = session.store.dispatch(intent);
+        let store = session.store.clone();
+        let before_preferences =
+            agent_core::persistence::encode_model_preferences(&store.snapshot()).ok();
+        let receipt = store.dispatch(intent);
         let updates = self.updates.clone();
         let epoch = self.epoch;
         self.runtime.handle.spawn(async move {
@@ -1152,7 +1222,16 @@ impl Desktop {
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|r| r.map_err(|e| e.to_string()));
-            let _ = updates.send((epoch, Update::Completed(done, result))).await;
+            let allow_selected_preferences = result.is_ok()
+                && before_preferences.is_some()
+                && agent_core::persistence::encode_model_preferences(&store.snapshot())
+                    .is_ok_and(|after| before_preferences.as_ref() != Some(&after));
+            let _ = updates
+                .send((
+                    epoch,
+                    Update::Completed(done, result, allow_selected_preferences, true),
+                ))
+                .await;
         });
     }
 
@@ -1174,7 +1253,10 @@ impl Desktop {
             let value = task.await;
             let done: Done = Box::new(move |view, _, window, cx| done(view, value, window, cx));
             let _ = updates
-                .send((epoch, Update::Completed(Some(done), Ok(Outcome::Applied))))
+                .send((
+                    epoch,
+                    Update::Completed(Some(done), Ok(Outcome::Applied), false, false),
+                ))
                 .await;
         });
     }
@@ -1392,19 +1474,25 @@ impl Desktop {
                         let pending_environment = self
                             .pending_open
                             .as_ref()
-                            .map(|(environment_id, _)| environment_id)
+                            .map(|(environment_id, _)| environment_id.clone())
                             .or_else(|| {
                                 self.pending_new_thread
                                     .as_ref()
-                                    .map(|(environment_id, _)| environment_id)
+                                    .map(|(environment_id, _)| environment_id.clone())
                             });
-                        if pending_environment.is_some_and(|environment_id| {
-                            self.environment_registry.selected() != Some(environment_id.as_str())
-                                && self.profile_environment_ids.get(&profile_id)
-                                    == Some(environment_id)
-                        }) {
+                        let should_promote =
+                            pending_environment
+                                .as_deref()
+                                .is_some_and(|environment_id| {
+                                    self.environment_registry.selected() != Some(environment_id)
+                                        && self
+                                            .profile_environment_ids
+                                            .get(&profile_id)
+                                            .is_some_and(|mapped| mapped.as_str() == environment_id)
+                                });
+                        if should_promote {
                             if let Some(environment_id) = pending_environment {
-                                self.promote_environment(environment_id);
+                                self.promote_environment(&environment_id);
                             }
                         }
                         self.generation += 1;
@@ -1514,13 +1602,19 @@ impl Desktop {
                 }
                 self.schedule_views(cx);
             }
-            Update::Completed(done, result) => {
+            Update::Completed(done, result, allow_selected_preferences, sync_selected_snapshot) => {
                 if let Some(session) = &self.session {
                     let snapshot = session.store.snapshot();
                     if snapshot.accepts_after(&self.snapshot) {
                         self.snapshot = snapshot;
                     }
-                    self.synchronize_client_preferences();
+                    if sync_selected_snapshot {
+                        if allow_selected_preferences {
+                            self.synchronize_selected_client_preferences(&session.store.snapshot());
+                        } else {
+                            self.synchronize_client_preferences();
+                        }
+                    }
                     session.save(self.snapshot.clone());
                 }
                 match (&result, done.is_some()) {
@@ -1699,19 +1793,47 @@ impl Desktop {
     /// Host-scoped, so an older Store cannot overwrite the current version or
     /// become the source for a later Host switch.
     fn synchronize_client_preferences(&self) {
-        self.broadcast_client_preferences(&self.snapshot, false);
+        self.broadcast_client_preferences(&self.snapshot, false, false);
     }
 
-    fn synchronize_client_preferences_from(&self, source: &Snapshot) {
-        self.broadcast_client_preferences(source, true);
+    fn synchronize_client_preferences_from(&self, source: &Snapshot, allow_pending_selected: bool) {
+        self.broadcast_client_preferences(source, true, allow_pending_selected);
     }
 
-    fn broadcast_client_preferences(&self, source: &Snapshot, include_selected: bool) {
+    fn synchronize_selected_client_preferences(&self, source: &Snapshot) {
+        self.broadcast_client_preferences(source, false, true);
+    }
+
+    fn broadcast_client_preferences(
+        &self,
+        source: &Snapshot,
+        include_selected: bool,
+        allow_pending_selected: bool,
+    ) {
         let Ok(bytes) = agent_core::persistence::encode_model_preferences(source) else {
             return;
         };
-        if !include_selected && self.client_preferences.selected_sync_blocks(&bytes) {
-            return;
+        let current_selected = self.session.as_ref().map(|session| session.store.clone());
+        if let Some(selected) = &current_selected {
+            if allow_pending_selected {
+                self.client_preferences.clear_selected_sync();
+            } else if self
+                .client_preferences
+                .selected_sync_blocks(selected, &bytes)
+            {
+                return;
+            }
+        }
+        if !include_selected {
+            if let Some(selected) = &current_selected {
+                if !allow_pending_selected {
+                    self.client_preferences.observe_selected_sync(
+                        selected,
+                        source.revision,
+                        &bytes,
+                    );
+                }
+            }
         }
         let changed = self.client_preferences.replace(bytes.clone());
         let selected = include_selected
@@ -1720,9 +1842,9 @@ impl Desktop {
         if !changed && selected.is_none() {
             return;
         }
-        if selected.is_some() {
-            self.client_preferences.mark_selected_sync(&bytes);
-        }
+        let selected_token = selected
+            .as_ref()
+            .map(|selected| self.client_preferences.mark_selected_sync(selected, &bytes));
         let mut stores = self
             .background_sessions
             .values()
@@ -1737,13 +1859,27 @@ impl Desktop {
         for store in stores {
             let receipt = store.apply_client_preferences(bytes.clone());
             let client_preferences = self.client_preferences.clone();
-            let applied_bytes = bytes.clone();
             let is_selected = selected
                 .as_ref()
                 .is_some_and(|selected| Arc::ptr_eq(selected, &store));
+            let token = selected_token;
+            let retry_store = store.clone();
+            let retry_bytes = bytes.clone();
             self.runtime.handle.spawn(async move {
-                if matches!(receipt.await, Ok(Ok(_))) && is_selected {
-                    client_preferences.complete_selected_sync(&applied_bytes);
+                let mut receipt = receipt;
+                let mut delay = Duration::from_millis(250);
+                loop {
+                    if matches!(receipt.await, Ok(Ok(_))) || !is_selected {
+                        return;
+                    }
+                    tokio::time::sleep(delay).await;
+                    let Some(token) = token else { return };
+                    if !client_preferences.selected_sync_matches(&retry_store, token, &retry_bytes)
+                    {
+                        return;
+                    }
+                    receipt = retry_store.apply_client_preferences(retry_bytes.clone());
+                    delay = delay.saturating_mul(2).min(Duration::from_secs(300));
                 }
             });
         }
@@ -1762,7 +1898,8 @@ impl Desktop {
             self.environment_registry.select(&environment_id);
             self.generation += 1;
         }
-        self.deliver_notification_events(&previous, &self.snapshot, window, cx);
+        let current = self.snapshot.clone();
+        self.deliver_notification_events(&previous, &current, window, cx);
     }
 
     fn deliver_notification_events(

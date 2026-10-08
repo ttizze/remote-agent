@@ -35,6 +35,7 @@
 		B00000000000000000000026 /* AppViewModelRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000006 /* AppViewModelRouting.swift */; };
 		B00000000000000000000027 /* AppViewModelConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000007 /* AppViewModelConnection.swift */; };
 		B00000000000000000000028 /* AppViewModelActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* AppViewModelActions.swift */; };
+		B0000000000000000000002F /* AppViewModelPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000F /* AppViewModelPush.swift */; };
 		B00000000000000000000029 /* AppViewModelObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000009 /* AppViewModelObservation.swift */; };
 		B0000000000000000000002A /* SettingsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000A /* SettingsControls.swift */; };
 		B0000000000000000000002B /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000B /* RemoteFolderPicker.swift */; };
@@ -153,6 +154,7 @@
 		B00000000000000000000006 /* AppViewModelRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelRouting.swift; sourceTree = "<group>"; };
 		B00000000000000000000007 /* AppViewModelConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelConnection.swift; sourceTree = "<group>"; };
 		B00000000000000000000008 /* AppViewModelActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelActions.swift; sourceTree = "<group>"; };
+		B0000000000000000000000F /* AppViewModelPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelPush.swift; sourceTree = "<group>"; };
 		B00000000000000000000009 /* AppViewModelObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelObservation.swift; sourceTree = "<group>"; };
 		D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdown.swift; sourceTree = "<group>"; };
 		CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
@@ -273,6 +275,7 @@
 				B00000000000000000000006 /* AppViewModelRouting.swift */,
 				B00000000000000000000007 /* AppViewModelConnection.swift */,
 				B00000000000000000000008 /* AppViewModelActions.swift */,
+				B0000000000000000000000F /* AppViewModelPush.swift */,
 				B00000000000000000000009 /* AppViewModelObservation.swift */,
 				B0000000000000000000000D /* AppViewModelEnvironment.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
@@ -485,6 +488,7 @@
 				B00000000000000000000026 /* AppViewModelRouting.swift in Sources */,
 				B00000000000000000000027 /* AppViewModelConnection.swift in Sources */,
 				B00000000000000000000028 /* AppViewModelActions.swift in Sources */,
+				B0000000000000000000002F /* AppViewModelPush.swift in Sources */,
 				B00000000000000000000029 /* AppViewModelObservation.swift in Sources */,
 				B0000000000000000000002D /* AppViewModelEnvironment.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,

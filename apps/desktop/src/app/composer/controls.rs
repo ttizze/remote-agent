@@ -12,8 +12,8 @@ use agent_core::{
         models::{
             ProviderInstance,
             picker::{
-                LegacyModelsSection, ModelPickerRow, ModelPickerView, PickerRail, PickerRailItem,
-                parse_model_picker_legacy_section_key,
+                LegacyModelsSection, ModelPickerRow, ModelPickerTrigger, ModelPickerView,
+                PickerRail, PickerRailItem, parse_model_picker_legacy_section_key,
             },
             traits::{SpeedIcon, TraitControl},
         },

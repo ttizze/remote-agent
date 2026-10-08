@@ -11,13 +11,11 @@ use crate::app::{
 use agent_core::state::Intent;
 use gpui_kit::{
     component::{
-        Sizable, StyledExt,
+        Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
-        v_flex,
     },
-    prelude::FluentBuilder,
     *,
 };
 use std::collections::BTreeSet;
@@ -179,7 +177,7 @@ impl Desktop {
         for (index, (agent_id, prepared)) in registry
             .prepared
             .iter()
-            .filter(|(agent_id, _)| !result_ids.contains(agent_id))
+            .filter(|(agent_id, _)| !result_ids.contains((*agent_id).as_str()))
             .enumerate()
         {
             let probe_id = agent_id.clone();
@@ -231,9 +229,13 @@ impl Desktop {
 
         section(
             Some("ACP registry".into()),
-            Some(div().text_xs().text_color(tint("textMuted", 0.8)).child(
-                "Install and verify Agent Client Protocol providers from the connected Host.",
-            )),
+            Some(
+                div()
+                    .text_xs()
+                    .text_color(tint("textMuted", 0.8))
+                    .child("Install and verify Agent Client Protocol providers from the connected Host.")
+                    .into_any_element(),
+            ),
             None,
             rows,
         )

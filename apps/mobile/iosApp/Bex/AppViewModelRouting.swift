@@ -7,6 +7,7 @@ import UIKit
 extension BexAppViewModel {
     func selectProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
+        browserProfileRemovalGeneration &+= 1
         if automaticRouteProfileId != nil, automaticRouteProfileId != id {
             invalidatePendingLoadBalancedNewThread()
         }
@@ -26,7 +27,7 @@ extension BexAppViewModel {
         let old = detachStore()
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
-        publish(AgentCore.Snapshot.empty())
+        publish(AgentCore.Snapshot.empty(clientPreferences: clientPreferencesData), syncClientPreferences: false)
         let writing = persistenceWrite
         initialization = Task { [weak self] in
             await writing?.value
@@ -229,6 +230,7 @@ extension BexAppViewModel {
 
     func removeProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
+        browserProfileRemovalGeneration &+= 1
         do {
             let environmentId = environmentSnapshots[id]?.environmentId() ?? id
             LocalNotifications.removeEnvironment(environmentId)
@@ -247,7 +249,10 @@ extension BexAppViewModel {
                 selectedProfileId = nil
                 UserDefaults.standard.removeObject(forKey: "bex.selected-host")
                 notice = nil
-                publish(AgentCore.Snapshot.empty())
+                publish(
+                    AgentCore.Snapshot.empty(clientPreferences: clientPreferencesData),
+                    syncClientPreferences: false
+                )
                 Task { [weak self] in
                     await unregistration?.value
                     do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }

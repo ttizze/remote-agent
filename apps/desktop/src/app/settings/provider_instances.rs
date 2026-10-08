@@ -400,7 +400,8 @@ impl ProviderInstanceEditor {
 
     fn input(&self, cx: &App) -> Result<(String, ProviderInstanceConfig), String> {
         let id = self.id.read(cx).value().trim().to_owned();
-        let environment = editing::parse_environment_lines(self.environment.read(cx).value())?;
+        let environment_text = self.environment.read(cx).value();
+        let environment = editing::parse_environment_lines(environment_text.as_ref())?;
         let custom_models = self
             .models
             .iter()
@@ -414,7 +415,10 @@ impl ProviderInstanceEditor {
             binary_path: Some(self.binary_path.read(cx).value().to_string()),
             home_path: Some(self.home_path.read(cx).value().to_string()),
             environment,
-            launch_args: editing::parse_launch_args(self.launch_args.read(cx).value()),
+            launch_args: {
+                let launch_args = self.launch_args.read(cx).value();
+                editing::parse_launch_args(launch_args.as_ref())
+            },
             custom_models,
         };
         let config = editing::normalize_config(&id, config)?;
