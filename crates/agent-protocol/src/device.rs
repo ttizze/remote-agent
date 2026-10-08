@@ -134,7 +134,10 @@ pub struct DeviceSession {
     pub host_id: String,
     pub device_id: String,
     pub platform: DevicePlatform,
+    /// Wall-clock time used for user-facing session history.
     pub opened_at: String,
+    /// Opaque generation used to reject queued events from an earlier reopen.
+    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,10 +493,8 @@ impl DeviceActionInput {
                 Err("device push payload is invalid".into())
             }
             DeviceActionKind::Input(input) => DeviceInput {
-                thread_id: None,
                 host_id: None,
                 device_id: self.device_id.clone(),
-                request_id: None,
                 input: input.clone(),
             }
             .validate(),
@@ -526,8 +527,6 @@ pub struct DeviceScreenshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceFrame {
     pub thread_id: ThreadId,
-    /// Session generation that produced this event. The client rejects late
-    /// helper data after a close/reopen of the same device identity.
     pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
@@ -570,9 +569,9 @@ pub struct DeviceVideoFrame {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceScreenConfig {
     pub thread_id: Option<ThreadId>,
+    pub session_epoch: String,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
-    pub session_epoch: Option<String>,
     pub width: u32,
     pub height: u32,
     pub orientation: DeviceOrientation,
@@ -664,15 +663,8 @@ pub enum DeviceHardwareButton {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceInput {
-    /// The conversation that owns this input. Host-side transports ignore the
-    /// value, while the core uses it to reject a late control reply after a
-    /// thread/session has changed.
-    pub thread_id: Option<ThreadId>,
     pub host_id: Option<String>,
     pub device_id: String,
-    /// Client-owned id for queued Duo/Fold controls. Ordinary inputs leave it
-    /// unset and the Host does not wait for a control acknowledgement.
-    pub request_id: Option<u64>,
     pub input: DeviceInputKind,
 }
 
@@ -697,22 +689,13 @@ impl DeviceInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceControlResult {
-    pub request_id: Option<u64>,
-    pub accepted: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceAccessibilityInput {
-    pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceEventLogInput {
-    pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
     pub limit: u16,
@@ -720,10 +703,8 @@ pub struct DeviceEventLogInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceRecordingFormat {
-    RawFrames,
-    Mjpeg,
     /// H.264 frames finalized as a playable fragmented MP4 attachment.
-    Avcc,
+    Mp4,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -746,8 +727,9 @@ pub struct DeviceRecordingStatus {
     pub thread_id: ThreadId,
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub format: DeviceRecordingFormat,
+    pub file_name: String,
+    pub mime_type: String,
     pub active: bool,
     pub started_at: String,
     pub frame_count: u64,
@@ -926,10 +908,8 @@ mod tests {
     #[test]
     fn keyboard_input_validates_both_physical_code_and_actual_key_value() {
         let valid = DeviceInput {
-            thread_id: None,
             host_id: None,
             device_id: "emulator-1".into(),
-            request_id: None,
             input: DeviceInputKind::Key {
                 code: "KeyA".into(),
                 key: "A".into(),
@@ -954,10 +934,8 @@ mod tests {
     #[test]
     fn duo_input_validates_a_bounded_angle_without_string_commands() {
         let input = DeviceInput {
-            thread_id: None,
             host_id: None,
             device_id: "simulator".into(),
-            request_id: None,
             input: DeviceInputKind::Duo {
                 command: DeviceDuoCommand::Angle { value: 90.0 },
             },
