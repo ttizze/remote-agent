@@ -493,19 +493,19 @@ impl Owner {
                 model,
                 options,
             } => {
-                let draft = Draft {
-                    instance_id,
-                    driver,
-                    model,
-                    options,
-                    ..self.state.default_draft.clone()
-                };
-                draft.selection().map_err(invalid)?;
-                self.state.default_draft = draft;
+                let mut defaults = self.state.default_draft.user_defaults();
+                defaults.instance_id = instance_id;
+                defaults.driver = driver;
+                defaults.model = model;
+                defaults.options = options;
+                defaults.selection().map_err(invalid)?;
+                self.state.default_draft = defaults;
                 Next::Done
             }
             Intent::SetDefaultRuntimeMode { mode } => {
-                self.state.default_draft.runtime_mode = mode;
+                let mut defaults = self.state.default_draft.user_defaults();
+                defaults.runtime_mode = mode;
+                self.state.default_draft = defaults;
                 Next::Done
             }
             Intent::ToggleFavoriteModel { instance_id, model } => {
@@ -718,14 +718,7 @@ impl Owner {
                 draft.model = model;
                 draft.options = options;
                 let selection = draft.selection().map_err(invalid)?;
-                self.state.default_draft = Draft {
-                    text: String::new(),
-                    attachments: vec![],
-                    project_id: None,
-                    project_selected_at_ms: None,
-                    created_at_ms: None,
-                    ..draft.clone()
-                };
+                self.state.default_draft = draft.user_defaults();
                 let key = self.state.draft_key();
                 self.state.drafts.insert(key, draft);
                 self.thread_command(select_model_command(selection))

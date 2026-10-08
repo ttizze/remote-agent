@@ -286,7 +286,9 @@ impl Owner {
                 &draft.options,
             );
             let selection = draft.selection().map_err(invalid)?;
-            self.state.default_draft.options = draft.options.clone();
+            let mut defaults = self.state.default_draft.user_defaults();
+            defaults.options = draft.options.clone();
+            self.state.default_draft = defaults;
             if let Some(thread) = self.state.selected_thread.clone() {
                 next = Next::Commands(vec![self.command(thread, select_model_command(selection))]);
             }

@@ -132,6 +132,20 @@ fn attachment_error(code: &str) -> String {
     .into()
 }
 impl Draft {
+    /// Copies only the values that seed a fresh task. Content, context,
+    /// workspace and identity belong to the draft that supplied them.
+    pub fn user_defaults(&self) -> Self {
+        Self {
+            instance_id: self.instance_id.clone(),
+            driver: self.driver,
+            model: self.model.clone(),
+            options: self.options.clone(),
+            runtime_mode: self.runtime_mode,
+            interaction_mode: self.interaction_mode,
+            ..Self::default()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.attachments.is_empty()
     }
@@ -493,7 +507,7 @@ impl Snapshot {
         project_id: Option<String>,
         selected_at_ms: i64,
     ) {
-        let mut draft = self.default_draft.clone();
+        let mut draft = self.default_draft.user_defaults();
         draft.project_id = Some(
             project_id
                 .clone()
@@ -569,7 +583,7 @@ impl Snapshot {
             .cloned()
             .unwrap_or_else(|| {
                 self.selected_thread.as_ref().map_or_else(
-                    || self.default_draft.clone(),
+                    || self.default_draft.user_defaults(),
                     |id| self.draft_for_thread(id),
                 )
             })
@@ -593,7 +607,7 @@ impl Snapshot {
                 interaction_mode,
                 ..Draft::default().with_selection(selection)
             },
-            None => self.default_draft.clone(),
+            None => self.default_draft.user_defaults(),
         }
     }
     /// A fork or merge back from this thread is waiting for the Host.
@@ -1459,6 +1473,61 @@ mod tests {
             "typed\n\nsent"
         );
         assert_eq!(merge_restored_text("sent", "sent"), "sent");
+    }
+
+    #[test]
+    fn user_defaults_drop_content_context_workspace_and_identity() {
+        let source = Draft {
+            text: "task-specific text".into(),
+            attachments: vec![DraftAttachment {
+                id: "attachment".into(),
+                remote_id: None,
+                name: "note.txt".into(),
+                mime_type: "text/plain".into(),
+                kind: "file".into(),
+                size_bytes: 4,
+                local_path: "/tmp/note.txt".into(),
+                status: "ready".into(),
+                error: None,
+            }],
+            instance_id: "claude".into(),
+            driver: agent_domain::Driver::Claude,
+            model: "sonnet".into(),
+            options: vec![ModelOption {
+                key: "effort".into(),
+                value: "high".into(),
+            }],
+            runtime_mode: agent_domain::RuntimeMode::ApprovalRequired,
+            interaction_mode: agent_domain::InteractionMode::Plan,
+            context: Some(MessageContext {
+                version: 1,
+                records: vec![],
+            }),
+            workspace: Some(DraftWorkspace {
+                mode: crate::view::projects::selection::ThreadWorkspaceMode::Worktree,
+                branch: Some("feature".into()),
+                worktree_path: Some("/trees/feature".into()),
+                start_from_origin: true,
+                start_from_origin_choice: Some(true),
+            }),
+            project_id: Some("project".into()),
+            project_selected_at_ms: Some(1),
+            created_at_ms: Some(2),
+        };
+        let defaults = source.user_defaults();
+        assert_eq!(defaults.instance_id, "claude");
+        assert_eq!(defaults.driver, agent_domain::Driver::Claude);
+        assert_eq!(defaults.model, "sonnet");
+        assert_eq!(defaults.options, source.options);
+        assert_eq!(defaults.runtime_mode, agent_domain::RuntimeMode::ApprovalRequired);
+        assert_eq!(defaults.interaction_mode, agent_domain::InteractionMode::Plan);
+        assert!(defaults.text.is_empty());
+        assert!(defaults.attachments.is_empty());
+        assert!(defaults.context.is_none());
+        assert!(defaults.workspace.is_none());
+        assert!(defaults.project_id.is_none());
+        assert!(defaults.project_selected_at_ms.is_none());
+        assert!(defaults.created_at_ms.is_none());
     }
 
     fn skills(start: usize, count: usize) -> (String, MessageContext) {
