@@ -398,7 +398,11 @@ impl Desktop {
                 self.perform(Intent::ListWorktrees);
             }
             SettingsPage::Projects { .. } => self.perform(Intent::LoadSettings),
-            SettingsPage::Providers => self.perform(Intent::LoadAccounts),
+            SettingsPage::Providers => {
+                self.perform(Intent::LoadAccounts);
+                self.perform(Intent::LoadProviders);
+                self.perform(Intent::LoadSettings);
+            }
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
             SettingsPage::Archived
             | SettingsPage::Appearance

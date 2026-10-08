@@ -191,6 +191,9 @@ pub(crate) struct TextGenerator {
     pub(crate) codex: Option<PathBuf>,
     pub(crate) codex_home: Option<PathBuf>,
     pub(crate) claude: Option<(ClaudeProgram, Arc<dyn super::ClaudeCredentials>)>,
+    /// The settings owner is read for every generation so a provider-instance
+    /// executable or home change applies to the next title/Git request.
+    pub(crate) worktrees: Option<Arc<Worktrees>>,
 }
 
 /// The default Codex text-generation model and its reasoning effort.
@@ -203,15 +206,122 @@ const TEXT_TIMEOUT: Duration = Duration::from_secs(180);
 impl TextGenerator {
     async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
         let driver = request.model.as_ref().map(|selection| selection.driver);
+        let configured = request.model.as_ref().and_then(|selection| {
+            self.worktrees.as_ref().and_then(|worktrees| {
+                worktrees
+                    .latest_host_settings()
+                    .provider_instances
+                    .get(&selection.instance)
+                    .cloned()
+            })
+        });
+        if let Some(selection) = request.model.as_ref() {
+            if configured.is_none()
+                && selection.instance != "codex"
+                && selection.instance != "claude"
+            {
+                return Err(format!(
+                    "The selected provider instance {} is not configured.",
+                    selection.instance
+                ));
+            }
+            if configured
+                .as_ref()
+                .is_some_and(|config| Some(config.driver) != driver)
+            {
+                return Err(format!(
+                    "The selected provider instance {} uses a different driver.",
+                    selection.instance
+                ));
+            }
+        }
+        let configured = configured.filter(|config| Some(config.driver) == driver);
+        if configured.as_ref().is_some_and(|config| !config.enabled) {
+            return Err(format!(
+                "The selected provider instance {} is disabled.",
+                request
+                    .model
+                    .as_ref()
+                    .map_or("unknown", |selection| selection.instance.as_str())
+            ));
+        }
         if (driver.is_none() || driver == Some(agent_domain::Driver::Codex))
-            && let Some(codex) = &self.codex
+            && let Some(program) = configured
+                .as_ref()
+                .and_then(|config| config.binary_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| self.codex.clone())
         {
-            return self.codex(codex, request).await;
+            let home = configured
+                .as_ref()
+                .and_then(|config| config.home_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| self.codex_home.clone());
+            let launch_args = configured
+                .as_ref()
+                .map_or(&[][..], |config| config.launch_args.as_slice());
+            let environment = configured
+                .as_ref()
+                .map_or_else(std::collections::BTreeMap::new, |config| {
+                    config.environment.clone()
+                });
+            return Self::codex(
+                &program,
+                home.as_deref(),
+                launch_args,
+                &environment,
+                request,
+            )
+            .await;
         }
         if (driver.is_none() || driver == Some(agent_domain::Driver::Claude))
-            && let Some((claude, credentials)) = &self.claude
+            && let Some(program) = configured
+                .as_ref()
+                .and_then(|config| config.binary_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| {
+                    self.claude
+                        .as_ref()
+                        .map(|(claude, _)| claude.program.clone())
+                })
         {
-            return Self::claude(claude, credentials.as_ref(), request).await;
+            let config_home = configured
+                .as_ref()
+                .and_then(|config| config.home_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| {
+                    self.claude
+                        .as_ref()
+                        .map(|(claude, _)| claude.config_home.clone())
+                });
+            let Some(config_home) = config_home else {
+                return Err("Claude needs a configuration directory for text generation.".into());
+            };
+            let use_base_credentials = configured
+                .as_ref()
+                .is_none_or(|config| config.home_path.is_none());
+            let credentials = self
+                .claude
+                .as_ref()
+                .filter(|_| use_base_credentials)
+                .map(|(_, credentials)| credentials.as_ref());
+            return Self::claude(
+                &ClaudeProgram {
+                    program,
+                    config_home,
+                    environment: configured
+                        .as_ref()
+                        .map_or_else(std::collections::BTreeMap::new, |config| {
+                            config.environment.clone()
+                        }),
+                    launch_args: configured
+                        .as_ref()
+                        .map_or_else(Vec::new, |config| config.launch_args.clone()),
+                },
+                credentials,
+                request,
+            )
+            .await;
         }
         Err(format!(
             "The selected text-generation provider is unavailable: {}.",
@@ -224,8 +334,10 @@ impl TextGenerator {
 
     /// `codex exec` with an output schema, prompt on stdin.
     async fn codex(
-        &self,
         program: &Path,
+        codex_home: Option<&Path>,
+        launch_args: &[String],
+        environment: &std::collections::BTreeMap<String, String>,
         request: TextGenerationRequest,
     ) -> Result<String, String> {
         let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -261,6 +373,7 @@ impl TextGenerator {
             "--output-last-message".into(),
             output.to_string_lossy().into(),
         ]);
+        args.extend(launch_args.iter().cloned());
         for attachment in &request.attachments {
             if attachment.kind == AttachmentKind::Image && Path::new(&attachment.path).is_file() {
                 args.extend(["--image".into(), attachment.path.clone()]);
@@ -268,7 +381,8 @@ impl TextGenerator {
         }
         args.push("-".into());
         let mut command = bex_process::command(program).map_err(|e| e.to_string())?;
-        if let Some(home) = &self.codex_home {
+        command.envs(environment);
+        if let Some(home) = codex_home {
             command.env("CODEX_HOME", home);
         }
         let cwd = Some(PathBuf::from(&request.cwd))
@@ -284,10 +398,13 @@ impl TextGenerator {
     /// `claude -p` with a JSON schema and no tools.
     async fn claude(
         program: &ClaudeProgram,
-        credentials: &dyn super::ClaudeCredentials,
+        credentials: Option<&dyn super::ClaudeCredentials>,
         request: TextGenerationRequest,
     ) -> Result<String, String> {
-        let home = credentials.claude_home().await?;
+        let home = match credentials {
+            Some(credentials) => credentials.claude_home().await?,
+            None => program.config_home.clone(),
+        };
         let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
         let args: Vec<String> = vec![
             "-p".into(),
@@ -730,19 +847,33 @@ impl HostOperations for HostIo {
         resolve_branch_naming(&self.worktrees.latest_host_settings(), project)
     }
     fn text_generation_settings(&self, project: &str, operation: &str) -> TextGenerationSettings {
-        let mut settings = resolve_text_generation_settings(
-            &self.worktrees.latest_host_settings(),
-            project,
-            operation,
-        );
-        if settings
-            .model
-            .as_ref()
-            .is_some_and(|selection| match selection.driver {
-                agent_domain::Driver::Codex => self.text.codex.is_none(),
-                agent_domain::Driver::Claude => self.text.claude.is_none(),
-            })
-        {
+        let host = self.worktrees.latest_host_settings();
+        let mut settings = resolve_text_generation_settings(&host, project, operation);
+        if settings.model.as_ref().is_some_and(|selection| {
+            let configured = host.provider_instances.get(&selection.instance);
+            (configured.is_none()
+                && selection.instance != "codex"
+                && selection.instance != "claude")
+                || configured.is_some_and(|config| !config.enabled)
+                || configured.is_some_and(|config| config.driver != selection.driver)
+                || match selection.driver {
+                    agent_domain::Driver::Codex => {
+                        self.text.codex.is_none()
+                            && configured
+                                .and_then(|config| config.binary_path.as_ref())
+                                .is_none()
+                    }
+                    agent_domain::Driver::Claude => {
+                        if self.text.claude.is_some() {
+                            false
+                        } else {
+                            configured.is_none_or(|config| {
+                                config.binary_path.is_none() || config.home_path.is_none()
+                            })
+                        }
+                    }
+                }
+        }) {
             settings.model = None;
         }
         settings

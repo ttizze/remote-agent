@@ -12,6 +12,7 @@ mod agent;
 mod auto_settle;
 mod behavior;
 mod beta;
+mod capture;
 #[cfg(test)]
 mod fixtures;
 mod follow_ups;
@@ -80,6 +81,14 @@ pub enum SettingId {
     StorageWorktreeUnchanged,
     StorageBrowserArtifactsAfterDays,
     StorageLogsAfterDays,
+    LoadBalancing,
+    SnapshotCapture,
+    SnapshotIncludeAccessibility,
+    SnapshotShortcut,
+    SnapshotPlaySound,
+    SnapshotSound,
+    SnapshotFlash,
+    SnapshotAnimations,
 }
 
 /// Where a project page's value comes from.

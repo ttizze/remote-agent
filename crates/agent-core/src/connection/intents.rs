@@ -464,6 +464,54 @@ impl Owner {
                 self.state.preferences.in_app_notifications_enabled = enabled;
                 Next::Done
             }
+            Intent::SetLoadBalancingEnabled { enabled } => {
+                self.state.preferences.load_balancing_enabled = enabled;
+                Next::Done
+            }
+            Intent::SetLoadBalancingWeight {
+                instance_id,
+                weight,
+            } => {
+                if weight > 100 {
+                    return Err(invalid("Load balancing weights must be 0 to 100."));
+                }
+                self.state
+                    .preferences
+                    .load_balancing_weights
+                    .insert(instance_id, weight);
+                Next::Done
+            }
+            Intent::SetSnapshotCaptureEnabled { enabled } => {
+                self.state.preferences.snapshot_capture.enabled = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotIncludeAccessibility { enabled } => {
+                self.state
+                    .preferences
+                    .snapshot_capture
+                    .include_accessibility = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotShortcut { shortcut } => {
+                self.state.preferences.snapshot_capture.shortcut = shortcut;
+                Next::Done
+            }
+            Intent::SetSnapshotPlaySound { enabled } => {
+                self.state.preferences.snapshot_capture.play_sound = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotSound { sound } => {
+                self.state.preferences.snapshot_capture.sound = sound;
+                Next::Done
+            }
+            Intent::SetSnapshotFlash { enabled } => {
+                self.state.preferences.snapshot_capture.flash = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotAnimations { enabled } => {
+                self.state.preferences.snapshot_capture.animations = enabled;
+                Next::Done
+            }
             Intent::ImportShare { content } => {
                 let incoming = crate::view::share::compose(&content);
                 if !incoming.is_empty() {
@@ -1405,6 +1453,7 @@ impl Owner {
                 Next::call(Call::RemoveWorktree(op::RemoveWorktree { path }), None)
             }
             Intent::LoadAccounts => Next::call(Call::ListAccounts(m::Empty {}), None),
+            Intent::LoadProviders => Next::call(Call::ListProviders(m::Empty {}), None),
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),
                 None,

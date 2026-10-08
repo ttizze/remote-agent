@@ -548,6 +548,45 @@ impl Snapshot {
         {
             draft = draft.with_selection(selection);
         }
+        if self.preferences.load_balancing_enabled {
+            let providers = self.providers.as_deref().unwrap_or(&[]);
+            let candidates = providers
+                .iter()
+                .map(|provider| crate::view::load_balancing::Candidate {
+                    instance_id: provider.instance.clone(),
+                    driver: provider.driver,
+                    ready: provider.enabled
+                        && provider.status == agent_protocol::models::ProviderStatus::Ready,
+                })
+                .collect::<Vec<_>>();
+            let seed = crate::view::load_balancing::seed(
+                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
+            );
+            if let Some(instance) = crate::view::load_balancing::select_instance(
+                &candidates,
+                draft.driver,
+                &self.preferences.load_balancing_weights,
+                seed,
+            ) {
+                if let Some(provider) = providers
+                    .iter()
+                    .find(|provider| provider.instance == instance)
+                {
+                    let model = provider
+                        .models
+                        .iter()
+                        .find(|model| model.slug == draft.model)
+                        .or_else(|| provider.models.iter().find(|model| model.is_default))
+                        .or_else(|| provider.models.first());
+                    if let Some(model) = model {
+                        draft.instance_id = provider.instance.clone();
+                        draft.driver = provider.driver;
+                        draft.model = model.slug.clone();
+                        draft.options.clear();
+                    }
+                }
+            }
+        }
         draft
     }
     /// A thread's draft, or one with the thread's model and modes.
@@ -1283,6 +1322,36 @@ pub enum Intent {
     SetInAppNotificationsEnabled {
         enabled: bool,
     },
+    /// Enables weighted routing of new threads across provider instances.
+    SetLoadBalancingEnabled {
+        enabled: bool,
+    },
+    /// Sets one provider instance's local routing weight from 0 to 100.
+    SetLoadBalancingWeight {
+        instance_id: String,
+        weight: u8,
+    },
+    SetSnapshotCaptureEnabled {
+        enabled: bool,
+    },
+    SetSnapshotIncludeAccessibility {
+        enabled: bool,
+    },
+    SetSnapshotShortcut {
+        shortcut: crate::view::snapshot_capture::SnapshotShortcut,
+    },
+    SetSnapshotPlaySound {
+        enabled: bool,
+    },
+    SetSnapshotSound {
+        sound: crate::view::snapshot_capture::SnapshotSound,
+    },
+    SetSnapshotFlash {
+        enabled: bool,
+    },
+    SetSnapshotAnimations {
+        enabled: bool,
+    },
     /// The model new threads start with; an open thread keeps its own.
     SetDefaultModel {
         instance_id: String,
@@ -1368,6 +1437,7 @@ pub enum Intent {
 
     // Accounts and Hosts.
     LoadAccounts,
+    LoadProviders,
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,
@@ -1574,6 +1644,78 @@ mod tests {
             snapshot.new_thread_workspace().mode,
             crate::view::projects::selection::ThreadWorkspaceMode::Local
         );
+    }
+
+    #[test]
+    fn load_balancing_routes_a_new_thread_to_the_weighted_ready_instance() {
+        let mut snapshot = Snapshot {
+            selected_project: Some("project".into()),
+            host_settings: Some(crate::models::HostSettings::default()),
+            default_draft: Draft {
+                instance_id: "codex".into(),
+                driver: Driver::Codex,
+                model: "shared".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        snapshot.preferences.load_balancing_enabled = true;
+        snapshot
+            .preferences
+            .load_balancing_weights
+            .insert("codex-build".into(), 100);
+        snapshot.providers = Some(vec![
+            crate::models::ProviderInstance {
+                instance: "codex".into(),
+                driver: Driver::Codex,
+                display_name: "Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+            crate::models::ProviderInstance {
+                instance: "codex-build".into(),
+                driver: Driver::Codex,
+                display_name: "Build Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+        ]);
+        let draft = snapshot.new_thread_default_draft();
+        assert_eq!(draft.instance_id, "codex-build");
     }
 
     #[test]

@@ -2,8 +2,8 @@
 use super::{
     ProjectOverridesHeader, ProjectSettingKey, ResolvedSettings, SettingId, SettingSource,
     SettingValue, SettingsRow, SettingsScope, SettingsSection, SettingsView, agent, auto_settle,
-    behavior, beta, follow_ups, maintenance, new_threads, notifications, patch, source_control,
-    storage, update, usage_limits,
+    behavior, beta, capture, follow_ups, maintenance, new_threads, notifications, patch,
+    source_control, storage, update, usage_limits,
 };
 use crate::{
     models::HostSettings,
@@ -39,7 +39,7 @@ pub(super) struct Section {
     pub inherit: fn(SettingId) -> Option<ProjectSettingKey>,
 }
 
-static SECTIONS: [Section; 11] = [
+static SECTIONS: [Section; 12] = [
     usage_limits::SECTION,
     auto_settle::SECTION,
     follow_ups::SECTION,
@@ -49,6 +49,7 @@ static SECTIONS: [Section; 11] = [
     source_control::SECTION,
     storage::SECTION,
     beta::SECTION,
+    capture::SECTION,
     new_threads::SECTION,
     notifications::SECTION,
 ];
@@ -189,6 +190,19 @@ mod tests {
                 ("behavior".into(), vec![SettingId::TimeFormat]),
                 ("beta".into(), vec![SettingId::WorkingSection]),
                 (
+                    "capture".into(),
+                    vec![
+                        SettingId::LoadBalancing,
+                        SettingId::SnapshotCapture,
+                        SettingId::SnapshotIncludeAccessibility,
+                        SettingId::SnapshotShortcut,
+                        SettingId::SnapshotPlaySound,
+                        SettingId::SnapshotSound,
+                        SettingId::SnapshotFlash,
+                        SettingId::SnapshotAnimations,
+                    ]
+                ),
+                (
                     "new-threads".into(),
                     vec![SettingId::DefaultModel, SettingId::DefaultPermissions]
                 ),
@@ -279,6 +293,19 @@ mod tests {
                     ]
                 ),
                 ("beta".into(), vec![SettingId::WorkingSection]),
+                (
+                    "capture".into(),
+                    vec![
+                        SettingId::LoadBalancing,
+                        SettingId::SnapshotCapture,
+                        SettingId::SnapshotIncludeAccessibility,
+                        SettingId::SnapshotShortcut,
+                        SettingId::SnapshotPlaySound,
+                        SettingId::SnapshotSound,
+                        SettingId::SnapshotFlash,
+                        SettingId::SnapshotAnimations,
+                    ]
+                ),
                 (
                     "new-threads".into(),
                     vec![

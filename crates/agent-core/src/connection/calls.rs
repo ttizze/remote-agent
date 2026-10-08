@@ -498,7 +498,10 @@ impl Owner {
                         })
                         .collect();
                 }
-                self.state.host_settings = Some(settings)
+                self.state.host_settings = Some(settings);
+                if matches!(call, Call::UpdateSettings(_)) {
+                    self.job(Call::ListProviders(m::Empty {}), None, None);
+                }
             }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::SessionScan(scan) => {

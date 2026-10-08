@@ -17,6 +17,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputState},
+        switch::Switch,
         v_flex,
     },
     prelude::FluentBuilder,
@@ -159,7 +160,10 @@ impl Desktop {
             .text_color(color("textMuted"))
             .tooltip("Refresh provider status")
             .accessibility_label("Refresh provider status")
-            .on_click(cx.listener(|view, _, _, _| view.perform(Intent::LoadAccounts)));
+            .on_click(cx.listener(|view, _, _, _| {
+                view.perform(Intent::LoadAccounts);
+                view.perform(Intent::LoadProviders);
+            }));
         let card = h_flex()
             .items_start()
             .rounded(px(14.))
@@ -197,9 +201,65 @@ impl Desktop {
                             .child(refresh),
                     )
                     .child(card)
+                    .child(self.render_routing_settings(cx))
                     .into_any_element(),
             ],
         )
+    }
+
+    /// The routing weights are device-local, while the provider instance and
+    /// custom model catalogue come from the connected Host.
+    fn render_routing_settings(&self, cx: &mut Context<Desktop>) -> AnyElement {
+        let providers = self.snapshot.providers.as_deref().unwrap_or(&[]);
+        let enabled = self.snapshot.preferences.load_balancing_enabled;
+        let rows = providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let id = provider.instance.clone();
+                let weight = self
+                    .snapshot
+                    .preferences
+                    .load_balancing_weights
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(100);
+                let title = provider.display_name.clone();
+                let detail = format!(
+                    "{} model{} · weight {}",
+                    provider.models.len(),
+                    if provider.models.len() == 1 { "" } else { "s" },
+                    weight
+                );
+                Row::new(format!("route-{index}"))
+                    .description(detail)
+                    .control(
+                        Switch::new(SharedString::from(format!("route-switch-{id}")))
+                            .checked(enabled && weight > 0)
+                            .accessibility_label(format!("Use {} for load balancing", title))
+                            .on_click(cx.listener(move |view, checked: &bool, _, _| {
+                                view.perform(Intent::SetLoadBalancingWeight {
+                                    instance_id: id.clone(),
+                                    weight: if *checked { 100 } else { 0 },
+                                });
+                            })),
+                    )
+                    .render()
+            })
+            .collect::<Vec<_>>();
+        let mut rows = rows;
+        if rows.is_empty() {
+            rows.push(notice("Provider instances are still loading.").into_any_element());
+        }
+        v_flex()
+            .gap(px(8.))
+            .child(section(
+                Some("Load balancing".into()),
+                Some("Choose which ready provider instances receive new threads. Enable routing in General settings.".into()),
+                None,
+                rows,
+            ))
+            .into_any_element()
     }
 
     fn render_provider(

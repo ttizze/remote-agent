@@ -280,6 +280,8 @@ impl ClaudeResources {
         crate::claude::control::ClaudeProgram {
             program: self.program.clone(),
             config_home: self.native_home.clone(),
+            environment: Default::default(),
+            launch_args: vec![],
         }
     }
     pub async fn credentials_home(&self) -> Result<PathBuf, Failure> {

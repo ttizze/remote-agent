@@ -202,6 +202,270 @@ pub struct ProviderInstance {
     pub models: Vec<Model>,
 }
 
+/// Host-owned configuration for one provider instance. The live provider
+/// catalogue is still reported by [`ProviderInstance`]; this value contains
+/// the settings that determine how the instance is launched and the models
+/// the user adds to that catalogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProviderInstanceConfig {
+    pub driver: agent_domain::Driver,
+    #[serde(deserialize_with = "trimmed")]
+    pub display_name: String,
+    #[serde(deserialize_with = "trimmed")]
+    pub accent_color: Option<String>,
+    pub enabled: bool,
+    /// A provider executable override. An absent value uses the Host's
+    /// detected executable for the driver.
+    #[serde(deserialize_with = "trimmed")]
+    pub binary_path: Option<String>,
+    /// Provider state/configuration directory override.
+    #[serde(deserialize_with = "trimmed")]
+    pub home_path: Option<String>,
+    /// Environment values owned by this provider instance.
+    pub environment: std::collections::BTreeMap<String, String>,
+    /// Extra provider CLI arguments appended to the Host's launch arguments.
+    pub launch_args: Vec<String>,
+    /// Models not returned by the provider's live catalogue.
+    pub custom_models: Vec<ProviderCustomModel>,
+}
+impl Default for ProviderInstanceConfig {
+    fn default() -> Self {
+        Self {
+            driver: agent_domain::Driver::Codex,
+            display_name: String::new(),
+            accent_color: None,
+            enabled: true,
+            binary_path: None,
+            home_path: None,
+            environment: Default::default(),
+            launch_args: vec![],
+            custom_models: vec![],
+        }
+    }
+}
+
+impl ProviderInstanceConfig {
+    fn validate(&self, instance: &str) -> Result<(), String> {
+        let raw_instance = instance;
+        let instance = raw_instance.trim();
+        if raw_instance != instance {
+            return Err("provider instance ids must not have surrounding whitespace".into());
+        }
+        if instance.is_empty()
+            || instance.len() > 64
+            || !instance.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphanumeric() || (index > 0 && (byte == b'_' || byte == b'-'))
+            })
+        {
+            return Err(
+                "provider instance ids must start with a letter and use letters, numbers, '-' or '_'".into(),
+            );
+        }
+        if !instance.as_bytes()[0].is_ascii_alphabetic() {
+            return Err("provider instance ids must start with a letter".into());
+        }
+        if (instance == "codex" && self.driver != agent_domain::Driver::Codex)
+            || (instance == "claude" && self.driver != agent_domain::Driver::Claude)
+        {
+            return Err(format!(
+                "built-in provider instance {instance} has the wrong driver"
+            ));
+        }
+        if !self.display_name.trim().is_empty() && self.display_name.chars().count() > 128 {
+            return Err("provider instance names must be at most 128 characters".into());
+        }
+        if let Some(color) = &self.accent_color
+            && !(color.len() == 7
+                && color.starts_with('#')
+                && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err("provider accent colors must be #rrggbb".into());
+        }
+        if self
+            .binary_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err("provider executable paths must not be empty".into());
+        }
+        if self
+            .home_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err("provider home paths must not be empty".into());
+        }
+        for name in self.environment.keys() {
+            if name.is_empty()
+                || name.len() > 128
+                || !name.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_alphanumeric() || (index > 0 && byte == b'_')
+                })
+                || !(name.as_bytes()[0].is_ascii_alphabetic() || name.as_bytes()[0] == b'_')
+            {
+                return Err(format!(
+                    "invalid provider environment variable name: {name}"
+                ));
+            }
+        }
+        let mut slugs = std::collections::BTreeSet::new();
+        for model in &self.custom_models {
+            if model.slug.trim().is_empty() || model.name.trim().is_empty() {
+                return Err("custom provider models need a slug and name".into());
+            }
+            if !slugs.insert(model.slug.trim().to_owned()) {
+                return Err(format!(
+                    "custom provider model {} is duplicated",
+                    model.slug
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A model descriptor saved with a provider instance. Defaults keep the
+/// settings document small while the Host expands it into the wire `Model`
+/// catalogue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderCustomModel {
+    pub slug: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub badge: Option<String>,
+    pub is_default: bool,
+    pub is_legacy: bool,
+    pub option_descriptors: Vec<agent_domain::OptionDescriptor>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Serialize for ProviderCustomModel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.name == self.slug
+            && self.aliases.is_empty()
+            && self.badge.is_none()
+            && !self.is_default
+            && !self.is_legacy
+            && self.option_descriptors.is_empty()
+        {
+            return serializer.serialize_str(&self.slug);
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fields<'a> {
+            slug: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<&'a str>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            aliases: &'a Vec<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            badge: &'a Option<String>,
+            #[serde(skip_serializing_if = "is_false")]
+            is_default: bool,
+            #[serde(skip_serializing_if = "is_false")]
+            is_legacy: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            capabilities: Option<ProviderCustomModelCapabilities<'a>>,
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ProviderCustomModelCapabilities<'a> {
+            option_descriptors: &'a Vec<agent_domain::OptionDescriptor>,
+        }
+        Fields {
+            slug: &self.slug,
+            name: (self.name != self.slug).then_some(&self.name),
+            aliases: &self.aliases,
+            badge: &self.badge,
+            is_default: self.is_default,
+            is_legacy: self.is_legacy,
+            capabilities: (!self.option_descriptors.is_empty()).then_some(
+                ProviderCustomModelCapabilities {
+                    option_descriptors: &self.option_descriptors,
+                },
+            ),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ProviderCustomModelFields {
+    #[serde(deserialize_with = "trimmed")]
+    slug: String,
+    #[serde(deserialize_with = "trimmed")]
+    name: String,
+    aliases: Vec<String>,
+    badge: Option<String>,
+    is_default: bool,
+    is_legacy: bool,
+    option_descriptors: Vec<agent_domain::OptionDescriptor>,
+    capabilities: Option<ProviderCustomModelCapabilities>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ProviderCustomModelCapabilities {
+    option_descriptors: Vec<agent_domain::OptionDescriptor>,
+}
+impl Default for ProviderCustomModelFields {
+    fn default() -> Self {
+        Self {
+            slug: String::new(),
+            name: String::new(),
+            aliases: vec![],
+            badge: None,
+            is_default: false,
+            is_legacy: false,
+            option_descriptors: vec![],
+            capabilities: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderCustomModel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Slug(String),
+            Fields(ProviderCustomModelFields),
+        }
+        Ok(match Input::deserialize(deserializer)? {
+            Input::Slug(slug) => Self {
+                name: slug.clone(),
+                slug,
+                ..Default::default()
+            },
+            Input::Fields(fields) => Self {
+                name: if fields.name.is_empty() {
+                    fields.slug.clone()
+                } else {
+                    fields.name
+                },
+                slug: fields.slug,
+                aliases: fields.aliases,
+                badge: fields.badge,
+                is_default: fields.is_default,
+                is_legacy: fields.is_legacy,
+                option_descriptors: if fields.option_descriptors.is_empty() {
+                    fields
+                        .capabilities
+                        .map(|capabilities| capabilities.option_descriptors)
+                        .unwrap_or_default()
+                } else {
+                    fields.option_descriptors
+                },
+            },
+        })
+    }
+}
+
 /// One model of a provider instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -901,6 +1165,11 @@ pub struct HostSettings {
     /// last chosen on the device.
     pub pull_request_merge_method: Option<PullRequestMergeMethod>,
     pub browser: BrowserDefaults,
+    /// Configured provider instances, keyed by the instance id used in model
+    /// selections and runtime launches. The built-in instances are used when
+    /// a key is absent; entries here override their launch and catalogue
+    /// settings or add another instance for the same driver.
+    pub provider_instances: std::collections::BTreeMap<String, ProviderInstanceConfig>,
     pub project_overrides: std::collections::BTreeMap<String, ProjectSettingsOverrides>,
 }
 impl Default for HostSettings {
@@ -933,6 +1202,7 @@ impl Default for HostSettings {
             source_control_writer_model_selection: None,
             pull_request_merge_method: None,
             browser: BrowserDefaults::default(),
+            provider_instances: Default::default(),
             project_overrides: Default::default(),
         }
     }
@@ -971,6 +1241,10 @@ pub struct HostSettingsPatch {
     pub source_control_writer_model_selection: Option<Nullable<agent_domain::ModelSelection>>,
     pub pull_request_merge_method: Option<Nullable<PullRequestMergeMethod>>,
     pub browser: Option<BrowserDefaultsPatch>,
+    /// Replaces the configured provider instance map. The Host validates the
+    /// complete map before persisting it so removing an instance cannot leave
+    /// a half-updated launch configuration.
+    pub provider_instances: Option<std::collections::BTreeMap<String, ProviderInstanceConfig>>,
     /// Each entry edits only the supplied project fields; `None` removes all overrides.
     pub project_overrides:
         std::collections::BTreeMap<String, Option<ProjectSettingsOverridesPatch>>,
@@ -1018,6 +1292,7 @@ impl HostSettings {
             source_control_writer_model_selection,
             pull_request_merge_method,
             browser,
+            provider_instances,
             project_overrides,
         } = patch.clone();
         if let Some(patch) = storage_cleanup {
@@ -1092,6 +1367,7 @@ impl HostSettings {
         if let Some(patch) = browser {
             next.browser = next.browser.patched(&patch);
         }
+        set(&mut next.provider_instances, provider_instances);
         for (project, overrides) in project_overrides {
             match overrides {
                 Some(patch) => {
@@ -1136,6 +1412,9 @@ impl HostSettings {
         retention(self.storage_cleanup.logs_after_days)?;
         cleanup(self.worktree_cleanup.as_ref())?;
         self.browser.validate()?;
+        for (instance, config) in &self.provider_instances {
+            config.validate(instance)?;
+        }
         self.project_overrides.values().try_for_each(|project| {
             project.auto_settle.as_ref().map_or(Ok(()), days)?;
             cleanup(project.worktree_cleanup.as_ref())
@@ -1660,6 +1939,156 @@ mod settings_tests {
             ..Default::default()
         });
         assert_eq!(balanced.background_activity, BackgroundActivity::default());
+    }
+
+    #[test]
+    fn provider_instance_maps_replace_atomically_and_validate_models() {
+        let decoded = decode(json!({
+            "providerInstances": {
+                "build": {
+                    "driver": "codex",
+                    "customModels": ["bare-model", {"slug": "build-model", "name": "Build model"}],
+                },
+            },
+        }));
+        assert_eq!(
+            decoded.provider_instances["build"].custom_models[0].slug,
+            "bare-model"
+        );
+        assert_eq!(
+            decoded.provider_instances["build"].custom_models[1].slug,
+            "build-model"
+        );
+        assert_eq!(
+            decoded.provider_instances["build"].custom_models[0].name,
+            "bare-model"
+        );
+        assert!(
+            decoded.provider_instances["build"].custom_models[1]
+                .aliases
+                .is_empty()
+        );
+        let capabilities = decode(json!({
+            "providerInstances": {
+                "capabilities": {
+                    "driver": "codex",
+                    "customModels": [{
+                        "slug": "reasoning",
+                        "capabilities": {
+                            "optionDescriptors": [{
+                            "Select": {
+                                    "id": "effort",
+                                    "label": "Reasoning",
+                                    "description": null,
+                                    "options": [],
+                                    "currentValue": null,
+                                    "promptInjectedValues": []
+                                }
+                            }
+                            ]
+                        }
+                    }]
+                }
+            }
+        }));
+        assert_eq!(
+            capabilities.provider_instances["capabilities"].custom_models[0]
+                .option_descriptors
+                .len(),
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded.provider_instances["build"].custom_models).unwrap(),
+            json!([
+                "bare-model",
+                {"slug": "build-model", "name": "Build model"}
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(&capabilities.provider_instances["capabilities"].custom_models)
+                .unwrap()[0]["capabilities"]["optionDescriptors"][0]["Select"]["id"],
+            "effort"
+        );
+        let custom = ProviderInstanceConfig {
+            driver: agent_domain::Driver::Codex,
+            display_name: "Build Codex".into(),
+            binary_path: Some(" /opt/codex ".into()),
+            environment: std::collections::BTreeMap::from([(
+                "PROVIDER_MODE".into(),
+                "work".into(),
+            )]),
+            custom_models: vec![ProviderCustomModel {
+                slug: "build-model".into(),
+                name: "Build model".into(),
+                aliases: vec![],
+                badge: Some("custom".into()),
+                is_default: false,
+                is_legacy: false,
+                option_descriptors: vec![],
+            }],
+            ..Default::default()
+        };
+        let settings = HostSettings::default().patched(&HostSettingsPatch {
+            provider_instances: Some([(String::from("build"), custom.clone())].into()),
+            ..Default::default()
+        });
+        assert_eq!(settings.provider_instances.get("build"), Some(&custom));
+        assert!(settings.provider_instances.get("codex").is_none());
+        assert!(settings.validate().is_ok());
+        assert_eq!(
+            settings.provider_instances["build"].environment["PROVIDER_MODE"],
+            "work"
+        );
+        let invalid_environment = HostSettings::default().patched(&HostSettingsPatch {
+            provider_instances: Some(
+                [(
+                    String::from("build"),
+                    ProviderInstanceConfig {
+                        environment: std::collections::BTreeMap::from([(
+                            "bad-name".into(),
+                            "x".into(),
+                        )]),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        assert!(invalid_environment.validate().is_err());
+        let duplicate = HostSettings::default().patched(&HostSettingsPatch {
+            provider_instances: Some(
+                [(
+                    String::from("build"),
+                    ProviderInstanceConfig {
+                        custom_models: vec![
+                            ProviderCustomModel {
+                                slug: "same".into(),
+                                name: "One".into(),
+                                aliases: vec![],
+                                badge: None,
+                                is_default: false,
+                                is_legacy: false,
+                                option_descriptors: vec![],
+                            },
+                            ProviderCustomModel {
+                                slug: "same".into(),
+                                name: "Two".into(),
+                                aliases: vec![],
+                                badge: None,
+                                is_default: false,
+                                is_legacy: false,
+                                option_descriptors: vec![],
+                            },
+                        ],
+                        ..custom
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        assert!(duplicate.validate().is_err());
     }
 }
 

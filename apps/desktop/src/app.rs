@@ -37,8 +37,7 @@ use agent_core::{
 use agent_protocol::models::RemoteHost;
 use gpui_kit::{
     component::{
-        Sizable, WindowExt,
-        h_flex,
+        Sizable, WindowExt, h_flex,
         input::{Input, InputEvent, InputState},
         menu::PopupMenuItem,
         notification::Notification,
@@ -133,6 +132,10 @@ pub(crate) struct Desktop {
     pub(crate) menus: menus::MenuState,
     command_palette_query: Entity<InputState>,
     command_palette_open: bool,
+    /// Number of Shift key presses in the current modifier pair. GPUI exposes
+    /// modifier state but not left/right identity, so the desktop surface
+    /// keeps this small edge-triggered latch for the both-Shift shortcut.
+    snapshot_shift_presses: u8,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
     /// Decoded project icons, by content hash.
@@ -244,6 +247,7 @@ impl Desktop {
             menus,
             command_palette_query,
             command_palette_open: false,
+            snapshot_shift_presses: 0,
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
             project_icons: Default::default(),
@@ -606,6 +610,29 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> bool {
         let keystroke = &event.keystroke;
+        let capture = self.snapshot.preferences.snapshot_capture.clone();
+        if capture.shortcut == agent_core::view::snapshot_capture::SnapshotShortcut::BothShiftKeys
+            && keystroke.key.eq_ignore_ascii_case("shift")
+        {
+            self.snapshot_shift_presses = self.snapshot_shift_presses.saturating_add(1);
+        } else if !keystroke.modifiers.shift {
+            self.snapshot_shift_presses = 0;
+        }
+        if capture.enabled
+            && agent_core::view::snapshot_capture::shortcut_matches(
+                capture.shortcut,
+                &keystroke.key,
+                keystroke.modifiers.shift,
+                keystroke.modifiers.platform,
+                keystroke.modifiers.control,
+                self.snapshot_shift_presses >= 2,
+            )
+            && let Some(draft_key) = self.composer_attachment_target()
+        {
+            self.capture_snapshot(draft_key);
+            self.snapshot_shift_presses = 0;
+            return true;
+        }
         if keystroke.key == "k" && (keystroke.modifiers.platform || keystroke.modifiers.control) {
             self.open_command_palette(window, cx);
             return true;

@@ -6,6 +6,7 @@ use super::{
     resources::{ClaudeResources, CodexResources},
 };
 use crate::ProjectStore;
+use crate::claude::control::ClaudeProgram;
 use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
     SharedResources, SupervisedSpawner, tools::ModelCatalog,
@@ -22,7 +23,7 @@ use codex_app_server::CodexAppServer;
 use futures_util::future::BoxFuture;
 use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -261,6 +262,7 @@ impl HostRpcService {
     /// providers are enabled and before `start`.
     pub async fn enable_conversation(&self, settings: ConversationSettings) -> anyhow::Result<()> {
         let resources = &self.inner.resources;
+        resources.shared.worktrees.host_settings(None).await?;
         let codex = codex_app_server::resolve_executable(&settings.codex).ok();
         let claude = resources.claude.get().map(|claude| {
             (
@@ -281,6 +283,33 @@ impl HostRpcService {
                 driver: Driver::Claude,
                 instance: "claude".into(),
                 path: program.config_home.clone(),
+            });
+        }
+        for (instance, config) in resources
+            .shared
+            .worktrees
+            .latest_host_settings()
+            .provider_instances
+        {
+            if !config.enabled {
+                continue;
+            }
+            let Some(path) = config
+                .home_path
+                .map(|path| crate::projects::expand_home(&path))
+            else {
+                continue;
+            };
+            if homes
+                .iter()
+                .any(|home| home.instance == instance && home.path == path)
+            {
+                continue;
+            }
+            homes.push(ImportHome {
+                driver: config.driver,
+                instance,
+                path,
             });
         }
         let mut runtime = RuntimeConfig::new(settings.database.clone());
@@ -689,6 +718,9 @@ impl HostRpcService {
                     if changed && let Ok(conversation) = self.conversation() {
                         conversation.settings_changed();
                     }
+                    if changed {
+                        resources.commands.clear();
+                    }
                     settings.into()
                 }
                 Call::UpsertKeybinding(params) => (resources
@@ -1047,8 +1079,35 @@ impl HostRpcService {
             slash_commands_pending: false,
             skills: vec![],
         };
-        match params.instance.as_str() {
-            "codex" => {
+        let configured = resources
+            .shared
+            .worktrees
+            .latest_host_settings()
+            .provider_instances
+            .get(&params.instance)
+            .cloned();
+        if configured.as_ref().is_some_and(|config| !config.enabled) {
+            return Err(Failure::new(
+                "provider_unavailable",
+                format!("provider instance {} is disabled", params.instance),
+            ));
+        }
+        let driver = configured
+            .as_ref()
+            .map(|config| config.driver)
+            .or_else(|| match params.instance.as_str() {
+                "codex" => Some(Driver::Codex),
+                "claude" => Some(Driver::Claude),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                Failure::new(
+                    "provider_unavailable",
+                    format!("unknown provider instance {}", params.instance),
+                )
+            })?;
+        match driver {
+            Driver::Codex => {
                 let shares_tokens =
                     crate::conversation::CodexCredentials::shares_tokens(resources.codex.as_ref())
                         .await;
@@ -1071,12 +1130,64 @@ impl HostRpcService {
                     }
                 }
             }
-            "claude" => {
-                let claude = self.claude()?;
-                scan.skills = crate::claude::skills::discover(&claude.native_home, Some(&cwd));
-                let initialized = match claude.credentials_home().await {
-                    Ok(home) => claude.program().query_control(&home, &cwd, None).await.ok(),
-                    Err(_) => None,
+            Driver::Claude => {
+                let configured_home = configured
+                    .as_ref()
+                    .and_then(|config| config.home_path.as_deref())
+                    .map(crate::projects::expand_home);
+                let configured_program = configured
+                    .as_ref()
+                    .and_then(|config| config.binary_path.as_deref())
+                    .map(crate::projects::expand_home);
+                let launch_args = configured
+                    .as_ref()
+                    .map_or_else(Vec::new, |config| config.launch_args.clone());
+                let (program, credentials_home) = match self.inner.resources.claude.get() {
+                    Some(claude) => {
+                        let base = claude.program();
+                        let program = ClaudeProgram {
+                            program: configured_program.unwrap_or_else(|| base.program.clone()),
+                            config_home: configured_home
+                                .clone()
+                                .unwrap_or_else(|| base.config_home.clone()),
+                            environment: configured
+                                .as_ref()
+                                .map_or_else(BTreeMap::new, |config| config.environment.clone()),
+                            launch_args: launch_args.clone(),
+                        };
+                        let home = match configured_home {
+                            Some(home) => Some(home),
+                            None => claude.credentials_home().await.ok(),
+                        };
+                        (Some(program), home)
+                    }
+                    None => configured_program
+                        .zip(configured_home.clone())
+                        .map(|(program, home)| {
+                            (
+                                Some(ClaudeProgram {
+                                    program,
+                                    config_home: home.clone(),
+                                    environment: configured
+                                        .as_ref()
+                                        .map_or_else(BTreeMap::new, |config| {
+                                            config.environment.clone()
+                                        }),
+                                    launch_args,
+                                }),
+                                Some(home),
+                            )
+                        })
+                        .unwrap_or((None, None)),
+                };
+                if let Some(program) = &program {
+                    scan.skills = crate::claude::skills::discover(&program.config_home, Some(&cwd));
+                }
+                let initialized = match (program, credentials_home) {
+                    (Some(program), Some(home)) => {
+                        program.query_control(&home, &cwd, None).await.ok()
+                    }
+                    _ => None,
                 };
                 match initialized {
                     Some(initialized) => {
@@ -1088,12 +1199,6 @@ impl HostRpcService {
                     }
                 }
             }
-            other => {
-                return Err(Failure::new(
-                    "provider_unavailable",
-                    format!("unknown provider instance {other}"),
-                ));
-            }
         }
         Ok(resources.commands.put(scan))
     }
@@ -1101,11 +1206,8 @@ impl HostRpcService {
     async fn providers(&self) -> Vec<agent_protocol::models::ProviderInstance> {
         use agent_protocol::models::{ProviderInstance, ProviderStatus};
         let resources = &self.inner.resources;
-        let check_provider_updates = resources
-            .shared
-            .worktrees
-            .latest_host_settings()
-            .enable_provider_update_checks;
+        let settings = resources.shared.worktrees.latest_host_settings();
+        let check_provider_updates = settings.enable_provider_update_checks;
         let instance = |driver: Driver, name: &str| ProviderInstance {
             instance: name.to_lowercase(),
             driver,
@@ -1166,7 +1268,77 @@ impl HostRpcService {
             .into_iter()
             .map(super::resources::wire_model)
             .collect();
-        vec![codex, claude]
+        let mut builtins = std::collections::BTreeMap::from([
+            (codex.instance.clone(), codex),
+            (claude.instance.clone(), claude),
+        ]);
+        let mut custom = Vec::new();
+        for (id, config) in settings.provider_instances {
+            let Some(base) = builtins
+                .get(&match config.driver {
+                    Driver::Codex => "codex",
+                    Driver::Claude => "claude",
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            let mut provider = if let Some(existing) = builtins.remove(&id) {
+                existing
+            } else {
+                let name = if config.display_name.trim().is_empty() {
+                    base.display_name.as_str()
+                } else {
+                    config.display_name.as_str()
+                };
+                let mut provider = instance(config.driver, &id);
+                provider.display_name = name.into();
+                provider.version = base.version.clone();
+                provider.status = base.status;
+                provider.message = base.message.clone();
+                provider.unavailable_reason = base.unavailable_reason.clone();
+                provider.models = base.models.clone();
+                provider
+            };
+            provider.display_name = if config.display_name.trim().is_empty() {
+                base.display_name.clone()
+            } else {
+                config.display_name.clone()
+            };
+            provider.accent_color = config.accent_color.clone();
+            provider.enabled = config.enabled;
+            if !config.enabled {
+                provider.status = ProviderStatus::Disabled;
+                provider.message = Some("This provider instance is disabled.".into());
+            } else if let Some(path) = config.binary_path.as_deref() {
+                let path = crate::projects::expand_home(path);
+                let available = provider_executable_available(&path);
+                if !available {
+                    provider.installed = false;
+                    provider.status = ProviderStatus::Error;
+                    provider.message = Some(format!(
+                        "Provider executable was not found: {}",
+                        path.display()
+                    ));
+                } else {
+                    provider.installed = true;
+                    provider.status = ProviderStatus::Ready;
+                    provider.message = None;
+                }
+            }
+            merge_custom_models(&mut provider.models, config.custom_models);
+            if provider.instance != id {
+                provider.instance = id.clone();
+            }
+            if id == "codex" || id == "claude" {
+                builtins.insert(id, provider);
+            } else {
+                custom.push(provider);
+            }
+        }
+        let mut result: Vec<_> = builtins.into_values().collect();
+        result.extend(custom);
+        result
     }
     async fn worktree_list(&self) -> Result<Vec<agent_protocol::models::Worktree>, Failure> {
         let shared = &self.inner.resources.shared;
@@ -1253,4 +1425,111 @@ fn provider_key(provider: ProviderKind) -> String {
         ProviderKind::Claude => "claude",
     }
     .into()
+}
+
+/// A bare command is resolved by the child process through `PATH`; a path
+/// containing a directory must already name a file so the provider catalogue
+/// can report a useful error before a thread is launched.
+fn provider_executable_available(path: &Path) -> bool {
+    path.parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+        || path.is_file()
+}
+
+/// Applies user-defined models after the live provider catalogue. A custom
+/// model with the same slug intentionally replaces the live descriptor so a
+/// saved display name or option schema is effective in every picker.
+fn merge_custom_models(
+    models: &mut Vec<agent_protocol::models::Model>,
+    custom: Vec<agent_protocol::models::ProviderCustomModel>,
+) {
+    for model in custom {
+        let model = agent_protocol::models::Model {
+            slug: model.slug,
+            name: model.name,
+            aliases: model.aliases,
+            badge: model.badge,
+            is_default: model.is_default,
+            is_legacy: model.is_legacy,
+            option_descriptors: model.option_descriptors,
+        };
+        if model.is_default {
+            for existing in models.iter_mut() {
+                existing.is_default = false;
+            }
+        }
+        if let Some(existing) = models
+            .iter_mut()
+            .find(|existing| existing.slug == model.slug)
+        {
+            *existing = model;
+        } else {
+            models.push(model);
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_settings_tests {
+    use super::{merge_custom_models, provider_executable_available};
+    use agent_protocol::models::{Model, ProviderCustomModel};
+    use std::path::Path;
+
+    #[test]
+    fn custom_models_replace_live_slugs_and_select_one_default() {
+        let mut live = vec![
+            Model {
+                slug: "live".into(),
+                name: "Live model".into(),
+                aliases: vec![],
+                badge: None,
+                is_default: true,
+                is_legacy: false,
+                option_descriptors: vec![],
+            },
+            Model {
+                slug: "other".into(),
+                name: "Other model".into(),
+                aliases: vec![],
+                badge: None,
+                is_default: false,
+                is_legacy: false,
+                option_descriptors: vec![],
+            },
+        ];
+        merge_custom_models(
+            &mut live,
+            vec![ProviderCustomModel {
+                slug: "custom".into(),
+                name: "Custom model".into(),
+                is_default: true,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(live.len(), 3);
+        assert_eq!(live.iter().filter(|model| model.is_default).count(), 1);
+        assert_eq!(live[2].slug, "custom");
+        assert!(live[2].is_default);
+
+        merge_custom_models(
+            &mut live,
+            vec![ProviderCustomModel {
+                slug: "live".into(),
+                name: "Renamed live".into(),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(
+            live.iter().find(|model| model.slug == "live").unwrap().name,
+            "Renamed live"
+        );
+        assert_eq!(live.iter().filter(|model| model.is_default).count(), 1);
+    }
+
+    #[test]
+    fn provider_paths_use_path_lookup_only_for_bare_commands() {
+        assert!(provider_executable_available(Path::new("codex")));
+        assert!(!provider_executable_available(Path::new("./codex")));
+        assert!(!provider_executable_available(Path::new("/missing/codex")));
+    }
 }

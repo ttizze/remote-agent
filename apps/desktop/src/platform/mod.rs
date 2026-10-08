@@ -311,3 +311,83 @@ fn start_host(directory: &std::path::Path, isolated: bool) -> anyhow::Result<std
 pub(crate) fn choose_folder() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_folder()
 }
+
+/// Captures the desktop into a caller-owned path using the platform's native
+/// screen capture utility. The caller feeds the resulting file into the same
+/// attachment admission path as a picked image.
+pub(crate) fn capture_snapshot(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("screencapture");
+        command.args(["-x", "-w", "-t", "png"]).arg(path);
+        let status = command
+            .status()
+            .map_err(|error| format!("screen capture could not start: {error}"))?;
+        return status
+            .success()
+            .then_some(())
+            .ok_or_else(|| format!("screen capture exited with {status}"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = Command::new("gnome-screenshot");
+        command.args(["-w", "-f"]).arg(path);
+        let status = command
+            .status()
+            .map_err(|error| format!("screen capture could not start: {error}"))?;
+        return status
+            .success()
+            .then_some(())
+            .ok_or_else(|| format!("screen capture exited with {status}"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = path;
+        Err("Desktop screenshot capture is unavailable on this Windows build.".into())
+    }
+}
+
+/// Plays the user's selected capture feedback without making sound a
+/// prerequisite for attaching the image. Desktop environments may omit the
+/// optional player; the capture itself remains successful in that case.
+pub(crate) fn play_snapshot_sound(
+    sound: agent_core::view::snapshot_capture::SnapshotSound,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let file = match sound {
+            agent_core::view::snapshot_capture::SnapshotSound::SoftPop => {
+                "/System/Library/Sounds/Pop.aiff"
+            }
+            agent_core::view::snapshot_capture::SnapshotSound::CameraShutter => {
+                "/System/Library/Sounds/Camera Shutter.aiff"
+            }
+        };
+        Command::new("afplay")
+            .arg(file)
+            .status()
+            .map_err(|error| format!("capture sound could not start: {error}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "capture sound failed".into())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let id = match sound {
+            agent_core::view::snapshot_capture::SnapshotSound::SoftPop => "message-new-instant",
+            agent_core::view::snapshot_capture::SnapshotSound::CameraShutter => "camera-shutter",
+        };
+        Command::new("canberra-gtk-play")
+            .args(["-i", id])
+            .status()
+            .map_err(|error| format!("capture sound could not start: {error}"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "capture sound failed".into())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = sound;
+        Err("capture sound is unavailable on this Windows build".into())
+    }
+}

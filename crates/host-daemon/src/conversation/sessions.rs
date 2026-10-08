@@ -5,6 +5,7 @@ use crate::claude::control::ClaudeProgram;
 use crate::claude::skills::user_invocable_skills;
 use crate::{workspace_files::WorkspaceFiles, worktrees::Worktrees};
 use agent_domain::{Attachment, AttachmentKind, Driver, Json, ThreadId};
+use agent_protocol::models::ProviderInstanceConfig;
 use agent_providers::{
     CLAUDE_MCP_TOOL_TIMEOUT_MS, PreparedImage, WireContext, claude_append_system_prompt,
     claude_project_key, codex_additional_context, codex_developer_instructions,
@@ -85,6 +86,147 @@ pub(crate) struct ProviderHost {
 }
 
 impl ProviderHost {
+    /// Reads the owner-managed configuration for each new provider process.
+    /// Existing sessions keep their already spawned process, while the next
+    /// session observes an updated executable, home or argument list.
+    fn configured_provider(&self, instance: &str) -> Option<ProviderInstanceConfig> {
+        self.worktrees
+            .latest_host_settings()
+            .provider_instances
+            .get(instance)
+            .cloned()
+    }
+
+    fn codex_launch(
+        &self,
+        instance: &str,
+    ) -> Result<
+        (
+            PathBuf,
+            Option<PathBuf>,
+            Vec<String>,
+            BTreeMap<String, String>,
+        ),
+        String,
+    > {
+        let configured = self.configured_provider(instance);
+        if configured
+            .as_ref()
+            .is_some_and(|config| config.driver != Driver::Codex)
+        {
+            return Err(format!(
+                "Provider instance {instance} is configured for a different driver."
+            ));
+        }
+        if configured.is_none() && instance != "codex" {
+            return Err(format!("Provider instance {instance} is not configured."));
+        }
+        if configured.as_ref().is_some_and(|config| !config.enabled) {
+            return Err(format!("Provider instance {instance} is disabled."));
+        }
+        let program = configured
+            .as_ref()
+            .and_then(|config| config.binary_path.as_deref())
+            .map(crate::projects::expand_home)
+            .or_else(|| self.programs.codex.clone())
+            .ok_or_else(|| "Codex is unavailable on this Host.".to_owned())?;
+        let home = configured
+            .as_ref()
+            .and_then(|config| config.home_path.as_deref())
+            .map(crate::projects::expand_home)
+            .or_else(|| self.programs.codex_home.clone());
+        let (args, environment) = configured
+            .map(|config| (config.launch_args, config.environment))
+            .unwrap_or_default();
+        Ok((program, home, args, environment))
+    }
+
+    fn claude_launch(
+        &self,
+        instance: &str,
+    ) -> Result<(ClaudeProgram, Option<Arc<dyn ClaudeCredentials>>), String> {
+        let configured = self.configured_provider(instance);
+        if configured
+            .as_ref()
+            .is_some_and(|config| config.driver != Driver::Claude)
+        {
+            return Err(format!(
+                "Provider instance {instance} is configured for a different driver."
+            ));
+        }
+        if configured.is_none() && instance != "claude" {
+            return Err(format!("Provider instance {instance} is not configured."));
+        }
+        if configured.as_ref().is_some_and(|config| !config.enabled) {
+            return Err(format!("Provider instance {instance} is disabled."));
+        }
+        if let Some((base, credentials)) = self.programs.claude.clone() {
+            let use_base_credentials = configured
+                .as_ref()
+                .is_none_or(|config| config.home_path.is_none());
+            let program = configured
+                .as_ref()
+                .and_then(|config| config.binary_path.as_deref())
+                .map(crate::projects::expand_home)
+                .unwrap_or(base.program);
+            let config_home = configured
+                .as_ref()
+                .and_then(|config| config.home_path.as_deref())
+                .map(crate::projects::expand_home)
+                .unwrap_or(base.config_home);
+            return Ok((
+                ClaudeProgram {
+                    program,
+                    config_home,
+                    environment: configured
+                        .as_ref()
+                        .map_or_else(BTreeMap::new, |config| config.environment.clone()),
+                    launch_args: configured
+                        .as_ref()
+                        .map_or_else(Vec::new, |config| config.launch_args.clone()),
+                },
+                use_base_credentials.then_some(credentials),
+            ));
+        }
+        let config = configured.ok_or_else(|| "Claude is unavailable on this Host.".to_owned())?;
+        let program = config
+            .binary_path
+            .map(|path| crate::projects::expand_home(&path))
+            .ok_or_else(|| "Claude needs an executable path for this instance.".to_owned())?;
+        let config_home = config
+            .home_path
+            .map(|path| crate::projects::expand_home(&path))
+            .ok_or_else(|| {
+                "Claude needs a configuration directory for this instance.".to_owned()
+            })?;
+        Ok((
+            ClaudeProgram {
+                program,
+                config_home,
+                environment: config.environment,
+                launch_args: config.launch_args,
+            },
+            None,
+        ))
+    }
+
+    async fn claude_home(
+        &self,
+        program: &ClaudeProgram,
+        credentials: Option<&Arc<dyn ClaudeCredentials>>,
+    ) -> Result<PathBuf, String> {
+        match credentials {
+            Some(credentials) => credentials.claude_home().await,
+            None => Ok(program.config_home.clone()),
+        }
+    }
+
+    fn managed_codex_accounts(&self, instance: &str) -> Option<Arc<dyn CodexCredentials>> {
+        (instance == "codex")
+            .then(|| self.programs.codex_accounts.clone())
+            .flatten()
+    }
+
     /// The thread's working directory, recreating a deleted managed checkout.
     async fn cwd(&self, target: &LaunchTarget) -> Result<PathBuf, String> {
         let cwd = match &target.workspace {
@@ -136,16 +278,11 @@ impl ProviderHost {
         Ok(servers)
     }
 
-    fn claude(&self) -> Result<&(ClaudeProgram, Arc<dyn ClaudeCredentials>), String> {
-        self.programs
-            .claude
-            .as_ref()
-            .ok_or_else(|| "Claude is unavailable on this Host.".to_owned())
-    }
-
     /// `<config home>/projects/<key of the real cwd>/<session>.jsonl`.
     async fn transcript(&self, target: &LaunchTarget, session: &str) -> io::Result<PathBuf> {
-        let (claude, _) = self.claude().map_err(io::Error::other)?;
+        let (claude, _) = self
+            .claude_launch(&target.key.instance)
+            .map_err(io::Error::other)?;
         let cwd = self.cwd(target).await.map_err(io::Error::other)?;
         let real = tokio::fs::canonicalize(&cwd).await.unwrap_or(cwd);
         let key = claude_project_key(&dunce::simplified(&real).to_string_lossy());
@@ -170,29 +307,37 @@ impl SessionHost for ProviderHost {
             let cwd = self.cwd(&request.target).await.map_err(io::Error::other)?;
             let spec = match &request.claude {
                 Some(_) => {
-                    let (claude, credentials) = self.claude().map_err(io::Error::other)?;
-                    let home = credentials.claude_home().await.map_err(io::Error::other)?;
+                    let (claude, credentials) = self
+                        .claude_launch(&request.target.key.instance)
+                        .map_err(io::Error::other)?;
+                    let home = self
+                        .claude_home(&claude, credentials.as_ref())
+                        .await
+                        .map_err(io::Error::other)?;
                     claude.sdk_process(&home, &cwd).await?
                 }
                 None => {
-                    let program =
-                        self.programs.codex.clone().ok_or_else(|| {
-                            io::Error::other("Codex is unavailable on this Host.")
-                        })?;
+                    let (program, home, launch_args, environment) = self
+                        .codex_launch(&request.target.key.instance)
+                        .map_err(io::Error::other)?;
+                    let mut args = ["app-server", "--listen", "stdio://"]
+                        .map(str::to_owned)
+                        .to_vec();
+                    args.extend(launch_args);
                     ProcessSpec {
                         driver: Driver::Codex,
                         program,
-                        args: ["app-server", "--listen", "stdio://"]
-                            .map(str::to_owned)
-                            .to_vec(),
-                        env: self
-                            .programs
-                            .codex_home
-                            .iter()
-                            .map(|home| {
-                                ("CODEX_HOME".to_owned(), home.to_string_lossy().into_owned())
-                            })
-                            .collect(),
+                        args,
+                        env: {
+                            let mut environment = environment;
+                            if let Some(home) = home {
+                                environment.insert(
+                                    "CODEX_HOME".to_owned(),
+                                    home.to_string_lossy().into_owned(),
+                                );
+                            }
+                            environment
+                        },
                         clear_env: false,
                         cwd,
                     }
@@ -206,7 +351,7 @@ impl SessionHost for ProviderHost {
         Box::pin(async move {
             let cwd = self.cwd(&target).await?;
             let servers = self.mcp_servers(&target.key).await?;
-            let omit_service_tier = match &self.programs.codex_accounts {
+            let omit_service_tier = match self.managed_codex_accounts(&target.key.instance) {
                 Some(accounts) => accounts.shares_tokens().await,
                 None => false,
             };
@@ -242,7 +387,8 @@ impl SessionHost for ProviderHost {
         target: LaunchTarget,
     ) -> BoxFuture<'_, Result<ClaudeSettings, String>> {
         Box::pin(async move {
-            let config = self.claude()?.0.config_home.clone();
+            let (claude, _) = self.claude_launch(&target.key.instance)?;
+            let config = claude.config_home.clone();
             let cwd = self.cwd(&target).await?;
             // The app's tools are pre-approved, and a waiting tool may block for
             // up to an hour.
@@ -315,8 +461,13 @@ impl SessionHost for ProviderHost {
         through: Option<String>,
     ) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
-            let (claude, credentials) = self.claude().map_err(io::Error::other)?;
-            let home = credentials.claude_home().await.map_err(io::Error::other)?;
+            let (claude, credentials) = self
+                .claude_launch(&source.key.instance)
+                .map_err(io::Error::other)?;
+            let home = self
+                .claude_home(&claude, credentials.as_ref())
+                .await
+                .map_err(io::Error::other)?;
             let cwd = self.cwd(&source).await.map_err(io::Error::other)?;
             let path = self.transcript(&source, &session).await?;
             let transcript = tokio::fs::read_to_string(path).await?;
@@ -355,9 +506,9 @@ impl SessionHost for ProviderHost {
         self.tools.revoke(thread, instance);
     }
 
-    fn codex_account(&self, _instance: String) -> BoxFuture<'_, Result<Option<Value>, String>> {
+    fn codex_account(&self, instance: String) -> BoxFuture<'_, Result<Option<Value>, String>> {
         Box::pin(async move {
-            match &self.programs.codex_accounts {
+            match self.managed_codex_accounts(&instance) {
                 Some(accounts) => accounts.login().await,
                 None => Ok(None),
             }
@@ -366,11 +517,11 @@ impl SessionHost for ProviderHost {
 
     fn refresh_codex_account(
         &self,
-        _instance: String,
+        instance: String,
         previous_account: Option<String>,
     ) -> BoxFuture<'_, Result<Value, String>> {
         Box::pin(async move {
-            match &self.programs.codex_accounts {
+            match self.managed_codex_accounts(&instance) {
                 Some(accounts) => accounts.refresh(previous_account).await,
                 None => Err("Select an account before refreshing credentials".into()),
             }

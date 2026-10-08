@@ -21,6 +21,11 @@ pub(crate) struct ClaudeProgram {
     pub(crate) program: PathBuf,
     /// Settings and transcripts; credentials come from the selected account.
     pub(crate) config_home: PathBuf,
+    /// Provider-instance environment, layered into the SDK process.
+    pub(crate) environment: BTreeMap<String, String>,
+    /// Provider-specific arguments passed to the Claude CLI by the SDK bridge
+    /// and by one-shot text generation.
+    pub(crate) launch_args: Vec<String>,
 }
 
 impl ClaudeProgram {
@@ -29,6 +34,14 @@ impl ClaudeProgram {
         let mut source: BTreeMap<String, String> = std::env::vars()
             .filter(|(key, _)| !CREDENTIAL_VARIABLES.contains(&key.as_str()))
             .collect();
+        source.extend(self.environment.iter().filter_map(|(key, value)| {
+            (!CREDENTIAL_VARIABLES.contains(&key.as_str())
+                && key != "CLAUDE_CONFIG_DIR"
+                && key != "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+                && key != "CLAUDE_CODE_SDK_READS_SESSION_STATE"
+                && key != "NODE_OPTIONS")
+                .then(|| (key.clone(), value.clone()))
+        }));
         source.insert(
             "CLAUDE_CONFIG_DIR".into(),
             self.config_home.to_string_lossy().into_owned(),
@@ -51,6 +64,7 @@ impl ClaudeProgram {
         let mut command = bex_process::command(&self.program)?;
         command
             .args(args)
+            .args(&self.launch_args)
             .env_clear()
             .envs(self.environment(credentials_home))
             .current_dir(cwd)
@@ -95,5 +109,36 @@ impl ClaudeProgram {
         self.sdk_requests(credentials_home, cwd, requests)
             .await
             .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClaudeProgram;
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    #[test]
+    fn instance_environment_overrides_safe_values_and_protects_session_paths() {
+        let program = ClaudeProgram {
+            program: PathBuf::from("claude"),
+            config_home: PathBuf::from("/tmp/provider-config"),
+            environment: BTreeMap::from([
+                ("PROVIDER_MODE".into(), "work".into()),
+                ("CLAUDE_CONFIG_DIR".into(), "/tmp/ignored".into()),
+                ("NODE_OPTIONS".into(), "--require=ignored".into()),
+            ]),
+            launch_args: vec!["--verbose".into()],
+        };
+        let environment = program.environment(PathBuf::from("/tmp/provider-credentials").as_path());
+        assert_eq!(environment.get("PROVIDER_MODE"), Some(&"work".to_owned()));
+        assert_eq!(
+            environment.get("CLAUDE_CONFIG_DIR"),
+            Some(&"/tmp/provider-config".to_owned())
+        );
+        assert_eq!(
+            environment.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+            Some(&"/tmp/provider-credentials".to_owned())
+        );
+        assert!(!environment.contains_key("NODE_OPTIONS"));
     }
 }

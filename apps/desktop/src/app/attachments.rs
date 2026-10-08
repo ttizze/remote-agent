@@ -67,6 +67,21 @@ impl Desktop {
         self.stage(draft_key, move || stage_paths(paths, &existing));
     }
 
+    /// Captures the desktop through the platform bridge and sends its PNG
+    /// through the normal image admission and Host upload path.
+    pub(crate) fn capture_snapshot(&self, draft_key: String) {
+        let existing = self.draft_attachments(&draft_key);
+        let settings = self.snapshot.preferences.snapshot_capture.clone();
+        self.stage(draft_key, move || {
+            let path = staging_directory()?.join(format!("Snapshot-{}.png", uuid::Uuid::new_v4()));
+            crate::platform::capture_snapshot(&path)?;
+            if settings.play_sound {
+                let _ = crate::platform::play_snapshot_sound(settings.sound);
+            }
+            stage_paths(vec![path], &existing)
+        });
+    }
+
     /// Attaches the files or image on the clipboard; false when it holds
     /// neither, so the text pastes as usual.
     pub(crate) fn paste_attachments(&self, draft_key: String, item: ClipboardItem) -> bool {

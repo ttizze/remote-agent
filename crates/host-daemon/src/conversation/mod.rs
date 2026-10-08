@@ -101,6 +101,7 @@ impl Conversation {
                 codex: config.programs.codex.clone(),
                 codex_home: config.programs.codex_home.clone(),
                 claude: config.programs.claude.clone(),
+                worktrees: Some(resources.worktrees.clone()),
             },
         });
         let runtime = Arc::new(Runtime::open(config.runtime, io, host.clone()).await?);
