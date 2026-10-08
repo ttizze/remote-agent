@@ -175,12 +175,8 @@ final class TaskLiveActivities {
     }
 
     private func apply(_ input: Input) async {
-        logger.info("""
-        Live Activity foreground=\(input.foreground, privacy: .public) \
-        connected=\(input.state.connected, privacy: .public) remote=\(remote.count, privacy: .public)
-        """)
-        let activities = Activity<TaskActivityAttributes>.activities
-        for activity in activities where activity.activityState == .active || activity.activityState == .stale {
+        for activity in Activity<TaskActivityAttributes>.activities
+            where activity.activityState == .active || activity.activityState == .stale {
             observe(activity)
             let host = activity.attributes.hostID
             started.insert(host)
@@ -212,9 +208,8 @@ final class TaskLiveActivities {
             }
         }
         guard input.state.connected, let host = input.hostID else { return }
-        guard input.state.display.ongoing else {
+        if !input.state.display.ongoing {
             started.remove(host)
-            return
         }
         guard input.state.display.canStart,
               input.foreground, ActivityAuthorizationInfo().areActivitiesEnabled,
