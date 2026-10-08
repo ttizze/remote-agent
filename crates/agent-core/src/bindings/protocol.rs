@@ -17,11 +17,32 @@ struct RegisterLiveActivity {
     pub token: Vec<u8>,
     pub environment: PushEnvironment,
 }
+#[uniffi::remote(Enum)]
+enum TaskActivityIconKind {
+    Running,
+    Waiting,
+    Unknown,
+    Finished,
+}
 #[uniffi::remote(Record)]
-struct TaskActivitySummary {
-    pub running: u32,
-    pub waiting: u32,
-    pub unknown: u32,
+struct TaskActivityIcon {
+    pub kind: TaskActivityIconKind,
+    pub label: String,
+}
+#[uniffi::remote(Record)]
+struct TaskActivityDisplay {
+    pub current: TaskActivityView,
+    pub stale: TaskActivityView,
+    pub can_start: bool,
+    pub ongoing: bool,
+    pub urgent: bool,
+}
+#[uniffi::remote(Record)]
+struct TaskActivityView {
+    pub total: u32,
+    pub label: String,
+    pub icons: Vec<TaskActivityIcon>,
+    pub overflow: u32,
 }
 #[uniffi::remote(Record)]
 struct UnregisterLiveActivity {

@@ -7,7 +7,7 @@ use agent_protocol::{
 };
 use client::{Client, ResultKind};
 use futures_util::{StreamExt, stream};
-use registry::{Content, Registry};
+use registry::Registry;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -121,18 +121,13 @@ impl Apns {
         params: &RegisterLiveActivity,
         tasks: Vec<(SessionRef, String)>,
     ) -> Result<(), &'static str> {
-        let content = Content {
-            summary: Default::default(),
-            connected: true,
-            host_name: self.host_name.clone(),
-        };
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let timestamp = now();
         registry.seed(tasks, timestamp);
-        registry.register(owner, params, content, timestamp)?;
+        registry.register(owner, params, &self.host_name, timestamp)?;
         self.wake.notify_one();
         Ok(())
     }

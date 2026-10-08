@@ -39,6 +39,36 @@ pub(super) enum ResultKind {
     Retry,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum Rejection {
+    BadDeviceToken,
+    DeviceTokenNotForTopic,
+    Unregistered,
+    BadTopic,
+    TopicDisallowed,
+    InvalidProviderToken,
+    ExpiredProviderToken,
+    TooManyProviderTokenUpdates,
+    BadPriority,
+    PayloadTooLarge,
+    #[serde(other)]
+    Unknown,
+}
+
+fn rejection_result(status: u16, rejection: Rejection) -> ResultKind {
+    match status {
+        410 => ResultKind::Expired,
+        400 if matches!(
+            rejection,
+            Rejection::BadDeviceToken | Rejection::DeviceTokenNotForTopic
+        ) =>
+        {
+            ResultKind::Expired
+        }
+        _ => ResultKind::Retry,
+    }
+}
+
 impl Client {
     pub async fn load(path: &Path) -> Result<Option<Self>> {
         let bytes = match tokio::fs::read(path).await {
@@ -154,22 +184,41 @@ impl Client {
 
     pub async fn send(&self, token: &[u8], payload: &[u8], urgent: bool, now: u64) -> ResultKind {
         let Ok(request) = self.request(token, payload, urgent, now) else {
+            tracing::warn!(target: "bex", operation = "host.apns.delivery", "Cannot prepare a Live Activity push request");
             return ResultKind::Retry;
         };
-        let result = self.http.execute(request).await;
         // reqwest errors include the URL, which contains a secret push token.
-        let Ok(response) = result else {
-            return ResultKind::Retry;
+        let response = match self.http.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                let kind = if error.is_timeout() {
+                    "timeout"
+                } else if error.is_connect() {
+                    "connection"
+                } else {
+                    "transport"
+                };
+                tracing::warn!(target: "bex", operation = "host.apns.delivery",
+                    message = %format_args!("Live Activity push transport failed: {kind}"));
+                return ResultKind::Retry;
+            }
         };
         let status = response.status();
         if status.is_success() {
+            tracing::info!(target: "bex", operation = "host.apns.delivery", "APNs accepted a Live Activity update");
             return ResultKind::Accepted;
         }
-        if status.as_u16() == 400 || status.as_u16() == 410 {
-            return ResultKind::Expired;
+        #[derive(Deserialize)]
+        struct Failure {
+            reason: Rejection,
         }
-        tracing::warn!(target: "bex", operation = "host.apns.delivery", status = status.as_u16(), "APNs rejected a Live Activity update");
-        ResultKind::Retry
+        let rejection = response
+            .json::<Failure>()
+            .await
+            .map_or(Rejection::Unknown, |failure| failure.reason);
+        tracing::warn!(target: "bex", operation = "host.apns.delivery", error_code = u64::from(status.as_u16()),
+            message = %format_args!("APNs rejected a Live Activity update: {rejection:?}"));
+        rejection_result(status.as_u16(), rejection)
     }
 }
 fn valid_id(value: &str) -> bool {
@@ -226,6 +275,46 @@ impl Client {
 mod tests {
     use super::*;
     use ring::signature::{ECDSA_P256_SHA256_FIXED, KeyPair, UnparsedPublicKey};
+
+    #[test]
+    fn configuration_rejections_keep_device_registration_and_diagnostics_exclude_response_text() {
+        for reason in [
+            Rejection::BadTopic,
+            Rejection::TopicDisallowed,
+            Rejection::InvalidProviderToken,
+            Rejection::ExpiredProviderToken,
+            Rejection::TooManyProviderTokenUpdates,
+            Rejection::BadPriority,
+            Rejection::PayloadTooLarge,
+            Rejection::Unknown,
+        ] {
+            assert_eq!(rejection_result(400, reason), ResultKind::Retry);
+            assert_eq!(rejection_result(403, reason), ResultKind::Retry);
+        }
+        assert_eq!(
+            serde_json::from_str::<Rejection>("\"unexpected-secret-response\"").unwrap(),
+            Rejection::Unknown
+        );
+        for reason in [Rejection::BadDeviceToken, Rejection::DeviceTokenNotForTopic] {
+            assert_eq!(rejection_result(400, reason), ResultKind::Expired);
+            assert_eq!(rejection_result(403, reason), ResultKind::Retry);
+        }
+        for reason in [Rejection::Unregistered, Rejection::Unknown] {
+            assert_eq!(rejection_result(410, reason), ResultKind::Expired);
+            assert_eq!(rejection_result(400, reason), ResultKind::Retry);
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn only_confirmed_invalid_devices_expire(status in 400u16..600, reason in 0usize..4) {
+            let reasons = [Rejection::BadDeviceToken, Rejection::DeviceTokenNotForTopic,
+                Rejection::Unregistered, Rejection::Unknown];
+            let expected = if status == 410 || (status == 400 && reason < 2) { ResultKind::Expired }
+                else { ResultKind::Retry };
+            proptest::prop_assert_eq!(rejection_result(status, reasons[reason]), expected);
+        }
+    }
     #[test]
     fn push_request_uses_live_activity_topic_http2_and_the_signed_builds_environment() {
         let mut client = Client::testing();

@@ -1,7 +1,7 @@
 //! Compact task state for system surfaces. Never expose message or command bodies.
 use crate::models::task_active;
 use crate::{models::SessionStatus, session::SessionRef, state::Snapshot};
-use agent_protocol::live_activity::{TaskActivitySummary, task_phase};
+use agent_protocol::live_activity::{TaskActivityDisplay, TaskActivitySummary, task_phase};
 use std::collections::BTreeSet;
 
 struct TaskActivity {
@@ -13,8 +13,30 @@ struct TaskActivity {
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TaskActivityOverview {
-    pub summary: TaskActivitySummary,
+    pub display: TaskActivityDisplay,
     pub sessions: Vec<SessionRef>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct TaskActivityTiming {
+    pub stale_after_seconds: Option<u32>,
+    pub dismiss_after_seconds: u32,
+}
+
+/// Low-priority APNs updates may be coalesced; they cannot promise a two-minute heartbeat.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn task_activity_timing(foreground: bool, remote_updates: bool) -> TaskActivityTiming {
+    TaskActivityTiming {
+        stale_after_seconds: if remote_updates {
+            Some(10 * 60)
+        } else if foreground {
+            None
+        } else {
+            Some(30)
+        },
+        dismiss_after_seconds: 60,
+    }
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -42,7 +64,7 @@ impl Snapshot {
             }
         }
         TaskActivityOverview {
-            summary: TaskActivitySummary::from_statuses(statuses),
+            display: TaskActivitySummary::from_statuses(statuses).display(),
             sessions: sessions.into_iter().collect(),
         }
     }
@@ -106,6 +128,20 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn freshness_depends_on_the_update_channel_and_completion_remains_visible_for_a_minute() {
+        for foreground in [false, true] {
+            let remote = task_activity_timing(foreground, true);
+            assert_eq!(remote.stale_after_seconds, Some(600));
+            assert_eq!(remote.dismiss_after_seconds, 60);
+        }
+        assert_eq!(task_activity_timing(true, false).stale_after_seconds, None);
+        assert_eq!(
+            task_activity_timing(false, false).stale_after_seconds,
+            Some(30)
+        );
+        assert_eq!(task_activity_timing(false, false).dismiss_after_seconds, 60);
+    }
     use crate::{
         models::Thread,
         protocol::Notification,
@@ -118,15 +154,17 @@ mod tests {
     fn overview_retains_only_previously_active_unknown_tasks_and_clears_observed_completion() {
         let running = snapshot("running", "running");
         let overview = running.task_activity_overview(vec![]);
-        assert_eq!(overview.summary.running, 1);
+        assert_eq!(overview.display.current.label, "実行中 1件");
         let unknown = snapshot("unavailable", "completed");
-        assert!(!unknown.task_activity_overview(vec![]).summary.ongoing());
+        assert!(!unknown.task_activity_overview(vec![]).display.ongoing);
         let retained = unknown.task_activity_overview(overview.sessions);
-        assert_eq!(retained.summary.unknown, 1);
+        assert_eq!(retained.display.current.label, "状態確認中 1件");
         let absent = Snapshot::default().task_activity_overview(retained.sessions);
-        assert_eq!(absent.summary.unknown, 1);
+        assert_eq!(absent.display.current.label, "状態確認中 1件");
         let ended = snapshot("idle", "completed").task_activity_overview(absent.sessions);
-        assert!(!ended.summary.ongoing());
+        assert!(!ended.display.ongoing);
+        assert_eq!(ended.display.current.label, "すべてのタスクが終了");
+        assert_eq!(ended.display.stale, ended.display.current);
         assert!(ended.sessions.is_empty());
     }
 

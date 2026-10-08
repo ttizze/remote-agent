@@ -1041,7 +1041,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["summary"]["running"],
+            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["display"]["current"]
+                ["total"],
             1
         );
         drop(phone);
@@ -1059,7 +1060,10 @@ mod tests {
         assert!(router.execution_targets().is_empty());
         let final_payload = &apns.test_payloads(crate::apns::now() + 2)[0]["aps"];
         assert_eq!(final_payload["event"], "end");
-        assert_eq!(final_payload["content-state"]["summary"]["running"], 0);
+        assert_eq!(
+            final_payload["content-state"]["display"]["current"]["total"],
+            0
+        );
         let replacement = router.open_authenticated_session(Some("phone".into()));
         router.revoke_device("phone");
         assert!(apns.test_payloads(crate::apns::now() + 3).is_empty());

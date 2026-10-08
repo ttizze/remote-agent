@@ -73,6 +73,109 @@ impl TaskActivitySummary {
     pub fn ongoing(self) -> bool {
         self.running + self.waiting + self.unknown > 0
     }
+
+    pub fn display(self) -> TaskActivityDisplay {
+        let total = self.running + self.waiting + self.unknown;
+        let mut parts = Vec::new();
+        if self.waiting > 0 {
+            parts.push(format!("確認待ち {}件", self.waiting));
+        }
+        if self.running > 0 {
+            parts.push(format!("実行中 {}件", self.running));
+        }
+        if self.unknown > 0 {
+            parts.push(format!("状態確認中 {}件", self.unknown));
+        }
+        let mut icons = Vec::new();
+        for (count, kind, label) in [
+            (self.waiting, TaskActivityIconKind::Waiting, "確認待ち"),
+            (self.running, TaskActivityIconKind::Running, "実行中"),
+            (self.unknown, TaskActivityIconKind::Unknown, "状態確認中"),
+        ] {
+            for _ in 0..count.min(12 - icons.len() as u32) {
+                icons.push(TaskActivityIcon {
+                    kind,
+                    label: label.into(),
+                });
+            }
+        }
+        let overflow = total.saturating_sub(icons.len() as u32);
+        if total == 0 {
+            icons.push(TaskActivityIcon {
+                kind: TaskActivityIconKind::Finished,
+                label: "すべてのタスクが終了".into(),
+            });
+        }
+        let current = TaskActivityView {
+            total,
+            label: if total == 0 {
+                "すべてのタスクが終了".into()
+            } else {
+                parts.join(" · ")
+            },
+            icons,
+            overflow,
+        };
+        let stale = if total == 0 {
+            current.clone()
+        } else {
+            TaskActivityView {
+                label: "更新待ち".into(),
+                icons: current
+                    .icons
+                    .iter()
+                    .map(|_| TaskActivityIcon {
+                        kind: TaskActivityIconKind::Unknown,
+                        label: "更新待ち".into(),
+                    })
+                    .collect(),
+                ..current.clone()
+            }
+        };
+        TaskActivityDisplay {
+            current,
+            stale,
+            can_start: self.running + self.waiting > 0,
+            ongoing: total > 0,
+            urgent: total == 0 || self.waiting > 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskActivityIconKind {
+    Running,
+    Waiting,
+    Unknown,
+    Finished,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskActivityIcon {
+    pub kind: TaskActivityIconKind,
+    pub label: String,
+}
+
+/// One bounded presentation for local updates and APNs. Native views only render it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskActivityDisplay {
+    pub current: TaskActivityView,
+    pub stale: TaskActivityView,
+    pub can_start: bool,
+    pub ongoing: bool,
+    pub urgent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskActivityView {
+    pub total: u32,
+    pub label: String,
+    pub icons: Vec<TaskActivityIcon>,
+    pub overflow: u32,
 }
 
 /// Unknown state cannot certify completion; a running turn outlives its idle notification.
@@ -103,6 +206,62 @@ pub fn task_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_unknown_tasks_do_not_hide_running_or_waiting_tasks() {
+        let display = TaskActivitySummary {
+            running: 2,
+            waiting: 1,
+            unknown: 1,
+        }
+        .display();
+        assert!(display.ongoing && display.can_start && display.urgent);
+        assert_eq!(
+            display.current.label,
+            "確認待ち 1件 · 実行中 2件 · 状態確認中 1件"
+        );
+        assert_eq!(
+            display
+                .current
+                .icons
+                .iter()
+                .map(|icon| icon.kind)
+                .collect::<Vec<_>>(),
+            [
+                TaskActivityIconKind::Waiting,
+                TaskActivityIconKind::Running,
+                TaskActivityIconKind::Running,
+                TaskActivityIconKind::Unknown
+            ]
+        );
+        assert_eq!(display.stale.label, "更新待ち");
+        assert!(
+            display
+                .stale
+                .icons
+                .iter()
+                .all(|icon| icon.label == "更新待ち")
+        );
+        let uncertain = TaskActivitySummary {
+            unknown: 1,
+            ..Default::default()
+        }
+        .display();
+        assert!(uncertain.ongoing);
+        assert!(!uncertain.can_start);
+    }
+
+    #[test]
+    fn completion_remains_visible_even_if_the_system_marks_the_activity_stale() {
+        let display = TaskActivitySummary::default().display();
+        assert!(!display.ongoing && !display.can_start && display.urgent);
+        assert_eq!(display.current.label, "すべてのタスクが終了");
+        assert_eq!(
+            display.current.icons[0].kind,
+            TaskActivityIconKind::Finished
+        );
+        assert_eq!(display.current.icons[0].label, display.current.label);
+        assert_eq!(display.stale, display.current);
+    }
     #[test]
     fn a_single_waiting_or_uncertain_task_keeps_the_activity_alive() {
         for (status, ongoing) in [
@@ -153,6 +312,25 @@ mod tests {
         }
     }
     proptest::proptest! {
+        #[test]
+        fn display_is_bounded_and_accounts_for_every_task(running in 0u32..500, waiting in 0u32..500, unknown in 0u32..500) {
+            let display = TaskActivitySummary { running, waiting, unknown }.display();
+            let total = running + waiting + unknown;
+            proptest::prop_assert_eq!(display.current.total, total);
+            proptest::prop_assert_eq!(display.ongoing, total > 0);
+            proptest::prop_assert_eq!(display.can_start, running > 0 || waiting > 0);
+            proptest::prop_assert_eq!(display.urgent, waiting > 0 || total == 0);
+            proptest::prop_assert!(display.current.icons.len() <= 12);
+            proptest::prop_assert_eq!(display.current.overflow, total.saturating_sub(12));
+            proptest::prop_assert_eq!(display.stale.total, total);
+            proptest::prop_assert_eq!(display.stale.overflow, display.current.overflow);
+            if total > 0 {
+                proptest::prop_assert_eq!(display.current.icons.len() as u32 + display.current.overflow, total);
+            } else {
+                proptest::prop_assert_eq!(display.current.icons.len(), 1);
+                proptest::prop_assert_eq!(&display.current, &display.stale);
+            }
+        }
         #[test]
         fn task_summary_counts_every_ongoing_state_and_is_order_independent(states in proptest::collection::vec(0u8..7, 0..500)) {
             let names = ["running", "finishing", "waiting", "unknown", "completed", "failed", "finished"];
