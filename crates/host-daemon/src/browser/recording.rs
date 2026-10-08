@@ -267,6 +267,11 @@ async fn run_capture(
                 if frame.len() > FRAME_MAX_BYTES {
                     break Err("recording frame exceeds 4 MiB".to_owned());
                 }
+                if first_timestamp.is_none()
+                    && timestamp.is_some_and(|timestamp| timestamp.is_finite())
+                {
+                    first_timestamp = timestamp;
+                }
                 let repeats = frame_repetition_count(first_timestamp, timestamp, encoded_frames);
                 if encoded_frames.saturating_add(repeats) > MAX_ENCODED_FRAMES {
                     break Err("recording capture duration exceeds 120000ms".to_owned());
@@ -274,9 +279,6 @@ async fn run_capture(
                 let added_bytes = (frame.len() as u64).saturating_mul(repeats);
                 if encoded_input_bytes.saturating_add(added_bytes) > MAX_ENCODED_INPUT_BYTES {
                     break Err("recording encoder input exceeds its bounded limit".to_owned());
-                }
-                if first_timestamp.is_none() {
-                    first_timestamp = timestamp;
                 }
                 let mut push_error = None;
                 for _ in 0..repeats {
