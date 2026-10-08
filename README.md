@@ -131,6 +131,24 @@ running the same conversation on both Hosts at once.
 
 On Mac and iPhone, select assistant text to quote it into the draft or ask about it in a side chat. Closing an iPhone side chat restores the original conversation and draft. Mac also supports right-click Copy and Google Search, and own-message hover actions for copying or returning text to the composer. Command activity starts collapsed while running and after reopening; explicit expansion is preserved. See the [conversation display contract](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md).
 
+iPhone starts a Live Activity for running tasks on the selected PC. The Lock Screen and Dynamic Island show the task title and running, awaiting confirmation, completed, failed or interrupted state; tapping opens that task. Final state remains on the Lock Screen for one minute. Switching PCs dismisses the previous PC's activities. Live Activities must be enabled in iOS Settings.
+
+For updates while the iPhone app is suspended, enable the app's Push Notifications capability in Apple Developer and configure APNs on the Host. Put `bex-apns.json` in the Host state directory (alongside `identity.keys`):
+
+```json
+{
+  "key_id": "YOURKEYID1",
+  "team_id": "K65K9J8686",
+  "bundle_id": "com.ttizze.b-codex",
+  "key_file": "/absolute/path/outside/the/repository/AuthKey.p8",
+  "environment": "production"
+}
+```
+
+Use an APNs ES256 `.p8` authentication key with permission for this bundle ID. Keep the private key outside the repository and Nix store; restrict file access to the Host account. `key_file` may also be relative to this configuration file. Use `sandbox` with a Debug/development-signed app, or `production` with TestFlight/App Store builds. Restart the Host after configuring it, when its active tasks can be safely stopped. Invalid configuration fails startup; a missing file keeps local Live Activity updates available.
+
+Each phone registers its activity update token through the authenticated Host connection. The Host sends APNs updates directly, retains registrations after phone disconnection, replaces rotated tokens and removes registrations on device revocation, activity completion, invalid tokens or the eight-hour activity limit. APNs can update activities already started by the app; it does not start activities remotely. Running activities receive low-priority heartbeats every minute; confirmation and final results use immediate delivery. If updates stop, the activity shows **更新待ち** after two minutes. Without APNs, background content becomes stale after 30 seconds or immediately on disconnection. Actual delivery requires matching signing entitlements, APNs environment and Apple credentials.
+
 Mac and iPhone place borderless Fast, model name and reasoning-strength controls immediately before microphone and send. The model name opens a picker with separate agent and account rows and a searchable catalog. The account row shows reported weekly quota; open it to switch accounts or enter account management for add/login/confirmed sign-out. Settings reaches the same management view. Account changes refresh the catalog while preserving supported model settings, conversation text and attachments. The Host owns authentication and the per-provider account selection shared by connected clients. Current adapters support Codex and Claude; Pi and third-party connection adapters are not yet available. For Claude, open the login page and paste the returned authorization code into Bex.
 
 ### Claude Code

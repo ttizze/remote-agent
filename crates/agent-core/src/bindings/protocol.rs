@@ -1,10 +1,27 @@
 //! ABI converters for wire records; the protocol crate has no UniFFI dependency.
 
 use crate::{models::*, session::*};
+use agent_protocol::live_activity::*;
 use agent_protocol::permissions::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
 use std::collections::BTreeMap;
+#[uniffi::remote(Enum)]
+enum PushEnvironment {
+    Sandbox,
+    Production,
+}
+#[uniffi::remote(Record)]
+struct RegisterLiveActivity {
+    pub session: SessionRef,
+    pub activity_id: String,
+    pub token: Vec<u8>,
+    pub environment: PushEnvironment,
+}
+#[uniffi::remote(Record)]
+struct UnregisterLiveActivity {
+    pub activity_id: String,
+}
 #[uniffi::remote(Enum)]
 enum WorktreeStatus {
     Unmerged,

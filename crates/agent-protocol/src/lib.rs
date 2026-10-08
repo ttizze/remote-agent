@@ -6,6 +6,7 @@ pub mod error;
 pub mod execution;
 pub mod ids;
 pub mod items;
+pub mod live_activity;
 pub mod message;
 pub mod models;
 pub mod operations;

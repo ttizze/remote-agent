@@ -1,4 +1,5 @@
 //! The visible list combines wire summaries with locally observed activity.
+use crate::models::{task_active, task_title};
 use crate::{models::Project, state::Snapshot};
 use std::collections::HashSet;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -62,24 +63,11 @@ impl Snapshot {
                 .iter()
                 .filter_map(|thread| {
                     let id = thread.id.clone()?;
-                    let active =
-                        self.activity.active.get(&id).copied().unwrap_or_else(|| {
-                            thread.status == crate::models::SessionStatus::Running
-                        });
+                    let active = task_active(self.activity.active.get(&id).copied(), thread.status);
                     let unread = self.activity.unread.contains(&id);
                     Some(ThreadSummary {
                         id,
-                        title: thread
-                            .name
-                            .as_deref()
-                            .filter(|name| !name.is_empty())
-                            .or_else(|| {
-                                thread
-                                    .preview
-                                    .as_deref()
-                                    .filter(|preview| !preview.is_empty())
-                            })
-                            .unwrap_or("無題のタスク")
+                        title: task_title(thread.name.as_deref(), thread.preview.as_deref())
                             .to_owned()
                             + if thread.list_stale == Some(true) {
                                 "（保存済み・未確認）"
