@@ -1,5 +1,5 @@
 use super::view::section_heading;
-use crate::{Runtime, store_session::StoreSession};
+use crate::{Runtime, appearance, store_session::StoreSession};
 use agent_core::{
     state::{Intent, Snapshot, operations as op},
     store::Outcome,
@@ -252,7 +252,7 @@ impl Hosts {
             .when(!cards, |view| {
                 view.rounded(px(10.))
                     .border_1()
-                    .border_color(rgb(0x2b2f35))
+                    .border_color(rgb(appearance::BORDER))
                     .overflow_hidden()
             });
         for (index, remote) in std::iter::once(None)
@@ -280,13 +280,15 @@ impl Hosts {
                     view.rounded(px(12.))
                         .border_1()
                         .border_color(if selected {
-                            rgb(0x476ce0)
+                            rgb(appearance::ACCENT)
                         } else {
-                            rgb(0x303030)
+                            rgb(appearance::BORDER)
                         })
-                        .bg(rgb(0x151515))
+                        .bg(rgb(appearance::SURFACE))
                 })
-                .when(!cards, |view| view.border_b_1().border_color(rgb(0x2b2f35)))
+                .when(!cards, |view| {
+                    view.border_b_1().border_color(rgb(appearance::BORDER))
+                })
                 .child(
                     h_flex()
                         .items_center()
@@ -317,7 +319,7 @@ impl Hosts {
                                 .text_color(if selected && connected {
                                     rgb(0x88c9a0)
                                 } else {
-                                    rgb(0x949494)
+                                    rgb(appearance::MUTED)
                                 })
                                 .child(label),
                         )
@@ -347,10 +349,15 @@ impl Hosts {
                 let details = v_flex()
                     .gap_2()
                     .when(cards, |view| {
-                        view.pt_3().border_t_1().border_color(rgb(0x292929))
+                        view.pt_3()
+                            .border_t_1()
+                            .border_color(rgb(appearance::BORDER))
                     })
                     .when(!cards, |view| {
-                        view.ml_8().p_3().rounded(px(6.)).bg(rgb(0x191c20))
+                        view.ml_8()
+                            .p_3()
+                            .rounded(px(6.))
+                            .bg(rgb(appearance::RAISED))
                     })
                     .children(agent_controls.take());
                 card = card.child(details);
@@ -417,8 +424,8 @@ impl Hosts {
                 .p_4()
                 .rounded(px(12.))
                 .border_1()
-                .border_color(rgb(0x303030))
-                .bg(rgb(0x151515))
+                .border_color(rgb(appearance::BORDER))
+                .bg(rgb(appearance::SURFACE))
                 .when(!cards, |view| view.mx_4().mb_4())
                 .child(methods);
             if self.use_ssh {
@@ -429,7 +436,7 @@ impl Hosts {
                                 .aria_label("SSH接続先")
                                 .disabled(disabled),
                         )
-                        .child(div().text_xs().text_color(rgb(0x949494)).child(
+                        .child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
                             "SSHの鍵で接続でき、Bex Hostを起動済みのサーバーにつなぎます。",
                         ));
             } else {
@@ -479,8 +486,8 @@ impl Hosts {
                 .p_4()
                 .when(cards, |view| view.rounded(px(12.)).border_1())
                 .when(!cards, |view| view.border_t_1())
-                .border_color(rgb(0x2b2f35))
-                .text_color(rgb(0x737373))
+                .border_color(rgb(appearance::BORDER))
+                .text_color(rgb(appearance::MUTED))
                 .child(Icon::new(IconName::Network))
                 .child(div().flex_1().child("Bexの実行環境"))
                 .child(div().text_xs().child("今後対応")),
@@ -561,7 +568,7 @@ impl Render for Hosts {
             return body
                 .child(
                     div()
-                        .text_color(rgb(0x949ca8))
+                        .text_color(rgb(appearance::MUTED))
                         .child("このPCの接続情報を読み込めません。"),
                 )
                 .child(
@@ -610,11 +617,11 @@ impl Render for Hosts {
         if let Some((_, file)) = &self.invitation {
             body = body.child(
                 h_flex().flex_wrap().gap_5().p_4().rounded(px(10.))
-                    .border_1().border_color(rgb(0x2b2f35))
+                    .border_1().border_color(rgb(appearance::BORDER))
                     .child(img(file.path().to_path_buf()).w(px(200.)).h(px(200.)))
                     .child(v_flex().flex_1().min_w(px(200.)).gap_3()
                         .child(div().font_semibold().child("BexアプリでQRを読み取る"))
-                        .child(div().text_sm().text_color(rgb(0x949ca8))
+                        .child(div().text_sm().text_color(rgb(appearance::MUTED))
                             .child("1回限りの招待です。QRを読み取るか、招待をコピーして相手の端末に貼り付けてください。"))
                         .child(Button::new("copy-invite")
                             .label("招待をコピー")
@@ -631,7 +638,7 @@ impl Render for Hosts {
             .gap_3()
             .pt_6()
             .border_t_1()
-            .border_color(rgb(0x2b2f35))
+            .border_color(rgb(appearance::BORDER))
             .child(
                 h_flex()
                     .items_center()
@@ -644,7 +651,7 @@ impl Render for Hosts {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0x949ca8))
+                                    .text_color(rgb(appearance::MUTED))
                                     .child("このPCへアクセスできる端末を管理します。"),
                             ),
                     )
@@ -666,14 +673,14 @@ impl Render for Hosts {
             let mut list = v_flex()
                 .rounded(px(10.))
                 .border_1()
-                .border_color(rgb(0x2b2f35))
+                .border_color(rgb(appearance::BORDER))
                 .overflow_hidden();
             if status.devices.is_empty() {
                 list = list.child(
                     div()
                         .p_4()
                         .text_sm()
-                        .text_color(rgb(0x949ca8))
+                        .text_color(rgb(appearance::MUTED))
                         .child("接続を許可した端末はありません。"),
                 );
             }
@@ -685,9 +692,9 @@ impl Render for Hosts {
                         .gap_4()
                         .p_4()
                         .when(index > 0, |row| {
-                            row.border_t_1().border_color(rgb(0x2b2f35))
+                            row.border_t_1().border_color(rgb(appearance::BORDER))
                         })
-                        .child(Icon::new(IconName::Network).text_color(rgb(0x949ca8)))
+                        .child(Icon::new(IconName::Network).text_color(rgb(appearance::MUTED)))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -697,7 +704,7 @@ impl Render for Hosts {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x949ca8))
+                                        .text_color(rgb(appearance::MUTED))
                                         .text_ellipsis()
                                         .child(node.clone()),
                                 ),
@@ -724,7 +731,7 @@ impl Render for Hosts {
             devices = devices.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x949ca8))
+                    .text_color(rgb(appearance::MUTED))
                     .child("端末を読み込み中…"),
             );
         }

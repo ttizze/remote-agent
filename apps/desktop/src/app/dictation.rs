@@ -55,7 +55,7 @@ impl Desktop {
                             .flex_shrink_0()
                             .h(px(3. + level.sqrt() * 45.))
                             .rounded_full()
-                            .bg(rgb(0xececec))
+                            .bg(rgb(appearance::FOREGROUND))
                     }))
                     .into_any_element()
             } else {

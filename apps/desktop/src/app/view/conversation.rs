@@ -67,9 +67,9 @@ impl Desktop {
                     .p_3()
                     .gap_2()
                     .rounded_lg()
-                    .bg(rgb(0x303030))
+                    .bg(rgb(appearance::RAISED))
                     .border_1()
-                    .border_color(rgb(0x454545))
+                    .border_color(rgb(appearance::BORDER))
                     .shadow_md()
                     .text_sm()
                     .child(div().max_h(px(44.)).overflow_hidden().child(user.clone()))
@@ -77,7 +77,7 @@ impl Desktop {
                         div()
                             .max_h(px(66.))
                             .overflow_hidden()
-                            .text_color(rgb(0xaaaaaa))
+                            .text_color(rgb(appearance::MUTED))
                             .child(answer)
                     }))
             });
@@ -119,9 +119,9 @@ impl Desktop {
                                         .h(px(if distance == Some(0) { 2. } else { 1. }))
                                         .w(px(width))
                                         .bg(rgb(if active || distance == Some(0) {
-                                            0xeeeeee
+                                            appearance::FOREGROUND
                                         } else {
-                                            0x777777
+                                            appearance::MUTED
                                         })),
                                 ),
                             ),
@@ -315,7 +315,7 @@ impl Desktop {
                         },
                     )
                     .icon(IconName::SquareTerminal)
-                    .text_color(rgb(0xa0a0a0)),
+                    .text_color(rgb(appearance::MUTED)),
                 );
                 if expanded {
                     let output = projected.expanded_body();
@@ -328,7 +328,7 @@ impl Desktop {
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(rgb(0x999999))
+                                        .text_color(rgb(appearance::MUTED))
                                         .child("プレーンテキスト"),
                                 )
                                 .child(
@@ -344,11 +344,16 @@ impl Desktop {
                                 ),
                         )
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
-                        .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
-                            "{} {}",
-                            item.status.label(),
-                            exit_code.map(|v| format!("exit {v}")).unwrap_or_default()
-                        )));
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(appearance::MUTED))
+                                .child(format!(
+                                    "{} {}",
+                                    item.status.label(),
+                                    exit_code.map(|v| format!("exit {v}")).unwrap_or_default()
+                                )),
+                        );
                 }
                 body.into_any_element()
             }
@@ -487,11 +492,11 @@ impl Desktop {
                                 view.remeasure_item(&turn_id);
                             },
                         )
-                        .text_color(rgb(0xa0a0a0))
+                        .text_color(rgb(appearance::MUTED))
                         .into_any_element()
                     } else {
                         div()
-                            .text_color(rgb(0xa0a0a0))
+                            .text_color(rgb(appearance::MUTED))
                             .child(label.clone())
                             .into_any_element()
                     };
@@ -578,7 +583,7 @@ impl Desktop {
                             .debug_selector(|| "conversation-in-progress".into())
                             .gap_2()
                             .text_sm()
-                            .text_color(rgb(0xa0a0a0))
+                            .text_color(rgb(appearance::MUTED))
                             .child(spinner::Spinner::new().small())
                             .child(projected.progress_label(false, now)),
                     );
@@ -656,7 +661,7 @@ impl Desktop {
                 v_flex().min_w_0().gap_2().child(body).child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x999999))
+                        .text_color(rgb(appearance::MUTED))
                         .child(pending.delivery_label()),
                 ),
             )
@@ -679,7 +684,7 @@ impl Desktop {
                     .rounded_lg()
                     .overflow_hidden()
                     .border_1()
-                    .border_color(rgb(0x444444))
+                    .border_color(rgb(appearance::BORDER))
                     .debug_selector(|| "user-image-thumbnail".into())
                     .child(self.image(source, false, 80., true, cx))
             })
@@ -1052,11 +1057,13 @@ fn user_message_row(
                     .debug_selector(|| "user-message-actions".into())
                     .invisible()
                     .group_hover(group, |style| style.visible())
-                    .children(
-                        time.map(|time| {
-                            div().text_xs().text_color(rgb(0x999999)).mr_2().child(time)
-                        }),
-                    )
+                    .children(time.map(|time| {
+                        div()
+                            .text_xs()
+                            .text_color(rgb(appearance::MUTED))
+                            .mr_2()
+                            .child(time)
+                    }))
                     .child(
                         Button::new(format!("copy-{id}"))
                             .debug_selector(|| "user-message-copy".into())
@@ -1107,7 +1114,7 @@ mod tests {
 
     #[gpui::test]
     fn hovering_own_message_allows_copying_the_complete_text(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(crate::appearance::init);
         let (_, cx) = cx.add_window_view(|_, _| Message);
         cx.run_until_parked();
         let bounds = cx.debug_bounds("user-message-actions").unwrap();
@@ -1159,7 +1166,7 @@ mod rendering_tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),
