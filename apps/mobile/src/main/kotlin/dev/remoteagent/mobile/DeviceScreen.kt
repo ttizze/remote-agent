@@ -156,6 +156,12 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 val detail = view.details.firstOrNull {
                     it.hostId == session.hostId && it.deviceId == session.deviceId
                 }
+                val activeRecording = view.recordings.firstOrNull {
+                    it.threadId == threadId &&
+                        it.hostId == session.hostId &&
+                        it.deviceId == session.deviceId &&
+                        it.sessionEpoch == session.sessionEpoch
+                }
                 val foreground = view.foreground.firstOrNull {
                     it.hostId == session.hostId && it.deviceId == session.deviceId
                 }?.appId ?: detail?.foregroundApp
@@ -220,7 +226,16 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "mp4"))
                     }) { Text("Record") }
                     Button(onClick = {
-                        model.perform(Intent.StopDeviceRecording(session.hostId, session.deviceId))
+                        activeRecording?.let { recording ->
+                            model.perform(
+                                Intent.StopDeviceRecording(
+                                    session.hostId,
+                                    session.deviceId,
+                                    recording.recordingId,
+                                    recording.sessionEpoch,
+                                ),
+                            )
+                        } ?: run { model.notice = "No active device recording" }
                     }) { Text("Stop record") }
                     if (session.platform == "android") {
                         Button(onClick = {

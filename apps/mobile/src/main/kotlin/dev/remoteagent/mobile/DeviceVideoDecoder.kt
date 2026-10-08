@@ -91,6 +91,49 @@ internal class DeviceVideoIngressGate(
     }
 }
 
+internal data class DeviceResetRequest(
+    val streamKey: String,
+    val width: Int,
+    val height: Int,
+)
+
+/** Coalesces recomposition-driven decoder resets before they reach the worker queue. */
+internal class DeviceVideoResetGate {
+    private var pending: DeviceResetRequest? = null
+    private var applied: DeviceResetRequest? = null
+    private var scheduled = false
+
+    @Synchronized
+    fun request(request: DeviceResetRequest): Boolean {
+        if (pending == request || (applied == request && !scheduled)) return false
+        pending = request
+        if (scheduled) return false
+        scheduled = true
+        return true
+    }
+
+    @Synchronized
+    fun next(): DeviceResetRequest? = pending
+
+    @Synchronized
+    fun finish(request: DeviceResetRequest): Boolean {
+        applied = request
+        if (pending == request) {
+            pending = null
+            scheduled = false
+            return false
+        }
+        return true
+    }
+
+    @Synchronized
+    fun cancel() {
+        pending = null
+        applied = null
+        scheduled = false
+    }
+}
+
 /** A bounded, stateful H.264 decoder for the Host's live device transport. */
 internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private data class Frame(
@@ -116,6 +159,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     @Volatile private var closed = false
     private val pending = ArrayDeque<Frame>()
     private val ingress = DeviceVideoIngressGate()
+    private val resetGate = DeviceVideoResetGate()
 
     fun attach(textureView: TextureView) {
         if (this.textureView === textureView) return
@@ -127,18 +171,31 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
     fun reset(streamKey: String, width: Int, height: Int) {
         if (closed) return
-        ingress.reset(streamKey)
-        handler.post {
-            if (this.streamKey == streamKey && this.width == width && this.height == height) return@post
-            closeCodec()
-            this.streamKey = streamKey
-            this.width = width.coerceAtLeast(1)
-            this.height = height.coerceAtLeast(1)
-            codecDescription = null
-            needsKeyframe = true
-            ingress.forceResync()
-            lastSequence = null
-            pending.clear()
+        val request = DeviceResetRequest(
+            streamKey = streamKey,
+            width = width.coerceAtLeast(1),
+            height = height.coerceAtLeast(1),
+        )
+        // Dimensions are part of the ingress identity so a resize invalidates queued frames
+        // even when the Host keeps the same stream key.
+        ingress.reset("${request.streamKey}\u0000${request.width}x${request.height}")
+        if (!resetGate.request(request)) return
+        if (!handler.post {
+            while (!closed) {
+                val pendingReset = resetGate.next() ?: return@post
+                closeCodec()
+                this.streamKey = pendingReset.streamKey
+                this.width = pendingReset.width
+                this.height = pendingReset.height
+                codecDescription = null
+                needsKeyframe = true
+                ingress.forceResync()
+                lastSequence = null
+                pending.clear()
+                if (!resetGate.finish(pendingReset)) return@post
+            }
+        }) {
+            resetGate.cancel()
         }
     }
 
@@ -232,6 +289,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         if (closed) return
         closed = true
         ingress.close()
+        resetGate.cancel()
         textureView?.surfaceTextureListener = null
         textureView = null
         handler.post {

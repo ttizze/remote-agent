@@ -721,6 +721,8 @@ pub struct DeviceRecordingStopInput {
     pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
+    pub recording_id: u64,
+    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,6 +730,10 @@ pub struct DeviceRecordingStatus {
     pub thread_id: ThreadId,
     pub host_id: String,
     pub device_id: String,
+    /// Monotonic identity for one recording lifetime on the owning Host.
+    pub recording_id: u64,
+    /// Device session generation that supplied the recording frames.
+    pub session_epoch: String,
     pub format: DeviceRecordingFormat,
     pub file_name: String,
     pub mime_type: String,
