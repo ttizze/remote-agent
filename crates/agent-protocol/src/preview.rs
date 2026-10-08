@@ -37,7 +37,6 @@ impl Default for PreviewAppearance {
 
 /// Where links open when a client offers an in-app Preview surface.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 #[serde(rename_all = "lowercase")]
 pub enum BrowserLinkTarget {
     #[default]
@@ -768,7 +767,7 @@ pub fn normalize_preview_url(input: &str) -> Result<String, String> {
         };
         format!("{protocol}://{input}")
     };
-    let mut url = url::Url::parse(&source).map_err(|_| "preview URL is invalid".to_owned())?;
+    let url = url::Url::parse(&source).map_err(|_| "preview URL is invalid".to_owned())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("preview URL must use http or https".into());
     }

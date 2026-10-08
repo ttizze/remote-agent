@@ -67,7 +67,7 @@ impl PullRequestStore {
         links: &[PullRequestLink],
         updated_at: &str,
     ) -> Result<(), PullRequestStoreError> {
-        let mut connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         transaction.execute(
             "DELETE FROM pull_request_links WHERE thread_id = ?1",
@@ -267,7 +267,7 @@ impl PullRequestStore {
         files: &[(&str, bool)],
         updated_at: &str,
     ) -> Result<(), PullRequestStoreError> {
-        let mut connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         for (path, viewed) in files {
             transaction.execute(
