@@ -72,20 +72,23 @@ enum AppTheme {
     }
 
     static func font(_ size: CGFloat = 16, weight: Font.Weight = .regular) -> Font {
-        let resolved = switch size {
-        case 11: CGFloat(typography.microFontSize)
-        case 12: CGFloat(typography.captionFontSize)
-        case 13: CGFloat(typography.labelFontSize)
-        case 14: CGFloat(typography.footnoteFontSize)
-        case 15: CGFloat(typography.markdownH4FontSize)
-        case 16: CGFloat(typography.bodyFontSize)
-        case 18: CGFloat(typography.headlineFontSize)
-        case 21: CGFloat(typography.titleFontSize)
-        case 26: CGFloat(typography.largeTitleFontSize)
-        case 30: CGFloat(typography.displayFontSize)
-        default: size * CGFloat(typography.baseFontSize) / 16
-        }
-        return .custom(fontName(weight), size: resolved)
+        .custom(fontName(weight), size: resolvedFontSize(size))
+    }
+
+    private static func resolvedFontSize(_ size: CGFloat) -> CGFloat {
+        let sizes: [CGFloat: CGFloat] = [
+            11: CGFloat(typography.microFontSize),
+            12: CGFloat(typography.captionFontSize),
+            13: CGFloat(typography.labelFontSize),
+            14: CGFloat(typography.footnoteFontSize),
+            15: CGFloat(typography.markdownH4FontSize),
+            16: CGFloat(typography.bodyFontSize),
+            18: CGFloat(typography.headlineFontSize),
+            21: CGFloat(typography.titleFontSize),
+            26: CGFloat(typography.largeTitleFontSize),
+            30: CGFloat(typography.displayFontSize)
+        ]
+        return sizes[size] ?? size * CGFloat(typography.baseFontSize) / 16
     }
 
     static func markdownFont(_ header: UInt8?, weight: Font.Weight = .regular) -> Font {
@@ -255,13 +258,15 @@ struct MobileAppearanceState: Equatable {
     enum ColorScheme: String, CaseIterable, Equatable, Hashable, Codable {
         case system, light, dark
 
-        var label: String { rawValue.capitalized }
+        var label: String {
+            rawValue.capitalized
+        }
     }
 
     var colorScheme: ColorScheme = .system
-    var theme: String? = nil
-    var lightTheme: String? = nil
-    var darkTheme: String? = nil
+    var theme: String?
+    var lightTheme: String?
+    var darkTheme: String?
     var baseFontSize = 16
     var codeFontSize: Int?
     var terminalFontSize: Double?
@@ -280,7 +285,9 @@ struct MobileAppearanceState: Equatable {
     }
 
     func save() {
-        if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key) }
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: Self.key)
+        }
         UserDefaults.standard.set(resolvedTerminalFontSize, forKey: "terminal.fontSize")
     }
 

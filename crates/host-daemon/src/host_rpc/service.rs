@@ -1207,6 +1207,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.keybindings(cancel).await);
         }
+        if let Call::DeviceSubscribe(params) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.device_subscribe(params, cancel).await);
+        }
         if let Call::SubscribeVcsStatus(params) = call {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.vcs_status(params, cancel).await);

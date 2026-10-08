@@ -172,7 +172,7 @@ private struct WorkspaceRoot: View {
             settingsProjectId = projectId
             showingSettings = true
         }, newTask: newTask,
-                         showNewTaskDraft: showNewTaskDraft)
+        showNewTaskDraft: showNewTaskDraft)
     }
 
     @ViewBuilder

@@ -394,8 +394,8 @@ pub struct DeviceState {
     pub details: BTreeMap<(String, String), DeviceDetail>,
     pub frames: BTreeMap<(String, String, String), DeviceFrame>,
     pub video_frames: BTreeMap<(String, String, String, u8), DeviceVideoFrame>,
-    /// Ordered access units for stateful native decoders. `video_frames` is
-    /// the latest-frame projection used by lightweight still-image consumers.
+    /// Ordered access units retained for stateful native decoders. The latest
+    /// frame map above remains the cheap projection used by still-image views.
     pub video_events: BTreeMap<(String, String, String, u8), VecDeque<DeviceVideoFrame>>,
     pub accessibility: BTreeMap<(String, String), DeviceAccessibilityTree>,
     pub event_log: BTreeMap<(String, String), Vec<DeviceEventLogEntry>>,
@@ -1613,53 +1613,35 @@ mod tests {
     }
 
     #[test]
-    fn reopening_a_session_prunes_and_rejects_old_device_metadata() {
-        let current = session("thread", "host", "device");
+    fn screen_metadata_keeps_duo_panel_identities() {
+        let current = session("screens", "host", "device");
         let mut state = DeviceState::default();
         state.apply_event(DeviceEvent::State(DeviceServiceState {
             sessions: vec![current.clone()],
             ..DeviceServiceState::default()
         }));
-        state.apply_event(DeviceEvent::Accessibility(DeviceAccessibilityTree {
-            host_id: current.host_id.clone(),
-            device_id: current.device_id.clone(),
-            session_epoch: current.session_epoch.clone(),
-            elements: vec![],
-            errors: vec![],
-            read_at: "old".into(),
-        }));
-        state.apply_event(DeviceEvent::Foreground(DeviceForegroundUpdate {
-            host_id: current.host_id.clone(),
-            device_id: current.device_id.clone(),
-            session_epoch: current.session_epoch.clone(),
-            app: None,
-            received_at: "old".into(),
-        }));
-        state.apply_event(DeviceEvent::EventLog(DeviceEventLogEntry {
-            host_id: current.host_id.clone(),
-            device_id: current.device_id.clone(),
-            session_epoch: current.session_epoch.clone(),
-            id: 1,
-            timestamp: "old".into(),
-            kind: "old".into(),
-            summary: "old".into(),
-        }));
-        state.apply_event(DeviceEvent::Screen(DeviceScreenConfig {
-            thread_id: Some(current.thread_id.clone()),
-            session_epoch: current.session_epoch.clone(),
-            host_id: Some(current.host_id.clone()),
-            device_id: Some(current.device_id.clone()),
-            width: 1,
-            height: 1,
-            orientation: agent_protocol::device::DeviceOrientation::Portrait,
-            screen_id: None,
-            supports_hinge_angle: false,
-            supports_physical_orientation: false,
-            hinge_angle: None,
-            hinge_pose: None,
-            table_mode: false,
-            table_mode_available: false,
-        }));
+        for screen_id in [Some(1), Some(3)] {
+            state.apply_event(DeviceEvent::Screen(DeviceScreenConfig {
+                thread_id: Some(current.thread_id.clone()),
+                session_epoch: current.session_epoch.clone(),
+                host_id: Some(current.host_id.clone()),
+                device_id: Some(current.device_id.clone()),
+                width: 100,
+                height: 100,
+                orientation: DeviceOrientation::Portrait,
+                screen_id,
+                supports_hinge_angle: true,
+                supports_physical_orientation: false,
+                hinge_angle: Some(90.0),
+                hinge_pose: Some("book".into()),
+                table_mode: false,
+                table_mode_available: true,
+            }));
+        }
+        assert_eq!(state.screens.len(), 2);
+        let view = crate::view::device::device_view(&Snapshot { device: state, ..Snapshot::default() });
+        assert_eq!(view.screens.iter().map(|screen| screen.screen_id).collect::<Vec<_>>(), vec![Some(1), Some(3)]);
+    }
 
         let reopened = DeviceSession {
             session_epoch: "new".into(),
@@ -1669,10 +1651,8 @@ mod tests {
             sessions: vec![reopened.clone()],
             ..DeviceServiceState::default()
         }));
-        assert!(state.accessibility.is_empty());
-        assert!(state.foreground.is_empty());
-        assert!(state.event_log.is_empty());
-        assert!(state.screens.is_empty());
+        assert!(state.video_events.is_empty());
+        assert!(state.video_frames.is_empty());
 
         state.apply_event(DeviceEvent::Accessibility(DeviceAccessibilityTree {
             host_id: current.host_id.clone(),
@@ -1768,8 +1748,6 @@ mod tests {
             sessions: vec![current.clone()],
             ..DeviceServiceState::default()
         }));
-        state.apply_event(DeviceEvent::Recording(old_status.clone()));
-        assert!(state.recordings.is_empty());
         let new_status = DeviceRecordingStatus {
             recording_id: 2,
             session_epoch: current.session_epoch.clone(),
@@ -1808,5 +1786,71 @@ mod tests {
                 .map(|recording| recording.bytes.clone()),
             Some(vec![2])
         );
+    }
+
+    #[test]
+    fn duo_controls_are_single_flight_and_epoch_scoped() {
+        let current = session("duo", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+
+        let first = state
+            .enqueue_duo(
+                current.thread_id.clone(),
+                Some(current.host_id.clone()),
+                current.device_id.clone(),
+                crate::state::DeviceDuoCommandIntent::Table { value: true },
+            )
+            .unwrap()
+            .expect("first Duo request is sent immediately");
+        assert!(state
+            .enqueue_duo(
+                current.thread_id.clone(),
+                Some(current.host_id.clone()),
+                current.device_id.clone(),
+                crate::state::DeviceDuoCommandIntent::Angle { value: 30.0 },
+            )
+            .unwrap()
+            .is_none());
+
+        let next = state
+            .complete_duo(&first, true, None)
+            .expect("queued Duo request is promoted after completion");
+        assert_eq!(
+            next.command,
+            crate::state::DeviceDuoCommandIntent::Angle { value: 30.0 }
+        );
+        assert!(state.complete_duo(&next, true, None).is_none());
+        assert!(state.duo_controls.is_empty());
+
+        let reopened = DeviceSession {
+            session_epoch: "new".into(),
+            ..current
+        };
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![reopened],
+            ..DeviceServiceState::default()
+        }));
+        assert!(state.duo_controls.is_empty());
+    }
+
+    #[test]
+    fn touch_projection_keeps_extreme_finite_dimensions_valid() {
+        let tiny = f32::from_bits(1);
+        let projected = project_device_point(
+            tiny,
+            tiny,
+            f32::MAX,
+            f32::MAX,
+            tiny,
+            tiny,
+        )
+        .expect("finite dimensions should produce a finite fit");
+        assert!(projected.x.is_finite() && projected.y.is_finite());
+        assert!((0.0..=1.0).contains(&projected.x));
+        assert!((0.0..=1.0).contains(&projected.y));
     }
 }

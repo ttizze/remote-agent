@@ -56,32 +56,47 @@ enum MarkdownLinkURL {
             contextAction?(href)
             return .handled
         }
-        let root = links?.workspaceRoot
-        switch markdownLinkAction(href: href, workspaceRoot: root) {
+        switch markdownLinkAction(href: href, workspaceRoot: links?.workspaceRoot) {
         case let .workspaceFile(path, line):
-            guard let root, let links else { return .handled }
-            Haptics.selection()
-            let target = FileTarget(path: (root as NSString).appendingPathComponent(path), displayPath: path, line: line)
-            if isPdfFile(path: path), let openPDF = links.openPDF {
-                openPDF(target)
-            } else {
-                links.openFile(target)
-            }
+            return openWorkspaceFile(path: path, line: line, links: links)
         case let .hostFile(path, line):
-            guard let links else { return .handled }
-            Haptics.selection()
-            let target = FileTarget(path: path, displayPath: path, line: line)
-            if isPdfFile(path: path), let openPDF = links.openPDF {
-                openPDF(target)
-            } else {
-                links.openFile(target)
-            }
+            return openHostFile(path: path, line: line, links: links)
         case let .external(target):
-            if let target = URL(string: target) {
-                return .systemAction(target)
-            }
+            guard let target = URL(string: target) else { return .handled }
+            return .systemAction(target)
         case .nothing:
-            break
+            return .handled
+        }
+    }
+
+    @MainActor private static func openWorkspaceFile(
+        path: String,
+        line: UInt64?,
+        links: MarkdownLinkOpener?
+    ) -> OpenURLAction.Result {
+        guard let root = links?.workspaceRoot, let links else { return .handled }
+        let absolutePath = (root as NSString).appendingPathComponent(path)
+        return openFile(FileTarget(path: absolutePath, displayPath: path, line: line), links: links)
+    }
+
+    @MainActor private static func openHostFile(
+        path: String,
+        line: UInt64?,
+        links: MarkdownLinkOpener?
+    ) -> OpenURLAction.Result {
+        guard let links else { return .handled }
+        return openFile(FileTarget(path: path, displayPath: path, line: line), links: links)
+    }
+
+    @MainActor private static func openFile(
+        _ target: FileTarget,
+        links: MarkdownLinkOpener
+    ) -> OpenURLAction.Result {
+        Haptics.selection()
+        if isPdfFile(path: target.displayPath), let openPDF = links.openPDF {
+            openPDF(target)
+        } else {
+            links.openFile(target)
         }
         return .handled
     }
@@ -270,7 +285,11 @@ struct ThreadFileSheet: View {
                                 .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 1)
-                        .frame(maxWidth: wrapping ? .infinity : nil, minHeight: AppTheme.codeLineHeight, alignment: .top)
+                        .frame(
+                            maxWidth: wrapping ? .infinity : nil,
+                            minHeight: AppTheme.codeLineHeight,
+                            alignment: .top
+                        )
                         .background(UInt64(index + 1) == target.line ? AppTheme.primary.opacity(0.12) : .clear)
                         .id(index + 1)
                     }

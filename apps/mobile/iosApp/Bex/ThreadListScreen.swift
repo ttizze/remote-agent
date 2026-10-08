@@ -45,12 +45,12 @@ struct ThreadListScreen: View {
             } else {
                 content(list, now: now)
             }
-                .task(id: list.nextSnoozeWakeAtMs) {
-                    guard let wake = list.nextSnoozeWakeAtMs else { return }
-                    let delay = max(0, Double(wake - Int64(Date().timeIntervalSince1970 * 1000)) / 1000)
-                    do { try await Task.sleep(for: .seconds(delay + 0.05)) } catch { return }
-                    wokeAt = Date()
-                }
+            .task(id: list.nextSnoozeWakeAtMs) {
+                guard let wake = list.nextSnoozeWakeAtMs else { return }
+                let delay = max(0, Double(wake - Int64(Date().timeIntervalSince1970 * 1000)) / 1000)
+                do { try await Task.sleep(for: .seconds(delay + 0.05)) } catch { return }
+                wokeAt = Date()
+            }
         }
         .background((sidebar ? AppTheme.color("mobileDrawer") : AppTheme.screen).ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
@@ -88,18 +88,6 @@ struct ThreadListScreen: View {
                 model.perform(.thread(threadId: thread.value, action: .snooze(until: until)))
             }
         }
-    }
-
-    private var options: ThreadListOptions {
-        ThreadListOptions(
-            workingShelfEnabled: false,
-            workingShelfExpanded: workingExpanded,
-            snoozedShelfExpanded: snoozedExpanded,
-            settledShelfExpanded: settledExpanded,
-            settledLimit: settledLimit,
-            shelfPreferencesLoading: false,
-            timestampFormat: .locale
-        )
     }
 
     @ViewBuilder
@@ -164,7 +152,9 @@ struct ThreadListScreen: View {
                                        status: actions.status, isDraft: actions.isDraft)
                         .onTapGesture {
                             model.perform(actions.open)
-                            if case .newThread = actions.open { showNewTaskDraft() }
+                            if case .newThread = actions.open {
+                                showNewTaskDraft()
+                            }
                         }
                         .contextMenu {
                             Button("Delete", systemImage: "trash", role: .destructive) {
@@ -228,8 +218,22 @@ struct ThreadListScreen: View {
             ShelfHeaderView(label: "Settled", shelf: shelf, sidebar: sidebar) { settledExpanded.toggle() }
         }
     }
+}
 
-    private func primarySwipe(_ row: ThreadRow) -> SwipeActionSpec {
+private extension ThreadListScreen {
+    var options: ThreadListOptions {
+        ThreadListOptions(
+            workingShelfEnabled: false,
+            workingShelfExpanded: workingExpanded,
+            snoozedShelfExpanded: snoozedExpanded,
+            settledShelfExpanded: settledExpanded,
+            settledLimit: settledLimit,
+            shelfPreferencesLoading: false,
+            timestampFormat: .locale
+        )
+    }
+
+    func primarySwipe(_ row: ThreadRow) -> SwipeActionSpec {
         let button = row.swipePrimary
         return SwipeActionSpec(
             symbol: button.action.symbol, label: button.label, accessibilityLabel: button.accessibilityLabel
@@ -248,7 +252,7 @@ struct ThreadListScreen: View {
     }
 
     /// Snooze offers its wake times as a menu.
-    private func secondarySwipe(_ row: ThreadRow) -> SwipeMenuSpec? {
+    func secondarySwipe(_ row: ThreadRow) -> SwipeMenuSpec? {
         guard let button = row.swipeSecondary, !row.snoozeOptions.isEmpty else { return nil }
         return SwipeMenuSpec(
             symbol: button.action.symbol, label: button.label, accessibilityLabel: button.accessibilityLabel,
@@ -256,7 +260,7 @@ struct ThreadListScreen: View {
         ) { run($0, row: row) }
     }
 
-    private func run(_ action: ThreadMenuAction, row: ThreadRow) {
+    func run(_ action: ThreadMenuAction, row: ThreadRow) {
         switch action {
         case let .thread(value):
             if case .delete = value, model.selectedThreadId == row.id {
@@ -284,7 +288,7 @@ struct ThreadListScreen: View {
         }
     }
 
-    private func copy(_ action: ThreadMenuAction) {
+    func copy(_ action: ThreadMenuAction) {
         switch action {
         case let .copyPath(path): Haptics.copy(path ?? "")
         case let .copyBranch(branch): Haptics.copy(branch)
@@ -294,14 +298,15 @@ struct ThreadListScreen: View {
     }
 
     @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
+    var toolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             ConnectionTitle(model: model, open: { openSettings(nil) })
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Button(action: { openSettings(nil) }) {
-                Image(systemName: sidebar ? "gearshape" : "ellipsis")
-            }
+            Button(
+                action: { openSettings(nil) },
+                label: { Image(systemName: sidebar ? "gearshape" : "ellipsis") }
+            )
             .accessibilityLabel("Open settings")
         }
         if sidebar {
