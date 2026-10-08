@@ -4,6 +4,109 @@ pub const ACTIVITY_SUMMARY_LIMIT: usize = 120;
 pub const ACTIVITY_STATUS_LIMIT: usize = 40;
 pub const ACTIVITY_LINK_LIMIT: usize = 512;
 pub const ACTIVITY_ROWS_LIMIT: usize = 5;
+pub const ACTIVITY_MESSAGE_MAX_AGE_MS: i64 = 10 * 60 * 1_000;
+pub const RUNNING_ACTIVITY_TTL_MS: i64 = 2 * 60 * 60 * 1_000;
+pub const WAITING_ACTIVITY_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
+pub const TERMINAL_ACTIVITY_TTL_MS: i64 = 15 * 60 * 1_000;
+pub const TERMINAL_NOTIFICATION_FRESHNESS_MS: i64 = 2 * 60 * 1_000;
+pub const ACTIVITY_MAX_DISPLAY_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityDeliveryDecision {
+    Accept,
+    Rearmed,
+    IgnoreStale,
+    Expired,
+    Dismissed,
+}
+
+impl ActivityDeliveryDecision {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Rearmed => "rearmed",
+            Self::IgnoreStale => "ignore_stale",
+            Self::Expired => "expired",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
+
+/// Returns true only when a provider message is close enough to the local
+/// clock in either direction. Native clients must not invent a timestamp
+/// window when an FCM/APNs envelope contains the source timestamp.
+pub fn activity_message_is_fresh(updated_at_ms: i64, now_ms: i64) -> bool {
+    let delta = updated_at_ms
+        .checked_sub(now_ms)
+        .or_else(|| now_ms.checked_sub(updated_at_ms))
+        .unwrap_or(i64::MAX);
+    delta <= ACTIVITY_MESSAGE_MAX_AGE_MS && delta >= -ACTIVITY_MESSAGE_MAX_AGE_MS
+}
+
+pub fn activity_expiry_at_ms(phase: &str, updated_at_ms: i64) -> i64 {
+    let ttl = match canonical_activity_phase(phase) {
+        "starting" | "running" => RUNNING_ACTIVITY_TTL_MS,
+        "waiting_for_approval" | "waiting_for_input" => WAITING_ACTIVITY_TTL_MS,
+        "completed" | "failed" | "stale" => TERMINAL_ACTIVITY_TTL_MS,
+        _ => TERMINAL_ACTIVITY_TTL_MS,
+    };
+    updated_at_ms.saturating_add(ttl)
+}
+
+pub fn activity_expiry_is_due(expires_at_ms: i64, now_ms: i64) -> bool {
+    expires_at_ms <= now_ms
+}
+
+/// Bounds one OS notification timeout while retaining the Host's absolute
+/// source expiry. The sentinel is used only by pure unit fixtures and never
+/// comes from a Host envelope.
+pub fn activity_display_expiry_at_ms(expires_at_ms: i64, now_ms: i64) -> i64 {
+    if expires_at_ms == i64::MAX {
+        i64::MAX
+    } else {
+        expires_at_ms.min(now_ms.saturating_add(ACTIVITY_MAX_DISPLAY_LIFETIME_MS))
+    }
+}
+
+pub fn activity_notification_is_fresh(phase: &str, updated_at_ms: i64, now_ms: i64) -> bool {
+    !matches!(
+        canonical_activity_phase(phase),
+        "completed" | "failed" | "stale"
+    ) || {
+        let delta = updated_at_ms
+            .checked_sub(now_ms)
+            .or_else(|| now_ms.checked_sub(updated_at_ms))
+            .unwrap_or(i64::MAX);
+        delta <= TERMINAL_NOTIFICATION_FRESHNESS_MS && delta >= -TERMINAL_NOTIFICATION_FRESHNESS_MS
+    }
+}
+
+pub fn activity_delivery_decision(
+    updated_at_ms: i64,
+    expiry_at_ms: i64,
+    now_ms: i64,
+    previous_updated_at_ms: i64,
+    dismissed: bool,
+    active: bool,
+    previous_active: bool,
+) -> ActivityDeliveryDecision {
+    if !activity_message_is_fresh(updated_at_ms, now_ms)
+        || (previous_updated_at_ms >= 0 && updated_at_ms < previous_updated_at_ms)
+    {
+        return ActivityDeliveryDecision::IgnoreStale;
+    }
+    if expiry_at_ms <= now_ms {
+        return ActivityDeliveryDecision::Expired;
+    }
+    if dismissed {
+        return if active && !previous_active {
+            ActivityDeliveryDecision::Rearmed
+        } else {
+            ActivityDeliveryDecision::Dismissed
+        };
+    }
+    ActivityDeliveryDecision::Accept
+}
 
 /// A provider-neutral awareness row. The Host and native clients use this
 /// input record, while this module owns phase names, ordering, bounds, and
@@ -238,10 +341,14 @@ fn activity_timestamp(millis: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn parse_activity_timestamp(value: &str) -> i64 {
+pub fn activity_timestamp_millis(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
         .map(|date| date.timestamp_millis())
-        .unwrap_or(0)
+}
+
+fn parse_activity_timestamp(value: &str) -> i64 {
+    activity_timestamp_millis(value).unwrap_or(0)
 }
 
 /// Keeps routing identities intact and drops links that cannot safely route
@@ -332,6 +439,55 @@ mod tests {
         assert_eq!(aggregate.activities.len(), 2);
         assert_eq!(aggregate.activities[0].thread_id, "one");
         assert_eq!(aggregate.activities[0].deep_link, "remoteagent://threads/host/one");
+    }
+
+    #[test]
+    fn message_freshness_accepts_small_clock_skew_but_rejects_future_replays() {
+        assert!(activity_message_is_fresh(1_000, 1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS));
+        assert!(activity_message_is_fresh(1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS, 1_000));
+        assert!(!activity_message_is_fresh(
+            1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS + 1,
+            1_000
+        ));
+        assert!(!activity_message_is_fresh(
+            1_000,
+            1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS + 1
+        ));
+    }
+
+    #[test]
+    fn delivery_policy_expires_terminal_cards_and_rearms_new_runs() {
+        let now = 10_000;
+        let expiry = now + TERMINAL_ACTIVITY_TTL_MS;
+        assert_eq!(
+            activity_delivery_decision(9_500, expiry, now, -1, false, false, true),
+            ActivityDeliveryDecision::Accept
+        );
+        assert_eq!(
+            activity_delivery_decision(9_500, now, now, -1, false, true, false),
+            ActivityDeliveryDecision::Expired
+        );
+        assert_eq!(
+            activity_delivery_decision(9_500, expiry, now, 9_000, true, true, false),
+            ActivityDeliveryDecision::Rearmed
+        );
+        assert_eq!(
+            activity_delivery_decision(9_500, expiry, now, 9_000, true, false, true),
+            ActivityDeliveryDecision::Dismissed
+        );
+    }
+
+    #[test]
+    fn display_expiry_bounds_only_the_os_timeout() {
+        let now = 10_000;
+        assert_eq!(activity_display_expiry_at_ms(i64::MAX, now), i64::MAX);
+        assert_eq!(
+            activity_display_expiry_at_ms(
+                now + ACTIVITY_MAX_DISPLAY_LIFETIME_MS + 1,
+                now,
+            ),
+            now + ACTIVITY_MAX_DISPLAY_LIFETIME_MS
+        );
     }
 
     #[test]

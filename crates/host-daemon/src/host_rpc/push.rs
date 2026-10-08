@@ -7,7 +7,10 @@
 
 use agent_domain::{
     ACTIVITY_LINK_LIMIT, ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT,
-    BackgroundKind, RunStatus, ThreadRelationship, bounded_activity_link, bounded_activity_text,
+    BackgroundKind, RUNNING_ACTIVITY_TTL_MS, RunStatus, TERMINAL_ACTIVITY_TTL_MS,
+    TERMINAL_NOTIFICATION_FRESHNESS_MS, ThreadRelationship, WAITING_ACTIVITY_TTL_MS,
+    activity_expiry_at_ms, activity_expiry_is_due, activity_notification_is_fresh,
+    bounded_activity_link, bounded_activity_text,
 };
 use agent_protocol::push::{
     ApnsEnvironment, PushActivityEvent, PushActivityItem, PushActivityPhase, PushContentState,
@@ -37,10 +40,6 @@ const MAX_FCM_ACTIVITY_BYTES: usize = 2_400;
 const MAX_ATTEMPTS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const ACTIVITY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
-const RUNNING_ACTIVITY_TTL_MS: i64 = 2 * 60 * 60 * 1_000;
-const WAITING_ACTIVITY_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
-const TERMINAL_ACTIVITY_TTL_MS: i64 = 15 * 60 * 1_000;
-const TERMINAL_NOTIFICATION_FRESHNESS_MS: i64 = 2 * 60 * 1_000;
 const PUSH_TO_START_RETRY_AFTER_MS: i64 = 10 * 60 * 1_000;
 const APNS_JWT_CACHE_SECONDS: u64 = 45 * 60;
 const APNS_PRODUCTION: &str = "https://api.push.apple.com";
@@ -493,6 +492,7 @@ impl PushService {
         }
         *last_sequence = sequence;
         let content_state = content_state(&event, &active);
+        let activity_expires_at_ms = content_state_expiry_at_ms(&content_state, &event);
         *self.latest_state.write().await = Some(content_state.clone());
         let records = {
             let state = self.devices.lock().await;
@@ -524,6 +524,7 @@ impl PushService {
                         &device.registration,
                         &event,
                         &content_state,
+                        activity_expires_at_ms,
                         alert_enabled,
                     )
                     .await
@@ -736,6 +737,7 @@ impl PushService {
         registration: &RegisterPushDevice,
         event: &PushActivityEvent,
         state: &PushContentState,
+        activity_expires_at_ms: i64,
         alert_enabled: bool,
     ) -> Result<(), DeliveryError> {
         let request = match registration.platform {
@@ -762,6 +764,7 @@ impl PushService {
                     registration,
                     event,
                     state,
+                    activity_expires_at_ms,
                     access_token,
                     alert_enabled,
                 )
@@ -1187,21 +1190,14 @@ fn is_live_phase(phase: PushActivityPhase) -> bool {
 }
 
 fn activity_expired(event: &PushActivityEvent, now_ms: i64) -> bool {
-    let ttl = match event.phase {
-        PushActivityPhase::Starting | PushActivityPhase::Running => RUNNING_ACTIVITY_TTL_MS,
-        PushActivityPhase::WaitingForApproval | PushActivityPhase::WaitingForInput => {
-            WAITING_ACTIVITY_TTL_MS
-        }
-        PushActivityPhase::Completed | PushActivityPhase::Failed | PushActivityPhase::Stale => {
-            TERMINAL_ACTIVITY_TTL_MS
-        }
-    };
-    now_ms.saturating_sub(event.occurred_at_ms) > ttl
+    activity_expiry_is_due(
+        activity_expiry_at_ms(event.phase.wire_name(), event.occurred_at_ms),
+        now_ms,
+    )
 }
 
 fn notification_is_fresh(event: &PushActivityEvent, now_ms: i64) -> bool {
-    !event.phase.is_terminal()
-        || now_ms.saturating_sub(event.occurred_at_ms) <= TERMINAL_NOTIFICATION_FRESHNESS_MS
+    activity_notification_is_fresh(event.phase.wire_name(), event.occurred_at_ms, now_ms)
 }
 
 fn current_activity_events(
@@ -1375,6 +1371,18 @@ fn content_state(event: &PushActivityEvent, active: &[PushActivityEvent]) -> Pus
         records.push(event.activity_record());
     }
     agent_domain::activity_content_state(&records).into()
+}
+
+fn content_state_expiry_at_ms(state: &PushContentState, event: &PushActivityEvent) -> i64 {
+    state
+        .activities
+        .iter()
+        .filter_map(|value| {
+            let updated_at_ms = agent_domain::activity_timestamp_millis(&value.updated_at)?;
+            Some(activity_expiry_at_ms(value.phase.wire_name(), updated_at_ms))
+        })
+        .max()
+        .unwrap_or_else(|| activity_expiry_at_ms(event.phase.wire_name(), event.occurred_at_ms))
 }
 
 fn timestamp(millis: i64) -> String {
@@ -1594,6 +1602,7 @@ fn fcm_notification_request(
     registration: &RegisterPushDevice,
     event: &PushActivityEvent,
     state: &PushContentState,
+    activity_expires_at_ms: i64,
     access_token: String,
     alert_enabled: bool,
 ) -> Result<HttpRequest, DeliveryError> {
@@ -1636,6 +1645,7 @@ fn fcm_notification_request(
     ]);
     if registration.preferences.live_activities_enabled {
         data.insert("activity", bounded_content_state(state)?);
+        data.insert("activity_expires_at", activity_expires_at_ms.to_string());
     }
     let mut android = serde_json::json!({
         "priority": "HIGH",
@@ -2010,6 +2020,32 @@ mod tests {
     }
 
     #[test]
+    fn activity_expiry_uses_the_visible_canonical_rows() {
+        let make = |thread_id: &str, phase: PushActivityPhase, occurred_at_ms: i64| {
+            PushActivityEvent {
+                host_id: "host".into(),
+                thread_id: thread_id.into(),
+                project_id: "project".into(),
+                project_title: "Project".into(),
+                thread_title: thread_id.into(),
+                model_title: "Model".into(),
+                phase,
+                headline: "Agent update".into(),
+                detail: None,
+                deep_link: thread_deep_link("host", thread_id),
+                occurred_at_ms,
+            }
+        };
+        let running = make("running", PushActivityPhase::Running, 1_000);
+        let waiting = make("waiting", PushActivityPhase::WaitingForInput, 2_000);
+        let state = content_state(&waiting, &[running, waiting.clone()]);
+        assert_eq!(
+            content_state_expiry_at_ms(&state, &waiting),
+            2_000 + WAITING_ACTIVITY_TTL_MS
+        );
+    }
+
+    #[test]
     fn terminal_activity_updates_until_the_aggregate_is_empty() {
         let mut registration = registration();
         registration.live_activity_token = Some("activity".into());
@@ -2201,6 +2237,7 @@ mod tests {
             &registration,
             &event,
             &state,
+            900_000,
             "access-token".into(),
             false,
         )
@@ -2211,6 +2248,40 @@ mod tests {
         assert_eq!(body["message"]["data"]["alert"], "0");
         assert_eq!(body["message"]["android"]["priority"], "HIGH");
         assert_eq!(body["message"]["android"]["collapse_key"], "agent-activity");
+    }
+
+    #[test]
+    fn android_activity_payload_carries_host_absolute_expiry() {
+        let event = PushActivityEvent {
+            host_id: "host".into(),
+            thread_id: "thread".into(),
+            project_id: "project".into(),
+            project_title: "Project".into(),
+            thread_title: "Thread".into(),
+            model_title: "Model".into(),
+            phase: PushActivityPhase::Running,
+            headline: "Working".into(),
+            detail: None,
+            deep_link: thread_deep_link("host", "thread"),
+            occurred_at_ms: 1,
+        };
+        let state = content_state(&event, &[]);
+        let mut registration = registration();
+        registration.platform = PushPlatform::Android;
+        registration.bundle_id = None;
+        registration.apns_environment = None;
+        let request = fcm_notification_request(
+            "project-id",
+            &registration,
+            &event,
+            &state,
+            7_200_001,
+            "access-token".into(),
+            false,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["message"]["data"]["activity_expires_at"], "7200001");
     }
 
     #[test]
@@ -2228,7 +2299,7 @@ mod tests {
             deep_link: thread_deep_link("host", "thread"),
             occurred_at_ms: 1_000,
         };
-        assert!(!activity_expired(&event, 1_000 + RUNNING_ACTIVITY_TTL_MS));
+        assert!(activity_expired(&event, 1_000 + RUNNING_ACTIVITY_TTL_MS));
         assert!(activity_expired(&event, 1_001 + RUNNING_ACTIVITY_TTL_MS));
         let waiting = PushActivityEvent {
             phase: PushActivityPhase::WaitingForInput,

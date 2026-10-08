@@ -1126,7 +1126,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             }
         }
         if (!changed) {
-            renderActivityAggregate(context, currentActivityAggregate(context))
+            renderActivitySnapshot(context, currentActivitySnapshot(context))
             return
         }
         renderActivityAggregate(context, aggregate)

@@ -5,7 +5,12 @@ mod ids;
 mod protocol;
 mod snapshot;
 
-pub use activity::{agent_activity_content_state_json, aggregate_agent_activity_content_states_json};
+pub use activity::{
+    agent_activity_content_state_json, agent_activity_delivery_decision,
+    agent_activity_display_expiry_at, agent_activity_expiry_is_due,
+    agent_activity_message_is_fresh, agent_activity_timestamp_millis,
+    aggregate_agent_activity_content_states_json,
+};
 
 use crate::{
     connection::{Outcome, StoreOptions},
