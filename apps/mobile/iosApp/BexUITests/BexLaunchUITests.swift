@@ -155,6 +155,7 @@ final class BexLaunchUITests: XCTestCase {
 
         let prompt = app.descendants(matching: .any)["task.message"]
         XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        chooseFixtureModel(app)
         prompt.tap()
         prompt.typeText(promptText)
 

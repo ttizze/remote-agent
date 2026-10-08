@@ -6,6 +6,7 @@ extension BexLaunchUITests {
         openDefaultModelSettings(app)
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
+        chooseIndependentNewChatModel(app, choice: choice)
         chooseDefaultModelMenuOption(app, menu: "model.sheet.effort", option: "medium")
         chooseDefaultModelMenuOption(
             app,

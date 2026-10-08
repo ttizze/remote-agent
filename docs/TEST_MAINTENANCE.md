@@ -373,6 +373,10 @@ Isolated iroh submission fixtures that omit account management select their
 explicit Codex catalog model before submitting. Automatic selection still
 requires an authenticated provider; offline recovery, failed creation, sidebar
 refresh, worktree preservation and history assertions remain unchanged.
+The iPhone conversation helper likewise selects the explicit fixture model.
+The scope-inheritance case selects it as the independent new-chat model before
+changing provider presets, so its reasoning/speed and existing-draft assertions
+do not depend on automatic authentication or an earlier test's model choice.
 
 The Android 17 integration exposed Compose's transitive Espresso 3.5.0 dependency
 calling the removed `InputManager.getInstance` API before Markdown assertions
