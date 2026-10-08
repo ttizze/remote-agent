@@ -253,7 +253,7 @@ private struct ScheduledTaskScheduleSection: View {
         if case let .fixedTime(_, days) = draft.schedule {
             return days
         }
-        return []
+        return Data()
     }
 
     private func setSchedule(_ interval: Bool) {
