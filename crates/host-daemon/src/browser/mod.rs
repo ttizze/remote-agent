@@ -100,7 +100,7 @@ impl Page {
     }
 }
 
-const COLLABORATIVE_BROWSER_OWNER: &str = "local";
+pub(crate) const COLLABORATIVE_BROWSER_OWNER: &str = "local";
 
 fn can_access_preview_tab(page: &Page, owner: Option<&str>, tab_id: &str) -> bool {
     !page.preview_tabs.contains(tab_id)
@@ -200,6 +200,17 @@ impl Drop for Browser {
 }
 
 impl Browser {
+    pub(crate) fn profile(&self) -> &Path {
+        &self.profile
+    }
+
+    pub(crate) fn has_active_tasks(&self) -> bool {
+        self.recordings
+            .try_lock()
+            .map(|recordings| !recordings.is_empty())
+            .unwrap_or(true)
+    }
+
     fn preview_profile_key(profile_id: Option<&str>) -> &str {
         profile_id.unwrap_or(agent_protocol::preview::DEFAULT_PREVIEW_PROFILE_ID)
     }

@@ -2703,9 +2703,11 @@ impl HostRpcService {
                     .get()
                     .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
                 browser
-                    .start_preview_recording(
+                    .start_preview_recording_for_owner(
+                        crate::browser::COLLABORATIVE_BROWSER_OWNER,
                         &params.thread_id.to_string(),
                         &params.tab_id,
+                        params.recording_id,
                         params.options,
                     )
                     .await
@@ -2721,7 +2723,12 @@ impl HostRpcService {
                     .get()
                     .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
                 browser
-                    .stop_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                    .stop_preview_recording_for_owner(
+                        crate::browser::COLLABORATIVE_BROWSER_OWNER,
+                        &params.thread_id.to_string(),
+                        &params.tab_id,
+                        &params.recording_id,
+                    )
                     .await
                     .map_err(|error| Failure::new("preview_recording_stop_failed", error))?
                     .into()
@@ -4221,7 +4228,10 @@ fn preview_event_thread(event: &agent_protocol::preview::PreviewEvent) -> &agent
         | agent_protocol::preview::PreviewEvent::Resized { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Failed { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Closed { thread_id, .. }
-        | agent_protocol::preview::PreviewEvent::RecordingChanged { thread_id, .. } => thread_id,
+        | agent_protocol::preview::PreviewEvent::RecordingChanged { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::RecordingArtifactRemoved { thread_id, .. } => {
+            thread_id
+        }
     }
 }
 

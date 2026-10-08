@@ -295,9 +295,8 @@ pub struct DeviceDuoRequest {
 
 /// Settings this device keeps across launches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Preferences {
-    /// Device-local Preview browser defaults, recording options, and profiles.
-    pub browser: crate::view::browser::BrowserSettings,
     pub timestamp_format: TimestampFormat,
     pub favorite_models: Vec<FavoriteModel>,
     /// The user's model order per provider instance, by slug.
@@ -313,11 +312,26 @@ pub struct Preferences {
     pub terminal_font_size: Option<f64>,
     /// Each model's last chosen options, which a newly picked model takes.
     pub model_options: crate::view::models::staging::ModelOptionMemory,
+    pub usage: crate::view::usage::UsagePreferences,
+    /// How this device presents thread attention and completion events.
+    pub notification_mode: crate::view::notifications::NotificationMode,
+    /// Whether foreground thread events appear as in-app notices.
+    pub in_app_notifications_enabled: bool,
+    /// Whether active agent work appears in the system Live Activity/ongoing
+    /// notification surface. Platform permission and tokens stay native.
+    pub live_activities_enabled: bool,
+    /// Routes new threads across matching ready environments on this device.
+    pub load_balancing_enabled: bool,
+    /// Integer weights by provider instance; omitted instances use 100.
+    pub load_balancing_weights: BTreeMap<String, u8>,
+    /// Device-local screenshot capture behavior.
+    pub snapshot_capture: crate::view::snapshot_capture::SnapshotPreferences,
+    /// Device-local Preview browser defaults, recording options and profiles.
+    pub browser: crate::view::browser::BrowserSettings,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            browser: crate::view::browser::BrowserSettings::default(),
             timestamp_format: TimestampFormat::default(),
             favorite_models: vec![],
             model_order: BTreeMap::new(),
@@ -327,6 +341,14 @@ impl Default for Preferences {
             resume_compaction_dismissed: BTreeSet::new(),
             terminal_font_size: None,
             model_options: BTreeMap::new(),
+            usage: Default::default(),
+            notification_mode: crate::view::notifications::NotificationMode::default(),
+            in_app_notifications_enabled: true,
+            live_activities_enabled: true,
+            load_balancing_enabled: false,
+            load_balancing_weights: BTreeMap::new(),
+            snapshot_capture: Default::default(),
+            browser: Default::default(),
         }
     }
 }
