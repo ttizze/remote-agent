@@ -88,9 +88,9 @@ struct ModelSettingsScreen: View {
                     if let account = selectedAccount {
                         WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
                             provider: account.provider, id: account.id
-                        ), compact: true)
-                            .accessibilityIdentifier("model.account.usage").padding(.horizontal, 12)
-                            .padding(.bottom, 12)
+                        ))
+                        .accessibilityIdentifier("model.account.usage").padding(.horizontal, 12)
+                        .padding(.bottom, 12)
                     }
                     Divider()
                     if defaults {

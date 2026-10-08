@@ -163,17 +163,7 @@ extension AgentSettingsScreen {
                             .disabled(busy)
                     }
                     if selected {
-                        if let error = account.usage?.error {
-                            Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
-                                .font(.caption).foregroundStyle(.orange)
-                        } else {
-                            WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
-                                provider: account.provider,
-                                id: account.id
-                            ))
-                        }
-                        DisclosureGroup("使用量の詳細") { AccountUsageView(usage: account.usage) }
-                            .font(.caption)
+                        AccountUsageView(usage: account.usage)
                             .accessibilityIdentifier("account.usage." + account.id)
                     }
                 }
