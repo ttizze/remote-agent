@@ -260,8 +260,7 @@ async fn run_capture(
             _ = &mut deadline => break Err("recording capture deadline exceeded after 120000ms".to_owned()),
             message = next_screencast_frame(&mut socket) => {
                 let (frame, timestamp, session_id) = match message {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => continue,
+                    Ok(frame) => frame,
                     Err(error) => break Err(error),
                 };
                 if frame.len() > FRAME_MAX_BYTES {
@@ -344,7 +343,7 @@ async fn run_capture(
 
 async fn next_screencast_frame(
     socket: &mut WebSocketStream<ConnectStream>,
-) -> Result<Option<(Vec<u8>, Option<f64>, Option<u64>)>, String> {
+) -> Result<(Vec<u8>, Option<f64>, Option<u64>), String> {
     loop {
         let Some(message) = socket.next().await else {
             return Err("recording screencast connection closed".to_owned());
@@ -371,7 +370,7 @@ async fn next_screencast_frame(
             .map_err(|error| format!("recording screencast frame is invalid: {error}"))?;
         let timestamp = value["params"]["metadata"]["timestamp"].as_f64();
         let session_id = value["params"]["sessionId"].as_u64();
-        return Ok(Some((frame, timestamp, session_id)));
+        return Ok((frame, timestamp, session_id));
     }
 }
 
