@@ -134,6 +134,32 @@ internal class DeviceVideoResetGate {
     }
 }
 
+/** Owns the one delayed output command so release can remove the exact queued callback. */
+internal class DeviceVideoPumpGate {
+    private var pending: Runnable? = null
+
+    @Synchronized
+    fun admit(command: Runnable): Boolean {
+        if (pending != null) return false
+        pending = command
+        return true
+    }
+
+    @Synchronized
+    fun begin(command: Runnable): Boolean {
+        if (pending !== command) return false
+        pending = null
+        return true
+    }
+
+    @Synchronized
+    fun cancel(): Runnable? {
+        val command = pending
+        pending = null
+        return command
+    }
+}
+
 /** A bounded, stateful H.264 decoder for the Host's live device transport. */
 internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private data class Frame(
@@ -155,11 +181,11 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private var codecDescription: ByteArray? = null
     private var needsKeyframe = true
     private var lastSequence: ULong? = null
-    private var outputPumpScheduled = false
     @Volatile private var closed = false
     private val pending = ArrayDeque<Frame>()
     private val ingress = DeviceVideoIngressGate()
     private val resetGate = DeviceVideoResetGate()
+    private val outputPumpGate = DeviceVideoPumpGate()
 
     fun attach(textureView: TextureView) {
         if (this.textureView === textureView) return
@@ -290,6 +316,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         closed = true
         ingress.close()
         resetGate.cancel()
+        cancelOutputPump()
         textureView?.surfaceTextureListener = null
         textureView = null
         handler.post {
@@ -384,14 +411,20 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     }
 
     private fun scheduleOutputPump() {
-        if (outputPumpScheduled || closed || codec == null) return
-        outputPumpScheduled = true
-        handler.postDelayed({
-            outputPumpScheduled = false
-            if (closed || codec == null) return@postDelayed
-            drainOutput(codec ?: return@postDelayed)
-            drainPending()
-        }, OUTPUT_PUMP_INTERVAL_MS)
+        if (closed || codec == null) return
+        val pump = object : Runnable {
+            override fun run() {
+                if (!outputPumpGate.begin(this)) return
+                if (closed || codec == null) return
+                drainOutput(codec ?: return)
+                drainPending()
+            }
+        }
+        if (!outputPumpGate.admit(pump)) return
+        if (closed || !handler.postDelayed(pump, OUTPUT_PUMP_INTERVAL_MS)) {
+            outputPumpGate.cancel()?.let { handler.removeCallbacks(it) }
+            handler.removeCallbacks(pump)
+        }
     }
 
     private fun drainOutput(decoder: MediaCodec) {
@@ -411,6 +444,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     }
 
     private fun closeCodec() {
+        cancelOutputPump()
         val decoder = codec ?: return
         codec = null
         runCatching { decoder.stop() }
@@ -420,12 +454,15 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
     private fun releaseSurfaceOnWorker() {
         closeCodec()
-        outputPumpScheduled = false
         pending.clear()
         lastSequence = null
         surface?.release()
         surface = null
         surfaceTexture = null
+    }
+
+    private fun cancelOutputPump() {
+        outputPumpGate.cancel()?.let { handler.removeCallbacks(it) }
     }
 
     private companion object {

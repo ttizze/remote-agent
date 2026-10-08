@@ -4,10 +4,27 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceVideoDecoderTest {
+    @Test
+    fun pumpGateRemovesOnlyTheOwnedQueuedWorkerCommand() {
+        val gate = DeviceVideoPumpGate()
+        val first = Runnable { }
+        val second = Runnable { }
+
+        assertTrue(gate.admit(first))
+        assertTrue(!gate.admit(second))
+        assertSame(first, gate.cancel())
+        assertTrue(!gate.begin(first))
+
+        assertTrue(gate.admit(second))
+        assertTrue(gate.begin(second))
+        assertTrue(!gate.begin(second))
+    }
+
     @Test
     fun resetGateBoundsWorkerCommandsWhileLatestDimensionsWin() {
         val gate = DeviceVideoResetGate()
