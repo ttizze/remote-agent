@@ -127,7 +127,13 @@ impl Drop for UpdateOperation {
         let manager = self.manager.clone();
         let target = self.target;
         let generation = self.generation;
+        let lock = manager
+            .operation_locks
+            .get(&target)
+            .expect("all update targets have an operation lock")
+            .clone();
         let persist = async move {
+            let _lock = lock.lock().await;
             if manager.current_generation(target) != generation {
                 return;
             }
