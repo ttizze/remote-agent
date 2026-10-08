@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{peer::PeerError, protocol::Call, state::*};
 use agent_protocol::{
-    conversation as c, models as m, operations as op, pull_requests as pr,
+    background as bg, conversation as c, models as m, operations as op, pull_requests as pr,
     scheduled_tasks as st, workspace as w,
 };
 use std::sync::Arc;
@@ -73,6 +73,11 @@ pub(super) enum Reply {
     ScheduledTasks(st::ScheduledTaskList),
     ScheduledTask(st::ScheduledTask),
     ScheduledTaskRef(st::ScheduledTaskRef),
+    Background(bg::BackgroundPolicySnapshot),
+    HostResources(bg::HostResourcesSnapshot),
+    ProcessDiagnostics(bg::ProcessDiagnosticsResult),
+    ProcessResourceHistory(bg::ProcessResourceHistoryResult),
+    TraceDiagnostics(bg::TraceDiagnosticsResult),
     Done,
 }
 
@@ -173,6 +178,19 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         }
         Call::ListScheduledTasks(_) => Reply::ScheduledTasks(peer.request(call).await?),
         Call::DeleteScheduledTask(_) => Reply::ScheduledTaskRef(peer.request(call).await?),
+        Call::ReadBackground(_)
+        | Call::ReportClientActivity(_)
+        | Call::RemoveClientActivity(_) => Reply::Background(peer.request(call).await?),
+        Call::ReportHostPowerState(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::ReadHostResources(_) => Reply::HostResources(peer.request(call).await?),
+        Call::ReadProcessDiagnostics(_) => Reply::ProcessDiagnostics(peer.request(call).await?),
+        Call::ReadProcessResourceHistory(_) => {
+            Reply::ProcessResourceHistory(peer.request(call).await?)
+        }
+        Call::ReadTraceDiagnostics(_) => Reply::TraceDiagnostics(peer.request(call).await?),
         _ => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -189,13 +207,15 @@ pub fn turn_review(diff: c::TurnDiff) -> crate::models::WorkspaceReview {
 
 impl Owner {
     pub(super) fn refresh(&mut self) {
-        for call in [
-            Call::ListProviders(m::Empty {}),
-            Call::ListAccounts(m::Empty {}),
-            Call::ReadSettings(m::Empty {}),
-        ] {
-            self.job(call, None, None);
-        }
+        self.job(Call::ListProviders(m::Empty {}), None, None);
+        self.job(Call::ReadSettings(m::Empty {}), None, None);
+        self.refresh_accounts_if_due(super::owner::now_ms());
+    }
+
+    /// A replacement Network keeps the five-minute quota attempt throttle; a
+    /// first connection still refreshes immediately because no attempt exists.
+    pub(super) fn refresh_after_attach(&mut self) {
+        self.refresh();
     }
 
     pub(super) fn job(
@@ -204,6 +224,18 @@ impl Owner {
         complete: Option<Waiter>,
         sent: Option<(String, Draft)>,
     ) {
+        let account_request = matches!(&call, Call::ListAccounts(_));
+        let previous_attempt = self.usage_refresh_last_attempt_ms;
+        if account_request {
+            if self.accounts_refresh_in_flight() {
+                if let Some(complete) = complete {
+                    let _ = complete.send(Err(invalid("Account refresh already in progress")));
+                }
+                return;
+            }
+            self.accounts_refresh_in_flight_epoch = Some(self.epoch);
+            self.usage_refresh_last_attempt_ms = Some(super::owner::now_ms());
+        }
         let diff_generation = matches!(&call, Call::DiffPreview(_))
             .then_some(self.state.sources.diff_generation);
         let sender = self.sender.clone();
@@ -219,6 +251,10 @@ impl Owner {
         let network = match self.network() {
             Ok(network) => network,
             Err(error) => {
+                if account_request {
+                    self.accounts_refresh_in_flight_epoch = None;
+                    self.usage_refresh_last_attempt_ms = previous_attempt;
+                }
                 if let Some(complete) = complete {
                     self.state.error = Some(error.to_string());
                     let _ = complete.send(Err(error));
@@ -546,6 +582,9 @@ impl Owner {
         if let Some(complete) = complete {
             let _ = complete.send(outcome);
         }
+        if matches!(&call, Call::ListAccounts(_)) {
+            self.account_refresh_finished();
+        }
     }
 
     fn reply(
@@ -705,6 +744,11 @@ impl Owner {
                 }
             }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
+            Reply::Background(snapshot) => self.state.background_policy = Some(snapshot),
+            Reply::HostResources(_)
+            | Reply::ProcessDiagnostics(_)
+            | Reply::ProcessResourceHistory(_)
+            | Reply::TraceDiagnostics(_) => {}
             Reply::SessionScan(scan) => {
                 let import = &mut self.state.session_import;
                 import.scan_pending = false;

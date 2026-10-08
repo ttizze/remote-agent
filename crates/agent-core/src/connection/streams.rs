@@ -22,6 +22,7 @@ pub(super) enum Payload {
     ScheduledTasks(ScheduledTaskList),
     Preview(agent_protocol::preview::PreviewListResult),
     Awareness(agent_protocol::models::AwarenessSnapshot),
+    Background(agent_protocol::background::BackgroundPolicySnapshot),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }

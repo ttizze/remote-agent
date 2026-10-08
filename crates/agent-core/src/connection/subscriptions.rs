@@ -58,6 +58,7 @@ impl Owner {
                 tokio::spawn(follow(target, call, Payload::ScheduledTasks))
             }
             StreamKey::Awareness => tokio::spawn(follow(target, call, Payload::Awareness)),
+            StreamKey::Background => tokio::spawn(follow(target, call, Payload::Background)),
         };
         let failures = network
             .streams
@@ -231,6 +232,18 @@ impl Owner {
         );
     }
 
+    /// The Host's background policy and power snapshot, followed by semantic
+    /// lease or power changes.
+    pub(super) fn subscribe_background(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Background,
+            Call::SubscribeBackground(agent_protocol::models::Empty {}),
+        );
+    }
+
     fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
         use agent_protocol::operations::TerminalMetadataEvent as Metadata;
         let terminals = &mut self.state.terminal_metadata;
@@ -352,6 +365,8 @@ impl Owner {
         }
         self.subscribe_git_statuses();
         self.subscribe_scheduled_tasks();
+        self.subscribe_background();
+        self.refresh_accounts_if_due(super::owner::now_ms());
     }
 
     pub(super) fn subscribe_git_statuses(&mut self) {
@@ -436,6 +451,7 @@ impl Owner {
             StreamKey::GitAction(_) => {}
             StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
             StreamKey::Awareness => self.subscribe_awareness(),
+            StreamKey::Background => self.subscribe_background(),
         }
     }
 
@@ -507,6 +523,10 @@ impl Owner {
                 self.healthy(&StreamKey::Awareness);
                 self.state.awareness = Some(snapshot);
             }
+            (StreamKey::Background, Payload::Background(snapshot)) => {
+                self.healthy(&StreamKey::Background);
+                self.state.background_policy = Some(snapshot);
+            }
             _ => {}
         }
     }
@@ -538,8 +558,9 @@ impl Owner {
                 | StreamKey::VcsStatus(_)
                 | StreamKey::GitAction(_)
                 | StreamKey::Preview(_)
-                | StreamKey::ScheduledTasks => {}
-                | StreamKey::Awareness => {}
+                | StreamKey::ScheduledTasks
+                | StreamKey::Awareness
+                | StreamKey::Background => {}
             }
             self.schedule_resubscribe(key);
             return;

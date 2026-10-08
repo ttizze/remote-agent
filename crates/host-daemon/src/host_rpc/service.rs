@@ -5,6 +5,7 @@ use super::{
     identity::Identity,
     resources::{ClaudeResources, CodexResources},
 };
+use crate::background::BackgroundOwner;
 use crate::ProjectStore;
 use crate::github::pulls::{GitHubPullRequestService, supports_github_host};
 use crate::claude::control::ClaudeProgram;
@@ -131,6 +132,9 @@ struct HostResources {
     usage: crate::usage::UsageService,
     pull_requests: Arc<GitHubPullRequestService>,
     pull_request_watch_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    background: Arc<BackgroundOwner>,
+    background_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    background_stop: tokio_util::sync::CancellationToken,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
@@ -302,6 +306,12 @@ impl HostRpcService {
         let pull_requests = Arc::new(GitHubPullRequestService::new(
             projects.path().with_file_name("pull-requests.sqlite"),
         )?);
+        let state_directory = projects
+            .path()
+            .parent()
+            .map(Path::to_owned)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let background = BackgroundOwner::new(state_directory);
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -343,6 +353,9 @@ impl HostRpcService {
             usage: crate::usage::UsageService::new(&state_path),
             pull_requests,
             pull_request_watch_task: OnceLock::new(),
+            background,
+            background_task: OnceLock::new(),
+            background_stop: tokio_util::sync::CancellationToken::new(),
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -534,6 +547,7 @@ impl HostRpcService {
                     Some(browser.provider_config(thread.as_str()))
                 }),
                 models: Arc::new(ServiceModels(Arc::downgrade(&self.inner))),
+                background: resources.background.clone(),
             },
             resources.shared.clone(),
         )
@@ -562,6 +576,12 @@ impl HostRpcService {
         if self.inner.started.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        let _ = self.inner.resources.background_task.set(
+            self.inner
+                .resources
+                .background
+                .spawn(self.inner.resources.background_stop.clone()),
+        );
         if let Some(task) = self.inner.resources.codex.auth_requests() {
             let _ = self.inner.resources.auth_task.set(task);
         }
@@ -830,6 +850,10 @@ impl HostRpcService {
         self.inner.resources.shared.terminals.close_session(session);
         self.inner.resources.shared.files.clear_session(session);
         self.inner.resources.dictation.close_session(session);
+        let background = self.inner.resources.background.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move { background.close_session(session).await });
+        }
     }
     pub(crate) fn revoke_device(&self, principal: &str) {
         self.inner
@@ -877,6 +901,7 @@ impl HostRpcService {
     }
     /// Stops provider processes after the conversation records the shutdown.
     pub(crate) async fn shutdown_owned_processes(&self) {
+        self.inner.resources.background_stop.cancel();
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.shutdown().await;
         }
@@ -922,7 +947,39 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.preview_subscribe(params, cancel).await);
         }
+        if let Call::SubscribeBackground(_) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.background_stream(cancel).await);
+        }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+
+    /// The current policy snapshot, followed by semantic power or lease
+    /// changes. A lagging subscriber receives a fresh snapshot.
+    async fn background_stream(&self, cancel: tokio_util::sync::CancellationToken) -> HostReply {
+        let background = self.inner.resources.background.clone();
+        let (receiver, first) = background.subscribe_with_snapshot().await;
+        let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+        let empty = first.clone();
+        crate::conversation::stream(
+            std::collections::VecDeque::from([first]),
+            empty,
+            move || {
+                let (receiver, background) = (receiver.clone(), background.clone());
+                Box::pin(async move {
+                    let mut receiver = receiver.lock().await;
+                    match receiver.recv().await {
+                        Ok(snapshot) => Some(vec![snapshot]),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            *receiver = background.subscribe();
+                            Some(vec![background.snapshot().await])
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                    }
+                })
+            },
+            cancel,
+        )
     }
 
     async fn vcs_status(
@@ -2139,6 +2196,43 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("diagnostic_write_failed", error))?;
                     agent_protocol::models::Empty {}.into()
+                }
+                Call::ReadBackground(_) => resources.background.snapshot().await.into(),
+                Call::ReportClientActivity(params) => resources
+                    .background
+                    .report_activity(session, params.clone())
+                    .await
+                    .map_err(|error| Failure::new("invalid_params", error))?
+                    .into(),
+                Call::ReportHostPowerState(params) => {
+                    resources.background.report_power(params.clone()).await;
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::RemoveClientActivity(params) => resources
+                    .background
+                    .remove_activity(session, params.rpc_client_id)
+                    .await
+                    .into(),
+                Call::ReadHostResources(_) => resources.background.host_resources().await.into(),
+                Call::ReadProcessDiagnostics(_) => {
+                    resources.background.process_diagnostics().await.into()
+                }
+                Call::ReadProcessResourceHistory(params) => resources
+                    .background
+                    .process_history(params.window_ms, params.bucket_ms)
+                    .await
+                    .into(),
+                Call::ReadTraceDiagnostics(params) => resources
+                    .background
+                    .trace_diagnostics(params)
+                    .await
+                    .map_err(|error| Failure::new("diagnostics_unavailable", error))?
+                    .into(),
+                Call::SubscribeBackground(_) => {
+                    return Err(Failure::new(
+                        "stream_only",
+                        "background subscriptions must use a stream",
+                    ));
                 }
                 Call::ReadSettings(_) | Call::UpdateSettings(_) => {
                     let update = match request {

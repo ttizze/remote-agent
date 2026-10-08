@@ -167,6 +167,12 @@ impl Snapshot {
                 .collect()
         })
     }
+    pub fn background_rows(&self) -> Vec<crate::view::diagnostics::DiagnosticRow> {
+        self.background_policy
+            .as_ref()
+            .map(crate::view::diagnostics::background_rows)
+            .unwrap_or_default()
+    }
     pub fn error(&self) -> Option<String> {
         self.error.clone()
     }

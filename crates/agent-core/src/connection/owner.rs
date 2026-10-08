@@ -80,6 +80,7 @@ pub(super) enum StreamKey {
     GitAction(String),
     ScheduledTasks,
     Awareness,
+    Background,
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {
@@ -229,6 +230,10 @@ pub(super) struct Owner {
     /// publication boundary has not arrived yet.
     stream_publish_pending: bool,
     stream_publish_deferred: bool,
+    /// The last attempted account/quota refresh, retained across connection epochs.
+    pub(super) usage_refresh_last_attempt_ms: Option<u64>,
+    /// Any account request currently running on this connection epoch.
+    pub(super) accounts_refresh_in_flight_epoch: Option<u64>,
 }
 
 pub(super) type ObservedList = (Arc<ShellCache>, Arc<crate::commands::outbox::Outbox>, bool);
@@ -239,6 +244,23 @@ pub(super) fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+pub(super) const USAGE_REFRESH_INTERVAL_MS: u64 = 5 * 60 * 1_000;
+
+fn usage_refresh_due(last_attempt_ms: Option<u64>, in_flight: bool, now: u64) -> bool {
+    !in_flight
+        && last_attempt_ms.map_or(true, |last| {
+            now.saturating_sub(last) >= USAGE_REFRESH_INTERVAL_MS
+        })
+}
+
+fn usage_refresh_deadline(last_attempt_ms: Option<u64>, in_flight: bool, now: u64) -> Option<u64> {
+    (!in_flight).then(|| {
+        last_attempt_ms
+            .map(|last| last.saturating_add(USAGE_REFRESH_INTERVAL_MS))
+            .unwrap_or(now)
+    })
+}
+
 pub(super) fn timestamp(ms: u64) -> Timestamp {
     Timestamp::from_millis(ms as i64).expect("current timestamp")
 }
@@ -288,6 +310,8 @@ impl Owner {
             work_locally: None,
             stream_publish_pending: false,
             stream_publish_deferred: false,
+            usage_refresh_last_attempt_ms: None,
+            accounts_refresh_in_flight_epoch: None,
         };
         if let Some(thread) = owner.state.selected_thread.clone() {
             owner.open_thread(&thread);
@@ -364,6 +388,15 @@ impl Owner {
     }
 
     fn next_deadline(&self) -> Option<u64> {
+        let usage_refresh = if self.connected() {
+            usage_refresh_deadline(
+                self.usage_refresh_last_attempt_ms,
+                self.accounts_refresh_in_flight_epoch == Some(self.epoch),
+                now_ms(),
+            )
+        } else {
+            None
+        };
         let retention = self
             .last_used
             .iter()
@@ -379,6 +412,7 @@ impl Owner {
             )
             .chain(retention)
             .chain(self.sources_deadline())
+            .chain(usage_refresh)
             .chain(
                 self.device
                     .as_ref()
@@ -390,6 +424,7 @@ impl Owner {
     /// Writes due cache entries and forgets threads idle past the retention.
     pub fn tick(&mut self) {
         let now = now_ms();
+        self.refresh_accounts_if_due(now);
         self.sources_tick(now);
         self.write_device_state(now);
         if let Some((revision, shell)) = self.shell_cache.due(now) {
@@ -672,6 +707,31 @@ impl Owner {
             .begin_new_thread_draft(new_id("new"), project, now_ms() as i64);
     }
 
+    pub(super) fn accounts_refresh_in_flight(&self) -> bool {
+        self.accounts_refresh_in_flight_epoch == Some(self.epoch)
+    }
+
+    pub(super) fn refresh_accounts_if_due(&mut self, now: u64) {
+        if !self.connected()
+            || !usage_refresh_due(
+                self.usage_refresh_last_attempt_ms,
+                self.accounts_refresh_in_flight(),
+                now,
+            )
+        {
+            return;
+        }
+        // Record the attempt before spawning the request. A failed request keeps
+        // the same five-minute throttle, matching the widget refresher contract.
+        self.usage_refresh_last_attempt_ms = Some(now);
+        self.job(Call::ListAccounts(m::Empty {}), None, None);
+    }
+
+    pub(super) fn account_refresh_finished(&mut self) {
+        self.accounts_refresh_in_flight_epoch = None;
+        self.refresh_accounts_if_due(now_ms());
+    }
+
     fn attach(
         &mut self,
         peer: Peer,
@@ -691,6 +751,8 @@ impl Owner {
             });
         }
         self.epoch += 1;
+        // A task from the replaced Network can never complete this epoch.
+        self.accounts_refresh_in_flight_epoch = None;
         self.state.connected = true;
         self.state.host_name = Some(host_name);
         self.state.environment = Some(environment);
@@ -735,7 +797,8 @@ impl Owner {
             self.subscribe_awareness();
             self.job(Call::RegisterAwareness(awareness_registration), None, None);
         }
-        self.refresh();
+        self.subscribe_background();
+        self.refresh_after_attach();
         self.sources_tick(now_ms());
         if let Some(request) = self
             .state
@@ -808,6 +871,7 @@ impl Owner {
     fn disconnected(&mut self, error: String) {
         self.interrupt_uploads();
         self.abandon_requests();
+        self.accounts_refresh_in_flight_epoch = None;
         self.state.connected = false;
         self.state.awareness = None;
         self.state.error = Some(error);
@@ -935,5 +999,44 @@ impl Owner {
                 t.output_bytes -= t.output.pop_front().expect("nonempty output").data.len();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{USAGE_REFRESH_INTERVAL_MS, usage_refresh_deadline, usage_refresh_due};
+
+    #[test]
+    fn usage_refresh_matches_attempt_throttle_and_clock_rollback() {
+        assert!(usage_refresh_due(None, false, 0));
+        assert!(!usage_refresh_due(
+            Some(1_000),
+            false,
+            1_000 + USAGE_REFRESH_INTERVAL_MS - 1
+        ));
+        assert!(usage_refresh_due(
+            Some(1_000),
+            false,
+            1_000 + USAGE_REFRESH_INTERVAL_MS
+        ));
+        assert!(!usage_refresh_due(Some(1_000), false, 999));
+        assert!(!usage_refresh_due(
+            Some(1_000),
+            true,
+            1_000 + USAGE_REFRESH_INTERVAL_MS
+        ));
+    }
+
+    #[test]
+    fn usage_refresh_deadline_is_suppressed_while_a_request_is_in_flight() {
+        assert_eq!(usage_refresh_deadline(None, false, 50), Some(50));
+        assert_eq!(
+            usage_refresh_deadline(Some(100), false, 100),
+            Some(100 + USAGE_REFRESH_INTERVAL_MS)
+        );
+        assert_eq!(
+            usage_refresh_deadline(Some(100), true, 100 + USAGE_REFRESH_INTERVAL_MS),
+            None
+        );
     }
 }

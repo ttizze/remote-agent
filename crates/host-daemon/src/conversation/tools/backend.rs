@@ -1,6 +1,7 @@
 //! What the tools read and change: the runtime's threads, the Host's projects and
 //! the live provider catalog.
 use super::ModelCatalog;
+use crate::background::BackgroundOwner;
 use crate::conversation::ProjectCatalog;
 use crate::projects::NamedProjectError;
 use crate::conversation::SharedResources;
@@ -9,6 +10,11 @@ use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
 use agent_protocol::{
+    background::{
+        BackgroundPolicySnapshot, HostResourcesSnapshot, ProcessDiagnosticsResult,
+        ProcessResourceHistoryResult, ReadProcessResourceHistory, ReadTraceDiagnostics,
+        TraceDiagnosticsResult,
+    },
     models::{ProjectScript, ProviderStatus},
     workspace::{ListRefs, RefList, VcsStatus},
 };
@@ -214,6 +220,28 @@ pub(crate) trait Orchestration: Send + Sync {
             Err("scheduled tasks are unavailable".into())
         })
     }
+
+    fn background_policy(&self) -> BoxFuture<'_, Result<BackgroundPolicySnapshot, String>> {
+        Box::pin(async { Err("background diagnostics unavailable".into()) })
+    }
+    fn host_resources(&self) -> BoxFuture<'_, Result<HostResourcesSnapshot, String>> {
+        Box::pin(async { Err("Host resources unavailable".into()) })
+    }
+    fn process_diagnostics(&self) -> BoxFuture<'_, Result<ProcessDiagnosticsResult, String>> {
+        Box::pin(async { Err("process diagnostics unavailable".into()) })
+    }
+    fn process_history(
+        &self,
+        _request: ReadProcessResourceHistory,
+    ) -> BoxFuture<'_, Result<ProcessResourceHistoryResult, String>> {
+        Box::pin(async { Err("process resource history unavailable".into()) })
+    }
+    fn trace_diagnostics(
+        &self,
+        _request: ReadTraceDiagnostics,
+    ) -> BoxFuture<'_, Result<TraceDiagnosticsResult, String>> {
+        Box::pin(async { Err("trace diagnostics unavailable".into()) })
+    }
 }
 
 /// The runtime, project catalog and model catalog this Host serves.
@@ -223,6 +251,7 @@ pub(crate) struct HostOrchestration {
     pub(crate) files: WorkspaceFiles,
     pub(crate) resources: SharedResources,
     pub(crate) models: Arc<dyn ModelCatalog>,
+    pub(crate) background: Arc<BackgroundOwner>,
 }
 
 impl Orchestration for HostOrchestration {
@@ -618,6 +647,37 @@ impl Orchestration for HostOrchestration {
             .get(project)
             .and_then(|override_settings| override_settings.new_worktrees_start_from_origin)
             .unwrap_or(settings.new_worktrees_start_from_origin)
+    }
+
+    fn background_policy(&self) -> BoxFuture<'_, Result<BackgroundPolicySnapshot, String>> {
+        Box::pin(async move { Ok(self.background.snapshot().await) })
+    }
+
+    fn host_resources(&self) -> BoxFuture<'_, Result<HostResourcesSnapshot, String>> {
+        Box::pin(async move { Ok(self.background.host_resources().await) })
+    }
+
+    fn process_diagnostics(&self) -> BoxFuture<'_, Result<ProcessDiagnosticsResult, String>> {
+        Box::pin(async move { Ok(self.background.process_diagnostics().await) })
+    }
+
+    fn process_history(
+        &self,
+        request: ReadProcessResourceHistory,
+    ) -> BoxFuture<'_, Result<ProcessResourceHistoryResult, String>> {
+        Box::pin(async move {
+            Ok(self
+                .background
+                .process_history(request.window_ms, request.bucket_ms)
+                .await)
+        })
+    }
+
+    fn trace_diagnostics(
+        &self,
+        request: ReadTraceDiagnostics,
+    ) -> BoxFuture<'_, Result<TraceDiagnosticsResult, String>> {
+        Box::pin(async move { self.background.trace_diagnostics(&request).await })
     }
 }
 

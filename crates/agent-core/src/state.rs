@@ -546,6 +546,8 @@ pub struct Snapshot {
     pub usage_loading: bool,
     pub usage_error: Option<String>,
     pub host_status: Option<crate::models::HostStatus>,
+    /// The Host's current background activity and power policy snapshot.
+    pub background_policy: Option<agent_protocol::background::BackgroundPolicySnapshot>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
     pub preferences: Preferences,
