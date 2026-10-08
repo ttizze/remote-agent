@@ -627,7 +627,7 @@ pub struct DeviceEventLogEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceInputKind {
-    Touch { phase: DeviceTouchPhase, x: f32, y: f32 },
+    Touch { phase: DeviceTouchPhase, x: f32, y: f32, raw: bool },
     /// A keyboard event carries both its physical code and the platform's
     /// actual key value. iOS uses the code for HID; Android uses the key value
     /// so shifted and non-ASCII input is preserved without client-side
