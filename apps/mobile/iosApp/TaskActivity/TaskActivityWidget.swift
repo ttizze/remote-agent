@@ -4,7 +4,9 @@ import WidgetKit
 
 @main
 struct BexTaskWidgets: WidgetBundle {
-    var body: some Widget { BexTaskActivity() }
+    var body: some Widget {
+        BexTaskActivity()
+    }
 }
 
 private struct BexTaskActivity: Widget {
@@ -57,7 +59,7 @@ private struct BexTaskActivity: Widget {
         return HStack(spacing: 2) {
             TaskIconRow(icons: half, stale: context.isStale || !context.state.connected)
                 .frame(width: CGFloat(half.count) * 10, height: 22)
-            if !leading && context.state.summary.total > icons.count {
+            if !leading, context.state.summary.total > icons.count {
                 Text("+\(context.state.summary.total - icons.count)").font(.caption2).monospacedDigit()
             }
         }
@@ -78,7 +80,8 @@ private struct TaskIconRow: View {
                 Image(systemName: stale ? "arrow.clockwise.circle" : icons[index])
                     .resizable().scaledToFit()
                     .foregroundStyle(icons[index] == "person.crop.circle.badge.questionmark" ? .orange : .primary)
-                    .accessibilityLabel(stale ? "更新待ち" : icons[index] == "person.crop.circle.badge.questionmark" ? "確認待ち" : "実行中")
+                    .accessibilityLabel(stale ? "更新待ち" : icons[index] == "person.crop.circle.badge.questionmark" ?
+                        "確認待ち" : "実行中")
                     .frame(maxWidth: 22)
             }
         }
