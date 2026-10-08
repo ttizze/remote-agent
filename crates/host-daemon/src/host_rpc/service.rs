@@ -108,7 +108,7 @@ struct ServiceInner {
     // permit. Handoff takes the write permit, so independent work can overlap
     // while the handoff waits for all of it, and no new operation can enter
     // once draining starts.
-    handoff_gate: tokio::sync::RwLock<()>,
+    handoff_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 #[derive(Default)]
@@ -406,7 +406,7 @@ impl HostRpcService {
                 updater: crate::UpdateManager::new(update_dir),
                 started: AtomicBool::new(false),
                 handoff_draining: AtomicBool::new(false),
-                handoff_gate: tokio::sync::RwLock::new(()),
+                handoff_gate: Arc::new(tokio::sync::RwLock::new(())),
             }),
         })
     }
@@ -940,6 +940,9 @@ impl HostRpcService {
         if self.inner.updater.has_active_operations() {
             return true;
         }
+        if self.inner.resources.vcs.has_active_actions() {
+            return true;
+        }
         if self.inner.resources.dictation.has_active_tasks() {
             return true;
         }
@@ -1025,6 +1028,19 @@ impl HostRpcService {
         }
         Ok(gate)
     }
+
+    /// Admit a detached owner while retaining the same handoff read permit
+    /// until that owner completes. The owned guard prevents an update from
+    /// being accepted after the RPC that started the owner has returned.
+    pub(crate) async fn acquire_owned_handoff_gate(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, String> {
+        let gate = self.inner.handoff_gate.clone().read_owned().await;
+        if !handoff_admission_allowed(self.handoff_is_draining(), false) {
+            return Err("Host is waiting for its installed update to start".into());
+        }
+        Ok(gate)
+    }
     pub fn open_session(&self) -> HostSession {
         self.inner.connections.open_session()
     }
@@ -1102,6 +1118,7 @@ impl HostRpcService {
     /// Stops provider processes after the conversation records the shutdown.
     pub(crate) async fn shutdown_owned_processes(&self) {
         self.stop_background_tasks().await;
+        self.inner.resources.vcs.shutdown_actions().await;
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.shutdown().await;
         }
@@ -1174,7 +1191,7 @@ impl HostRpcService {
         }
         if let Call::RunStackedAction(params) = call {
             let cancel = self.inner.connections.cancellation(session)?;
-            return Ok(self.stacked_action(params, cancel));
+            return Ok(self.stacked_action(params, cancel).await);
         }
         if let Call::SubscribeScheduledTasks(_) = call {
             let cancel = self.inner.connections.cancellation(session)?;
@@ -1406,18 +1423,27 @@ impl HostRpcService {
         )
     }
 
-    fn stacked_action(
+    async fn stacked_action(
         &self,
         params: &agent_protocol::vcs::RunStackedAction,
         cancel: tokio_util::sync::CancellationToken,
     ) -> HostReply {
+        let handoff_gate = match self.acquire_owned_handoff_gate().await {
+            Ok(gate) => gate,
+            Err(error) => return Response::error("host_handoff_in_progress", &error).into(),
+        };
         let resources = &self.inner.resources;
-        let (first, receiver) = crate::vcs::start_action(
+        let (first, receiver) = match crate::vcs::start_action(
             params.clone(),
             resources.vcs.github().cloned(),
             resources.text.get().cloned(),
             resources.vcs.clone(),
-        );
+            cancel.clone(),
+            handoff_gate,
+        ) {
+            Ok(action) => action,
+            Err(error) => return Response::error("vcs_action_unavailable", &error).into(),
+        };
         let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
         let empty = agent_protocol::vcs::ActionProgressEvent {
             action_id: params.action_id.clone(),
