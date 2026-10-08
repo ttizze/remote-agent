@@ -448,24 +448,14 @@ impl HostRuntime {
                 | Call::RemoveRemote(_)
         );
         if management {
-            let _management_gate = match message {
-                Call::Pair(_)
-                | Call::HostStatus(_)
-                | Call::Invite(_)
-                | Call::Revoke(_)
-                | Call::ListRemotes(_)
-                | Call::RegisterRemote(_)
-                | Call::RemoveRemote(_) => Some(
-                    self.service
-                        .acquire_handoff_gate(matches!(
-                            message,
-                            Call::HostStatus(_) | Call::ListRemotes(_)
-                        ))
-                        .await
-                        .map_err(anyhow::Error::msg)?,
-                ),
-                _ => None,
-            };
+            let _management_gate = self
+                .service
+                .acquire_handoff_gate(matches!(
+                    message,
+                    Call::HostStatus(_) | Call::ReadUpdateStatus(_) | Call::ListRemotes(_)
+                ))
+                .await
+                .map_err(anyhow::Error::msg)?;
             let result = if matches!(message, Call::Pair(_)) {
                 // Only authorized sessions reach dispatch; the invitation was
                 // already consumed at the transport gate.

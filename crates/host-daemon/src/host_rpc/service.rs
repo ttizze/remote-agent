@@ -1034,9 +1034,10 @@ impl HostRpcService {
     /// being accepted after the RPC that started the owner has returned.
     pub(crate) async fn acquire_owned_handoff_gate(
         &self,
+        allow_during_drain: bool,
     ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, String> {
         let gate = self.inner.handoff_gate.clone().read_owned().await;
-        if !handoff_admission_allowed(self.handoff_is_draining(), false) {
+        if !handoff_admission_allowed(self.handoff_is_draining(), allow_during_drain) {
             return Err("Host is waiting for its installed update to start".into());
         }
         Ok(gate)
@@ -1166,10 +1167,14 @@ impl HostRpcService {
         call: &Call,
         desktop_publisher_allowed: bool,
     ) -> Result<HostReply, String> {
-        // Admission and handoff share this gate. Holding it across the owner
-        // operation closes the window between the idle probe and starting a
-        // browser, conversation, terminal, or dictation task.
-        let _gate = self.acquire_handoff_gate(false).await?;
+        // Admission and handoff share this gate. Holding one permit across
+        // the owner operation closes the window between the idle probe and
+        // starting a browser, conversation, terminal, or dictation task.
+        // Status reads remain available while the installed update waits to
+        // start. A detached Git action takes ownership of this same permit.
+        let gate = self
+            .acquire_owned_handoff_gate(matches!(call, Call::ReadUpdateStatus(_)))
+            .await?;
         self.inner.connections.ensure_session(session)?;
         if let Some(conversation) = self.inner.resources.conversation.get() {
             let cancel = self.inner.connections.cancellation(session)?;
@@ -1191,8 +1196,9 @@ impl HostRpcService {
         }
         if let Call::RunStackedAction(params) = call {
             let cancel = self.inner.connections.cancellation(session)?;
-            return Ok(self.stacked_action(params, cancel).await);
+            return Ok(self.stacked_action(params, cancel, gate).await);
         }
+        let _gate = gate;
         if let Call::SubscribeScheduledTasks(_) = call {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.scheduled_tasks(cancel).await);
@@ -1427,11 +1433,8 @@ impl HostRpcService {
         &self,
         params: &agent_protocol::vcs::RunStackedAction,
         cancel: tokio_util::sync::CancellationToken,
+        handoff_gate: tokio::sync::OwnedRwLockReadGuard<()>,
     ) -> HostReply {
-        let handoff_gate = match self.acquire_owned_handoff_gate().await {
-            Ok(gate) => gate,
-            Err(error) => return Response::error("host_handoff_in_progress", &error).into(),
-        };
         let resources = &self.inner.resources;
         let (first, receiver) = match crate::vcs::start_action(
             params.clone(),
@@ -1534,10 +1537,6 @@ impl HostRpcService {
     }
 
     pub(crate) async fn update(&self, call: &Call) -> Result<Body, Failure> {
-        let _gate = self
-            .acquire_handoff_gate(matches!(call, Call::ReadUpdateStatus(_)))
-            .await
-            .map_err(|message| Failure::new("host_handoff_in_progress", message))?;
         let updater = &self.inner.updater;
         match call {
             Call::ReadUpdateStatus(request) => Ok(updater.status(request).await.into()),
