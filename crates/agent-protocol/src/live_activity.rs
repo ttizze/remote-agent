@@ -262,7 +262,9 @@ mod tests {
             ("failed", false),
         ] {
             assert_eq!(
-                TaskActivitySummary::from_statuses([status]).display().ongoing,
+                TaskActivitySummary::from_statuses([status])
+                    .display()
+                    .ongoing,
                 ongoing
             );
         }
