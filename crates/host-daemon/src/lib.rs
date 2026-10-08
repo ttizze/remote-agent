@@ -7,6 +7,7 @@ pub mod conversation;
 mod dictation;
 mod favicon;
 mod git;
+mod github;
 mod host_identity;
 mod host_rpc;
 mod host_runtime;

@@ -120,10 +120,13 @@ pub struct BranchChanges {
     pub deletions: u64,
 }
 
+/// The local half (`vcs::VcsStatusLocal`) with the remote half
+/// (`vcs::VcsStatusRemote`) merged in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcsStatus {
     pub is_repo: bool,
+    pub source_control_provider: Option<crate::vcs::SourceControlProviderInfo>,
     pub has_primary_remote: bool,
     pub is_default_ref: bool,
     /// `None` on a detached HEAD.
@@ -131,6 +134,13 @@ pub struct VcsStatus {
     pub has_working_tree_changes: bool,
     pub working_tree: WorkingTreeChanges,
     pub branch_changes: Option<BranchChanges>,
+    pub has_upstream: bool,
+    pub ahead_count: u64,
+    pub behind_count: u64,
+    /// Commits ahead of the default branch; `None` when the remote half was
+    /// not read.
+    pub ahead_of_default_count: Option<u64>,
+    pub pr: Option<crate::vcs::VcsStatusChangeRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -665,19 +665,8 @@ fn branch_changes(cwd: &Path, branch: Option<&str>) -> Result<BranchChanges> {
 }
 
 fn status(cwd: &Path) -> Result<VcsStatus> {
-    let not_repository = VcsStatus {
-        is_repo: false,
-        has_primary_remote: false,
-        is_default_ref: false,
-        ref_name: None,
-        has_working_tree_changes: false,
-        working_tree: WorkingTreeChanges {
-            files: vec![],
-            insertions: 0,
-            deletions: 0,
-        },
-        branch_changes: None,
-    };
+    let not_repository =
+        VcsStatus::merge(agent_protocol::vcs::VcsStatusLocal::not_repository(), None);
     if !cwd.is_dir() {
         return Ok(not_repository);
     }
@@ -762,6 +751,12 @@ fn status(cwd: &Path) -> Result<VcsStatus> {
     });
     let root = repository(cwd).map(|repository| repository.root);
     Ok(VcsStatus {
+        source_control_provider: None,
+        has_upstream: false,
+        ahead_count: 0,
+        behind_count: 0,
+        ahead_of_default_count: None,
+        pr: None,
         is_repo: true,
         has_primary_remote: stdout(cwd, &["remote", "get-url", "origin"]).is_some(),
         is_default_ref,

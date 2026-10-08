@@ -10,4 +10,5 @@ pub mod operations;
 pub mod permissions;
 pub mod protocol;
 pub mod provider;
+pub mod vcs;
 pub mod workspace;
