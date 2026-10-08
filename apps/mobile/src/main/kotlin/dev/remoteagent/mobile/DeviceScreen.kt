@@ -55,15 +55,16 @@ import java.io.File
 internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val view = model.snapshot.device()
     val context = LocalContext.current
+    val hostProfile = model.profileId
     val threadSessions = view.sessions.filter { it.threadId == threadId }
     val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}" }
     val liveFrames = view.videoFrames.filter { it.threadId == threadId }
-    LaunchedEffect(threadId) {
+    LaunchedEffect(threadId, hostProfile) {
         model.perform(Intent.OpenThread(threadId))
         model.perform(Intent.LoadDevices)
         model.perform(Intent.SubscribeDevice)
     }
-    LaunchedEffect(threadId, sessionKey) {
+    LaunchedEffect(threadId, hostProfile, sessionKey) {
         threadSessions.forEach { session ->
             model.perform(Intent.LoadDeviceDetail(session.hostId, session.deviceId))
             model.perform(Intent.LoadDeviceAccessibility(session.hostId, session.deviceId))
@@ -72,7 +73,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
             }
         }
     }
-    DisposableEffect(threadId) {
+    DisposableEffect(threadId, hostProfile) {
         onDispose { model.perform(Intent.UnsubscribeDevice) }
     }
     ScreenScaffold("Device", onBack = model::back) {
@@ -378,7 +379,7 @@ private fun DeviceH264Frame(
     frame: dev.remoteagent.core.DeviceVideoFrameView,
 ) {
     val decoder = remember { DeviceVideoDecoder() }
-    val streamKey = "${frame.hostId}:${frame.deviceId}:${frame.screenId ?: 0}"
+    val streamKey = "${model.profileId}:${frame.hostId}:${frame.deviceId}:${frame.screenId ?: 0}"
     DisposableEffect(decoder) {
         onDispose { decoder.close() }
     }
