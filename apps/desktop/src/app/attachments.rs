@@ -255,7 +255,7 @@ impl Desktop {
             })
     }
 
-    fn stage(
+    pub(super) fn stage(
         &self,
         draft_key: String,
         snapshot_feedback: Option<(bool, bool)>,

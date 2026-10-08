@@ -1073,7 +1073,7 @@ impl Desktop {
                                         action: DeviceActionIntent::Key {
                                             code: "Enter".into(),
                                             key: "Enter".into(),
-                                            session_epoch,
+                                            session_epoch: session_epoch.clone(),
                                             down: false,
                                             meta: false,
                                             ctrl: false,
@@ -1857,7 +1857,7 @@ impl Desktop {
                                         )
                                         .on_mouse_up_out(
                                             MouseButton::Left,
-                                            cx.listener(move |view, _, _, cx| {
+                                            cx.listener(move |view, _, _, _| {
                                                 if view
                                                     .panels
                                                     .device
@@ -1873,7 +1873,7 @@ impl Desktop {
                                                 }
                                             }),
                                         )
-                                        .on_mouse_exit(cx.listener(move |view, _, _, cx| {
+                                        .on_mouse_exit(cx.listener(move |view, _, _, _| {
                                             if view.panels.device.active_touch.as_ref().is_some_and(
                                                 |touch| {
                                                     touch.host_id == exit_host

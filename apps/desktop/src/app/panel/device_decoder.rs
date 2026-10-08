@@ -783,7 +783,7 @@ fn to_annex_b(bytes: &[u8]) -> Vec<u8> {
         return bytes.to_vec();
     }
     let mut result = Vec::with_capacity(bytes.len().saturating_add(16));
-    let mut offset = 0;
+    let mut offset: usize = 0;
     while offset.saturating_add(4) <= bytes.len() {
         let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
