@@ -327,25 +327,6 @@ impl Default for PreviewDefaults {
     }
 }
 
-impl PreviewDefaults {
-    pub(crate) fn from_browser_defaults(
-        defaults: agent_core::view::browser::BrowserDefaults,
-    ) -> Self {
-        Self {
-            viewport: defaults.viewport,
-            appearance: defaults.appearance,
-            zoom: defaults.zoom,
-            profile_id: Some(defaults.profile_id),
-            recording_options: agent_protocol::preview::PreviewRecordingOptions {
-                frame_rate: defaults.recording_frame_rate as u8,
-                show_key_presses: defaults.recording_show_key_presses,
-                show_mouse_presses: defaults.recording_show_mouse_presses,
-            }
-            .into(),
-        }
-    }
-}
-
 /// Renders frames from the Host-owned Preview browser. The image and every
 /// input action share the Host tab identity, so a panel switch never creates a
 /// second local page behind the user's visible Preview.

@@ -18,7 +18,7 @@ use gpui_kit::{
     *,
 };
 
-pub(super) struct FilesState {
+pub(in crate::app) struct FilesState {
     editor: Entity<EditorState>,
     content_query: Entity<InputState>,
     /// The file the editor holds.
@@ -79,7 +79,7 @@ impl FilesState {
         self.reveal = None;
     }
 
-    pub(crate) fn set_word_wrap(
+    pub(in crate::app) fn set_word_wrap(
         &mut self,
         wrap: bool,
         window: &mut Window,
