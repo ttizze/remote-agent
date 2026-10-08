@@ -2187,6 +2187,13 @@ pub enum Intent {
     SetDefaultRuntimeMode {
         mode: RuntimeMode,
     },
+    /// Replaces the Host-owned provider instance map atomically.
+    SetProviderInstances {
+        /// JSON for the complete map. The native layer uses the protocol's
+        /// serde shape while the binding-safe intent keeps the config types
+        /// out of the generated mobile enum.
+        provider_instances_json: String,
+    },
     ToggleFavoriteModel {
         instance_id: String,
         model: String,

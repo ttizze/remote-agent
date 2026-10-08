@@ -2038,6 +2038,59 @@ fn default_model_and_permissions_keep_only_user_defaults() {
 }
 
 #[test]
+fn provider_instance_edit_writes_one_validated_host_settings_patch() {
+    let mut owner = owner(Snapshot {
+        host_settings: Some(agent_protocol::models::HostSettings::default()),
+        ..Snapshot::default()
+    });
+    let config = agent_protocol::models::ProviderInstanceConfig {
+        driver: agent_domain::Driver::Codex,
+        display_name: "Build".into(),
+        binary_path: Some("/opt/codex".into()),
+        environment: BTreeMap::from([("PROFILE".into(), "work".into())]),
+        custom_models: vec![agent_protocol::models::ProviderCustomModel {
+            slug: "reasoning".into(),
+            name: "Reasoning".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let map = BTreeMap::from([("build".into(), config.clone())]);
+    let next = owner
+        .prepare(Intent::SetProviderInstances {
+            provider_instances_json: serde_json::to_string(&map).unwrap(),
+        })
+        .unwrap();
+    let Next::Call(call, _) = next else {
+        panic!("provider edits must be sent to the Host");
+    };
+    let crate::protocol::Call::UpdateSettings(patch) = *call else {
+        panic!("provider edits must use host/settings/update");
+    };
+    assert_eq!(patch.provider_instances, Some(map));
+    assert_eq!(patch.provider_instances.as_ref().unwrap()["build"], config);
+}
+
+#[test]
+fn provider_instance_edit_rejects_invalid_environment_before_dispatch() {
+    let mut owner = owner(Snapshot {
+        host_settings: Some(agent_protocol::models::HostSettings::default()),
+        ..Snapshot::default()
+    });
+    let next = owner.prepare(Intent::SetProviderInstances {
+        provider_instances_json: serde_json::to_string(&BTreeMap::from([(
+            "build".into(),
+            agent_protocol::models::ProviderInstanceConfig {
+                environment: BTreeMap::from([("bad-name".into(), "x".into())]),
+                ..Default::default()
+            },
+        )]))
+        .unwrap(),
+    });
+    assert!(next.is_err());
+}
+
+#[test]
 fn preferences_change_on_the_device_and_survive_a_restart() {
     let mut owner = owner(Snapshot::default());
     for intent in [

@@ -696,6 +696,12 @@ pub struct ProviderInstanceConfig {
     /// Models not returned by the provider's live catalogue.
     pub custom_models: Vec<ProviderCustomModel>,
 }
+
+/// Maximum length accepted for a provider instance id.
+pub const MAX_PROVIDER_INSTANCE_ID_LENGTH: usize = 64;
+/// Maximum length accepted for a user-authored provider model slug.
+pub const MAX_PROVIDER_CUSTOM_MODEL_SLUG_LENGTH: usize = 256;
+
 impl Default for ProviderInstanceConfig {
     fn default() -> Self {
         Self {
@@ -713,14 +719,20 @@ impl Default for ProviderInstanceConfig {
 }
 
 impl ProviderInstanceConfig {
-    fn validate(&self, instance: &str) -> Result<(), String> {
+    /// Validates the launch and catalogue settings for an instance id.
+    ///
+    /// The Host calls this while validating the complete settings document;
+    /// native editors use the same rule through the core provider editor
+    /// helpers so a value rejected in the UI cannot differ from a value
+    /// rejected when persisted.
+    pub fn validate(&self, instance: &str) -> Result<(), String> {
         let raw_instance = instance;
         let instance = raw_instance.trim();
         if raw_instance != instance {
             return Err("provider instance ids must not have surrounding whitespace".into());
         }
         if instance.is_empty()
-            || instance.len() > 64
+            || instance.len() > MAX_PROVIDER_INSTANCE_ID_LENGTH
             || !instance.bytes().enumerate().all(|(index, byte)| {
                 byte.is_ascii_alphanumeric() || (index > 0 && (byte == b'_' || byte == b'-'))
             })
@@ -780,6 +792,11 @@ impl ProviderInstanceConfig {
         for model in &self.custom_models {
             if model.slug.trim().is_empty() || model.name.trim().is_empty() {
                 return Err("custom provider models need a slug and name".into());
+            }
+            if model.slug.chars().count() > MAX_PROVIDER_CUSTOM_MODEL_SLUG_LENGTH {
+                return Err(format!(
+                    "custom provider model slugs must be {MAX_PROVIDER_CUSTOM_MODEL_SLUG_LENGTH} characters or fewer"
+                ));
             }
             if !slugs.insert(model.slug.trim().to_owned()) {
                 return Err(format!(

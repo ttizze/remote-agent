@@ -9,6 +9,7 @@ mod general;
 mod import;
 mod keybindings;
 mod projects;
+mod provider_instances;
 mod providers;
 mod scheduled_tasks;
 mod scripts;
