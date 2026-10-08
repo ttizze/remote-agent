@@ -13,12 +13,18 @@ struct ThreadRoutes {
 }
 
 private enum ThreadSheet: Identifiable {
+    case queue
+    case agents
+    case settings
     case file(FileTarget)
     case pdf(FileTarget)
     case context(ContextChip)
 
     var id: String {
         switch self {
+        case .queue: "queue"
+        case .agents: "agents"
+        case .settings: "settings"
         case let .file(target): "file:\(target.id)"
         case let .pdf(target): "pdf:\(target.id)"
         case let .context(chip): "context:\(chip.contextId)"
@@ -34,9 +40,6 @@ struct ThreadScreen: View {
     @State private var following = true
     @State private var userScrolling = false
     @State private var atEnd = true
-    @State private var showingQueue = false
-    @State private var showingAgents = false
-    @State private var showingSettings = false
     @State private var forkingRun: String?
     @State private var sheet: ThreadSheet?
     private let endId = "feed-end"
@@ -61,10 +64,16 @@ struct ThreadScreen: View {
         .background(AppTheme.screen.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { header }
-        .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
-        .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
         .sheet(item: $sheet) { sheet in
             switch sheet {
+            case .queue:
+                QueueSheet(model: model)
+            case .agents:
+                AgentsSheet(model: model)
+            case .settings:
+                if let controls = model.threadView?.composer.controls {
+                    ThreadSettingsSheet(model: model, controls: controls)
+                }
             case let .file(target):
                 ThreadFileSheet(model: model, target: target)
             case let .pdf(target):
@@ -82,11 +91,6 @@ struct ThreadScreen: View {
             openPDF: { sheet = .pdf($0) },
             loadFile: model.download
         ))
-        .sheet(isPresented: $showingSettings) {
-            if let controls = model.threadView?.composer.controls {
-                ThreadSettingsSheet(model: model, controls: controls)
-            }
-        }
     }
 
     private func content(_ view: ThreadView) -> some View {
@@ -178,8 +182,8 @@ struct ThreadScreen: View {
                 WorkingControl(
                     control: working,
                     reconnect: { model.connect(afterForeground: true) },
-                    showAgents: { showingAgents = true },
-                    showQueue: { showingQueue = true },
+                    showAgents: { sheet = .agents },
+                    showQueue: { sheet = .queue },
                     scrollToEnd: scrollToEnd
                 )
             }
@@ -202,7 +206,7 @@ struct ThreadScreen: View {
                     .padding(.horizontal, 14).padding(.bottom, 10.5)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
-                Composer(model: model, composer: view.composer) { showingSettings = true }
+                Composer(model: model, composer: view.composer) { sheet = .settings }
             }
         }
         .animation(.easeOut(duration: 0.22), value: view.requests.approval?.requestId)
