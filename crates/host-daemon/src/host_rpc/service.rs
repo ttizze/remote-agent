@@ -86,6 +86,7 @@ struct ServiceInner {
     updater: crate::UpdateManager,
     started: AtomicBool,
     handoff_draining: AtomicBool,
+    handoff_gate: tokio::sync::Mutex<()>,
 }
 struct HostResources {
     codex: Arc<CodexResources>,
@@ -171,6 +172,7 @@ impl HostRpcService {
                 updater: crate::UpdateManager::new(update_dir),
                 started: AtomicBool::new(false),
                 handoff_draining: AtomicBool::new(false),
+                handoff_gate: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -351,6 +353,9 @@ impl HostRpcService {
     /// subprocesses have settled. The Host owns this decision because a
     /// Desktop process cannot observe provider work in another process.
     pub(crate) fn has_active_tasks(&self) -> bool {
+        if self.inner.updater.has_active_operations() {
+            return true;
+        }
         if let Some(conversation) = self.inner.resources.conversation.get() {
             let threads = match conversation.runtime.store().thread_shells() {
                 Ok(threads) => threads,
@@ -383,9 +388,7 @@ impl HostRpcService {
     }
 
     pub(crate) async fn accept_handoff_if_idle(&self) -> anyhow::Result<bool> {
-        if self.has_active_tasks() {
-            return Ok(false);
-        }
+        let _gate = self.inner.handoff_gate.lock().await;
         if self
             .inner
             .handoff_draining
@@ -410,6 +413,9 @@ impl HostRpcService {
                 Err(error)
             }
         }
+    }
+    pub(crate) fn handoff_is_draining(&self) -> bool {
+        self.inner.handoff_draining.load(Ordering::Acquire)
     }
     pub fn open_session(&self) -> HostSession {
         self.inner.connections.open_session()
@@ -507,6 +513,13 @@ impl HostRpcService {
     }
 
     pub(crate) async fn update(&self, call: &Call) -> Result<Body, Failure> {
+        let _gate = self.inner.handoff_gate.lock().await;
+        if self.handoff_is_draining() && !matches!(call, Call::ReadUpdateStatus(_)) {
+            return Err(Failure::new(
+                "host_handoff_in_progress",
+                "Host is waiting for its installed update to start",
+            ));
+        }
         let updater = &self.inner.updater;
         match call {
             Call::ReadUpdateStatus(request) => Ok(updater.status(request).await.into()),

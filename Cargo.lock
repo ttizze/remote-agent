@@ -1075,6 +1075,7 @@ dependencies = [
  "gpui-wry",
  "host-daemon",
  "image",
+ "libc",
  "lb-wry",
  "objc2 0.6.4",
  "objc2-av-foundation",

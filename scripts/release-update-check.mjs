@@ -4,6 +4,10 @@ const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-
 const CHANNELS = Object.freeze(["nightly", "preview", "stable"]);
 const UPDATE_TARGETS = Object.freeze(["host", "desktop"]);
 const NATIVE_TARGETS = Object.freeze(["android", "ios"]);
+const NATIVE_STORE_HOSTS = Object.freeze({
+  android: Object.freeze(["play.google.com"]),
+  ios: Object.freeze(["apps.apple.com", "testflight.apple.com"]),
+});
 const MAX_REDIRECTS = 5;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const UPDATE_STATUSES = Object.freeze([
@@ -122,6 +126,15 @@ function assertHttpsUrl(value, field) {
   return url.toString();
 }
 
+function assertNativeStoreUrl(value, field, target) {
+  const normalized = assertHttpsUrl(value, field);
+  const hostname = new URL(normalized).hostname.toLowerCase().replace(/\.$/u, "");
+  if (!NATIVE_STORE_HOSTS[target]?.includes(hostname)) {
+    throw new Error(`${field} must use an approved store host`);
+  }
+  return normalized;
+}
+
 function validateMetadata(metadata, source = "release metadata") {
   if (
     !metadata ||
@@ -168,7 +181,9 @@ function validateMetadata(metadata, source = "release metadata") {
       const update = metadata.native_updates[target];
       if (update === undefined) continue;
       if (!update || typeof update !== "object") throw new Error(`invalid ${target} native update`);
-      if (update.url !== undefined && update.url !== null) assertHttpsUrl(update.url, `${target}.url`);
+      if (update.url !== undefined && update.url !== null) {
+        assertNativeStoreUrl(update.url, `${target}.url`, target);
+      }
     }
   }
   return metadata;
@@ -223,7 +238,7 @@ function nativeUpdate(metadata, currentVersion, target) {
     current_version: currentVersion,
     latest_version: metadata.version,
     update_available: versionAvailable && Boolean(configured?.url),
-    // Store links are metadata supplied by trusted release configuration. An
+    // Store links are metadata supplied by approved release configuration. An
     // absent link remains unavailable instead of inventing a published state.
     store_url: configured?.url ?? null,
     release_notes: normalizeReleaseNotes(metadata),

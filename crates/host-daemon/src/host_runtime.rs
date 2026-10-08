@@ -343,6 +343,16 @@ impl HostRuntime {
             }
             .into());
         }
+        if self.service.handoff_is_draining()
+            && !matches!(
+                message,
+                Call::HostStatus(_) | Call::ReadUpdateStatus(_) | Call::ListRemotes(_)
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Host is waiting for its installed update to start"
+            ));
+        }
         let management = matches!(
             message,
             Call::Pair(_)

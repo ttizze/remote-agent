@@ -200,6 +200,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: ${{ needs.toolchain.outputs.rust }}
+      - name: Stage pinned FFmpeg/libvpx runtime
+        shell: pwsh
+        run: ./scripts/fetch-windows-ffmpeg.ps1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: release-windows-${{ hashFiles('Cargo.lock') }}
@@ -480,10 +483,10 @@ jobs:
           ((${#assets[@]} > 0)) || { echo 'no release artifacts were produced' >&2; exit 1; }
           ANDROID_STORE_URL="$ANDROID_STORE_URL" IOS_STORE_URL="$IOS_STORE_URL" node <<'NODE'
           const urls = [
-            ['ANDROID_STORE_URL', process.env.ANDROID_STORE_URL],
-            ['IOS_STORE_URL', process.env.IOS_STORE_URL],
+            ['ANDROID_STORE_URL', process.env.ANDROID_STORE_URL, new Set(['play.google.com'])],
+            ['IOS_STORE_URL', process.env.IOS_STORE_URL, new Set(['apps.apple.com', 'testflight.apple.com'])],
           ];
-          for (const [name, value] of urls) {
+          for (const [name, value, allowedHosts] of urls) {
             if (!value) continue;
             let parsed;
             try {
@@ -492,8 +495,9 @@ jobs:
               console.error(`${name} must be an absolute HTTPS URL`);
               process.exit(1);
             }
-            if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) {
-              console.error(`${name} must be an absolute HTTPS URL without credentials`);
+            const hostname = parsed.hostname.toLowerCase().replace(/\.$/u, '');
+            if (parsed.protocol !== 'https:' || !hostname || parsed.username || parsed.password || !allowedHosts.has(hostname)) {
+              console.error(`${name} must be an absolute HTTPS URL on an approved store host without credentials`);
               process.exit(1);
             }
           }
