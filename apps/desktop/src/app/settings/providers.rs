@@ -1,11 +1,11 @@
 //! The Providers page: each provider's accounts on the Host, signing in and
 //! choosing the account threads use.
-use super::{Row, notice, page_container, section};
+use super::{Choice, Row, notice, page_container, section, select};
 use crate::app::{
     Desktop,
     ui::{color, driver_icon, icon, tint},
 };
-use agent_core::state::Intent;
+use agent_core::{state::Intent, view::load_balancing};
 use agent_domain::Driver;
 use agent_protocol::{
     operations::{Account, AccountLogin},
@@ -17,7 +17,6 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputState},
-        notification::Notification,
         switch::Switch,
         v_flex,
     },
@@ -111,7 +110,10 @@ impl Desktop {
         if !self.snapshot.connected {
             return page_container(
                 896.,
-                vec![notice("Connect an environment to set up its providers.")],
+                vec![
+                    notice("Connect an environment to set up its providers."),
+                    self.render_routing_settings(cx),
+                ],
             );
         }
         let selected = self.settings.providers.selected;
@@ -202,6 +204,7 @@ impl Desktop {
                             .child(refresh),
                     )
                     .child(card)
+                    .child(self.render_provider_instances(window, cx))
                     .child(self.render_routing_settings(cx))
                     .into_any_element(),
             ],
@@ -211,88 +214,114 @@ impl Desktop {
     /// The routing weights are device-local, while the provider instance and
     /// custom model catalogue come from the connected Host.
     fn render_routing_settings(&self, cx: &mut Context<Desktop>) -> AnyElement {
-        let providers = self.snapshot.providers.as_deref().unwrap_or(&[]);
+        let environments = self.environment_registry.summaries();
+        if environments.len() < 2 {
+            return div().into_any_element();
+        }
         let enabled = self.snapshot.preferences.load_balancing_enabled;
-        let rows = providers
+        let toggle = Switch::new("load-balancing-enabled")
+            .checked(enabled)
+            .accessibility_label("Automatically balance new threads")
+            .on_click(cx.listener(|view, checked: &bool, _, cx| {
+                let ids: Vec<_> = view
+                    .environment_registry
+                    .summaries()
+                    .into_iter()
+                    .map(|summary| summary.descriptor.environment_id)
+                    .collect();
+                for environment_id in ids {
+                    view.perform_on_environment(
+                        &environment_id,
+                        Intent::SetLoadBalancingEnabled { enabled: *checked },
+                    );
+                }
+                cx.notify();
+            }));
+        let mut rows = environments
             .iter()
             .enumerate()
-            .map(|(index, provider)| {
-                let id = provider.instance.clone();
+            .map(|(index, environment)| {
+                let id = environment.descriptor.environment_id.clone();
                 let weight = self
-                    .snapshot
-                    .preferences
-                    .load_balancing_weights
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(100);
-                let title = provider.display_name.clone();
-                let detail = format!(
-                    "{} model{} · weight {}",
-                    provider.models.len(),
-                    if provider.models.len() == 1 { "" } else { "s" },
-                    weight
+                    .environment_registry
+                    .snapshot(&id)
+                    .and_then(|snapshot| {
+                        snapshot.preferences.load_balancing_weights.get(&id).copied()
+                    })
+                    .or_else(|| self.snapshot.preferences.load_balancing_weights.get(&id).copied());
+                let preference = load_balancing::preference_for_weight(weight);
+                let title = environment.descriptor.label.clone();
+                let detail = match environment.connection {
+                    agent_core::environment::EnvironmentConnectionState::Connected => {
+                        "Connected"
+                    }
+                    agent_core::environment::EnvironmentConnectionState::Connecting => {
+                        "Connecting"
+                    }
+                    agent_core::environment::EnvironmentConnectionState::Disconnected => {
+                        "Disconnected"
+                    }
+                };
+                let choices = [
+                    (100_u8, "Prefer"),
+                    (50_u8, "Normal"),
+                    (25_u8, "Less often"),
+                    (0_u8, "Manual only"),
+                ]
+                .into_iter()
+                .map(|(value, label)| Choice {
+                    id: value.to_string(),
+                    label: label.into(),
+                    description: None,
+                    icon: None,
+                    selected: value == preference,
+                })
+                .collect();
+                let environment_id = id.clone();
+                let control = select(
+                    format!("load-balancing-weight-{id}"),
+                    match preference {
+                        100 => "Prefer",
+                        25 => "Less often",
+                        0 => "Manual only",
+                        _ => "Normal",
+                    },
+                    choices,
+                    move |view, value, _, cx| {
+                        if !view.snapshot.preferences.load_balancing_enabled {
+                            return;
+                        }
+                        if let Ok(weight) = value.parse::<u8>() {
+                            view.perform_on_environment(
+                                &environment_id,
+                                Intent::SetLoadBalancingWeight {
+                                    environment_id: environment_id.clone(),
+                                    weight,
+                                },
+                            );
+                        }
+                        cx.notify();
+                    },
+                    cx,
                 );
-                let update_id = id.clone();
-                let switch_id = id.clone();
-                let can_update = provider.installed && provider.enabled;
                 Row::new(format!("route-{index}"))
-                    .description(detail)
-                    .control(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Switch::new(SharedString::from(format!("route-switch-{id}")))
-                                    .checked(enabled && weight > 0)
-                                    .accessibility_label(format!(
-                                        "Use {} for load balancing",
-                                        title
-                                    ))
-                                    .on_click(cx.listener(move |view, checked: &bool, _, _| {
-                                        view.perform(Intent::SetLoadBalancingWeight {
-                                            instance_id: switch_id.clone(),
-                                            weight: if *checked { 100 } else { 0 },
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("update-provider-{id}")))
-                                    .ghost()
-                                    .xsmall()
-                                    .label("Update")
-                                    .disabled(!can_update)
-                                    .tooltip("Update this provider installation")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.perform_then(
-                                            Intent::UpdateProvider {
-                                                instance: update_id.clone(),
-                                                target_version: None,
-                                            },
-                                            |view, result, window, cx| match result {
-                                                Ok(_) => {
-                                                    window.push_notification(
-                                                        Notification::success("Provider updated."),
-                                                        cx,
-                                                    );
-                                                    view.perform(Intent::LoadProviders);
-                                                }
-                                                Err(error) => view.show_error(error, window, cx),
-                                            },
-                                        );
-                                    })),
-                            ),
-                    )
+                    .description(format!("{detail} · {title}"))
+                    .control(control.into_any_element())
                     .render()
             })
             .collect::<Vec<_>>();
-        let mut rows = rows;
-        if rows.is_empty() {
-            rows.push(notice("Provider instances are still loading.").into_any_element());
-        }
+        rows.insert(
+            0,
+            Row::new("load-balancing-toggle")
+                .description("New threads in shared projects use the machine with the most free capacity.")
+                .control(toggle.into_any_element())
+                .render(),
+        );
         v_flex()
             .gap(px(8.))
             .child(section(
                 Some("Load balancing".into()),
-                Some("Choose which ready provider instances receive new threads. Enable routing in General settings.".into()),
+                Some("Choose how often each connected environment receives automatic new threads.".into()),
                 None,
                 rows,
             ))
@@ -523,17 +552,32 @@ impl Desktop {
     ) -> AnyElement {
         let in_use = selected == Some(&account.id);
         let mut details: Vec<String> = account.plan_type.iter().cloned().collect();
-        if let Some(usage) = &account.usage {
-            details.extend(
-                usage
-                    .windows
-                    .iter()
-                    .map(|window| format!("{} {}% left", window.label, window.remaining_percent)),
-            );
+        let limit = self
+            .snapshot
+            .usage_limits()
+            .into_iter()
+            .find(|usage| usage.source_account_ids.iter().any(|id| id == &account.id));
+        if let Some(usage) = &limit {
+            details.extend(usage.windows.iter().map(|window| {
+                format!("{} {}% left", window.label, window.remaining_percent)
+            }));
+            if usage.reset_credit_count > 0 {
+                details.push(format!("{} reset credit(s)", usage.reset_credit_count));
+            }
+            if let Some(label) = usage.external_label.as_ref() {
+                details.push(label.clone());
+            }
         }
         let provider = account.provider;
         let id = account.id.clone();
         let delete_id = account.id.clone();
+        let reset_id = limit
+            .as_ref()
+            .and_then(|usage| usage.reset_credit_account_id.clone())
+            .unwrap_or_else(|| account.id.clone());
+        let reset_credit_id = limit.as_ref().and_then(|usage| usage.next_credit_id.clone());
+        let can_reset = limit.as_ref().is_some_and(|usage| usage.reset_credit_count > 0);
+        let external_url = limit.as_ref().and_then(|usage| usage.external_url.clone());
         let label = provider_name(provider);
         let message = format!(
             "Sign out of {label} on {host}? This stops running threads that share this sign-in. Thread history is kept."
@@ -545,6 +589,51 @@ impl Desktop {
         row.control(
             h_flex()
                 .gap(px(6.))
+                .when(can_reset, |actions| {
+                    actions.child(
+                        Button::new(("use-reset-credit", index))
+                            .outline()
+                            .small()
+                            .label("Use reset")
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                let account_id = reset_id.clone();
+                                let credit_id = reset_credit_id.clone();
+                                view.confirm(
+                                    crate::app::dialogs::Confirm {
+                                        title: Some("Use a reset credit?".into()),
+                                        message: "This redeems one credit and clears the current rate-limit windows.".into(),
+                                        action: "Use credit".into(),
+                                        destructive: false,
+                                    },
+                                    window,
+                                    cx,
+                                    move |view, _, _| {
+                                        view.perform_then(
+                                            Intent::ConsumeResetCredit {
+                                                provider,
+                                                account_id: account_id.clone(),
+                                                credit_id: credit_id.clone(),
+                                            },
+                                            |view, result, _, _| {
+                                                if result.is_ok() {
+                                                    view.perform(Intent::LoadAccounts);
+                                                }
+                                            },
+                                        )
+                                    },
+                                )
+                            })),
+                    )
+                })
+                .when_some(external_url, |actions, url| {
+                    actions.child(
+                        Button::new(("open-external-usage", index))
+                            .ghost()
+                            .small()
+                            .label("Manage usage")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
                 .child(if in_use {
                     div()
                         .text_xs()

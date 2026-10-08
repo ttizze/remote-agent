@@ -4,6 +4,7 @@ mod attachments;
 mod composer;
 mod dialogs;
 mod dictation;
+mod git;
 mod header;
 mod hosts;
 mod keymap;
@@ -24,6 +25,9 @@ pub(crate) fn ui_word_wrap() -> bool {
 use crate::{Runtime, platform, store_session::StoreSession};
 use agent_core::{
     connection::{Outcome, StoreOptions},
+    environment::{
+        EnvironmentInboxView, EnvironmentRegistry, EnvironmentSettingsView, EnvironmentSidebarView,
+    },
     state::{Intent, Snapshot},
     view::{
         command_palette::{self, CommandPaletteItem, CommandPaletteItemKind},
@@ -47,7 +51,13 @@ use gpui_kit::{
     *,
 };
 use hosts::{HostEvent, Hosts};
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio_util::sync::CancellationToken;
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -55,15 +65,30 @@ type Done = Box<
 >;
 
 enum Update {
-    Connected(Result<(StoreSession, PathBuf), String>),
+    Connected(Result<(StoreSession, PathBuf, bool), String>),
     Snapshot(Arc<Snapshot>),
+    EnvironmentConnected {
+        profile_id: String,
+        result: Result<(StoreSession, PathBuf), String>,
+    },
+    EnvironmentSnapshot {
+        profile_id: String,
+        snapshot: Arc<Snapshot>,
+    },
+    EnvironmentPersistenceError {
+        profile_id: String,
+        error: String,
+    },
     Views(Box<Views>),
     Completed(Option<Done>, Result<Outcome, String>),
     PersistenceError(String),
     Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
     Transcribed(uuid::Uuid, Result<Outcome, String>),
-    ExternalSnapshot(String),
+    HostPowerSample {
+        attempt: u64,
+        snapshot: agent_protocol::background::HostPowerSnapshot,
+    },
     Tick,
 }
 
@@ -81,6 +106,20 @@ struct ViewInputs {
     thread: ThreadViewOptions,
 }
 
+#[derive(Debug, Clone)]
+struct PendingLoadBalancedNewThread {
+    project_id: String,
+    source_environment_id: String,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticNewThreadResult {
+    Started,
+    Waiting,
+    Unavailable,
+}
+
 /// The views of one snapshot, derived off the main thread.
 pub(crate) struct Views {
     /// The snapshot revision they were derived from.
@@ -88,18 +127,39 @@ pub(crate) struct Views {
     pub(crate) generation: u64,
     pub(crate) now_ms: i64,
     pub(crate) sidebar: SidebarView,
+    /// Combined rows and awareness from every environment owned by this app.
+    pub(crate) environment_sidebar: EnvironmentSidebarView,
+    pub(crate) environment_inbox: EnvironmentInboxView,
+    pub(crate) environment_settings: EnvironmentSettingsView,
     /// The selected thread's screen.
     pub(crate) thread: Option<ThreadView>,
     /// The new-thread draft while no thread is selected.
     pub(crate) new_thread: Option<NewThreadView>,
 }
 impl Views {
-    fn derive(snapshot: &Snapshot, inputs: &ViewInputs, generation: u64, now_ms: i64) -> Self {
+    fn derive(
+        snapshot: &Snapshot,
+        environments: &EnvironmentRegistry,
+        inputs: &ViewInputs,
+        generation: u64,
+        now_ms: i64,
+    ) -> Self {
         Self {
             revision: snapshot.revision,
             generation,
             now_ms,
             sidebar: snapshot.sidebar(now_ms, inputs.sidebar.clone()),
+            environment_sidebar: environments.sidebar_filtered(
+                now_ms,
+                inputs.sidebar.clone(),
+                &snapshot.search,
+            ),
+            environment_inbox: environments.inbox_filtered(
+                now_ms,
+                inputs.sidebar.clone(),
+                &snapshot.search,
+            ),
+            environment_settings: environments.settings(),
             thread: snapshot.selected_thread(now_ms, inputs.thread.clone()),
             new_thread: snapshot
                 .selected_thread
@@ -112,15 +172,31 @@ impl Views {
 pub(crate) struct Desktop {
     pub(crate) session: Option<StoreSession>,
     pub(crate) snapshot: Arc<Snapshot>,
+    /// Immutable projections for every authenticated Host store.
+    pub(crate) environment_registry: EnvironmentRegistry,
     pub(crate) views: Arc<Views>,
     pub(crate) runtime: Runtime,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
     pub(crate) connecting: bool,
     pub(crate) remote: Option<RemoteHost>,
+    /// Secondary Host stores stay alive independently of the selected route.
+    background_sessions: BTreeMap<String, StoreSession>,
+    background_connecting: BTreeSet<String>,
+    background_retry_at: BTreeMap<String, (Instant, u32)>,
+    selected_retry_at: Option<(Instant, u32)>,
+    profile_environment_ids: BTreeMap<String, String>,
+    pending_open: Option<(String, String)>,
+    pending_new_thread: Option<(String, Option<String>)>,
+    local_host_supervised: bool,
+    pending_load_balanced_new_thread: Option<PendingLoadBalancedNewThread>,
+    load_balancing_refresh_requested: bool,
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
+    sidebar_animation: PanelAnimationState,
+    right_panel_animation: PanelAnimationState,
+    terminal_drawer_animation: PanelAnimationState,
     generation: u64,
     views_running: bool,
     shown_error: Option<String>,
@@ -137,16 +213,139 @@ pub(crate) struct Desktop {
     /// modifier state but not left/right identity, so the desktop surface
     /// keeps this small edge-triggered latch for the both-Shift shortcut.
     snapshot_shift_presses: u8,
-    snapshot_feedback_until: Option<std::time::Instant>,
-    snapshot_feedback_id: u64,
-    snapshot_feedback_animated: bool,
-    external_snapshot_ids: BTreeSet<String>,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
+    last_host_power_report_ms: Option<i64>,
+    last_host_power: Option<agent_protocol::background::HostPowerSnapshot>,
+    host_power_attempt: u64,
+    host_power_probe: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    host_power_probe_stop: Option<CancellationToken>,
+    desktop_process_monitor: Arc<host_daemon::DesktopProcessMonitor>,
     /// Decoded project icons, by content hash.
     pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A duration-based transition that can retarget from its current visual
+/// value. GPUI's ordinary animation state is keyed by element id and only
+/// tracks elapsed time, so changing an open/closed id would restart from an
+/// endpoint and visibly jump when a panel is toggled mid-transition.
+#[derive(Default)]
+struct PanelAnimationState {
+    scope: Option<String>,
+    from: f32,
+    target: f32,
+    started: Option<Instant>,
+    duration: Duration,
+    run: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PanelAnimation {
+    from: f32,
+    target: f32,
+    run: u64,
+    duration: Duration,
+}
+
+impl PanelAnimationState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Returns the animation inputs for this frame, or `None` when the target
+    /// is already settled. A scope change is rendered immediately so restored
+    /// panel state does not flash through an enter animation.
+    fn prepare(&mut self, scope: &str, target: f32, duration: Duration) -> Option<PanelAnimation> {
+        let now = Instant::now();
+        if self.scope.as_deref() != Some(scope) {
+            self.scope = Some(scope.to_owned());
+            self.from = target;
+            self.target = target;
+            self.started = None;
+            self.duration = duration;
+            return None;
+        }
+
+        if duration.is_zero() {
+            self.from = target;
+            self.target = target;
+            self.started = None;
+            self.duration = duration;
+            return None;
+        }
+
+        if (target - self.target).abs() > f32::EPSILON {
+            self.from = self.value_at(now);
+            self.target = target;
+            self.started = Some(now);
+            self.duration = duration;
+            self.run = self.run.wrapping_add(1);
+        } else if let Some(started) = self.started {
+            if now.duration_since(started) >= self.duration {
+                self.from = self.target;
+                self.started = None;
+            }
+        }
+
+        self.started.map(|_| PanelAnimation {
+            from: self.from,
+            target: self.target,
+            run: self.run,
+            duration: self.duration,
+        })
+    }
+
+    fn value_at(&self, now: Instant) -> f32 {
+        let Some(started) = self.started else {
+            return self.target;
+        };
+        if self.duration.is_zero() {
+            return self.target;
+        }
+        let delta =
+            (now.duration_since(started).as_secs_f32() / self.duration.as_secs_f32()).min(1.);
+        self.from + (self.target - self.from) * panel_ease_out(delta)
+    }
+}
+
+/// Match the web panel transitions' CSS `ease-out` curve
+/// (`cubic-bezier(0, 0, .58, 1)`).
+fn panel_ease_out(time: f32) -> f32 {
+    let time = time.clamp(0., 1.);
+    let mut parameter = time;
+    for _ in 0..5 {
+        let x = cubic_bezier(parameter, 0., 0.58);
+        let derivative = cubic_bezier_derivative(parameter, 0., 0.58);
+        if derivative.abs() < f32::EPSILON {
+            break;
+        }
+        parameter = (parameter - (x - time) / derivative).clamp(0., 1.);
+    }
+    cubic_bezier(parameter, 0., 1.)
+}
+
+fn cubic_bezier(parameter: f32, first_control: f32, second_control: f32) -> f32 {
+    let inverse = 1. - parameter;
+    3. * inverse * inverse * parameter * first_control
+        + 3. * inverse * parameter * parameter * second_control
+        + parameter * parameter * parameter
+}
+
+fn cubic_bezier_derivative(parameter: f32, first_control: f32, second_control: f32) -> f32 {
+    let inverse = 1. - parameter;
+    3. * inverse * inverse * first_control
+        + 6. * inverse * parameter * (second_control - first_control)
+        + 3. * parameter * parameter * (1. - second_control)
+}
+
+fn local_host_power_publish_allowed(
+    local_host_supervised: bool,
+    remote_selected: bool,
+    probe_in_flight: bool,
+) -> bool {
+    local_host_supervised && !remote_selected && !probe_in_flight
 }
 
 /// Keys every window binds; screens handle their own focus-specific keys.
@@ -158,6 +357,20 @@ pub(crate) fn bind_keys(cx: &mut App) {
     )]);
 }
 
+fn load_store_state(name: &str) -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
+    let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
+    let state_file = directory.join(format!("device-{name}.json"));
+    let path = directory.join("model-preferences.json");
+    let preferences = std::fs::read(&path).unwrap_or_default();
+    let snapshot = agent_core::persistence::load(&state_file, &preferences);
+    let options = StoreOptions {
+        cache_directory: Some(directory.join("cache").join(name)),
+        state_file: Some(state_file),
+        ..StoreOptions::default()
+    };
+    Ok((path, snapshot, options))
+}
+
 impl Desktop {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = cx.global::<Runtime>().clone();
@@ -165,9 +378,15 @@ impl Desktop {
         StoreSession::on_app_quit(cx, |view| &mut view.session);
         cx.spawn_in(window, async move |view, cx| {
             while let Ok((epoch, update)) = incoming.recv().await {
+                let environment_update = matches!(
+                    &update,
+                    Update::EnvironmentConnected { .. }
+                        | Update::EnvironmentSnapshot { .. }
+                        | Update::EnvironmentPersistenceError { .. }
+                );
                 if view
                     .update_in(cx, |view, window, cx| {
-                        if view.epoch == epoch {
+                        if view.epoch == epoch || environment_update {
                             view.receive(update, window, cx);
                         }
                     })
@@ -201,6 +420,11 @@ impl Desktop {
                 apply_appearance(window.appearance(), cx);
                 view.refresh_views(cx);
             }),
+            cx.observe_window_activation(window, |view, window, cx| {
+                if window.is_window_active() {
+                    view.refresh_diff_on_window_activation(cx);
+                }
+            }),
         ];
         let sidebar = sidebar::SidebarState::new(window, cx);
         let header = header::HeaderState::new(window, cx);
@@ -225,6 +449,7 @@ impl Desktop {
             snapshot: Arc::default(),
             views: Arc::new(Views::derive(
                 &Snapshot::default(),
+                &EnvironmentRegistry::default(),
                 &ViewInputs {
                     sidebar: SidebarOptions::default(),
                     thread: ThreadViewOptions::default(),
@@ -233,13 +458,27 @@ impl Desktop {
                 ui::now_ms(),
             )),
             runtime,
+            environment_registry: EnvironmentRegistry::default(),
             updates,
             epoch: 0,
             connecting: false,
             remote: None,
+            background_sessions: BTreeMap::new(),
+            background_connecting: BTreeSet::new(),
+            background_retry_at: BTreeMap::new(),
+            selected_retry_at: None,
+            profile_environment_ids: BTreeMap::new(),
+            pending_open: None,
+            pending_new_thread: None,
+            local_host_supervised: false,
+            pending_load_balanced_new_thread: None,
+            load_balancing_refresh_requested: false,
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
+            sidebar_animation: PanelAnimationState::default(),
+            right_panel_animation: PanelAnimationState::default(),
+            terminal_drawer_animation: PanelAnimationState::default(),
             generation: 0,
             views_running: false,
             shown_error: None,
@@ -253,12 +492,14 @@ impl Desktop {
             command_palette_query,
             command_palette_open: false,
             snapshot_shift_presses: 0,
-            snapshot_feedback_until: None,
-            snapshot_feedback_id: 0,
-            snapshot_feedback_animated: true,
-            external_snapshot_ids: BTreeSet::new(),
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
+            last_host_power_report_ms: None,
+            last_host_power: None,
+            host_power_attempt: 0,
+            host_power_probe: None,
+            host_power_probe_stop: None,
+            desktop_process_monitor: Arc::new(host_daemon::DesktopProcessMonitor::new()),
             project_icons: Default::default(),
             tick: None,
             _subscriptions: subscriptions,
@@ -280,12 +521,26 @@ impl Desktop {
     ) {
         self.attachments.clear();
         self.dictation = None;
+        self.selected_retry_at = None;
+        if let Some(stop) = self.host_power_probe_stop.take() {
+            stop.cancel();
+        }
+        self.host_power_probe.take();
+        self.local_host_supervised = false;
+        self.last_host_power_report_ms = None;
+        self.last_host_power = None;
+        self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
         self.epoch += 1;
         self.views_running = false;
         self.connecting = true;
+        self.pending_load_balanced_new_thread = None;
+        self.load_balancing_refresh_requested = false;
         self.remote = remote;
-        self.external_snapshot_ids.clear();
         self.session.take();
+        if let Some(remote) = &remote {
+            self.background_sessions.remove(&remote.id);
+            self.background_connecting.remove(&remote.id);
+        }
         self.snapshot = Arc::default();
         self.disconnected(window, cx);
         let updates = self.updates.clone();
@@ -299,19 +554,7 @@ impl Desktop {
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "local".into());
         self.runtime.handle.spawn(async move {
-            let state = (|| -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
-                let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
-                let state_file = directory.join(format!("device-{name}.json"));
-                let path = directory.join("model-preferences.json");
-                let preferences = std::fs::read(&path).unwrap_or_default();
-                let snapshot = agent_core::persistence::load(&state_file, &preferences);
-                let options = StoreOptions {
-                    cache_directory: Some(directory.join("cache").join(&name)),
-                    state_file: Some(state_file),
-                    ..StoreOptions::default()
-                };
-                Ok((path, snapshot, options))
-            })();
+            let state = load_store_state(&name);
             match state {
                 Err(error) => {
                     let _ = updates
@@ -328,14 +571,21 @@ impl Desktop {
                             }
                         }
                     });
+                    let connected = connections
+                        .connect(ticket.as_deref(), snapshot, options)
+                        .await;
+                    let local_host_supervised = connected
+                        .as_ref()
+                        .map(|connected| connected.local_host_supervised)
+                        .unwrap_or(false);
                     StoreSession::publish(
-                        connections
-                            .connect(ticket.as_deref(), snapshot, options)
-                            .await,
+                        connected.map(|connected| connected.store),
                         runtime.clone(),
                         tx,
                         move |result| {
-                            Update::Connected(result.map(|session| (session, path.clone())))
+                            Update::Connected(result.map(|session| {
+                                (session, path.clone(), local_host_supervised)
+                            }))
                         },
                         Update::Snapshot,
                     )
@@ -352,23 +602,246 @@ impl Desktop {
                     if updates.send((epoch, Update::Tick)).await.is_err() {
                         break;
                     }
-                    for snapshot in platform::pending_snapshots().unwrap_or_default() {
-                        if updates
-                            .send((epoch, Update::ExternalSnapshot(snapshot.id)))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
                 }
             }),
         ));
     }
 
+    /// Starts one supervised Store owner for each saved environment. Each
+    /// profile has its own cache directory and event stream; a failed profile
+    /// never replaces the selected Host's session.
+    fn start_background_connections(&mut self) {
+        let selected = self.remote.as_ref().map(|remote| remote.id.as_str());
+        let remotes = self.snapshot.remote_hosts.clone();
+        let known: BTreeSet<_> = remotes.iter().map(|remote| remote.id.clone()).collect();
+        let stale: Vec<_> = self
+            .background_sessions
+            .keys()
+            .chain(self.background_connecting.iter())
+            .filter(|profile_id| !known.contains(*profile_id))
+            .cloned()
+            .collect();
+        for profile_id in stale {
+            self.background_sessions.remove(&profile_id);
+            self.background_connecting.remove(&profile_id);
+            self.background_retry_at.remove(&profile_id);
+            if let Some(environment_id) = self.profile_environment_ids.remove(&profile_id) {
+                self.environment_registry.remove(&environment_id);
+            }
+        }
+        for remote in remotes {
+            if self
+                .background_retry_at
+                .get(&remote.id)
+                .is_some_and(|(retry_at, _)| *retry_at > Instant::now())
+            {
+                continue;
+            }
+            if selected == Some(remote.id.as_str())
+                || self.background_sessions.contains_key(&remote.id)
+                || !self.background_connecting.insert(remote.id.clone())
+            {
+                continue;
+            }
+            self.connect_background(remote);
+        }
+    }
+
+    fn background_failed(&mut self, profile_id: &str) {
+        let failures = self
+            .background_retry_at
+            .get(profile_id)
+            .map_or(0, |(_, failures)| *failures)
+            .saturating_add(1);
+        let exponent = failures.min(11);
+        let delay = Duration::from_millis(250_u64.saturating_mul(1 << exponent).min(300_000));
+        self.background_retry_at
+            .insert(profile_id.to_owned(), (Instant::now() + delay, failures));
+    }
+
+    fn selected_failed(&mut self) {
+        let failures = self
+            .selected_retry_at
+            .map_or(0, |(_, failures)| failures)
+            .saturating_add(1);
+        let exponent = failures.min(11);
+        let delay = Duration::from_millis(250_u64.saturating_mul(1 << exponent).min(300_000));
+        self.selected_retry_at = Some((Instant::now() + delay, failures));
+    }
+
+    fn reconnect_selected_if_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connecting
+            || self.remote.is_none()
+            || self.snapshot.environment.is_none()
+            || self.snapshot.connected
+        {
+            return;
+        }
+        if self
+            .selected_retry_at
+            .is_some_and(|(retry_at, _)| retry_at > Instant::now())
+        {
+            return;
+        }
+        let remote = self.remote.clone();
+        self.selected_retry_at = None;
+        if let Some(remote) = remote {
+            self.connect(Some(remote), window, cx);
+        }
+    }
+
+    fn connect_background(&self, remote: RemoteHost) {
+        let profile_id = remote.id.clone();
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        let runtime = self.runtime.clone();
+        let connections = runtime.connections.clone();
+        self.runtime.handle.spawn(async move {
+            let (path, snapshot, options) = match load_store_state(&profile_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = updates
+                        .send((
+                            epoch,
+                            Update::EnvironmentConnected {
+                                profile_id: profile_id.clone(),
+                                result: Err(error.to_string()),
+                            },
+                        ))
+                        .await;
+                    return;
+                }
+            };
+            if updates
+                .send((
+                    epoch,
+                    Update::EnvironmentSnapshot {
+                        profile_id: profile_id.clone(),
+                        snapshot: Arc::new(snapshot.clone()),
+                    },
+                ))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let (tx, rx) = async_channel::bounded(8);
+            let relay = updates.clone();
+            let forward = tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    if relay.send((epoch, event)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let connected_profile = profile_id.clone();
+            let snapshot_profile = profile_id.clone();
+            StoreSession::publish(
+                connections
+                    .connect(Some(&remote.ticket), snapshot, options)
+                    .await,
+                runtime,
+                tx,
+                move |result| Update::EnvironmentConnected {
+                    profile_id: connected_profile,
+                    result: result.map(|session| (session, path.clone())),
+                },
+                move |snapshot| Update::EnvironmentSnapshot {
+                    profile_id: snapshot_profile,
+                    snapshot,
+                },
+            )
+            .await;
+            let _ = forward.await;
+        });
+    }
+
+    /// Promotes an already-running per-profile Store when navigation targets
+    /// one of the combined rows. The Store owner moves with the selected route;
+    /// its cache and reconnect loop are otherwise independent.
+    pub(crate) fn promote_environment(&mut self, environment_id: &str) -> bool {
+        let Some(profile_id) = self
+            .profile_environment_ids
+            .iter()
+            .find_map(|(profile_id, id)| (id == environment_id).then(|| profile_id.clone()))
+        else {
+            return false;
+        };
+        let Some(session) = self.background_sessions.remove(&profile_id) else {
+            return false;
+        };
+        self.session.take();
+        self.snapshot = session.store.snapshot();
+        self.session = Some(session);
+        self.remote = self
+            .snapshot
+            .remote_hosts
+            .iter()
+            .find(|remote| remote.id == profile_id)
+            .cloned();
+        self.environment_registry.select(environment_id);
+        self.connecting = false;
+        true
+    }
+
+    fn apply_pending_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((environment_id, project_id)) = self.pending_new_thread.clone() {
+            if self.environment_registry.selected() != Some(environment_id.as_str())
+                && !self.promote_environment(&environment_id)
+            {
+                return;
+            }
+            if self.environment_registry.selected() == Some(environment_id.as_str()) {
+                self.pending_new_thread = None;
+                self.snapshot_changed(window, cx);
+                self.begin_new_thread(project_id);
+                return;
+            }
+        }
+        let Some((environment_id, thread_id)) = self.pending_open.clone() else {
+            return;
+        };
+        if self.environment_registry.selected() != Some(environment_id.as_str()) {
+            if !self.promote_environment(&environment_id) {
+                return;
+            }
+        }
+        if self.environment_registry.selected() == Some(environment_id.as_str()) {
+            self.pending_open = None;
+            self.snapshot_changed(window, cx);
+            self.perform(Intent::OpenThread { thread_id });
+        }
+    }
+
     /// Sends an intent to the Host connection's owner.
     pub(crate) fn perform(&self, intent: Intent) {
         self.dispatch(intent, None);
+    }
+
+    /// Dispatches a device-owned preference to the Store for one environment.
+    /// Provider and Host mutations remain scoped to the owning Store even
+    /// while the settings page is showing a combined environment list.
+    pub(crate) fn perform_on_environment(&self, environment_id: &str, intent: Intent) {
+        if self.snapshot.environment.as_ref().map(|environment| environment.environment_id.as_str())
+            == Some(environment_id)
+        {
+            self.perform(intent);
+            return;
+        }
+        let Some(profile_id) = self
+            .profile_environment_ids
+            .iter()
+            .find_map(|(profile_id, id)| (id == environment_id).then_some(profile_id))
+        else {
+            return;
+        };
+        if let Some(session) = self.background_sessions.get(profile_id) {
+            let _ = session.store.dispatch(intent);
+        } else {
+            // Device preferences remain editable while a cached environment
+            // is disconnected; the selected Store persists the scoped key.
+            self.perform(intent);
+        }
     }
 
     /// Sends an intent and runs `done` once it resolves.
@@ -463,6 +936,7 @@ impl Desktop {
         }
         self.views_running = true;
         let snapshot = self.snapshot.clone();
+        let environments = self.environment_registry.clone();
         let inputs = self.view_inputs();
         let generation = self.generation;
         let epoch = self.epoch;
@@ -470,7 +944,7 @@ impl Desktop {
         self.runtime.handle.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(16)).await;
             if let Ok(views) = tokio::task::spawn_blocking(move || {
-                Views::derive(&snapshot, &inputs, generation, ui::now_ms())
+                Views::derive(&snapshot, &environments, &inputs, generation, ui::now_ms())
             })
             .await
             {
@@ -483,11 +957,16 @@ impl Desktop {
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Tick => {
+                self.retry_pending_load_balanced_new_thread();
+                self.apply_pending_open(window, cx);
+                self.reconnect_selected_if_due(window, cx);
+                self.start_background_connections();
+                self.publish_host_power();
                 self.schedule_views(cx);
                 cx.notify();
                 return;
             }
-            Update::Connected(Ok((mut session, path))) => {
+            Update::Connected(Ok((mut session, path, local_host_supervised))) => {
                 let (tx, rx) = async_channel::bounded(4);
                 let updates = self.updates.clone();
                 let epoch = self.epoch;
@@ -500,19 +979,180 @@ impl Desktop {
                 });
                 session.persist(path, tx, Update::PersistenceError);
                 self.snapshot = session.store.snapshot();
+                self.last_host_power_report_ms = None;
+                self.last_host_power = self
+                    .snapshot
+                    .background_policy
+                    .as_ref()
+                    .map(|snapshot| snapshot.host_power.clone());
+                self.local_host_supervised = local_host_supervised;
                 self.session = Some(session);
+                let profile_id = self
+                    .remote
+                    .as_ref()
+                    .map(|remote| remote.id.clone())
+                    .unwrap_or_else(|| "local".into());
+                if let Some(environment_id) = self
+                    .snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+                {
+                    self.profile_environment_ids
+                        .insert(profile_id, environment_id.clone());
+                    self.environment_registry.select(&environment_id);
+                }
                 self.connecting = false;
+                self.selected_retry_at = None;
                 self.perform(Intent::LoadAccounts);
                 self.perform(Intent::LoadSettings);
                 self.snapshot_changed(window, cx);
             }
             Update::Connected(Err(error)) => {
                 self.connecting = false;
+                if self.remote.is_some() && self.selected_retry_at.is_none() {
+                    self.selected_failed();
+                }
                 self.show_error(&error, window, cx);
+            }
+            Update::EnvironmentConnected { profile_id, result } => {
+                if self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|remote| remote.id == profile_id)
+                    || !self
+                        .snapshot
+                        .remote_hosts
+                        .iter()
+                        .any(|remote| remote.id == profile_id)
+                {
+                    return;
+                }
+                self.background_connecting.remove(&profile_id);
+                match result {
+                    Ok((mut session, path)) => {
+                        self.background_retry_at.remove(&profile_id);
+                        let updates = self.updates.clone();
+                        let profile_for_errors = profile_id.clone();
+                        let (tx, rx) = async_channel::bounded(4);
+                        let epoch = self.epoch;
+                        self.runtime.handle.spawn(async move {
+                            while let Ok(event) = rx.recv().await {
+                                if updates.send((epoch, event)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        session.persist(path, tx, move |error| {
+                            Update::EnvironmentPersistenceError {
+                                profile_id: profile_for_errors.clone(),
+                                error,
+                            }
+                        });
+                        let snapshot = session.store.snapshot();
+                        if let Some(environment_id) = snapshot
+                            .environment
+                            .as_ref()
+                            .map(|environment| environment.environment_id.clone())
+                        {
+                            self.profile_environment_ids
+                                .insert(profile_id.clone(), environment_id);
+                        }
+                        self.background_sessions.insert(profile_id.clone(), session);
+                        self.environment_registry.update(snapshot);
+                        let pending_environment = self
+                            .pending_open
+                            .as_ref()
+                            .map(|(environment_id, _)| environment_id)
+                            .or_else(|| {
+                                self.pending_new_thread
+                                    .as_ref()
+                                    .map(|(environment_id, _)| environment_id)
+                            });
+                        if pending_environment.is_some_and(|environment_id| {
+                            self.environment_registry.selected() != Some(environment_id.as_str())
+                                && self.profile_environment_ids.get(&profile_id)
+                                    == Some(environment_id)
+                        }) {
+                            if let Some(environment_id) = pending_environment {
+                                self.promote_environment(environment_id);
+                            }
+                        }
+                        self.generation += 1;
+                        self.schedule_views(cx);
+                    }
+                    Err(error) => {
+                        self.background_failed(&profile_id);
+                        if let Some(environment_id) = self.profile_environment_ids.get(&profile_id)
+                        {
+                            self.environment_registry
+                                .mark_disconnected(environment_id, Some(error.clone()));
+                            self.generation += 1;
+                            self.schedule_views(cx);
+                        }
+                    }
+                }
+            }
+            Update::EnvironmentSnapshot {
+                profile_id,
+                snapshot,
+            } => {
+                if !self.background_sessions.contains_key(&profile_id)
+                    && !self.background_connecting.contains(&profile_id)
+                {
+                    return;
+                }
+                let disconnected = !snapshot.connected;
+                let current = self
+                    .profile_environment_ids
+                    .get(&profile_id)
+                    .and_then(|environment_id| self.environment_registry.snapshot(environment_id));
+                if current
+                    .as_ref()
+                    .is_some_and(|current| !snapshot.accepts_after(current))
+                {
+                    return;
+                }
+                if let Some(environment_id) = snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+                {
+                    self.profile_environment_ids
+                        .insert(profile_id.clone(), environment_id);
+                }
+                if let Some(session) = self.background_sessions.get(&profile_id) {
+                    session.save(snapshot.clone());
+                }
+                self.environment_registry.update(snapshot);
+                if disconnected {
+                    self.background_sessions.remove(&profile_id);
+                    self.background_failed(&profile_id);
+                }
+                self.generation += 1;
+                self.schedule_views(cx);
+            }
+            Update::EnvironmentPersistenceError { profile_id, error } => {
+                if !self
+                    .snapshot
+                    .remote_hosts
+                    .iter()
+                    .any(|remote| remote.id == profile_id)
+                {
+                    return;
+                }
+                self.show_error(&format!("Environment {profile_id}: {error}"), window, cx);
             }
             Update::Snapshot(snapshot) => {
                 if !snapshot.accepts_after(&self.snapshot) {
                     return;
+                }
+                if let Some(power) = snapshot
+                    .background_policy
+                    .as_ref()
+                    .map(|background| background.host_power.clone())
+                {
+                    self.last_host_power = Some(power);
                 }
                 self.snapshot = snapshot;
                 if let Some(session) = &self.session {
@@ -551,22 +1191,6 @@ impl Desktop {
             }
             Update::PersistenceError(error) => self.show_error(&error, window, cx),
             Update::Attachments(update) => self.attachments_update(update, window, cx),
-            Update::ExternalSnapshot(id) => {
-                if self.session.is_none() {
-                    return;
-                }
-                if self.external_snapshot_ids.insert(id.clone()) {
-                    match platform::read_pending_snapshot(&id) {
-                        Ok(snapshot) => {
-                            let draft_key = self.snapshot.draft_key();
-                            self.attach_external_snapshot(draft_key, snapshot);
-                        }
-                        Err(_) => {
-                            self.external_snapshot_ids.remove(&id);
-                        }
-                    }
-                }
-            }
             Update::Recording(id, event) => self.recording_update(id, event, window, cx),
             Update::Transcribed(id, result) => {
                 if self.dictation.as_ref().is_some_and(|d| d.id == id) {
@@ -580,8 +1204,102 @@ impl Desktop {
                 }
                 self.snapshot_changed(window, cx);
             }
+            Update::HostPowerSample { attempt, snapshot } => {
+                if let Some(stop) = self.host_power_probe_stop.take() {
+                    stop.cancel();
+                }
+                self.host_power_probe.take();
+                if attempt != self.host_power_attempt || !self.local_host_supervised {
+                    return;
+                }
+                let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+                    return;
+                };
+                self.last_host_power = Some(snapshot.clone());
+                let receipt = store.report_host_power(snapshot);
+                self.runtime.handle.spawn(async move {
+                    let _ = receipt.await;
+                });
+            }
         }
         cx.notify();
+    }
+
+    /// GPUI owns the desktop lifecycle, so its one-second app tick schedules a
+    /// local-only power observation. The bounded native probe runs on the
+    /// runtime and returns through the epoch-tagged update channel; GPUI only
+    /// applies the result and reports it to the connected Host.
+    fn publish_host_power(&mut self) {
+        if !local_host_power_publish_allowed(
+            self.local_host_supervised,
+            self.remote.is_some(),
+            self.host_power_probe.is_some(),
+        ) {
+            return;
+        }
+        if self.session.is_none() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let power = self
+            .last_host_power
+            .clone()
+            .or_else(|| {
+                self.snapshot
+                    .background_policy
+                    .as_ref()
+                    .map(|snapshot| snapshot.host_power.clone())
+            })
+            .unwrap_or_else(|| {
+                agent_domain::HostPowerSnapshot::unknown(
+                    agent_domain::Timestamp::from_millis(now_ms).expect("current timestamp"),
+                )
+            });
+        let interval_ms = self
+            .snapshot
+            .background_policy
+            .as_ref()
+            .map(|snapshot| {
+                if snapshot.host_power.idle.is_true() {
+                    snapshot.policy.host_power_monitor_idle_interval_ms
+                } else {
+                    snapshot.policy.host_power_monitor_active_interval_ms
+                }
+            })
+            .unwrap_or(30_000)
+            .max(1)
+            .min(i64::MAX as u64) as i64;
+        if self
+            .last_host_power_report_ms
+            .is_some_and(|last| now_ms >= last && now_ms.saturating_sub(last) < interval_ms)
+        {
+            return;
+        }
+        self.last_host_power_report_ms = Some(now_ms);
+        self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
+        let attempt = self.host_power_attempt;
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        let stop = CancellationToken::new();
+        let process_monitor = self.desktop_process_monitor.clone();
+        self.host_power_probe_stop = Some(stop.clone());
+        self.host_power_probe = Some(tokio_util::task::AbortOnDropHandle::new(
+            self.runtime.handle.spawn(async move {
+                let mut snapshot = host_daemon::sample_desktop_power(&stop).await;
+                let process_sample = tokio::task::spawn_blocking(move || process_monitor.sample());
+                let processes = tokio::select! {
+                    _ = stop.cancelled() => Vec::new(),
+                    result = process_sample => result.unwrap_or_default(),
+                };
+                snapshot.desktop_processes = processes;
+                let _ = updates
+                    .send((epoch, Update::HostPowerSample { attempt, snapshot }))
+                    .await;
+            }),
+        ));
     }
 
     fn outcome(&mut self, outcome: &Outcome, window: &mut Window, cx: &mut Context<Self>) {
@@ -589,6 +1307,18 @@ impl Desktop {
     }
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(environment_id) = self.environment_registry.update(self.snapshot.clone()) {
+            self.environment_registry.select(&environment_id);
+            self.generation += 1;
+        }
+        self.start_background_connections();
+        if self.remote.is_some()
+            && self.snapshot.environment.is_some()
+            && !self.snapshot.connected
+            && self.selected_retry_at.is_none()
+        {
+            self.selected_failed();
+        }
         if let Some(error) = self.snapshot.error.clone()
             && self.shown_error.as_deref()
                 != Some(agent_core::presentation::error::error_message(&error).as_str())
@@ -612,6 +1342,9 @@ impl Desktop {
     fn disconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.timeline.reset();
         self.panels.reset(window, cx);
+        self.sidebar_animation.reset();
+        self.right_panel_animation.reset();
+        self.terminal_drawer_animation.reset();
         self.sync_composer(window, cx);
     }
 
@@ -630,10 +1363,150 @@ impl Desktop {
         cx.notify();
     }
 
+    fn begin_new_thread(&self, project_id: Option<String>) {
+        self.perform(Intent::NewThread { project_id });
+    }
+
+    /// Requests one capacity sample from each live Store. This is called only
+    /// for an unresolved automatic draft; idle environments do not poll.
+    fn refresh_load_balancing_resources(&self) {
+        if let Some(session) = &self.session {
+            let _ = session
+                .store
+                .dispatch(Intent::RefreshLoadBalancingResources);
+        }
+        for session in self.background_sessions.values() {
+            let _ = session
+                .store
+                .dispatch(Intent::RefreshLoadBalancingResources);
+        }
+    }
+
+    fn automatic_new_thread(
+        &mut self,
+        project_id: &str,
+        allow_refresh: bool,
+    ) -> AutomaticNewThreadResult {
+        if !self.snapshot.preferences.load_balancing_enabled {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        let Some(source_environment_id) = self
+            .snapshot
+            .environment
+            .as_ref()
+            .map(|environment| environment.environment_id.clone())
+        else {
+            return AutomaticNewThreadResult::Unavailable;
+        };
+        let draft = self
+            .snapshot
+            .new_thread_default_draft_for_project(Some(project_id));
+        if draft.instance_id.is_empty() || draft.model.is_empty() {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        let evaluation = self.environment_registry.evaluate_load_balancing(
+            &source_environment_id,
+            project_id,
+            draft.driver,
+            (!draft.instance_id.is_empty()).then_some(draft.instance_id.as_str()),
+            &draft.model,
+            &self.snapshot.preferences.load_balancing_weights,
+            ui::now_ms(),
+        );
+        if evaluation.candidate_count < 2 {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        if evaluation.pending_resources {
+            if allow_refresh && !self.load_balancing_refresh_requested {
+                self.pending_load_balanced_new_thread = Some(PendingLoadBalancedNewThread {
+                    project_id: project_id.to_owned(),
+                    source_environment_id,
+                    started_at: Instant::now(),
+                });
+                self.load_balancing_refresh_requested = true;
+                self.refresh_load_balancing_resources();
+            }
+            return AutomaticNewThreadResult::Waiting;
+        }
+        let Some(route) = evaluation.route else {
+            return AutomaticNewThreadResult::Unavailable;
+        };
+        if self.environment_registry.selected() != Some(route.environment_id.as_str())
+            && !self.promote_environment(&route.environment_id)
+        {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        self.pending_load_balanced_new_thread = None;
+        self.load_balancing_refresh_requested = false;
+        let runtime_mode = draft.runtime_mode;
+        let interaction_mode = draft.interaction_mode;
+        let options = draft.options;
+        let selection = (route.provider_instance, route.driver, route.model);
+        let target_project = route.project_id;
+        let fallback_project = project_id.to_owned();
+        self.perform_then(
+            Intent::NewThread {
+                project_id: Some(target_project),
+            },
+            move |view, result, _, _| {
+                if result.is_err() {
+                    view.begin_new_thread(Some(fallback_project));
+                    return;
+                }
+                view.perform(Intent::SetModel {
+                    instance_id: selection.0.clone(),
+                    driver: selection.1,
+                    model: selection.2.clone(),
+                    options,
+                });
+                view.perform(Intent::SetRuntimeMode {
+                    mode: runtime_mode,
+                });
+                view.perform(Intent::SetInteractionMode {
+                    mode: interaction_mode,
+                });
+            },
+        );
+        AutomaticNewThreadResult::Started
+    }
+
+    fn retry_pending_load_balanced_new_thread(&mut self) {
+        let Some(pending) = self.pending_load_balanced_new_thread.clone() else {
+            return;
+        };
+        if pending.started_at.elapsed() > Duration::from_secs(3) {
+            self.pending_load_balanced_new_thread = None;
+            self.load_balancing_refresh_requested = false;
+            self.begin_new_thread(Some(pending.project_id));
+            return;
+        }
+        if self.environment_registry.selected() != Some(pending.source_environment_id.as_str()) {
+            self.pending_load_balanced_new_thread = None;
+            self.load_balancing_refresh_requested = false;
+            self.begin_new_thread(Some(pending.project_id));
+            return;
+        }
+        match self.automatic_new_thread(&pending.project_id, false) {
+            AutomaticNewThreadResult::Waiting => {}
+            AutomaticNewThreadResult::Started => {}
+            AutomaticNewThreadResult::Unavailable => {
+                self.pending_load_balanced_new_thread = None;
+                self.load_balancing_refresh_requested = false;
+                self.begin_new_thread(Some(pending.project_id));
+            }
+        }
+    }
+
     /// Starts a new-thread draft in `project_id`, leaving settings.
     pub(crate) fn new_thread(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         self.route = Route::Chat;
-        self.perform(Intent::NewThread { project_id });
+        let automatic = project_id.as_deref().map_or(
+            AutomaticNewThreadResult::Unavailable,
+            |project_id| self.automatic_new_thread(project_id, true),
+        );
+        if matches!(automatic, AutomaticNewThreadResult::Unavailable) {
+            self.begin_new_thread(project_id);
+        }
         cx.notify();
     }
 
@@ -867,6 +1740,58 @@ impl Desktop {
     }
 }
 
+impl Desktop {
+    fn panel_animation_duration() -> Duration {
+        Duration::from_millis(u64::from(ui::appearance().panel_animation_ms))
+    }
+
+    fn render_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let navigation = match self.route {
+            Route::Settings => self.render_settings_nav(window, cx),
+            Route::Chat => self.render_sidebar(window, cx),
+        };
+        let width = ui::metrics().sidebar_width;
+        let hidden = self.sidebar_hidden;
+        let duration = Self::panel_animation_duration();
+        let navigation = div()
+            .id("desktop-navigation")
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .w(px(if hidden { 0. } else { width }))
+            .child(navigation);
+        match self
+            .sidebar_animation
+            .prepare("navigation", if hidden { 0. } else { 1. }, duration)
+        {
+            Some(animation) => navigation
+                .with_animation(
+                    ("desktop-navigation-animation", animation.run),
+                    Animation::new(animation.duration).with_easing(panel_ease_out),
+                    move |navigation, delta| {
+                        let progress = animation.from + (animation.target - animation.from) * delta;
+                        navigation.w(px(width * progress))
+                    },
+                )
+                .into_any_element(),
+            None => navigation.into_any_element(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_host_power_publish_allowed;
+
+    #[test]
+    fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
+        assert!(local_host_power_publish_allowed(true, false, false));
+        assert!(!local_host_power_publish_allowed(false, false, false));
+        assert!(!local_host_power_publish_allowed(true, true, false));
+        assert!(!local_host_power_publish_allowed(true, false, true));
+    }
+}
+
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_browser(cx);
@@ -908,27 +1833,6 @@ impl Render for Desktop {
                     .into_any_element()
             }
         };
-        let snapshot_flash = self
-            .snapshot_feedback_until
-            .is_some_and(|until| until > std::time::Instant::now());
-        let snapshot_overlay = snapshot_flash.then(|| {
-            let overlay = div()
-                .id(("snapshot-feedback", self.snapshot_feedback_id))
-                .absolute()
-                .inset_0()
-                .bg(tint("text", 0.12));
-            if self.snapshot_feedback_animated {
-                overlay
-                    .with_animation(
-                        ("snapshot-feedback-fade", self.snapshot_feedback_id),
-                        Animation::new(std::time::Duration::from_millis(220)),
-                        |overlay, progress| overlay.opacity(1. - progress),
-                    )
-                    .into_any_element()
-            } else {
-                overlay.into_any_element()
-            }
-        });
         div()
             .id("desktop")
             .key_context("Desktop")
@@ -951,15 +1855,10 @@ impl Render for Desktop {
             .child(
                 h_flex()
                     .size_full()
-                    .when(!self.sidebar_hidden, |root| {
-                        root.child(match self.route {
-                            Route::Settings => self.render_settings_nav(window, cx),
-                            Route::Chat => self.render_sidebar(window, cx),
-                        })
-                    })
+                    .child(self.render_navigation(window, cx))
                     .child(main),
             )
-            .children(snapshot_overlay)
+            .children(self.panels.render_preview_mini_player(cx))
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(
                 window, cx,

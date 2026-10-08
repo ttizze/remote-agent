@@ -34,10 +34,7 @@ struct NewTaskFlow: View {
     }
 
     private var chooser: some View {
-        let projects = model.snapshot.projects().filter {
-            $0.id != "chats" && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)
-                || ($0.roots.first?.path.localizedCaseInsensitiveContains(query) ?? false))
-        }
+        let projects = model.environmentProjects(query)
         return ScrollView {
             VStack(spacing: 12) {
                 Button { choose(nil) } label: {
@@ -51,11 +48,11 @@ struct NewTaskFlow: View {
                                    detail: "Try a different project name or workspace path.")
                 } else if !projects.isEmpty {
                     VStack(spacing: 0) {
-                        ForEach(Array(projects.enumerated()), id: \.element.id) { index, project in
-                            Button { choose(project.id) } label: {
-                                ProjectChoiceRow(symbol: nil, title: project.name,
-                                                 subtitle: project.roots.first?.path ?? "", glyph: project.name,
-                                                 icon: ProjectIconImages.image(model.snapshot, project.id))
+                        ForEach(Array(projects.enumerated()), id: \.element.projectId) { index, project in
+                            Button { choose(project.projectId) } label: {
+                                ProjectChoiceRow(symbol: nil, title: "\(project.environmentLabel) · \(project.title)",
+                                                 subtitle: project.subtitle, glyph: project.title,
+                                                 icon: nil)
                             }
                             .buttonStyle(.plain)
                             .overlay(alignment: .top) {
@@ -93,7 +90,11 @@ struct NewTaskFlow: View {
     }
 
     private func choose(_ project: String?) {
-        model.perform(.newThread(projectId: project))
+        if draftOpen {
+            model.perform(.setNewThreadProject(projectId: project))
+        } else {
+            model.openNewThread(projectId: project)
+        }
         path = [project ?? "chats"]
     }
 }
