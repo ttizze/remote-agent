@@ -556,6 +556,7 @@ async fn commit(
         });
     }
     let message = format_commit_message(message);
+    let subject = message.lines().next().unwrap_or_default().to_owned();
     let args = vec!["commit".to_owned(), "-m".to_owned(), message];
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut report = |progress: Progress| {
@@ -593,7 +594,7 @@ async fn commit(
     Ok(CommitStep {
         status: CommitStepStatus::Created,
         commit_sha: stdout(cwd, &["rev-parse", "HEAD"]),
-        subject: Some(message.lines().next().unwrap_or_default().to_owned()),
+        subject: Some(subject),
     })
 }
 
