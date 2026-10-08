@@ -27,7 +27,8 @@ fn fixture(mode: &str) -> Result<()> {
             .build()?;
         return runtime.block_on(async {
             let _term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            fs::write("descendant.pid", std::process::id().to_string())?;
+            fs::write("descendant.pid.tmp", std::process::id().to_string())?;
+            fs::rename("descendant.pid.tmp", "descendant.pid")?;
             std::future::pending::<Result<()>>().await
         });
     }
