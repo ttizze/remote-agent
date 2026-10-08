@@ -181,6 +181,11 @@ impl HostRuntime {
     ) -> Result<()> {
         let node = incoming.node_id();
         let establish = async {
+            let _gate = self
+                .service
+                .acquire_handoff_gate(false)
+                .await
+                .map_err(anyhow::Error::msg)?;
             let record = self.credentials.record.lock().await;
             if record.trust.allowed.contains(&node) {
                 let connection = scopeguard::guard(incoming.authorize(&record.trust)?, |session| {
@@ -337,7 +342,13 @@ impl HostRuntime {
                         IncomingRequest::Blob(stream) => {
                             if transfers.len() >= 16 { continue; }
                             let service = self.service.clone();
-                            transfers.spawn(async move { service.files().transfer(id, stream).await });
+                            transfers.spawn(async move {
+                                let _gate = service
+                                    .acquire_handoff_gate(false)
+                                    .await
+                                    .map_err(anyhow::Error::msg)?;
+                                service.files().transfer(id, stream).await
+                            });
                         }
                         IncomingRequest::Close => break Ok(()),
                     }
