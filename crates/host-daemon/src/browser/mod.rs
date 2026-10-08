@@ -1433,7 +1433,6 @@ impl Browser {
             BrowserAction::Click { x, y } => recording::apply_input(
                 &overlay,
                 recording::InputEvent::Pointer {
-                    phase: recording::PointerPhase::Click,
                     x: *x,
                     y: *y,
                     width: viewport.0,

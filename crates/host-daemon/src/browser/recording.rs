@@ -46,20 +46,11 @@ pub(crate) enum InputEvent {
         down: bool,
     },
     Pointer {
-        phase: PointerPhase,
         x: f64,
         y: f64,
         width: u32,
         height: u32,
     },
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum PointerPhase {
-    Down,
-    Move,
-    Up,
-    Click,
 }
 
 #[derive(Clone, Debug)]
@@ -74,7 +65,6 @@ struct PointerOverlay {
     y: f64,
     width: u32,
     height: u32,
-    held: bool,
     released_at: Option<Instant>,
 }
 
@@ -90,48 +80,6 @@ pub(crate) fn new_overlay() -> OverlayHandle {
     Arc::new(Mutex::new(OverlayState::default()))
 }
 
-fn apply_pointer(
-    state: &mut OverlayState,
-    phase: PointerPhase,
-    x: f64,
-    y: f64,
-    width: u32,
-    height: u32,
-    now: Instant,
-) {
-    match phase {
-        PointerPhase::Down => {
-            state.pointer = Some(PointerOverlay {
-                x,
-                y,
-                width,
-                height,
-                held: true,
-                released_at: None,
-            });
-        }
-        PointerPhase::Move => {
-            if let Some(pointer) = state.pointer.as_mut() {
-                pointer.x = x;
-                pointer.y = y;
-                pointer.width = width;
-                pointer.height = height;
-            }
-        }
-        PointerPhase::Up => {
-            if let Some(pointer) = state.pointer.as_mut() {
-                pointer.x = x;
-                pointer.y = y;
-                pointer.width = width;
-                pointer.height = height;
-                pointer.held = false;
-                pointer.released_at = Some(now);
-            }
-        }
-        PointerPhase::Click => unreachable!("clicks are expanded into pointer phases"),
-    }
-}
-
 pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
     let Ok(mut state) = overlay.lock() else {
         return;
@@ -145,26 +93,19 @@ pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
             });
         }
         InputEvent::Pointer {
-            phase: PointerPhase::Click,
             x,
             y,
             width,
             height,
         } => {
-            // A browser click is the complete pointer lifecycle. Feeding the
-            // same phases used by a future drag source keeps the overlay
-            // state machine identical for clicks and streamed pointer input.
-            for phase in [PointerPhase::Down, PointerPhase::Move, PointerPhase::Up] {
-                apply_pointer(&mut state, phase, x, y, width, height, now);
-            }
+            state.pointer = Some(PointerOverlay {
+                x,
+                y,
+                width,
+                height,
+                released_at: Some(now),
+            });
         }
-        InputEvent::Pointer {
-            phase,
-            x,
-            y,
-            width,
-            height,
-        } => apply_pointer(&mut state, phase, x, y, width, height, now),
     }
 }
 
@@ -188,10 +129,9 @@ fn decorate_jpeg(
         .clone();
     if options.show_mouse_presses
         && let Some(pointer) = state.pointer
-        && (pointer.held
-            || pointer
-                .released_at
-                .is_some_and(|released| now.duration_since(released) < Duration::from_millis(600)))
+        && pointer
+            .released_at
+            .is_some_and(|released| now.duration_since(released) < Duration::from_millis(600))
     {
         let progress = pointer
             .released_at
