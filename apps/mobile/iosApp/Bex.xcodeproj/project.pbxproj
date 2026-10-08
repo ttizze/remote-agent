@@ -65,6 +65,10 @@
 		5A3E7F900DE1DD630BB482D0 /* QueueSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEEACADF6F84DFEDB2043CB /* QueueSheet.swift */; };
 		5AAAD5B74E2B6EA71FB97E12 /* RequestCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5C8EB7A315858408A45DD4 /* RequestCards.swift */; };
 		5AA51108FD3338DF7260477D /* ReviewScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A71C55BC1248CBB94BBCA63 /* ReviewScreen.swift */; };
+		5A6B00000000000000000001 /* GitControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6B00000000000000000002 /* GitControls.swift */; };
+		5A6B00000000000000000003 /* GitSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6B00000000000000000004 /* GitSheets.swift */; };
+		5A6B00000000000000000006 /* GitSheetSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6B00000000000000000005 /* GitSheetSections.swift */; };
+		5A6B00000000000000000008 /* GitPullRequestSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A6B00000000000000000007 /* GitPullRequestSection.swift */; };
 		5AC745F7F218DE3C213121D1 /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */; };
 		5AC745F7F218DE3C213121D2 /* UsageScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7F9C1E57CCEFA4413DFD7D /* UsageScreen.swift */; };
 		5A93A711C7F8F640D6399526 /* SetupCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A84E28D9598398CE73A1B57 /* SetupCard.swift */; };
@@ -168,6 +172,10 @@
 		5AEEACADF6F84DFEDB2043CB /* QueueSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueSheet.swift; sourceTree = "<group>"; };
 		5A5C8EB7A315858408A45DD4 /* RequestCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestCards.swift; sourceTree = "<group>"; };
 		5A71C55BC1248CBB94BBCA63 /* ReviewScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewScreen.swift; sourceTree = "<group>"; };
+		5A6B00000000000000000002 /* GitControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitControls.swift; sourceTree = "<group>"; };
+		5A6B00000000000000000004 /* GitSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSheets.swift; sourceTree = "<group>"; };
+		5A6B00000000000000000005 /* GitSheetSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSheetSections.swift; sourceTree = "<group>"; };
+		5A6B00000000000000000007 /* GitPullRequestSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitPullRequestSection.swift; sourceTree = "<group>"; };
 		5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
 		B0000000000000000000000A /* SettingsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsControls.swift; sourceTree = "<group>"; };
 		B0000000000000000000000B /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
@@ -280,6 +288,10 @@
 				5AEEACADF6F84DFEDB2043CB /* QueueSheet.swift */,
 				5A5C8EB7A315858408A45DD4 /* RequestCards.swift */,
 				5A71C55BC1248CBB94BBCA63 /* ReviewScreen.swift */,
+				5A6B00000000000000000002 /* GitControls.swift */,
+				5A6B00000000000000000004 /* GitSheets.swift */,
+				5A6B00000000000000000005 /* GitSheetSections.swift */,
+				5A6B00000000000000000007 /* GitPullRequestSection.swift */,
 				5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */,
 				B0000000000000000000000A /* SettingsControls.swift */,
 				B0000000000000000000000B /* RemoteFolderPicker.swift */,
@@ -485,6 +497,10 @@
 				5A3E7F900DE1DD630BB482D0 /* QueueSheet.swift in Sources */,
 				5AAAD5B74E2B6EA71FB97E12 /* RequestCards.swift in Sources */,
 				5AA51108FD3338DF7260477D /* ReviewScreen.swift in Sources */,
+				5A6B00000000000000000001 /* GitControls.swift in Sources */,
+				5A6B00000000000000000003 /* GitSheets.swift in Sources */,
+				5A6B00000000000000000006 /* GitSheetSections.swift in Sources */,
+				5A6B00000000000000000008 /* GitPullRequestSection.swift in Sources */,
 				5AC745F7F218DE3C213121D1 /* SettingsScreen.swift in Sources */,
 				B0000000000000000000002A /* SettingsControls.swift in Sources */,
 				B0000000000000000000002B /* RemoteFolderPicker.swift in Sources */,
