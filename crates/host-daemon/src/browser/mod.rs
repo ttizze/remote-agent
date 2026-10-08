@@ -69,8 +69,8 @@ struct State {
 struct ActiveRecording {
     cancel: CancellationToken,
     abort: tokio::task::AbortHandle,
-    done: tokio::sync::broadcast::Sender<
-        Result<agent_protocol::preview::PreviewRecordingArtifact, String>,
+    done: tokio::sync::watch::Sender<
+        Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
     >,
     started_at: String,
     stopping: bool,
@@ -190,7 +190,9 @@ impl Browser {
             task,
         } = started;
         let abort = task.abort_handle();
-        let (done, _) = tokio::sync::broadcast::channel(2);
+        let (done, _) = tokio::sync::watch::channel::<
+            Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+        >(None);
         let mut done_receiver = done.subscribe();
         recordings.insert(
             key.clone(),
@@ -213,7 +215,7 @@ impl Browser {
                 Ok(result) => result,
                 Err(error) => Err(format!("recording task terminated: {error}")),
             };
-            let _ = done.send(result);
+            let _ = done.send(Some(result));
             if let Some(preview) = preview
                 && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread)
             {
@@ -270,16 +272,20 @@ impl Browser {
             std::time::Duration::from_secs(
                 agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
             ),
-            done.recv(),
+            wait_for_recording_completion(&mut done),
         )
         .await
         .map_err(|_| format!("recording stop timeout for tab {tab_id} after 120000ms"));
         let result = match result {
             Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(format!("recording cleanup failed for tab {tab_id}: {error}")),
+            Ok(Err(error)) => Err(error),
             Err(error) => {
                 abort.abort();
-                let _ = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    wait_for_recording_completion(&mut done),
+                )
+                .await;
                 return Err(error);
             }
         }?;
@@ -289,8 +295,8 @@ impl Browser {
     async fn cancel_recording(
         &self,
         key: &(String, String),
-        done: &mut tokio::sync::broadcast::Receiver<
-            Result<agent_protocol::preview::PreviewRecordingArtifact, String>,
+        done: &mut tokio::sync::watch::Receiver<
+            Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
         >,
         timeout: Duration,
     ) {
@@ -301,9 +307,16 @@ impl Browser {
             (active.cancel.clone(), active.abort.clone())
         };
         cancel.cancel();
-        if tokio::time::timeout(timeout, done.recv()).await.is_err() {
+        if tokio::time::timeout(timeout, wait_for_recording_completion(done))
+            .await
+            .is_err()
+        {
             abort.abort();
-            let _ = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                wait_for_recording_completion(done),
+            )
+            .await;
         }
     }
 
@@ -354,14 +367,18 @@ impl Browser {
                 active.cancel.cancel();
                 active.done.subscribe()
             };
-            if tokio::time::timeout(Duration::from_secs(10), done.recv())
+            if tokio::time::timeout(Duration::from_secs(10), wait_for_recording_completion(&mut done))
                 .await
                 .is_err()
             {
                 if let Some(active) = self.recordings.lock().await.get(&key) {
                     active.abort.abort();
                 }
-                let _ = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    wait_for_recording_completion(&mut done),
+                )
+                .await;
             }
         }
         if let Some(chrome) = self.state.lock().await.chrome.take() {
@@ -835,6 +852,22 @@ impl Browser {
             image_id,
             dialog: chrome.dialog(&session),
         })
+    }
+}
+
+async fn wait_for_recording_completion(
+    done: &mut tokio::sync::watch::Receiver<
+        Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+    >,
+) -> Result<Result<agent_protocol::preview::PreviewRecordingArtifact, String>, String> {
+    loop {
+        let completed = done.borrow().clone();
+        if let Some(result) = completed {
+            return Ok(result);
+        }
+        done.changed()
+            .await
+            .map_err(|_| "recording completion channel closed".to_owned())?;
     }
 }
 
