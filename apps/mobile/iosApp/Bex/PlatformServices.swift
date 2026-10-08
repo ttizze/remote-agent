@@ -16,20 +16,29 @@ enum LocalNotifications {
         let sound: Bool
         let threadId: String?
         let deepLink: String?
-        let badgeCount: UInt32
         let kind: String?
         let soundKind: String?
     }
     private static var pending: [Pending] = []
-    private static var deliveredIdentifiers: Set<String> = []
+    /// Stable route ownership makes a replacement keep one posted notice and
+    /// lets a departed Host retract only its own notices.
+    private static var postedIdentifiers: [String: String] = [:]
     private static var foregroundPlayer: AVAudioPlayer?
 
     private static func schedule(_ pendingRequest: Pending) {
+        let key = notificationKey(pendingRequest)
+        let center = UNUserNotificationCenter.current()
+        if let oldIdentifier = postedIdentifiers.removeValue(forKey: key) {
+            center.removeDeliveredNotifications(withIdentifiers: [oldIdentifier])
+            center.removePendingNotificationRequests(withIdentifiers: [oldIdentifier])
+        }
+        let identifier = "remoteagent.local.\(UUID().uuidString)"
+        postedIdentifiers[key] = identifier
         let content = UNMutableNotificationContent()
         content.title = pendingRequest.title
         content.body = pendingRequest.body
         content.sound = pendingRequest.sound ? notificationSound(for: pendingRequest.soundKind) : nil
-        content.badge = NSNumber(value: pendingRequest.badgeCount)
+        content.badge = NSNumber(value: postedIdentifiers.count)
         var userInfo: [AnyHashable: Any] = [:]
         if let threadId = pendingRequest.threadId {
             // Keep same-named threads from different Hosts in separate
@@ -45,12 +54,18 @@ enum LocalNotifications {
         if let soundKind = pendingRequest.soundKind { userInfo["soundKind"] = soundKind }
         if !userInfo.isEmpty { content.userInfo = userInfo }
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
-        let identifier = "remoteagent.local.\(UUID().uuidString)"
         let notificationRequest = UNNotificationRequest(
             identifier: identifier, content: content, trigger: trigger
         )
-        deliveredIdentifiers.insert(identifier)
-        UNUserNotificationCenter.current().add(notificationRequest)
+        center.add(notificationRequest) { error in
+            guard error != nil else { return }
+            DispatchQueue.main.async {
+                if Self.postedIdentifiers[key] == identifier {
+                    Self.postedIdentifiers.removeValue(forKey: key)
+                    Self.updateBadge()
+                }
+            }
+        }
     }
 
     private static func notificationSound(for soundKind: String?) -> UNNotificationSound {
@@ -65,13 +80,12 @@ enum LocalNotifications {
         sound: Bool,
         threadId: String? = nil,
         deepLink: String? = nil,
-        badgeCount: UInt32 = 0,
         kind: String? = nil,
         soundKind: String? = nil
     ) {
         let request = Pending(
             title: title, body: body, sound: sound, threadId: threadId,
-            deepLink: deepLink, badgeCount: badgeCount, kind: kind, soundKind: soundKind
+            deepLink: deepLink, kind: kind, soundKind: soundKind
         )
         if authorized == true {
             schedule(request)
@@ -130,16 +144,17 @@ enum LocalNotifications {
         requests.forEach(schedule)
     }
 
-    /// Applies the aggregate core attention count even when focus/selection
-    /// cleared it without producing a new notification event.
-    static func updateBadge(_ count: UInt32) {
-        UIApplication.shared.applicationIconBadgeNumber = Int(count)
+    /// The native badge counts successfully posted notices, including a
+    /// completed notice until focus and excluding in-app toasts.
+    static func updateBadge() {
+        UIApplication.shared.applicationIconBadgeNumber = postedIdentifiers.count
     }
 
     static func clearDelivered() {
         let center = UNUserNotificationCenter.current()
-        var identifiers = deliveredIdentifiers
-        deliveredIdentifiers.removeAll()
+        var identifiers = Set(postedIdentifiers.values)
+        postedIdentifiers.removeAll()
+        pending.removeAll()
         center.getDeliveredNotifications { notifications in
             identifiers.formUnion(
                 notifications
@@ -158,7 +173,52 @@ enum LocalNotifications {
             guard !values.isEmpty else { return }
             center.removePendingNotificationRequests(withIdentifiers: values)
         }
-        updateBadge(0)
+        updateBadge()
+    }
+
+    static func acknowledge(_ deepLink: String?) {
+        guard let deepLink else { return }
+        let key = notificationKey(deepLink: deepLink, threadId: nil, title: nil, body: nil)
+        guard let identifier = postedIdentifiers.removeValue(forKey: key) else { return }
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        updateBadge()
+    }
+
+    static func removeEnvironment(_ environmentId: String) {
+        let keys = postedIdentifiers.keys.filter {
+            AgentPushCenter.threadTarget(from: $0.replacingOccurrences(of: "route:", with: ""))?.hostId == environmentId
+        }
+        let identifiers = keys.compactMap { postedIdentifiers.removeValue(forKey: $0) }
+        pending.removeAll {
+            guard let deepLink = $0.deepLink else { return false }
+            return AgentPushCenter.threadTarget(from: deepLink)?.hostId == environmentId
+        }
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        updateBadge()
+    }
+
+    private static func notificationKey(_ request: Pending) -> String {
+        notificationKey(
+            deepLink: request.deepLink,
+            threadId: request.threadId,
+            title: request.title,
+            body: request.body
+        )
+    }
+
+    private static func notificationKey(
+        deepLink: String?,
+        threadId: String?,
+        title: String?,
+        body: String?
+    ) -> String {
+        if let deepLink { return "route:\(deepLink)" }
+        if let threadId { return "thread:\(threadId)" }
+        return "body:\(title ?? "")\n\(body ?? "")"
     }
 
     static func playSound(soundKind: String? = nil) {

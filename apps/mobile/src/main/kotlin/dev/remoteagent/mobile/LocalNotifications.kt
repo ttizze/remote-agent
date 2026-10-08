@@ -16,7 +16,6 @@ private data class LocalNotificationRequest(
     val threadId: String?,
     val deepLink: String?,
     val sound: Boolean,
-    val badgeCount: UInt,
     val kind: String?,
     val soundKind: String?,
 )
@@ -50,7 +49,6 @@ internal object LocalNotifications {
         sound: Boolean,
         threadId: String? = null,
         deepLink: String? = null,
-        badgeCount: UInt = 0u,
         kind: String? = null,
         soundKind: String? = null,
     ) {
@@ -60,7 +58,6 @@ internal object LocalNotifications {
             threadId,
             deepLink,
             sound,
-            badgeCount,
             kind,
             soundKind,
         )
@@ -82,6 +79,7 @@ internal object LocalNotifications {
             return
         }
         post(context, request)
+        updateBadge(context)
     }
 
     /** Replays events queued while Android's notification permission sheet was open. */
@@ -89,6 +87,7 @@ internal object LocalNotifications {
         if (!granted) {
             permissionDenied = true
             synchronized(pending) { pending.clear() }
+            clearDelivered(context)
             return
         }
         permissionDenied = false
@@ -98,25 +97,22 @@ internal object LocalNotifications {
             copy
         }
         requests.forEach { post(context, it) }
+        updateBadge(context)
     }
 
-    /** Clears this client's native attention notifications when core reports
-     * that focus or selection removed the aggregate badge. */
-    fun updateBadge(context: Context, count: UInt) {
+    /** The badge is the number of OS notices posted by this client. Core's
+     * current waiting-row count is intentionally not used here: a completed
+     * notice remains pending until focus and a replacement keeps one tag. */
+    fun updateBadge(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        synchronized(activeNotifications) {
-            if (count == 0u) {
-                activeNotifications.keys.forEach { id -> manager.cancel(LOCAL_ATTENTION_TAG, id) }
-                activeNotifications.clear()
-            } else {
-                // Existing notifications retain the number they were posted
-                // with, so repost each active request when another Host's
-                // attention count changes without creating a new event.
-                activeNotifications.values
-                    .map { it.copy(badgeCount = count) }
-                    .forEach { request -> post(context, request) }
-            }
+        val requests = synchronized(activeNotifications) { activeNotifications.values.toList() }
+        if (requests.isEmpty()) {
+            manager.activeNotifications
+                .filter { it.tag == LOCAL_ATTENTION_TAG }
+                .forEach { manager.cancel(LOCAL_ATTENTION_TAG, it.id) }
+            return
         }
+        requests.forEach { request -> post(context, request) }
     }
 
     /** Removes a notification after its content intent has been consumed. */
@@ -124,6 +120,7 @@ internal object LocalNotifications {
         val id = deepLink?.hashCode() ?: return
         context.getSystemService(NotificationManager::class.java).cancel(LOCAL_ATTENTION_TAG, id)
         synchronized(activeNotifications) { activeNotifications.remove(id) }
+        updateBadge(context)
     }
 
     fun clearDelivered(context: Context) {
@@ -135,9 +132,31 @@ internal object LocalNotifications {
             activeNotifications.keys.forEach { id -> manager.cancel(LOCAL_ATTENTION_TAG, id) }
             activeNotifications.clear()
         }
+        synchronized(pending) { pending.clear() }
+    }
+
+    /** Removes only notices owned by a Host that left the profile registry. */
+    fun removeEnvironment(context: Context, environmentId: String) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val removedIds = synchronized(activeNotifications) {
+            activeNotifications
+                .filter { (_, request) -> environmentId == request.deepLink?.let(::deepLinkEnvironmentId) }
+                .map { (id, _) -> id }
+                .also { ids -> ids.forEach { id -> activeNotifications.remove(id) } }
+        }
+        removedIds.forEach { manager.cancel(LOCAL_ATTENTION_TAG, it) }
+        synchronized(pending) {
+            pending.removeAll { environmentId == it.deepLink?.let(::deepLinkEnvironmentId) }
+        }
+        updateBadge(context)
     }
 
     private fun post(context: Context, request: LocalNotificationRequest) {
+        val notificationId = notificationId(request)
+        val postedCount = synchronized(activeNotifications) {
+            activeNotifications[notificationId] = request
+            activeNotifications.size
+        }
         val soundClass = request.soundKind?.substringAfterLast('.')?.lowercase() ?: "input"
         val channelId =
             "remote-agent-attention-${if (request.sound) "sound" else "silent"}-$soundClass"
@@ -169,7 +188,7 @@ internal object LocalNotifications {
             .setContentTitle(request.title)
             .setContentText(request.body)
             .setAutoCancel(true)
-            .setNumber(request.badgeCount.toInt())
+            .setNumber(postedCount)
         request.deepLink?.let { deepLink ->
             val route = Intent(
                 Intent.ACTION_VIEW,
@@ -188,10 +207,15 @@ internal object LocalNotifications {
                 )
             )
         }
-        val notificationId = request.deepLink?.hashCode()
-            ?: request.threadId?.hashCode()
-            ?: request.body.hashCode()
         manager.notify(LOCAL_ATTENTION_TAG, notificationId, builder.build())
-        synchronized(activeNotifications) { activeNotifications[notificationId] = request }
+    }
+
+    private fun notificationId(request: LocalNotificationRequest): Int =
+        request.deepLink?.hashCode() ?: request.threadId?.hashCode() ?: request.body.hashCode()
+
+    private fun deepLinkEnvironmentId(deepLink: String): String? {
+        val uri = runCatching { Uri.parse(deepLink) }.getOrNull() ?: return null
+        if (uri.scheme != "remoteagent" || uri.host != "threads") return null
+        return uri.pathSegments.takeIf { it.size == 2 }?.first()
     }
 }

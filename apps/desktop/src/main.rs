@@ -253,6 +253,7 @@ fn main() {
             cx.set_app_identity("app.remoteagent.desktop", "Remote Agent");
             cx.on_app_quit(|cx| {
                 tracing::info!(target: "desktop", operation = "shutdown", "Desktop shutting down");
+                platform::set_notification_badge(0);
                 let runtime = cx.global::<Runtime>().clone();
                 async move {
                     runtime.closing.close();

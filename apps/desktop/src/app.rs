@@ -177,9 +177,11 @@ pub(crate) struct Desktop {
     pub(crate) snapshot: Arc<Snapshot>,
     /// Last snapshot used as the notification transition baseline.
     notification_snapshot: Arc<Snapshot>,
-    /// Native notifications that can be retracted when core reports that all
-    /// attention was cleared by selection or focus.
-    active_notification_tags: BTreeSet<String>,
+    /// Native notifications that have actually been posted. The value keeps
+    /// the owning environment so a disconnected Host only retracts its own
+    /// notices. Inserting an existing tag replaces its notice, matching the
+    /// platform notification contract.
+    active_notification_tags: BTreeMap<String, Option<String>>,
     /// Immutable projections for every authenticated Host store.
     pub(crate) environment_registry: EnvironmentRegistry,
     pub(crate) views: Arc<Views>,
@@ -364,6 +366,29 @@ fn local_host_power_publish_allowed(
     local_host_supervised && !remote_selected && !probe_in_flight
 }
 
+fn register_pending_notification(
+    tags: &mut BTreeMap<String, Option<String>>,
+    tag: String,
+    environment_id: Option<String>,
+) {
+    tags.insert(tag, environment_id);
+}
+
+fn remove_pending_notifications_for_environment(
+    tags: &mut BTreeMap<String, Option<String>>,
+    environment_id: &str,
+) -> Vec<String> {
+    let removed = tags
+        .iter()
+        .filter(|(_, owner)| owner.as_deref() == Some(environment_id))
+        .map(|(tag, _)| tag.clone())
+        .collect::<Vec<_>>();
+    for tag in &removed {
+        tags.remove(tag);
+    }
+    removed
+}
+
 /// Keys every window binds; screens handle their own focus-specific keys.
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(
@@ -465,7 +490,7 @@ impl Desktop {
             session: None,
             snapshot: Arc::default(),
             notification_snapshot: Arc::default(),
-            active_notification_tags: BTreeSet::new(),
+            active_notification_tags: BTreeMap::new(),
             views: Arc::new(Views::derive(
                 &Snapshot::default(),
                 &EnvironmentRegistry::default(),
@@ -645,7 +670,7 @@ impl Desktop {
     /// Starts one supervised Store owner for each saved environment. Each
     /// profile has its own cache directory and event stream; a failed profile
     /// never replaces the selected Host's session.
-    fn start_background_connections(&mut self) {
+    fn start_background_connections(&mut self, cx: &mut Context<Self>) {
         let selected = self.remote.as_ref().map(|remote| remote.id.as_str());
         let remotes = self.snapshot.remote_hosts.clone();
         let known: BTreeSet<_> = remotes.iter().map(|remote| remote.id.clone()).collect();
@@ -661,6 +686,7 @@ impl Desktop {
             self.background_connecting.remove(&profile_id);
             self.background_retry_at.remove(&profile_id);
             if let Some(environment_id) = self.profile_environment_ids.remove(&profile_id) {
+                self.dismiss_environment_notifications(&environment_id, cx);
                 self.environment_registry.remove(&environment_id);
             }
         }
@@ -999,13 +1025,16 @@ impl Desktop {
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Tick => {
+                if window.is_window_active() {
+                    self.dismiss_active_notifications(cx);
+                }
                 if let Some(route) = self.pending_notification_route.take() {
                     self.open_notification_route(&route, window, cx);
                 }
                 self.retry_pending_load_balanced_new_thread(window, cx);
                 self.apply_pending_open(window, cx);
                 self.reconnect_selected_if_due(window, cx);
-                self.start_background_connections();
+                self.start_background_connections(cx);
                 self.publish_host_power();
                 self.schedule_views(cx);
                 cx.notify();
@@ -1128,10 +1157,12 @@ impl Desktop {
                     }
                     Err(error) => {
                         self.background_failed(&profile_id);
-                        if let Some(environment_id) = self.profile_environment_ids.get(&profile_id)
+                        if let Some(environment_id) =
+                            self.profile_environment_ids.get(&profile_id).cloned()
                         {
+                            self.dismiss_environment_notifications(&environment_id, cx);
                             self.environment_registry
-                                .mark_disconnected(environment_id, Some(error.clone()));
+                                .mark_disconnected(&environment_id, Some(error.clone()));
                             self.generation += 1;
                             self.schedule_views(cx);
                         }
@@ -1174,6 +1205,11 @@ impl Desktop {
                     self.deliver_notification_events(previous, &snapshot, window, cx);
                 }
                 if disconnected {
+                    if let Some(environment_id) =
+                        self.profile_environment_ids.get(&profile_id).cloned()
+                    {
+                        self.dismiss_environment_notifications(&environment_id, cx);
+                    }
                     self.background_sessions.remove(&profile_id);
                     self.background_failed(&profile_id);
                 }
@@ -1373,7 +1409,7 @@ impl Desktop {
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.deliver_snapshot_notifications(window, cx);
-        self.start_background_connections();
+        self.start_background_connections(cx);
         if self.remote.is_some()
             && self.snapshot.environment.is_some()
             && !self.snapshot.connected
@@ -1403,17 +1439,6 @@ impl Desktop {
         self.deliver_notification_events(&previous, &self.snapshot, window, cx);
     }
 
-    fn notification_badge_count(&self) -> u32 {
-        let snapshots = self.environment_registry.snapshots();
-        if snapshots.is_empty() {
-            return agent_core::view::notifications::badge_count(&self.snapshot);
-        }
-        snapshots
-            .iter()
-            .map(|snapshot| agent_core::view::notifications::badge_count(snapshot))
-            .fold(0, u32::saturating_add)
-    }
-
     fn deliver_notification_events(
         &mut self,
         previous: &Snapshot,
@@ -1428,7 +1453,6 @@ impl Desktop {
             focused,
             focused,
         );
-        let mut delivered_os_notification = false;
         for event in events {
             if event.in_app {
                 let route = event.deep_link.clone();
@@ -1470,8 +1494,11 @@ impl Desktop {
                         label: "Open".into(),
                     }],
                 });
-                self.active_notification_tags.insert(tag);
-                delivered_os_notification = true;
+                register_pending_notification(
+                    &mut self.active_notification_tags,
+                    tag,
+                    event.environment_id.clone(),
+                );
             }
             if event.sound {
                 let sound_kind = event.sound_kind;
@@ -1485,8 +1512,10 @@ impl Desktop {
             // in-app selection path even when another Host still has pending
             // attention rows.
             self.dismiss_active_notifications(cx);
-        } else if !delivered_os_notification && self.notification_badge_count() == 0 {
+        } else if !current.preferences.notification_mode.has_notifications() {
             self.dismiss_active_notifications(cx);
+        } else {
+            self.publish_notification_badge();
         }
     }
 
@@ -1508,9 +1537,29 @@ impl Desktop {
     }
 
     fn dismiss_active_notifications(&mut self, cx: &mut Context<Self>) {
-        for tag in std::mem::take(&mut self.active_notification_tags) {
+        let tags = std::mem::take(&mut self.active_notification_tags);
+        for tag in tags.keys() {
+            cx.dismiss_system_notification(tag);
+        }
+        self.publish_notification_badge();
+    }
+
+    fn dismiss_environment_notifications(
+        &mut self,
+        environment_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        for tag in remove_pending_notifications_for_environment(
+            &mut self.active_notification_tags,
+            environment_id,
+        ) {
             cx.dismiss_system_notification(&tag);
         }
+        self.publish_notification_badge();
+    }
+
+    fn publish_notification_badge(&self) {
+        platform::set_notification_badge(self.active_notification_tags.len() as u32);
     }
 
     /// The selected thread's id.
@@ -2048,7 +2097,11 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::local_host_power_publish_allowed;
+    use super::{
+        local_host_power_publish_allowed, register_pending_notification,
+        remove_pending_notifications_for_environment,
+    };
+    use std::collections::BTreeMap;
 
     #[test]
     fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
@@ -2056,6 +2109,51 @@ mod tests {
         assert!(!local_host_power_publish_allowed(false, false, false));
         assert!(!local_host_power_publish_allowed(true, true, false));
         assert!(!local_host_power_publish_allowed(true, false, true));
+    }
+
+    #[test]
+    fn pending_notifications_replace_same_tag_and_retain_completion_until_focus() {
+        let mut tags = BTreeMap::new();
+        register_pending_notification(
+            &mut tags,
+            "remoteagent://threads/host-a/thread-1".into(),
+            Some("host-a".into()),
+        );
+        register_pending_notification(
+            &mut tags,
+            "remoteagent://threads/host-a/thread-1".into(),
+            Some("host-a".into()),
+        );
+        assert_eq!(tags.len(), 1, "a replacement must not add another badge");
+        assert!(tags.contains_key("remoteagent://threads/host-a/thread-1"));
+
+        tags.clear();
+        assert!(tags.is_empty(), "focus clears the posted-notice registry");
+    }
+
+    #[test]
+    fn removing_an_environment_retracts_only_its_posted_notifications() {
+        let mut tags = BTreeMap::new();
+        register_pending_notification(
+            &mut tags,
+            "remoteagent://threads/host-a/thread-1".into(),
+            Some("host-a".into()),
+        );
+        register_pending_notification(
+            &mut tags,
+            "remoteagent://threads/host-b/thread-1".into(),
+            Some("host-b".into()),
+        );
+
+        let removed = remove_pending_notifications_for_environment(&mut tags, "host-a");
+        assert_eq!(
+            removed,
+            vec!["remoteagent://threads/host-a/thread-1".to_owned()]
+        );
+        assert_eq!(
+            tags.keys().cloned().collect::<Vec<_>>(),
+            vec!["remoteagent://threads/host-b/thread-1".to_owned()]
+        );
     }
 }
 

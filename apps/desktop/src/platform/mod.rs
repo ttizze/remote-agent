@@ -38,6 +38,13 @@ use macos as os;
 #[cfg(target_os = "windows")]
 use windows as os;
 
+/// Publishes the number of notifications that were actually posted by the
+/// desktop client. Each platform owns its native app indicator; callers must
+/// clear this when focus, mode, or environment ownership clears the registry.
+pub(crate) fn set_notification_badge(count: u32) {
+    os::set_notification_badge(count);
+}
+
 mod microphone;
 #[cfg(target_os = "macos")]
 pub(crate) use microphone::prepare_microphone;
