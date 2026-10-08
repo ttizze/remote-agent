@@ -350,7 +350,7 @@ fn sound_kind(kind: NotificationEventKind) -> NotificationSoundKind {
 mod tests {
     use super::*;
     use crate::view::search::fixtures;
-    use agent_domain::{RunId, RunStatus, ThreadId, Timestamp};
+    use agent_domain::{RunId, RunStatus, Timestamp};
 
     fn thread(
         id: &str,

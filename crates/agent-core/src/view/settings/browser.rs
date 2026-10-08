@@ -512,7 +512,7 @@ mod tests {
                 selected: Some("125".into()),
             }
         );
-        assert_eq!(
+        assert!(matches!(
             (SECTION.intent)(
                 &snapshot,
                 &SettingsScope::Host,
@@ -522,7 +522,7 @@ mod tests {
             Some(Intent::SetBrowserLinkTarget {
                 target: BrowserLinkTarget::App,
             })
-        );
+        ));
         assert!(
             (SECTION.intent)(
                 &snapshot,

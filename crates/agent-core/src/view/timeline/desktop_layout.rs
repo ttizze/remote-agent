@@ -315,9 +315,8 @@ pub fn resolve_timeline_minimap_navigation_interactive(collapsed_width: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::timeline::rows::{
-        AssistantMessageRow, TimelineRow, UserMessageDecorations, UserMessageRow,
-    };
+    use crate::view::timeline::message::UserMessageDecorations;
+    use crate::view::timeline::rows::{AssistantMessageRow, TimelineRow, UserMessageRow};
     use agent_domain::MessageId;
 
     fn timeline_row(id: &str, kind: TimelineRowKind) -> TimelineRow {

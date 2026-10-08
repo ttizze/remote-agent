@@ -184,7 +184,7 @@ mod tests {
                 mode: NotificationMode::Sound
             })
         ));
-        assert_eq!(
+        assert!(matches!(
             (SECTION.intent)(
                 &snapshot,
                 &SettingsScope::Host,
@@ -192,6 +192,6 @@ mod tests {
                 &SettingValue::Switch { on: true }
             ),
             Some(Intent::SetLiveActivitiesEnabled { enabled: true })
-        );
+        ));
     }
 }

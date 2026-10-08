@@ -234,7 +234,7 @@ mod tests {
             row.control,
             SettingControl::Text { ref value, .. } if value == "~/projects"
         ));
-        assert_eq!(
+        assert!(matches!(
             (SECTION.intent)(
                 &Snapshot::default(),
                 &SettingsScope::Host,
@@ -246,9 +246,9 @@ mod tests {
             Some(crate::state::Intent::UpdateSettings {
                 scope: SettingsScope::Host,
                 change: SettingChange::AddProjectBaseDirectory {
-                    value: "/tmp/projects".into(),
+                    value,
                 },
-            })
-        );
+            }) if value == "/tmp/projects"
+        ));
     }
 }

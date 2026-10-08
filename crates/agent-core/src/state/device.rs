@@ -1248,10 +1248,12 @@ impl DeviceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::Snapshot;
     use agent_protocol::device::{
         DeviceAccessibilityTree, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame,
-        DeviceFrameEncoding, DevicePlatform, DeviceRecording, DeviceRecordingFormat,
-        DeviceRecordingStatus, DeviceScreenConfig, DeviceSummary, DeviceVideoFrame,
+        DeviceFrameEncoding, DeviceOrientation, DevicePlatform, DeviceRecording,
+        DeviceRecordingFormat, DeviceRecordingStatus, DeviceScreenConfig, DeviceSummary,
+        DeviceVideoFrame,
     };
 
     fn session(thread: &str, host: &str, device: &str) -> DeviceSession {
@@ -1954,8 +1956,9 @@ mod tests {
     #[test]
     fn touch_projection_keeps_extreme_finite_dimensions_valid() {
         let tiny = f32::from_bits(1);
-        let projected = project_device_point(tiny, tiny, f32::MAX, f32::MAX, tiny, tiny)
-            .expect("finite dimensions should produce a finite fit");
+        let projected =
+            crate::view::device::project_touch_point(tiny, tiny, f32::MAX, f32::MAX, tiny, tiny)
+                .expect("finite dimensions should produce a finite fit");
         assert!(projected.x.is_finite() && projected.y.is_finite());
         assert!((0.0..=1.0).contains(&projected.x));
         assert!((0.0..=1.0).contains(&projected.y));
