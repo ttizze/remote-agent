@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_AGE_MS: i64 = 15 * 60_000;
+const MAX_STORED_WINDOWS: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,7 +174,7 @@ pub fn subscription_widget(
                 selected.push(index);
             }
         }
-        selected.truncate(max_windows);
+        selected.truncate(max_windows.min(MAX_STORED_WINDOWS));
         selected.sort_unstable();
         let fresh = !members.is_empty() && expires > now_ms;
         providers.push(WidgetProvider {
@@ -431,7 +432,7 @@ mod tests {
             window.used_percent = Some(95 - index);
             usage.windows.push(window);
         }
-        let view = subscription_widget(&[first, second], &[], NOW, 6);
+        let view = subscription_widget(&[first, second], &[], NOW, usize::MAX);
         let provider = &view.entries[0].providers[0];
         assert_eq!(provider.total_windows, 21);
         assert_eq!(provider.windows.len(), 6);

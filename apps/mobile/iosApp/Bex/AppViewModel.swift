@@ -324,12 +324,10 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func publishUsageWidget() {
-        var snapshots = backgroundOwners.values.map { $0.snapshot() }
-        if let current = store?.snapshot() {
-            snapshots.append(current)
-        }
-        do { try usageWidget.publish(subscriptionUsageWidgetsJson(snapshots: snapshots, maxWindows: 6)) }
-        catch { notice = error.localizedDescription }
+        do { try usageWidget.publish(subscriptionUsageWidgetsJson(
+            snapshots: environmentSnapshotsForCore(),
+            maxWindows: 6
+        )) } catch { notice = error.localizedDescription }
     }
 
     func preparePairing(_ contents: String) {

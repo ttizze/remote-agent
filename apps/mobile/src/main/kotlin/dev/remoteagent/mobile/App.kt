@@ -595,8 +595,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun publishUsageWidget() {
-        val snapshots = backgroundOwners.values.map { it.snapshot() } + listOfNotNull(owner?.snapshot())
-        usageWidget.publish(subscriptionUsageWidgetsJson(snapshots, UInt.MAX_VALUE))
+        usageWidget.publish(subscriptionUsageWidgetsJson(environmentSnapshotsForCore(), 6u))
     }
 
     fun removeProfile(id: String) {
@@ -613,9 +612,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     scope.launch { old?.shutdown() }
                 }
                 profiles = profiles.filterNot { it.id == id }
-                publishUsageWidget()
                 environments = environments.filterNot { it.profileId == id }
                 environmentSnapshots = environmentSnapshots - id
+                publishUsageWidget()
                 repository.saveProfiles(profiles)
                 File(repository.cacheDirectory(id)).deleteRecursively()
                 if (profiles.isEmpty()) stack = listOf(Route.Pairing)
