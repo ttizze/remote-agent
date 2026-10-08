@@ -481,10 +481,11 @@ impl PreviewState {
             .into_iter()
             .map(|status| (status.tab_id.clone(), status))
             .collect();
-        self.last_recordings
-            .retain(|tab_id, _| self.sessions.contains_key(tab_id));
         if server_epoch_changed {
             self.last_recordings.clear();
+        } else {
+            self.last_recordings
+                .retain(|tab_id, _| self.sessions.contains_key(tab_id));
         }
         self.closed_tabs
             .retain(|tab_id| !self.sessions.contains_key(tab_id));
