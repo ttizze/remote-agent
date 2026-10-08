@@ -9,7 +9,22 @@ set -euo pipefail
 version=$1
 output_dir=$2
 app_path=${3:-target/Bex.app}
-[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+
+valid_version() {
+    local value=$1
+    local pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+    [[ $value =~ $pattern ]] || return 1
+    local prerelease=${BASH_REMATCH[5]:-}
+    local part
+    local -a parts
+    IFS='.' read -r -a parts <<< "$prerelease"
+    for part in "${parts[@]}"; do
+        [[ $part =~ ^0[0-9]+$ ]] || continue
+        return 1
+    done
+}
+
+valid_version "$version" || {
     echo "invalid release version: $version" >&2
     exit 1
 }

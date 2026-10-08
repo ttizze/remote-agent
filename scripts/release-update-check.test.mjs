@@ -134,7 +134,13 @@ test("rejects unsafe or oversized manifest assets before a consumer can select t
   const base = { schema: 1, channel: "nightly", version: "1.0.0" };
   const asset = { name: "host-linux-x86_64.tar.gz", sha256: "0".repeat(64), size: 1 };
   assert.throws(() => validateMetadata({ ...base, assets: [{ ...asset, name: "../host.tar.gz" }] }), /invalid asset/);
+  assert.throws(() => validateMetadata({ ...base, assets: [{ ...asset, name: "host.tar.gz?redirect" }] }), /invalid asset/);
+  assert.throws(() => validateMetadata({ ...base, assets: [asset, asset] }), /invalid asset/);
   assert.throws(() => validateMetadata({ ...base, assets: [{ ...asset, size: 512 * 1024 * 1024 + 1 }] }), /invalid asset/);
+  assert.throws(
+    () => validateMetadata({ ...base, update_url: "https://user:password@example.invalid/releases" }),
+    /without credentials/,
+  );
 });
 
 test("exposes native store links only when configured", () => {

@@ -77,5 +77,23 @@ if scripts/release-metadata.sh --channel stable --version invalid >/dev/null 2>&
     echo 'invalid stable version unexpectedly succeeded' >&2
     exit 1
 fi
+for version in 01.2.3 1.2.3-nightly.01 1.2.3-a..b; do
+    if scripts/release-metadata.sh --channel stable --version "$version" >/dev/null 2>&1; then
+        echo "invalid version unexpectedly succeeded: $version" >&2
+        exit 1
+    fi
+done
+for store_url in 'https://' 'http://play.google.com/store/apps/details?id=dev.remoteagent.mobile' 'https://user:password@play.google.com/store/apps/details?id=dev.remoteagent.mobile'; do
+    if scripts/release-metadata.sh \
+        --channel nightly \
+        --date 20261008 \
+        --run-number 44 \
+        --sha abcdef1234567890 \
+        --repository example/remote-agent \
+        --android-store-url "$store_url" >/dev/null 2>&1; then
+        echo "invalid native store URL unexpectedly succeeded: $store_url" >&2
+        exit 1
+    fi
+done
 scripts/signing-preflight-test.sh
 echo 'release metadata checks passed'
