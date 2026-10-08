@@ -4,6 +4,7 @@ import android.view.KeyEvent as AndroidKeyEvent
 import android.graphics.BitmapFactory
 import android.os.Environment
 import android.view.TextureView
+import android.widget.FrameLayout
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -397,9 +398,39 @@ private fun DeviceH264Frame(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                TextureView(context).also { decoder.attach(it) }
+                FrameLayout(context).apply {
+                    addView(
+                        TextureView(context).also { decoder.attach(it) },
+                        FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                    addView(
+                        DeviceAccessibilityOverlayView(context),
+                        FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                        ),
+                    )
+                }
             },
-            update = {
+            update = { container ->
+                val tree = view.accessibility.firstOrNull {
+                    it.hostId == frame.hostId && it.deviceId == frame.deviceId
+                }
+                (container.getChildAt(1) as? DeviceAccessibilityOverlayView)?.rects =
+                    tree?.elements
+                        ?.filter { it.label.isNotEmpty() }
+                        ?.map { element ->
+                            android.graphics.RectF(
+                                element.x,
+                                element.y,
+                                element.x + element.width,
+                                element.y + element.height,
+                            )
+                        }
+                        ?: emptyList()
                 decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())
                 decoder.submit(
                     payload = frame.payload.toByteArray(),
@@ -410,7 +441,6 @@ private fun DeviceH264Frame(
                 )
             },
         )
-        DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
     }
 }
 
