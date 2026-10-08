@@ -11,7 +11,7 @@ struct BexSwiftUIRoot: View {
                 NavigationStack { pairingScreen }
             } else if model.screen == .profiles || model.screen == .pairing {
                 NavigationStack {
-                    ProfilesScreen(profiles: model.profiles, notice: model.notice,
+                    ProfilesScreen(profiles: model.profiles, environments: model.environments, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
                 }
                 .sheet(isPresented: Binding(

@@ -10,7 +10,7 @@ use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
     SharedResources, SupervisedSpawner, tools::ModelCatalog,
 };
-use agent_domain::{Driver, RunStatus};
+use agent_domain::{Driver, RunStatus, RuntimeMode};
 use agent_protocol::{
     models::{
         AgentActivityPhase, AwarenessActivity, AwarenessRegistration, AwarenessRegistrationResult,
@@ -1119,7 +1119,7 @@ impl HostRpcService {
             unavailable_reason: None,
             show_interaction_mode_toggle: true,
             reports_context_window: true,
-            supported_runtime_modes: vec![],
+            supported_runtime_modes: supported_runtime_modes(driver),
             models: vec![],
         };
         let mut codex = instance(Driver::Codex, "Codex");
@@ -1241,6 +1241,20 @@ impl HostRpcService {
             .remove(path, false)
             .await
             .map_err(|error| Failure::new("worktree_remove_failed", error))
+    }
+}
+
+/// The two built-in providers expose the same four user-selectable permission
+/// modes. Keep this capability in the Host catalog so core and every native
+/// client render the actual provider contract rather than reconstructing it.
+fn supported_runtime_modes(driver: Driver) -> Vec<RuntimeMode> {
+    match driver {
+        Driver::Codex | Driver::Claude => vec![
+            RuntimeMode::ApprovalRequired,
+            RuntimeMode::AutoAcceptEdits,
+            RuntimeMode::Auto,
+            RuntimeMode::FullAccess,
+        ],
     }
 }
 

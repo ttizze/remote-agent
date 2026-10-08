@@ -24,6 +24,9 @@ pub(crate) fn ui_word_wrap() -> bool {
 use crate::{Runtime, platform, store_session::StoreSession};
 use agent_core::{
     connection::{Outcome, StoreOptions},
+    environment::{
+        EnvironmentInboxView, EnvironmentRegistry, EnvironmentSettingsView, EnvironmentSidebarView,
+    },
     state::{Intent, Snapshot},
     view::{
         new_thread::NewThreadView,
@@ -40,7 +43,12 @@ use gpui_kit::{
     *,
 };
 use hosts::{HostEvent, Hosts};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -50,6 +58,18 @@ type Done = Box<
 enum Update {
     Connected(Result<(StoreSession, PathBuf), String>),
     Snapshot(Arc<Snapshot>),
+    EnvironmentConnected {
+        profile_id: String,
+        result: Result<(StoreSession, PathBuf), String>,
+    },
+    EnvironmentSnapshot {
+        profile_id: String,
+        snapshot: Arc<Snapshot>,
+    },
+    EnvironmentPersistenceError {
+        profile_id: String,
+        error: String,
+    },
     Views(Box<Views>),
     Completed(Option<Done>, Result<Outcome, String>),
     PersistenceError(String),
@@ -80,18 +100,39 @@ pub(crate) struct Views {
     pub(crate) generation: u64,
     pub(crate) now_ms: i64,
     pub(crate) sidebar: SidebarView,
+    /// Combined rows and awareness from every environment owned by this app.
+    pub(crate) environment_sidebar: EnvironmentSidebarView,
+    pub(crate) environment_inbox: EnvironmentInboxView,
+    pub(crate) environment_settings: EnvironmentSettingsView,
     /// The selected thread's screen.
     pub(crate) thread: Option<ThreadView>,
     /// The new-thread draft while no thread is selected.
     pub(crate) new_thread: Option<NewThreadView>,
 }
 impl Views {
-    fn derive(snapshot: &Snapshot, inputs: &ViewInputs, generation: u64, now_ms: i64) -> Self {
+    fn derive(
+        snapshot: &Snapshot,
+        environments: &EnvironmentRegistry,
+        inputs: &ViewInputs,
+        generation: u64,
+        now_ms: i64,
+    ) -> Self {
         Self {
             revision: snapshot.revision,
             generation,
             now_ms,
             sidebar: snapshot.sidebar(now_ms, inputs.sidebar.clone()),
+            environment_sidebar: environments.sidebar_filtered(
+                now_ms,
+                inputs.sidebar.clone(),
+                &snapshot.search,
+            ),
+            environment_inbox: environments.inbox_filtered(
+                now_ms,
+                inputs.sidebar.clone(),
+                &snapshot.search,
+            ),
+            environment_settings: environments.settings(),
             thread: snapshot.selected_thread(now_ms, inputs.thread.clone()),
             new_thread: snapshot
                 .selected_thread
@@ -104,12 +145,22 @@ impl Views {
 pub(crate) struct Desktop {
     pub(crate) session: Option<StoreSession>,
     pub(crate) snapshot: Arc<Snapshot>,
+    /// Immutable projections for every authenticated Host store.
+    pub(crate) environment_registry: EnvironmentRegistry,
     pub(crate) views: Arc<Views>,
     pub(crate) runtime: Runtime,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
     pub(crate) connecting: bool,
     pub(crate) remote: Option<RemoteHost>,
+    /// Secondary Host stores stay alive independently of the selected route.
+    background_sessions: BTreeMap<String, StoreSession>,
+    background_connecting: BTreeSet<String>,
+    background_retry_at: BTreeMap<String, (Instant, u32)>,
+    selected_retry_at: Option<(Instant, u32)>,
+    profile_environment_ids: BTreeMap<String, String>,
+    pending_open: Option<(String, String)>,
+    pending_new_thread: Option<(String, Option<String>)>,
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
@@ -140,6 +191,20 @@ pub(crate) fn bind_keys(cx: &mut App) {
     )]);
 }
 
+fn load_store_state(name: &str) -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
+    let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
+    let state_file = directory.join(format!("device-{name}.json"));
+    let path = directory.join("model-preferences.json");
+    let preferences = std::fs::read(&path).unwrap_or_default();
+    let snapshot = agent_core::persistence::load(&state_file, &preferences);
+    let options = StoreOptions {
+        cache_directory: Some(directory.join("cache").join(name)),
+        state_file: Some(state_file),
+        ..StoreOptions::default()
+    };
+    Ok((path, snapshot, options))
+}
+
 impl Desktop {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = cx.global::<Runtime>().clone();
@@ -147,9 +212,15 @@ impl Desktop {
         StoreSession::on_app_quit(cx, |view| &mut view.session);
         cx.spawn_in(window, async move |view, cx| {
             while let Ok((epoch, update)) = incoming.recv().await {
+                let environment_update = matches!(
+                    &update,
+                    Update::EnvironmentConnected { .. }
+                        | Update::EnvironmentSnapshot { .. }
+                        | Update::EnvironmentPersistenceError { .. }
+                );
                 if view
                     .update_in(cx, |view, window, cx| {
-                        if view.epoch == epoch {
+                        if view.epoch == epoch || environment_update {
                             view.receive(update, window, cx);
                         }
                     })
@@ -196,6 +267,7 @@ impl Desktop {
             snapshot: Arc::default(),
             views: Arc::new(Views::derive(
                 &Snapshot::default(),
+                &EnvironmentRegistry::default(),
                 &ViewInputs {
                     sidebar: SidebarOptions::default(),
                     thread: ThreadViewOptions::default(),
@@ -204,10 +276,18 @@ impl Desktop {
                 ui::now_ms(),
             )),
             runtime,
+            environment_registry: EnvironmentRegistry::default(),
             updates,
             epoch: 0,
             connecting: false,
             remote: None,
+            background_sessions: BTreeMap::new(),
+            background_connecting: BTreeSet::new(),
+            background_retry_at: BTreeMap::new(),
+            selected_retry_at: None,
+            profile_environment_ids: BTreeMap::new(),
+            pending_open: None,
+            pending_new_thread: None,
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
@@ -244,11 +324,16 @@ impl Desktop {
     ) {
         self.attachments.clear();
         self.dictation = None;
+        self.selected_retry_at = None;
         self.epoch += 1;
         self.views_running = false;
         self.connecting = true;
         self.remote = remote;
         self.session.take();
+        if let Some(remote) = &remote {
+            self.background_sessions.remove(&remote.id);
+            self.background_connecting.remove(&remote.id);
+        }
         self.snapshot = Arc::default();
         self.disconnected(window, cx);
         let updates = self.updates.clone();
@@ -262,19 +347,7 @@ impl Desktop {
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "local".into());
         self.runtime.handle.spawn(async move {
-            let state = (|| -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
-                let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
-                let state_file = directory.join(format!("device-{name}.json"));
-                let path = directory.join("model-preferences.json");
-                let preferences = std::fs::read(&path).unwrap_or_default();
-                let snapshot = agent_core::persistence::load(&state_file, &preferences);
-                let options = StoreOptions {
-                    cache_directory: Some(directory.join("cache").join(&name)),
-                    state_file: Some(state_file),
-                    ..StoreOptions::default()
-                };
-                Ok((path, snapshot, options))
-            })();
+            let state = load_store_state(&name);
             match state {
                 Err(error) => {
                     let _ = updates
@@ -318,6 +391,212 @@ impl Desktop {
                 }
             }),
         ));
+    }
+
+    /// Starts one supervised Store owner for each saved environment. Each
+    /// profile has its own cache directory and event stream; a failed profile
+    /// never replaces the selected Host's session.
+    fn start_background_connections(&mut self) {
+        let selected = self.remote.as_ref().map(|remote| remote.id.as_str());
+        let remotes = self.snapshot.remote_hosts.clone();
+        let known: BTreeSet<_> = remotes.iter().map(|remote| remote.id.clone()).collect();
+        let stale: Vec<_> = self
+            .background_sessions
+            .keys()
+            .chain(self.background_connecting.iter())
+            .filter(|profile_id| !known.contains(*profile_id))
+            .cloned()
+            .collect();
+        for profile_id in stale {
+            self.background_sessions.remove(&profile_id);
+            self.background_connecting.remove(&profile_id);
+            self.background_retry_at.remove(&profile_id);
+            if let Some(environment_id) = self.profile_environment_ids.remove(&profile_id) {
+                self.environment_registry.remove(&environment_id);
+            }
+        }
+        for remote in remotes {
+            if self
+                .background_retry_at
+                .get(&remote.id)
+                .is_some_and(|(retry_at, _)| *retry_at > Instant::now())
+            {
+                continue;
+            }
+            if selected == Some(remote.id.as_str())
+                || self.background_sessions.contains_key(&remote.id)
+                || !self.background_connecting.insert(remote.id.clone())
+            {
+                continue;
+            }
+            self.connect_background(remote);
+        }
+    }
+
+    fn background_failed(&mut self, profile_id: &str) {
+        let failures = self
+            .background_retry_at
+            .get(profile_id)
+            .map_or(0, |(_, failures)| *failures)
+            .saturating_add(1);
+        let exponent = failures.min(11);
+        let delay = Duration::from_millis(250_u64.saturating_mul(1 << exponent).min(300_000));
+        self.background_retry_at
+            .insert(profile_id.to_owned(), (Instant::now() + delay, failures));
+    }
+
+    fn selected_failed(&mut self) {
+        let failures = self
+            .selected_retry_at
+            .map_or(0, |(_, failures)| failures)
+            .saturating_add(1);
+        let exponent = failures.min(11);
+        let delay = Duration::from_millis(250_u64.saturating_mul(1 << exponent).min(300_000));
+        self.selected_retry_at = Some((Instant::now() + delay, failures));
+    }
+
+    fn reconnect_selected_if_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connecting
+            || self.remote.is_none()
+            || self.snapshot.environment.is_none()
+            || self.snapshot.connected
+        {
+            return;
+        }
+        if self
+            .selected_retry_at
+            .is_some_and(|(retry_at, _)| retry_at > Instant::now())
+        {
+            return;
+        }
+        let remote = self.remote.clone();
+        self.selected_retry_at = None;
+        if let Some(remote) = remote {
+            self.connect(Some(remote), window, cx);
+        }
+    }
+
+    fn connect_background(&self, remote: RemoteHost) {
+        let profile_id = remote.id.clone();
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        let runtime = self.runtime.clone();
+        let connections = runtime.connections.clone();
+        self.runtime.handle.spawn(async move {
+            let (path, snapshot, options) = match load_store_state(&profile_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = updates
+                        .send((
+                            epoch,
+                            Update::EnvironmentConnected {
+                                profile_id: profile_id.clone(),
+                                result: Err(error.to_string()),
+                            },
+                        ))
+                        .await;
+                    return;
+                }
+            };
+            if updates
+                .send((
+                    epoch,
+                    Update::EnvironmentSnapshot {
+                        profile_id: profile_id.clone(),
+                        snapshot: Arc::new(snapshot.clone()),
+                    },
+                ))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let (tx, rx) = async_channel::bounded(8);
+            let relay = updates.clone();
+            let forward = tokio::spawn(async move {
+                while let Ok(event) = rx.recv().await {
+                    if relay.send((epoch, event)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let connected_profile = profile_id.clone();
+            let snapshot_profile = profile_id.clone();
+            StoreSession::publish(
+                connections
+                    .connect(Some(&remote.ticket), snapshot, options)
+                    .await,
+                runtime,
+                tx,
+                move |result| Update::EnvironmentConnected {
+                    profile_id: connected_profile,
+                    result: result.map(|session| (session, path.clone())),
+                },
+                move |snapshot| Update::EnvironmentSnapshot {
+                    profile_id: snapshot_profile,
+                    snapshot,
+                },
+            )
+            .await;
+            let _ = forward.await;
+        });
+    }
+
+    /// Promotes an already-running per-profile Store when navigation targets
+    /// one of the combined rows. The Store owner moves with the selected route;
+    /// its cache and reconnect loop are otherwise independent.
+    pub(crate) fn promote_environment(&mut self, environment_id: &str) -> bool {
+        let Some(profile_id) = self
+            .profile_environment_ids
+            .iter()
+            .find_map(|(profile_id, id)| (id == environment_id).then(|| profile_id.clone()))
+        else {
+            return false;
+        };
+        let Some(session) = self.background_sessions.remove(&profile_id) else {
+            return false;
+        };
+        self.session.take();
+        self.snapshot = session.store.snapshot();
+        self.session = Some(session);
+        self.remote = self
+            .snapshot
+            .remote_hosts
+            .iter()
+            .find(|remote| remote.id == profile_id)
+            .cloned();
+        self.environment_registry.select(environment_id);
+        self.connecting = false;
+        true
+    }
+
+    fn apply_pending_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((environment_id, project_id)) = self.pending_new_thread.clone() {
+            if self.environment_registry.selected() != Some(environment_id.as_str())
+                && !self.promote_environment(&environment_id)
+            {
+                return;
+            }
+            if self.environment_registry.selected() == Some(environment_id.as_str()) {
+                self.pending_new_thread = None;
+                self.snapshot_changed(window, cx);
+                self.new_thread(project_id, cx);
+                return;
+            }
+        }
+        let Some((environment_id, thread_id)) = self.pending_open.clone() else {
+            return;
+        };
+        if self.environment_registry.selected() != Some(environment_id.as_str()) {
+            if !self.promote_environment(&environment_id) {
+                return;
+            }
+        }
+        if self.environment_registry.selected() == Some(environment_id.as_str()) {
+            self.pending_open = None;
+            self.snapshot_changed(window, cx);
+            self.perform(Intent::OpenThread { thread_id });
+        }
     }
 
     /// Sends an intent to the Host connection's owner.
@@ -417,6 +696,7 @@ impl Desktop {
         }
         self.views_running = true;
         let snapshot = self.snapshot.clone();
+        let environments = self.environment_registry.clone();
         let inputs = self.view_inputs();
         let generation = self.generation;
         let epoch = self.epoch;
@@ -424,7 +704,7 @@ impl Desktop {
         self.runtime.handle.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(16)).await;
             if let Ok(views) = tokio::task::spawn_blocking(move || {
-                Views::derive(&snapshot, &inputs, generation, ui::now_ms())
+                Views::derive(&snapshot, &environments, &inputs, generation, ui::now_ms())
             })
             .await
             {
@@ -437,6 +717,9 @@ impl Desktop {
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Tick => {
+                self.apply_pending_open(window, cx);
+                self.reconnect_selected_if_due(window, cx);
+                self.start_background_connections();
                 self.schedule_views(cx);
                 cx.notify();
                 return;
@@ -455,14 +738,161 @@ impl Desktop {
                 session.persist(path, tx, Update::PersistenceError);
                 self.snapshot = session.store.snapshot();
                 self.session = Some(session);
+                let profile_id = self
+                    .remote
+                    .as_ref()
+                    .map(|remote| remote.id.clone())
+                    .unwrap_or_else(|| "local".into());
+                if let Some(environment_id) = self
+                    .snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+                {
+                    self.profile_environment_ids
+                        .insert(profile_id, environment_id.clone());
+                    self.environment_registry.select(&environment_id);
+                }
                 self.connecting = false;
+                self.selected_retry_at = None;
                 self.perform(Intent::LoadAccounts);
                 self.perform(Intent::LoadConversationSettings);
                 self.snapshot_changed(window, cx);
             }
             Update::Connected(Err(error)) => {
                 self.connecting = false;
+                if self.remote.is_some() && self.selected_retry_at.is_none() {
+                    self.selected_failed();
+                }
                 self.show_error(&error, window, cx);
+            }
+            Update::EnvironmentConnected { profile_id, result } => {
+                if self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|remote| remote.id == profile_id)
+                    || !self
+                        .snapshot
+                        .remote_hosts
+                        .iter()
+                        .any(|remote| remote.id == profile_id)
+                {
+                    return;
+                }
+                self.background_connecting.remove(&profile_id);
+                match result {
+                    Ok((mut session, path)) => {
+                        self.background_retry_at.remove(&profile_id);
+                        let updates = self.updates.clone();
+                        let profile_for_errors = profile_id.clone();
+                        let (tx, rx) = async_channel::bounded(4);
+                        let epoch = self.epoch;
+                        self.runtime.handle.spawn(async move {
+                            while let Ok(event) = rx.recv().await {
+                                if updates.send((epoch, event)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        session.persist(path, tx, move |error| {
+                            Update::EnvironmentPersistenceError {
+                                profile_id: profile_for_errors.clone(),
+                                error,
+                            }
+                        });
+                        let snapshot = session.store.snapshot();
+                        if let Some(environment_id) = snapshot
+                            .environment
+                            .as_ref()
+                            .map(|environment| environment.environment_id.clone())
+                        {
+                            self.profile_environment_ids
+                                .insert(profile_id.clone(), environment_id);
+                        }
+                        self.background_sessions.insert(profile_id.clone(), session);
+                        self.environment_registry.update(snapshot);
+                        let pending_environment = self
+                            .pending_open
+                            .as_ref()
+                            .map(|(environment_id, _)| environment_id)
+                            .or_else(|| {
+                                self.pending_new_thread
+                                    .as_ref()
+                                    .map(|(environment_id, _)| environment_id)
+                            });
+                        if pending_environment.is_some_and(|environment_id| {
+                            self.environment_registry.selected() != Some(environment_id.as_str())
+                                && self.profile_environment_ids.get(&profile_id)
+                                    == Some(environment_id)
+                        }) {
+                            if let Some(environment_id) = pending_environment {
+                                self.promote_environment(environment_id);
+                            }
+                        }
+                        self.generation += 1;
+                        self.schedule_views(cx);
+                    }
+                    Err(error) => {
+                        self.background_failed(&profile_id);
+                        if let Some(environment_id) = self.profile_environment_ids.get(&profile_id)
+                        {
+                            self.environment_registry
+                                .mark_disconnected(environment_id, Some(error.clone()));
+                            self.generation += 1;
+                            self.schedule_views(cx);
+                        }
+                    }
+                }
+            }
+            Update::EnvironmentSnapshot {
+                profile_id,
+                snapshot,
+            } => {
+                if !self.background_sessions.contains_key(&profile_id)
+                    && !self.background_connecting.contains(&profile_id)
+                {
+                    return;
+                }
+                let disconnected = !snapshot.connected;
+                let current = self
+                    .profile_environment_ids
+                    .get(&profile_id)
+                    .and_then(|environment_id| self.environment_registry.snapshot(environment_id));
+                if current
+                    .as_ref()
+                    .is_some_and(|current| !snapshot.accepts_after(current))
+                {
+                    return;
+                }
+                if let Some(environment_id) = snapshot
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+                {
+                    self.profile_environment_ids
+                        .insert(profile_id.clone(), environment_id);
+                }
+                if let Some(session) = self.background_sessions.get(&profile_id) {
+                    session.save(snapshot.clone());
+                }
+                self.environment_registry.update(snapshot);
+                if disconnected {
+                    self.background_sessions.remove(&profile_id);
+                    self.background_failed(&profile_id);
+                }
+                self.generation += 1;
+                self.schedule_views(cx);
+            }
+            Update::EnvironmentPersistenceError { profile_id, error } => {
+                if !self
+                    .snapshot
+                    .remote_hosts
+                    .iter()
+                    .any(|remote| remote.id == profile_id)
+                {
+                    return;
+                }
+                self.show_error(&format!("Environment {profile_id}: {error}"), window, cx);
             }
             Update::Snapshot(snapshot) => {
                 if !snapshot.accepts_after(&self.snapshot) {
@@ -527,6 +957,18 @@ impl Desktop {
     }
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(environment_id) = self.environment_registry.update(self.snapshot.clone()) {
+            self.environment_registry.select(&environment_id);
+            self.generation += 1;
+        }
+        self.start_background_connections();
+        if self.remote.is_some()
+            && self.snapshot.environment.is_some()
+            && !self.snapshot.connected
+            && self.selected_retry_at.is_none()
+        {
+            self.selected_failed();
+        }
         if let Some(error) = self.snapshot.error.clone()
             && self.shown_error.as_deref()
                 != Some(agent_core::presentation::error::error_message(&error).as_str())

@@ -166,6 +166,7 @@ struct PairingScreen: View {
 
 struct ProfilesScreen: View {
     let profiles: [HostProfile]
+    let environments: [EnvironmentRow]
     let notice: String?
     let select: (String) -> Void
     let remove: (String) -> Void
@@ -186,13 +187,23 @@ struct ProfilesScreen: View {
                         NoticeText(text: notice)
                     }
                     ForEach(profiles, id: \.id) { profile in
+                        let environment = environments.first(where: { $0.profileId == profile.id })
                         Button { select(profile.id) } label: {
                             HStack(spacing: 16) {
                                 Image(systemName: "laptopcomputer")
                                     .font(.system(size: 30)).foregroundStyle(.secondary)
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(profile.name).font(.headline)
-                                    Text("登録済みのPC").font(.subheadline).foregroundStyle(.secondary)
+                                    Text(environment.map { current in
+                                        [current.state, current.platform, current.machine,
+                                         current.capabilities.isEmpty ? nil : "\(current.capabilities.count) capabilities"]
+                                            .compactMap { value in value }
+                                            .joined(separator: " · ")
+                                    } ?? "登録済みのPC")
+                                        .font(.subheadline).foregroundStyle(.secondary)
+                                    if let reason = environment?.reconnectReason, !reason.isEmpty {
+                                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right").foregroundStyle(.secondary)
@@ -207,6 +218,32 @@ struct ProfilesScreen: View {
                         .contextMenu {
                             Button("接続を解除", role: .destructive) { removing = profile }
                                 .accessibilityIdentifier("connection.remove.\(profile.id)")
+                        }
+                    }
+                    ForEach(environments) { environment in
+                        if !environment.activities.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Agent activity").font(.headline)
+                                ForEach(environment.activities) { activity in
+                                    Button { select(environment.profileId) } label: {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text("\(environment.label) · \(activity.title)")
+                                                .font(.subheadline)
+                                            Text("\(activity.phase): \(activity.headline)")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                            if let detail = activity.detail, !detail.isEmpty {
+                                                Text(detail).font(.caption).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(20)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppTheme.card)
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                     }
                     Button(action: add) {

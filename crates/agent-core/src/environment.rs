@@ -1,7 +1,19 @@
 //! Pure environment identity, capability, and cross-environment view helpers.
+use crate::{
+    state::Snapshot,
+    view::{
+        settings::{SettingsScope, SettingsView},
+        sidebar::{SidebarDraftRow, SidebarItem, SidebarOptions, SidebarSection, SidebarThreadRow},
+    },
+};
 use agent_protocol::models::{
     AgentActivityPhase, AwarenessActivity, AwarenessSnapshot, EnvironmentCapabilities,
-    EnvironmentDescriptor,
+    EnvironmentDescriptor, ProviderInstance,
+};
+use agent_protocol::{operations::Account, provider::ProviderKind};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +71,10 @@ pub enum EnvironmentCapability {
     AttachmentUploads,
     QuestionAttachments,
     FileAttachments,
+    PullRequests,
+    PullRequestChecks,
+    InlineMessageContext,
+    RequiredWorktreeBootstrap,
     ThreadSettlement,
     ThreadAutoSettlement,
     ThreadSnooze,
@@ -100,6 +116,12 @@ pub fn supports_capability(
         EnvironmentCapability::AttachmentUploads => capabilities.attachment_uploads,
         EnvironmentCapability::QuestionAttachments => capabilities.question_attachments,
         EnvironmentCapability::FileAttachments => capabilities.file_attachments.is_some(),
+        EnvironmentCapability::PullRequests => capabilities.pull_requests,
+        EnvironmentCapability::PullRequestChecks => capabilities.pull_request_checks,
+        EnvironmentCapability::InlineMessageContext => capabilities.inline_message_context,
+        EnvironmentCapability::RequiredWorktreeBootstrap => {
+            capabilities.required_worktree_bootstrap
+        }
         EnvironmentCapability::ThreadSettlement => capabilities.thread_settlement,
         EnvironmentCapability::ThreadAutoSettlement => capabilities.thread_auto_settlement,
         EnvironmentCapability::ThreadSnooze => capabilities.thread_snooze,
@@ -136,6 +158,133 @@ pub fn supports_capability(
         EnvironmentCapability::DesktopAppUpdate => capabilities.desktop_app_update,
         EnvironmentCapability::AgentActivityPublishing => capabilities.agent_activity_publishing,
     }
+}
+
+pub fn capability_names(capabilities: &EnvironmentCapabilities) -> Vec<&'static str> {
+    [
+        (
+            EnvironmentCapability::RepositoryIdentity,
+            "repositoryIdentity",
+        ),
+        (EnvironmentCapability::ConnectionProbe, "connectionProbe"),
+        (
+            EnvironmentCapability::AttachmentUploads,
+            "attachmentUploads",
+        ),
+        (
+            EnvironmentCapability::QuestionAttachments,
+            "questionAttachments",
+        ),
+        (EnvironmentCapability::FileAttachments, "fileAttachments"),
+        (EnvironmentCapability::PullRequests, "pullRequests"),
+        (
+            EnvironmentCapability::PullRequestChecks,
+            "pullRequestChecks",
+        ),
+        (
+            EnvironmentCapability::InlineMessageContext,
+            "inlineMessageContext",
+        ),
+        (
+            EnvironmentCapability::RequiredWorktreeBootstrap,
+            "requiredWorktreeBootstrap",
+        ),
+        (EnvironmentCapability::ThreadSettlement, "threadSettlement"),
+        (
+            EnvironmentCapability::ThreadAutoSettlement,
+            "threadAutoSettlement",
+        ),
+        (EnvironmentCapability::ThreadSnooze, "threadSnooze"),
+        (EnvironmentCapability::StorageCleanup, "storageCleanup"),
+        (
+            EnvironmentCapability::ProjectWorktreeCleanup,
+            "projectWorktreeCleanup",
+        ),
+        (
+            EnvironmentCapability::ThreadRestartContinuation,
+            "threadRestartContinuation",
+        ),
+        (
+            EnvironmentCapability::ProjectSettingsOverrides,
+            "projectSettingsOverrides",
+        ),
+        (
+            EnvironmentCapability::EnvironmentThemes,
+            "environmentThemes",
+        ),
+        (
+            EnvironmentCapability::UsageLimitSources,
+            "usageLimitSources",
+        ),
+        (
+            EnvironmentCapability::UsagePriceOverrides,
+            "usagePriceOverrides",
+        ),
+        (
+            EnvironmentCapability::UsageModelAliases,
+            "usageModelAliases",
+        ),
+        (EnvironmentCapability::ThreadPinning, "threadPinning"),
+        (EnvironmentCapability::ThreadPinReorder, "threadPinReorder"),
+        (
+            EnvironmentCapability::ThreadActiveReorder,
+            "threadActiveReorder",
+        ),
+        (
+            EnvironmentCapability::ThreadAutoSettleOptOut,
+            "threadAutoSettleOptOut",
+        ),
+        (
+            EnvironmentCapability::ThreadTitleRegeneration,
+            "threadTitleRegeneration",
+        ),
+        (
+            EnvironmentCapability::ThreadVisitedTracking,
+            "threadVisitedTracking",
+        ),
+        (
+            EnvironmentCapability::ThreadPullRequestLinking,
+            "threadPullRequestLinking",
+        ),
+        (
+            EnvironmentCapability::ServerResolvedCommandContext,
+            "serverResolvedCommandContext",
+        ),
+        (
+            EnvironmentCapability::ThreadPullRequests,
+            "threadPullRequests",
+        ),
+        (
+            EnvironmentCapability::ThreadPullRequestWatch,
+            "threadPullRequestWatch",
+        ),
+        (
+            EnvironmentCapability::PullRequestStackActions,
+            "pullRequestStackActions",
+        ),
+        (EnvironmentCapability::ServerSelfUpdate, "serverSelfUpdate"),
+        (
+            EnvironmentCapability::ServerSelfUpdateProgress,
+            "serverSelfUpdateProgress",
+        ),
+        (
+            EnvironmentCapability::ServerUpdateThreadContinuation,
+            "serverUpdateThreadContinuation",
+        ),
+        (
+            EnvironmentCapability::ProjectCloneTracking,
+            "projectCloneTracking",
+        ),
+        (EnvironmentCapability::EnvironmentIcon, "environmentIcon"),
+        (EnvironmentCapability::DesktopAppUpdate, "desktopAppUpdate"),
+        (
+            EnvironmentCapability::AgentActivityPublishing,
+            "agentActivityPublishing",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(capability, name)| supports_capability(capabilities, capability).then_some(name))
+    .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,12 +439,441 @@ pub fn activity_is_live(phase: &AgentActivityPhase) -> bool {
     )
 }
 
+/// A thread row projected into the client-wide environment namespace.
+///
+/// The row remains the normal Host-owned sidebar row so native clients can
+/// reuse their existing renderer. Its id and project id are scoped before the
+/// row leaves this registry, which makes selection and routing unambiguous when
+/// two environments expose the same local ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentThreadRow {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub row: SidebarThreadRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentSidebarSection {
+    pub summary: EnvironmentSummary,
+    pub drafts: Vec<SidebarDraftRow>,
+    pub rows: Vec<EnvironmentThreadRow>,
+}
+
+/// The combined sidebar projection. Shelves stay grouped by environment so a
+/// client can retain the existing row actions while making the owning Host
+/// visible at the point of selection.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnvironmentSidebarView {
+    pub sections: Vec<EnvironmentSidebarSection>,
+    pub activities: Vec<AggregatedActivity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentInboxItem {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub row: SidebarThreadRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnvironmentInboxView {
+    pub items: Vec<EnvironmentInboxItem>,
+}
+
+/// Settings projected for every registered environment. The settings rows are
+/// still produced by each environment's Snapshot; this wrapper only supplies
+/// the environment identity required to route an edit back to its Store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentSettingsEntry {
+    pub summary: EnvironmentSummary,
+    pub settings: SettingsView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EnvironmentSettingsView {
+    pub entries: Vec<EnvironmentSettingsEntry>,
+}
+
+/// The Host-owned account/provider inputs used by a client-wide usage widget.
+/// Account ids are scoped before aggregation so two Hosts can expose the same
+/// local id without one overwriting the other. The usage renderer remains the
+/// owner of display policy and never receives private account credentials.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvironmentUsageInput {
+    pub environment: EnvironmentDescriptor,
+    pub accounts: Vec<Account>,
+    pub enabled_provider_kinds: Vec<ProviderKind>,
+    pub installed_provider_kinds: Vec<ProviderKind>,
+}
+
+/// The combined account/provider snapshot consumed by a client-wide usage
+/// widget. Account ids have already been scoped by `EnvironmentRegistry`, so
+/// duplicate local ids from different Hosts remain distinct while provider
+/// availability is unioned once for the whole workspace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvironmentUsageSnapshot {
+    pub accounts: Vec<Account>,
+    pub enabled_provider_kinds: Vec<ProviderKind>,
+    pub installed_provider_kinds: Vec<ProviderKind>,
+}
+
+#[derive(Debug, Clone)]
+struct EnvironmentEntry {
+    snapshot: Arc<Snapshot>,
+    summary: EnvironmentSummary,
+}
+
+/// Client-owned projections for all authenticated Host stores.
+///
+/// A Store remains the resource owner for one Host's transport, cache and
+/// mutations. This registry owns only the immutable snapshots and the combined
+/// projections, so disconnecting one entry never clears another entry's cache
+/// or reconnect state.
+#[derive(Debug, Clone, Default)]
+pub struct EnvironmentRegistry {
+    entries: BTreeMap<String, EnvironmentEntry>,
+    selected: Option<String>,
+}
+
+impl EnvironmentRegistry {
+    /// Publishes a newer snapshot and returns its stable environment id.
+    pub fn update(&mut self, snapshot: Arc<Snapshot>) -> Option<String> {
+        let descriptor = snapshot.environment.as_ref()?;
+        let id = descriptor.environment_id.clone();
+        let summary = summarize_snapshot(&snapshot)?;
+        if let Some(previous) = self.entries.get(&id)
+            && !snapshot.accepts_after(&previous.snapshot)
+        {
+            return Some(id);
+        }
+        self.entries
+            .insert(id.clone(), EnvironmentEntry { snapshot, summary });
+        self.selected.get_or_insert_with(|| id.clone());
+        Some(id)
+    }
+
+    /// Removes a profile only when the native owner explicitly unregisters it.
+    pub fn remove(&mut self, environment_id: &str) -> Option<Arc<Snapshot>> {
+        let removed = self
+            .entries
+            .remove(environment_id)
+            .map(|entry| entry.snapshot);
+        if self.selected.as_deref() == Some(environment_id) {
+            self.selected = self.entries.keys().next().cloned();
+        }
+        removed
+    }
+
+    /// Retains a cached projection while its transport is being retried.
+    pub fn mark_disconnected(&mut self, environment_id: &str, reason: Option<String>) -> bool {
+        let Some(entry) = self.entries.get(environment_id) else {
+            return false;
+        };
+        let mut snapshot = entry.snapshot.as_ref().clone();
+        snapshot.connected = false;
+        snapshot.error = reason;
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        self.update(Arc::new(snapshot));
+        true
+    }
+
+    pub fn select(&mut self, environment_id: &str) -> bool {
+        if self.entries.contains_key(environment_id) {
+            self.selected = Some(environment_id.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    pub fn snapshot(&self, environment_id: &str) -> Option<Arc<Snapshot>> {
+        self.entries
+            .get(environment_id)
+            .map(|entry| entry.snapshot.clone())
+    }
+
+    pub fn summaries(&self) -> Vec<EnvironmentSummary> {
+        let mut summaries: Vec<_> = self
+            .entries
+            .values()
+            .map(|entry| entry.summary.clone())
+            .collect();
+        sort_environment_summaries(&mut summaries);
+        summaries
+    }
+
+    pub fn filter_summaries(&self, query: &str) -> Vec<EnvironmentSummary> {
+        filter_environment_summaries(&self.summaries(), query)
+    }
+
+    pub fn activities(&self, query: &str) -> Vec<AggregatedActivity> {
+        let snapshots: Vec<_> = self
+            .entries
+            .values()
+            .filter_map(|entry| entry.snapshot.awareness.clone())
+            .collect();
+        aggregate_activities(&snapshots, query)
+    }
+
+    /// Builds the combined sidebar from each registered Host projection.
+    pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> EnvironmentSidebarView {
+        self.sidebar_filtered(now_ms, options, "")
+    }
+
+    /// Builds the combined sidebar after applying an environment/activity
+    /// query. The local Snapshot still owns thread search results; this query
+    /// narrows the Host sections before they are combined so a client cannot
+    /// accidentally mix duplicate local identities.
+    pub fn sidebar_filtered(
+        &self,
+        now_ms: i64,
+        options: SidebarOptions,
+        query: &str,
+    ) -> EnvironmentSidebarView {
+        let mut sections = Vec::with_capacity(self.entries.len());
+        let ordered_summaries = filter_environment_summaries(&self.summaries(), query);
+        for summary in ordered_summaries {
+            let Some(entry) = self.entries.get(&summary.descriptor.environment_id) else {
+                continue;
+            };
+            let Some(environment) = entry.snapshot.environment.as_ref() else {
+                continue;
+            };
+            let mut local_options = options.clone();
+            local_options.selection = options
+                .selection
+                .iter()
+                .filter_map(|key| {
+                    let reference = parse_scoped_thread_key(key)?;
+                    (reference.environment_id == environment.environment_id)
+                        .then_some(reference.thread_id)
+                })
+                .collect();
+            let view = entry.snapshot.sidebar(now_ms, local_options);
+            let drafts = view
+                .drafts
+                .into_iter()
+                .map(|mut draft| {
+                    draft.draft_key = scoped_key(&environment.environment_id, &draft.draft_key)
+                        .unwrap_or(draft.draft_key);
+                    draft.project_id = scoped_project_key(&ScopedProjectRef {
+                        environment_id: environment.environment_id.clone(),
+                        project_id: draft.project_id,
+                    })
+                    .unwrap_or_default();
+                    draft
+                })
+                .collect();
+            let rows = view
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    SidebarItem::Thread { mut row } => {
+                        let local_id = row.id.clone();
+                        row.id = scoped_thread_key(&ScopedThreadRef {
+                            environment_id: environment.environment_id.clone(),
+                            thread_id: local_id,
+                        })?;
+                        row.project_id = scoped_project_key(&ScopedProjectRef {
+                            environment_id: environment.environment_id.clone(),
+                            project_id: row.project_id,
+                        })
+                        .unwrap_or_default();
+                        row.accessibility_label =
+                            format!("{}, {}", environment.label, row.accessibility_label);
+                        Some(EnvironmentThreadRow {
+                            environment_id: environment.environment_id.clone(),
+                            environment_label: environment.label.clone(),
+                            row,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            sections.push(EnvironmentSidebarSection {
+                summary: entry.summary.clone(),
+                drafts,
+                rows,
+            });
+        }
+        EnvironmentSidebarView {
+            sections,
+            activities: self.activities(query),
+        }
+    }
+
+    /// Returns the active and working rows used by an all-environments inbox.
+    pub fn inbox(&self, now_ms: i64, options: SidebarOptions) -> EnvironmentInboxView {
+        self.inbox_filtered(now_ms, options, "")
+    }
+
+    pub fn inbox_filtered(
+        &self,
+        now_ms: i64,
+        options: SidebarOptions,
+        query: &str,
+    ) -> EnvironmentInboxView {
+        let sidebar = self.sidebar_filtered(now_ms, options, query);
+        let mut items: Vec<_> = sidebar
+            .sections
+            .into_iter()
+            .flat_map(|section| {
+                section.rows.into_iter().filter_map(|item| {
+                    matches!(
+                        item.row.section,
+                        SidebarSection::Pinned | SidebarSection::Active | SidebarSection::Working
+                    )
+                    .then_some(EnvironmentInboxItem {
+                        environment_id: item.environment_id,
+                        environment_label: item.environment_label,
+                        row: item.row,
+                    })
+                })
+            })
+            .collect();
+        items.sort_by(|left, right| {
+            left.row
+                .title
+                .to_lowercase()
+                .cmp(&right.row.title.to_lowercase())
+                .then_with(|| left.environment_id.cmp(&right.environment_id))
+        });
+        EnvironmentInboxView { items }
+    }
+
+    pub fn settings(&self) -> EnvironmentSettingsView {
+        let mut entries: Vec<_> = self
+            .entries
+            .values()
+            .map(|entry| EnvironmentSettingsEntry {
+                summary: entry.summary.clone(),
+                settings: entry.snapshot.settings(SettingsScope::Host),
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            left.summary
+                .descriptor
+                .label
+                .to_lowercase()
+                .cmp(&right.summary.descriptor.label.to_lowercase())
+                .then_with(|| {
+                    left.summary
+                        .descriptor
+                        .environment_id
+                        .cmp(&right.summary.descriptor.environment_id)
+                })
+        });
+        EnvironmentSettingsView { entries }
+    }
+
+    /// Returns one immutable usage input per registered Host. Native clients
+    /// can concatenate these records and pass the account/provider values to a
+    /// shared usage widget builder without re-deriving Host state themselves.
+    pub fn usage_inputs(&self) -> Vec<EnvironmentUsageInput> {
+        let mut inputs: Vec<_> = self
+            .entries
+            .values()
+            .filter_map(|entry| {
+                let environment = entry.snapshot.environment.clone()?;
+                let accounts = entry
+                    .snapshot
+                    .accounts
+                    .as_ref()
+                    .map_or_else(Vec::new, |accounts| {
+                        accounts
+                            .accounts
+                            .iter()
+                            .cloned()
+                            .map(|mut account| {
+                                account.id = scoped_key(&environment.environment_id, &account.id)
+                                    .unwrap_or(account.id);
+                                account
+                            })
+                            .collect()
+                    });
+                let providers = entry.snapshot.providers.as_deref().unwrap_or_default();
+                let enabled_provider_kinds = providers
+                    .iter()
+                    .filter(|provider| provider.enabled)
+                    .map(provider_kind)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let installed_provider_kinds = providers
+                    .iter()
+                    .filter(|provider| provider.installed)
+                    .map(provider_kind)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                Some(EnvironmentUsageInput {
+                    environment,
+                    accounts,
+                    enabled_provider_kinds,
+                    installed_provider_kinds,
+                })
+            })
+            .collect();
+        inputs.sort_by(|left, right| {
+            left.environment
+                .label
+                .to_lowercase()
+                .cmp(&right.environment.label.to_lowercase())
+                .then_with(|| {
+                    left.environment
+                        .environment_id
+                        .cmp(&right.environment.environment_id)
+                })
+        });
+        inputs
+    }
+
+    /// Aggregates the registry-owned usage inputs into the explicit values
+    /// accepted by the shared usage widget builder. Native clients do not
+    /// need to reconstruct account or provider state from individual Stores.
+    pub fn usage_snapshot(&self) -> EnvironmentUsageSnapshot {
+        let inputs = self.usage_inputs();
+        let mut accounts = Vec::new();
+        let mut enabled_provider_kinds = BTreeSet::new();
+        let mut installed_provider_kinds = BTreeSet::new();
+        for input in inputs {
+            accounts.extend(input.accounts);
+            enabled_provider_kinds.extend(input.enabled_provider_kinds);
+            installed_provider_kinds.extend(input.installed_provider_kinds);
+        }
+        EnvironmentUsageSnapshot {
+            accounts,
+            enabled_provider_kinds: enabled_provider_kinds.into_iter().collect(),
+            installed_provider_kinds: installed_provider_kinds.into_iter().collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn provider_kind(provider: &ProviderInstance) -> ProviderKind {
+    match provider.driver {
+        agent_domain::Driver::Codex => ProviderKind::Codex,
+        agent_domain::Driver::Claude => ProviderKind::Claude,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_protocol::models::{
         EnvironmentCapabilities, EnvironmentFileAttachments, EnvironmentInstallation,
-        EnvironmentPlatform,
+        EnvironmentPlatform, ProviderInstance, ProviderStatus,
     };
     use proptest::prelude::*;
 
@@ -361,6 +939,7 @@ mod tests {
             &capabilities,
             EnvironmentCapability::AgentActivityPublishing
         ));
+        assert_eq!(capability_names(&capabilities), ["agentActivityPublishing"]);
         let value = serde_json::to_value(descriptor("one", "One")).unwrap();
         assert_eq!(value["environmentId"], "one");
         assert!(value["serverVersion"].is_string());
@@ -471,6 +1050,127 @@ mod tests {
                 .map(|activity| activity.environment.environment_id.as_str())
                 .collect::<Vec<_>>(),
             ["a", "z"]
+        );
+    }
+
+    #[test]
+    fn environment_registry_keeps_cached_hosts_and_projects_consumers() {
+        let snapshot = |id: &str, label: &str| {
+            let environment = descriptor(id, label);
+            let activity = AwarenessActivity {
+                environment_id: id.into(),
+                thread_id: "same-thread".into(),
+                project_title: "Project".into(),
+                thread_title: format!("{label} thread"),
+                phase: AgentActivityPhase::Running,
+                headline: "Working".into(),
+                detail: Some("Building".into()),
+                model_title: None,
+                updated_at_ms: 4,
+            };
+            Arc::new(Snapshot {
+                store_id: id.into(),
+                revision: 1,
+                connected: true,
+                environment: Some(environment.clone()),
+                awareness: Some(AwarenessSnapshot {
+                    environment,
+                    activities: vec![activity],
+                    updated_at_ms: 4,
+                }),
+                ..Snapshot::default()
+            })
+        };
+
+        let mut registry = EnvironmentRegistry::default();
+        registry.update(snapshot("z", "Shared"));
+        registry.update(snapshot("a", "Shared"));
+        let mut account_snapshot = (*snapshot("z", "Shared")).clone();
+        account_snapshot.accounts = Some(agent_protocol::operations::Accounts {
+            accounts: vec![agent_protocol::operations::Account {
+                id: "account".into(),
+                provider: ProviderKind::Codex,
+                email: Some("user@example.com".into()),
+                plan_type: None,
+                usage: None,
+            }],
+            selected: std::collections::HashMap::new(),
+            error: None,
+        });
+        account_snapshot.providers = Some(vec![
+            ProviderInstance {
+                instance: "codex".into(),
+                driver: agent_domain::Driver::Codex,
+                display_name: "Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: false,
+                reports_context_window: false,
+                supported_runtime_modes: Vec::new(),
+                models: Vec::new(),
+            },
+            ProviderInstance {
+                instance: "claude".into(),
+                driver: agent_domain::Driver::Claude,
+                display_name: "Claude".into(),
+                accent_color: None,
+                enabled: false,
+                installed: true,
+                version: None,
+                status: ProviderStatus::Disabled,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: false,
+                reports_context_window: false,
+                supported_runtime_modes: Vec::new(),
+                models: Vec::new(),
+            },
+        ]);
+        registry.update(Arc::new(account_snapshot));
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.selected(), Some("z"));
+        assert_eq!(
+            registry
+                .summaries()
+                .iter()
+                .map(|summary| summary.descriptor.environment_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert_eq!(registry.filter_summaries("shared").len(), 2);
+        assert_eq!(registry.activities("building").len(), 2);
+        assert_eq!(registry.usage_inputs()[1].accounts[0].id, "z:account");
+        let usage = registry.usage_snapshot();
+        assert_eq!(usage.accounts[0].id, "z:account");
+        assert_eq!(usage.enabled_provider_kinds, vec![ProviderKind::Codex]);
+        assert_eq!(
+            usage.installed_provider_kinds,
+            vec![ProviderKind::Codex, ProviderKind::Claude]
+        );
+        assert_eq!(
+            registry
+                .sidebar_filtered(0, SidebarOptions::default(), "a")
+                .sections
+                .len(),
+            1
+        );
+        assert_eq!(registry.inbox(0, SidebarOptions::default()).items.len(), 0);
+        assert_eq!(registry.settings().entries.len(), 2);
+
+        assert!(registry.mark_disconnected("z", Some("network timeout".into())));
+        assert_eq!(
+            registry.summaries()[1].connection,
+            EnvironmentConnectionState::Disconnected
+        );
+        assert_eq!(registry.filter_summaries("timeout").len(), 1);
+        assert_eq!(
+            registry.snapshot("z").unwrap().environment_display_label(),
+            Some("Shared")
         );
     }
 }

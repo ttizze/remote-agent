@@ -1600,11 +1600,11 @@ UniFFI の公開（`bindings/views.rs`）:
 - 状態を持たない関数: `timeline_update`、`answer_draft_key`、`admit_attachments`、`snooze_presets`。
 - 生成は `scripts/build-agent-bindings.sh`（`AgentCore.swift`、`AgentCoreFFI.h`、`AgentCoreFFI.modulemap`、`dev/remoteagent/core/agent_core.kt`）。
 
-未接続:
+接続済み:
 
-- provider ごとの runtime mode は Host から届かないので、すべての mode を出す（plan toggle と model option は 2026-10-08 に接続した）。
-- 接続状態は接続しているかどうかだけで、再接続中の環境名や理由は出ない。
-- 新しい task の下書きの project 選択時刻。
+- provider の catalog が `supported_runtime_modes` を Host から返し、core の `runtime_mode_choices` と現在の draft の mode を共有する（空の catalog も unknown provider の安全な既定値として扱う）。
+- `EnvironmentSummary` が connected / connecting / disconnected と `Snapshot.error` の reconnect reason を保持し、desktop の settings/sidebar と iOS/Android の Hosts surface が environment label・platform・machine・capabilities・reason を表示する。
+- `Draft.created_at_ms` は新しい task の project 選択時刻を含み、sidebar/thread-list の unsent draft ordering と native bindings が同じ値を読む。
 
 ### Android クライアント（段階 4、2026-10-07）
 
@@ -1660,7 +1660,6 @@ UniFFI の公開（`bindings/views.rs`）:
 未接続（T3 にあって、まだ持たないもの）:
 
 - diff の window focus での再読み込み、環境 cwd での再試行。
-- provider ごとの runtime mode。
 
 truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 

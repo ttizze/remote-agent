@@ -483,6 +483,7 @@ impl HostRuntime {
 }
 
 fn environment_descriptor(environment_id: String, label: String) -> EnvironmentDescriptor {
+    let machine = detect_machine_kind();
     EnvironmentDescriptor {
         environment_id,
         label,
@@ -500,7 +501,7 @@ fn environment_descriptor(environment_id: String, label: String) -> EnvironmentD
                 _ => "other",
             }
             .into(),
-            machine: None,
+            machine: machine.clone(),
         },
         server_version: env!("CARGO_PKG_VERSION").into(),
         orchestration_protocol_version: Some(2),
@@ -543,11 +544,75 @@ fn environment_descriptor(environment_id: String, label: String) -> EnvironmentD
             server_self_update_progress: false,
             server_update_thread_continuation: false,
             project_clone_tracking: false,
-            environment_icon: false,
+            environment_icon: machine.is_some(),
             desktop_app_update: false,
             agent_activity_publishing: true,
         },
     }
+}
+
+fn detect_machine_kind() -> Option<String> {
+    if let Some(value) = std::env::var_os("BEX_ENVIRONMENT_MACHINE") {
+        let value = value.to_string_lossy().trim().to_ascii_lowercase();
+        if matches!(
+            value.as_str(),
+            "server" | "cloud" | "linux" | "desktop" | "laptop" | "mac-mini" | "mac-studio"
+        ) {
+            return Some(value);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let model = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        return Some(
+            if model.starts_with("macmini") {
+                "mac-mini"
+            } else if model.starts_with("macstudio") {
+                "mac-studio"
+            } else if model.starts_with("macbook") {
+                "laptop"
+            } else {
+                "desktop"
+            }
+            .into(),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let product = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let chassis = std::fs::read_to_string("/sys/class/dmi/id/chassis_type")
+            .unwrap_or_default()
+            .trim()
+            .parse::<u16>()
+            .ok();
+        if product.contains("virtual") || product.contains("vmware") || product.contains("kvm") {
+            return Some("cloud".into());
+        }
+        return Some(
+            match chassis {
+                Some(8 | 9 | 10 | 14) => "laptop",
+                Some(3 | 4 | 5 | 6 | 7 | 15 | 16 | 17) => "desktop",
+                _ => "linux",
+            }
+            .into(),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Some("desktop".into());
+    }
+    #[allow(unreachable_code)]
+    None
 }
 fn now() -> u64 {
     SystemTime::now()
