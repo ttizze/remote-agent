@@ -80,7 +80,7 @@ pub(super) const SECTION: Section = Section {
                         SettingId::LoadBalancing,
                         "Load balancing",
                         Some(
-                            "Route new threads across ready provider instances using their saved weights.",
+                            "Route new threads across matching environments using their saved weights.",
                         ),
                         SettingControl::Switch {
                             on: preferences.load_balancing_enabled,
@@ -173,7 +173,7 @@ pub(super) const SECTION: Section = Section {
                 },
             ],
             Some(
-                "Provider weights are kept per instance on this device; a weight of zero disables routing to that instance.",
+                "Environment weights are kept on this device; a weight of zero disables automatic routing to that environment.",
             ),
         ))
     },

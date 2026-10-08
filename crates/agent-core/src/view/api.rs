@@ -87,6 +87,7 @@ pub struct PreferencesView {
     pub follow_up: FollowUpBehavior,
     pub notification_mode: crate::view::notifications::NotificationMode,
     pub in_app_notifications_enabled: bool,
+    pub load_balancing_enabled: bool,
 }
 
 impl Snapshot {
@@ -509,6 +510,7 @@ impl Snapshot {
             follow_up: self.follow_up,
             notification_mode: preferences.notification_mode,
             in_app_notifications_enabled: preferences.in_app_notifications_enabled,
+            load_balancing_enabled: preferences.load_balancing_enabled,
         }
     }
     /// The project's icon; `None` shows its initials. Clients cache the image

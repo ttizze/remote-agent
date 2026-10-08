@@ -90,7 +90,7 @@ extension BexAppViewModel {
     }
 
     func openNewThread(project: String? = nil) {
-        resetEditor(); screen = .thread; perform(.newThread(projectId: project ?? snapshot.selectedProjectId()))
+        resetEditor(); screen = .thread; openNewThread(projectId: project ?? snapshot.selectedProjectId())
     }
 
     func send(alternate: Bool = false) {

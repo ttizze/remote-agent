@@ -236,6 +236,8 @@ pub(super) struct Owner {
     pub(super) usage_refresh_last_attempt_ms: Option<u64>,
     /// Any account request currently running on this connection epoch.
     pub(super) accounts_refresh_in_flight_epoch: Option<u64>,
+    /// Prevents repeated capacity RPCs while one automatic draft is waiting.
+    pub(super) load_balancing_resources_in_flight: bool,
 }
 
 pub(super) type ObservedList = (Arc<ShellCache>, Arc<crate::commands::outbox::Outbox>, bool);
@@ -314,6 +316,7 @@ impl Owner {
             stream_publish_deferred: false,
             usage_refresh_last_attempt_ms: None,
             accounts_refresh_in_flight_epoch: None,
+            load_balancing_resources_in_flight: false,
         };
         if let Some(thread) = owner.state.selected_thread.clone() {
             owner.open_thread(&thread);
@@ -716,6 +719,18 @@ impl Owner {
         self.accounts_refresh_in_flight_epoch == Some(self.epoch)
     }
 
+    pub(super) fn refresh_load_balancing_resources(&mut self) {
+        if !self.state.connected || self.load_balancing_resources_in_flight {
+            return;
+        }
+        self.load_balancing_resources_in_flight = true;
+        self.job(
+            Call::ReadHostResources(agent_protocol::background::ReadHostResources {}),
+            None,
+            None,
+        );
+    }
+
     pub(super) fn refresh_accounts_if_due(&mut self, now: u64) {
         if !self.connected()
             || !usage_refresh_due(
@@ -758,6 +773,8 @@ impl Owner {
         self.epoch += 1;
         // A task from the replaced Network can never complete this epoch.
         self.accounts_refresh_in_flight_epoch = None;
+        self.load_balancing_resources_in_flight = false;
+        self.state.host_resources_received_at_ms = None;
         self.state.connected = true;
         self.state.host_name = Some(host_name);
         self.state.environment = Some(environment);
@@ -877,6 +894,8 @@ impl Owner {
         self.interrupt_uploads();
         self.abandon_requests();
         self.accounts_refresh_in_flight_epoch = None;
+        self.load_balancing_resources_in_flight = false;
+        self.state.host_resources_received_at_ms = None;
         self.state.connected = false;
         self.state.awareness = None;
         self.state.error = Some(error);

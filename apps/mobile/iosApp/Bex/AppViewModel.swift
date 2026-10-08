@@ -5,6 +5,12 @@ import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
+    private struct PendingLoadBalancedNewThread {
+        let projectId: String
+        let sourceEnvironmentId: String
+        let startedAt: Date
+    }
+
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
     @Published var screen: AppScreen = .profiles
     @Published var isScanning = false
@@ -54,6 +60,7 @@ final class BexAppViewModel: ObservableObject {
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
     private var incomingShareHandoffsInFlight: Set<URL> = []
+    private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread?
     private let usageWidget = UsageWidgetPublisher()
 
     init() {
@@ -68,6 +75,7 @@ final class BexAppViewModel: ObservableObject {
 
     func selectProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
+        pendingLoadBalancedNewThread = nil
         screen = .threads
         if selectedProfileId == id, store != nil {
             connect(); return
@@ -90,7 +98,114 @@ final class BexAppViewModel: ObservableObject {
 
     func handleShortcut() {
         screen = .threads
-        perform(.newThread(projectId: snapshot.selectedProjectId()))
+        openNewThread(projectId: snapshot.selectedProjectId())
+    }
+
+    /// Opens a new draft on the selected repository's least-loaded connected
+    /// environment. Core owns candidate matching and capacity scoring; this
+    /// owner only promotes the Store and reapplies the source draft's
+    /// user-selected model options and modes.
+    func openNewThread(projectId: String?) {
+        guard let projectId,
+              let sourceEnvironmentId = snapshot.environmentId()
+        else {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: projectId))
+            return
+        }
+        // A project chosen from the aggregate picker is already an explicit
+        // environment route. Automatic balancing only applies to the source
+        // Host's local project selection.
+        if scopedValue(projectId).1 != nil {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: projectId))
+            return
+        }
+        let evaluation = AgentCore.environmentLoadBalancingRoute(
+            snapshots: environmentSnapshotsForCore(),
+            sourceEnvironmentId: sourceEnvironmentId,
+            projectId: projectId,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+        if evaluation.pendingResources {
+            pendingLoadBalancedNewThread = PendingLoadBalancedNewThread(
+                projectId: projectId,
+                sourceEnvironmentId: sourceEnvironmentId,
+                startedAt: Date()
+            )
+            requestLoadBalancingResources()
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                self?.retryPendingLoadBalancedNewThread()
+            }
+            return
+        }
+        pendingLoadBalancedNewThread = nil
+        guard let route = evaluation.route else {
+            perform(.newThread(projectId: projectId))
+            return
+        }
+        let sourceDraft = snapshot.newThreadDefaultsForProject(projectId: projectId)
+        startRoutedNewThread(route, sourceDraft: sourceDraft, fallbackProjectId: projectId)
+    }
+
+    private func startRoutedNewThread(
+        _ route: AgentCore.EnvironmentLoadBalancedRouteView,
+        sourceDraft: AgentCore.Draft,
+        fallbackProjectId: String
+    ) {
+        perform(.newThread(projectId: "\(route.environmentId):\(route.projectId)")) { [weak self] result in
+            guard case .success = result else {
+                self?.perform(.newThread(projectId: fallbackProjectId))
+                return
+            }
+            self?.perform(.setModel(
+                instanceId: route.providerInstance,
+                driver: route.driver,
+                model: route.model,
+                options: sourceDraft.options
+            ))
+            self?.perform(.setRuntimeMode(mode: sourceDraft.runtimeMode))
+            self?.perform(.setInteractionMode(mode: sourceDraft.interactionMode))
+        }
+    }
+
+    private func retryPendingLoadBalancedNewThread() {
+        guard let pending = pendingLoadBalancedNewThread else { return }
+        guard snapshot.environmentId() == pending.sourceEnvironmentId else {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: pending.projectId))
+            return
+        }
+        guard Date().timeIntervalSince(pending.startedAt) <= 3 else {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: pending.projectId))
+            return
+        }
+        let evaluation = AgentCore.environmentLoadBalancingRoute(
+            snapshots: environmentSnapshotsForCore(),
+            sourceEnvironmentId: pending.sourceEnvironmentId,
+            projectId: pending.projectId,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+        guard !evaluation.pendingResources else { return }
+        pendingLoadBalancedNewThread = nil
+        guard let route = evaluation.route else {
+            perform(.newThread(projectId: pending.projectId))
+            return
+        }
+        startRoutedNewThread(
+            route,
+            sourceDraft: snapshot.newThreadDefaultsForProject(projectId: pending.projectId),
+            fallbackProjectId: pending.projectId
+        )
+    }
+
+    private func requestLoadBalancingResources() {
+        perform(.refreshLoadBalancingResources)
+        for owner in backgroundOwners.values {
+            try? owner.dispatch(intent: .refreshLoadBalancingResources)
+        }
     }
 
     func handleSurfaceURL(_ url: URL) {
@@ -155,6 +270,7 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func detachStore() -> AgentStore? {
+        pendingLoadBalancedNewThread = nil
         persist()
         draftEdits.reset()
         presentation?.cancel()
@@ -321,6 +437,7 @@ final class BexAppViewModel: ObservableObject {
         environments = (environments.filter { $0.profileId != profile.id } + [row])
             .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
         publishUsageWidget()
+        retryPendingLoadBalancedNewThread()
     }
 
     private func publishUsageWidget() {
@@ -495,6 +612,47 @@ final class BexAppViewModel: ObservableObject {
 
     func environmentSettings() -> [EnvironmentSettingsEntryView] {
         AgentCore.environmentSettings(snapshots: environmentSnapshotsForCore())
+    }
+
+    func loadBalancingPreferences() -> [EnvironmentLoadBalancingPreferenceView] {
+        AgentCore.environmentLoadBalancingPreferences(snapshots: environmentSnapshotsForCore())
+    }
+
+    func setLoadBalancingEnabled(_ enabled: Bool) {
+        perform(.setLoadBalancingEnabled(enabled: enabled))
+        for (profile, owner) in backgroundOwners {
+            guard let receipt = try? owner.dispatch(intent: .setLoadBalancingEnabled(enabled: enabled)) else {
+                continue
+            }
+            Task { [weak self, owner] in
+                _ = try? await receipt.wait()
+                guard let self, let host = self.profiles.first(where: { $0.id == profile }) else {
+                    return
+                }
+                self.publishEnvironment(host, owner.snapshot())
+            }
+        }
+    }
+
+    func setLoadBalancingWeight(environmentId: String, weight: UInt8) {
+        let intent = Intent.setLoadBalancingWeight(environmentId: environmentId, weight: weight)
+        guard let profile = environments.first(where: { $0.environmentId == environmentId })?.profileId else {
+            return
+        }
+        if profile == selectedProfileId {
+            perform(intent)
+        } else if let owner = backgroundOwners[profile] {
+            guard let receipt = try? owner.dispatch(intent: intent) else { return }
+            Task { [weak self, owner] in
+                _ = try? await receipt.wait()
+                guard let self, let host = self.profiles.first(where: { $0.id == profile }) else {
+                    return
+                }
+                self.publishEnvironment(host, owner.snapshot())
+            }
+        } else {
+            perform(intent)
+        }
     }
 
     func environmentThreadList(nowMs: Int64, options: ThreadListOptions, query: String,

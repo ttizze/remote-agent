@@ -1,6 +1,7 @@
 //! Pure environment identity, capability, and cross-environment view helpers.
 use crate::{
     state::Snapshot,
+    view::load_balancing::{self, Candidate as LoadBalancingCandidate},
     view::{
         settings::{SettingsScope, SettingsView},
         sidebar::{SidebarDraftRow, SidebarItem, SidebarOptions, SidebarSection, SidebarThreadRow},
@@ -10,6 +11,7 @@ use crate::{
         thread_menu::{ThreadMenuAction, ThreadMenuChild, ThreadMenuItem},
     },
 };
+use agent_domain::Driver;
 use agent_protocol::models::{
     AgentActivityPhase, AwarenessActivity, AwarenessSnapshot, EnvironmentCapabilities,
     EnvironmentDescriptor, ProviderInstance,
@@ -523,6 +525,26 @@ pub struct EnvironmentUsageSnapshot {
     pub configured_provider_kinds: Vec<ProviderKind>,
 }
 
+/// The target Host/project/provider selected for a new-thread draft. The
+/// caller promotes the owning Store before creating the draft, so all
+/// subsequent mutations stay with that Host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentLoadBalancedRoute {
+    pub environment_id: String,
+    pub project_id: String,
+    pub provider_instance: String,
+    pub driver: Driver,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentLoadBalancingEvaluation {
+    pub candidate_count: usize,
+    /// At least one matching connected Host still needs a resource reply.
+    pub pending_resources: bool,
+    pub route: Option<EnvironmentLoadBalancedRoute>,
+}
+
 /// A project row in the client-wide project picker. The project id is scoped
 /// to the environment that owns it, so two Hosts may expose the same local id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1027,6 +1049,164 @@ impl EnvironmentRegistry {
         }
     }
 
+    /// Evaluates automatic routing for a new draft whose source project lives
+    /// on `source_environment_id`. Only connected Hosts that expose the same
+    /// repository identity and selected provider participate. The returned
+    /// route carries the target's local project id because equal project ids
+    /// across Hosts are not interchangeable.
+    pub fn evaluate_load_balancing(
+        &self,
+        source_environment_id: &str,
+        project_id: &str,
+        driver: Driver,
+        provider_instance: Option<&str>,
+        model: &str,
+        weights: &BTreeMap<String, u8>,
+        now_ms: i64,
+    ) -> EnvironmentLoadBalancingEvaluation {
+        let Some(source) = self.entries.get(source_environment_id) else {
+            return EnvironmentLoadBalancingEvaluation {
+                candidate_count: 0,
+                pending_resources: false,
+                route: None,
+            };
+        };
+        let Some(source_project) = source
+            .snapshot
+            .shell_projects()
+            .iter()
+            .find(|project| project.id == project_id)
+        else {
+            return EnvironmentLoadBalancingEvaluation {
+                candidate_count: 0,
+                pending_resources: false,
+                route: None,
+            };
+        };
+        let Some(repository_key) = source_project
+            .repository_identity
+            .as_ref()
+            .map(|identity| identity.canonical_key.as_str())
+            .filter(|key| !key.is_empty())
+        else {
+            return EnvironmentLoadBalancingEvaluation {
+                candidate_count: 0,
+                pending_resources: false,
+                route: None,
+            };
+        };
+
+        struct RouteCandidate {
+            route: EnvironmentLoadBalancedRoute,
+            capacity: LoadBalancingCandidate,
+        }
+        let mut route_candidates = Vec::new();
+        for summary in self.summaries() {
+            let Some(entry) = self.entries.get(&summary.descriptor.environment_id) else {
+                continue;
+            };
+            if !entry.snapshot.connected {
+                continue;
+            }
+            let Some(target_project) = entry
+                .snapshot
+                .shell_projects()
+                .iter()
+                .find(|project| {
+                    project
+                        .repository_identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.canonical_key == repository_key)
+                })
+            else {
+                continue;
+            };
+            let Some(provider) = entry
+                .snapshot
+                .providers
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|provider| {
+                    provider.driver == driver
+                        && provider_instance
+                            .is_none_or(|instance| instance.is_empty() || provider.instance == instance)
+                        && provider.enabled
+                        && provider.installed
+                        && !matches!(
+                            provider.status,
+                            agent_protocol::models::ProviderStatus::Error
+                                | agent_protocol::models::ProviderStatus::Disabled
+                        )
+                        && provider.unavailable_reason.is_none()
+                })
+            else {
+                continue;
+            };
+            let environment_id = summary.descriptor.environment_id.clone();
+            let target_weight = entry
+                .snapshot
+                .preferences
+                .load_balancing_weights
+                .get(&environment_id)
+                .copied()
+                .or_else(|| weights.get(&environment_id).copied());
+            let weight = load_balancing::preference_for_weight(target_weight);
+            if weight == 0 {
+                continue;
+            }
+            let Some(selected_model) = provider
+                .models
+                .iter()
+                .find(|candidate| candidate.slug == model)
+                .or_else(|| provider.models.iter().find(|candidate| candidate.is_default))
+                .or_else(|| provider.models.first())
+            else {
+                continue;
+            };
+            route_candidates.push(RouteCandidate {
+                route: EnvironmentLoadBalancedRoute {
+                    environment_id: environment_id.clone(),
+                    project_id: target_project.id.clone(),
+                    provider_instance: provider.instance.clone(),
+                    driver,
+                    model: selected_model.slug.clone(),
+                },
+                capacity: LoadBalancingCandidate {
+                    environment_id,
+                    resources: entry.snapshot.host_resources.clone(),
+                    received_at_ms: entry.snapshot.host_resources_received_at_ms,
+                    weight,
+                },
+            });
+        }
+        if route_candidates.len() < 2 {
+            return EnvironmentLoadBalancingEvaluation {
+                candidate_count: route_candidates.len(),
+                pending_resources: false,
+                route: None,
+            };
+        }
+        let pending_resources = route_candidates.iter().any(|candidate| {
+            candidate.capacity.resources.is_none() || candidate.capacity.received_at_ms.is_none()
+        });
+        let capacities: Vec<_> = route_candidates
+            .iter()
+            .map(|candidate| candidate.capacity.clone())
+            .collect();
+        let route = load_balancing::select_environment(&capacities, now_ms).and_then(|id| {
+            route_candidates
+                .iter()
+                .find(|candidate| candidate.route.environment_id == id)
+                .map(|candidate| candidate.route.clone())
+        });
+        EnvironmentLoadBalancingEvaluation {
+            candidate_count: route_candidates.len(),
+            pending_resources,
+            route,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -1109,7 +1289,8 @@ mod tests {
     use agent_protocol::conversation::ShellSnapshot;
     use agent_protocol::models::{
         EnvironmentCapabilities, EnvironmentFileAttachments, EnvironmentInstallation,
-        EnvironmentPlatform, ProviderInstance, ProviderStatus,
+        EnvironmentPlatform, Model, Project, ProjectRoot, ProviderInstance, ProviderStatus,
+        RepositoryIdentity, RepositoryLocator,
     };
     use proptest::prelude::*;
 
@@ -1518,5 +1699,131 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["host-a:same-thread", "host-b:same-thread"]
         );
+    }
+
+    #[test]
+    fn load_balancing_routes_same_repository_to_the_best_connected_host() {
+        let project = |id: &str| Project {
+            id: id.into(),
+            name: "Shared project".into(),
+            roots: vec![ProjectRoot {
+                path: format!("/work/{id}"),
+            }],
+            repository_identity: Some(RepositoryIdentity {
+                canonical_key: "github.com/example/shared".into(),
+                locator: RepositoryLocator {
+                    source: "git-remote".into(),
+                    remote_name: "origin".into(),
+                    remote_url: "https://github.com/example/shared.git".into(),
+                },
+                web_url: None,
+                root_path: None,
+                display_name: Some("Shared".into()),
+                provider: Some("github".into()),
+                owner: Some("example".into()),
+                name: Some("shared".into()),
+            }),
+            ..Project::default()
+        };
+        let provider = ProviderInstance {
+            instance: "codex".into(),
+            driver: Driver::Codex,
+            display_name: "Codex".into(),
+            accent_color: None,
+            enabled: true,
+            installed: true,
+            version: None,
+            status: ProviderStatus::Ready,
+            message: None,
+            unavailable_reason: None,
+            show_interaction_mode_toggle: true,
+            reports_context_window: true,
+            supported_runtime_modes: vec![],
+            models: vec![Model {
+                slug: "shared".into(),
+                name: "Shared".into(),
+                aliases: vec![],
+                badge: None,
+                is_default: true,
+                is_legacy: false,
+                option_descriptors: vec![],
+            }],
+        };
+        let snapshot = |environment_id: &str, project_id: &str, cpu_count: u64| {
+            Arc::new(Snapshot {
+                environment: Some(descriptor(environment_id, environment_id)),
+                connected: true,
+                shell: Arc::new(ShellCache::from_cache(ShellSnapshot {
+                    snapshot_sequence: 1,
+                    projects: vec![project(project_id)],
+                    threads: vec![],
+                })),
+                providers: Some(vec![provider.clone()]),
+                host_resources: Some(agent_protocol::background::HostResourcesSnapshot {
+                    sampled_at: 100_000,
+                    cpu_utilization: Some(0.2),
+                    cpu_count,
+                    available_memory_bytes: 8_000,
+                    total_memory_bytes: 16_000,
+                }),
+                host_resources_received_at_ms: Some(100_000),
+                ..Snapshot::default()
+            })
+        };
+        let mut registry = EnvironmentRegistry::default();
+        registry.update(snapshot("host-a", "project-a", 2));
+        registry.update(snapshot("host-b", "project-b", 8));
+        let evaluation = registry.evaluate_load_balancing(
+            "host-a",
+            "project-a",
+            Driver::Codex,
+            Some("codex"),
+            "shared",
+            &BTreeMap::new(),
+            100_000,
+        );
+        assert_eq!(evaluation.candidate_count, 2);
+        assert!(!evaluation.pending_resources);
+        assert_eq!(
+            evaluation.route,
+            Some(EnvironmentLoadBalancedRoute {
+                environment_id: "host-b".into(),
+                project_id: "project-b".into(),
+                provider_instance: "codex".into(),
+                driver: Driver::Codex,
+                model: "shared".into(),
+            })
+        );
+        let weights = BTreeMap::from([(String::from("host-b"), 0)]);
+        let manual_only = registry.evaluate_load_balancing(
+            "host-a",
+            "project-a",
+            Driver::Codex,
+            Some("codex"),
+            "shared",
+            &weights,
+            100_000,
+        );
+        assert_eq!(manual_only.candidate_count, 1);
+        assert!(manual_only.route.is_none());
+
+        let mut missing_resources = (*snapshot("host-b", "project-b", 8)).clone();
+        missing_resources.host_resources = None;
+        missing_resources.host_resources_received_at_ms = None;
+        let mut pending_registry = EnvironmentRegistry::default();
+        pending_registry.update(snapshot("host-a", "project-a", 2));
+        pending_registry.update(Arc::new(missing_resources));
+        let pending = pending_registry.evaluate_load_balancing(
+            "host-a",
+            "project-a",
+            Driver::Codex,
+            Some("codex"),
+            "shared",
+            &BTreeMap::new(),
+            100_000,
+        );
+        assert_eq!(pending.candidate_count, 2);
+        assert!(pending.pending_resources);
+        assert!(pending.route.is_none());
     }
 }

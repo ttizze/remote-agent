@@ -713,7 +713,7 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/filePreview.ts` (44) | — | 未翻訳 |
 | `packages/client-runtime/src/handoff.test.ts` (65) | — | 未翻訳 |
 | `packages/client-runtime/src/handoff.ts` (64) | — | 未翻訳 |
-| `packages/client-runtime/src/load-balancing.ts` (40) | — | 未翻訳 |
+| `packages/client-runtime/src/load-balancing.ts` (40) | `crates/agent-core/src/view/load_balancing.rs`（`select_environment`、4 段階の preference、client receipt の freshness）、`crates/agent-core/src/environment.rs`（同じ repository identity・provider instance の Host 候補と scoped project route）、`connection::{owner,calls,intents}`（自動 draft 中だけの HostResources refresh）、desktop / iOS / Android の新規 task owner | 翻訳済み：`load-balancing.ts`・`useLoadBalancedEnvironment.ts`・`LoadBalancingSettings.tsx` の capacity、pending refresh、failure/manual fallback、0/25/50/100 の preference を接続。Host の sample clock は跨る環境で比較せず client receipt を使う。 |
 | `packages/client-runtime/src/markdownImages.test.ts` (71) | — | 未翻訳 |
 | `packages/client-runtime/src/markdownImages.ts` (72) | — | 未翻訳 |
 | `packages/client-runtime/src/markdownLinks.test.ts` (320) | — | 未翻訳 |

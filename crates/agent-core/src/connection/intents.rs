@@ -874,16 +874,22 @@ impl Owner {
                 Next::Done
             }
             Intent::SetLoadBalancingWeight {
-                instance_id,
+                environment_id,
                 weight,
             } => {
-                if weight > 100 {
-                    return Err(invalid("Load balancing weights must be 0 to 100."));
+                if !crate::view::load_balancing::PREFERENCE_WEIGHTS.contains(&weight) {
+                    return Err(invalid(
+                        "Load balancing weights must be 0, 25, 50, or 100.",
+                    ));
                 }
                 self.state
                     .preferences
                     .load_balancing_weights
-                    .insert(instance_id, weight);
+                    .insert(environment_id, weight);
+                Next::Done
+            }
+            Intent::RefreshLoadBalancingResources => {
+                self.refresh_load_balancing_resources();
                 Next::Done
             }
             Intent::SetSnapshotCaptureEnabled { enabled } => {
