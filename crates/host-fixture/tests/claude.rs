@@ -1436,8 +1436,12 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         std::fs::remove_file(native.join("usage-paused")).unwrap();
         until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.accounts[0].usage.is_some())).await;
         let usage = store.snapshot().account.accounts.as_ref().unwrap().accounts[0].usage.clone().unwrap();
+        assert_eq!(usage.windows.len(), 3);
         assert_eq!(usage.windows[0].remaining_percent, 28);
         assert_eq!(usage.windows[1].remaining_percent, 61);
+        assert_eq!(usage.windows[2].label, "Fable · 週間枠");
+        assert_eq!(usage.windows[2].remaining_percent, 66);
+        assert_eq!(usage.windows[2].resets_at, Some(2000518400));
 
         assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&agent_protocol::session::ProviderKind::Claude).map(String::as_str), Some("claude:desktop"));
         store.dispatch(Intent::NewChat { cwd: root.to_string_lossy().into() }).await.unwrap();
