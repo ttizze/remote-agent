@@ -151,7 +151,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
             }
             items(
                 threadSessions,
-                key = { session -> "controls:${session.hostId}:${session.deviceId}" },
+                key = { session -> "controls:${session.hostId}:${session.deviceId}:${session.sessionEpoch}" },
             ) { session ->
                 val detail = view.details.firstOrNull {
                     it.hostId == session.hostId && it.deviceId == session.deviceId
