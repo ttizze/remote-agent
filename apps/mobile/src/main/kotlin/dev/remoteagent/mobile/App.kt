@@ -1083,7 +1083,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     /** Opens the host-aware activity overview used by grouped alerts. */
     internal fun openActivityOverviewDeepLink() {
         pendingPushThread = null
-        stack = if (profiles.isEmpty()) listOf(Route.Pairing) else listOf(Route.Home)
+        stack = if (profiles.isEmpty()) listOf(Route.Pairing) else listOf(Route.Hosts)
     }
 
     /** Widget/notification launches enter the real Usage screen before consumption. */

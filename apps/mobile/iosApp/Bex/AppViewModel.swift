@@ -693,7 +693,7 @@ final class BexAppViewModel: ObservableObject {
 
     func openActivityOverviewDeepLink() {
         pendingPushThread = nil
-        if !profiles.isEmpty { screen = .threads }
+        if !profiles.isEmpty { screen = .profiles }
     }
 
     /// The Usage root calls this after presenting the requested limits tab.
