@@ -110,6 +110,11 @@ results! {
     Files(crate::models::FileList), File(crate::models::FileContent), Grant(crate::models::TransferGrant),
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
+    BackgroundPolicy(crate::background::BackgroundPolicySnapshot),
+    HostResources(crate::background::HostResourcesSnapshot),
+    ProcessDiagnostics(crate::background::ProcessDiagnosticsResult),
+    ProcessResourceHistory(crate::background::ProcessResourceHistoryResult),
+    TraceDiagnostics(crate::background::TraceDiagnosticsResult),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
     Unit(()), Text(String)
 }

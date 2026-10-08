@@ -1,4 +1,5 @@
 mod account_usage;
+mod background;
 pub mod browser;
 mod checkpoints;
 mod claude;

@@ -26,6 +26,12 @@ impl Snapshot {
     pub fn host_name(&self) -> Option<String> {
         self.host_name.clone()
     }
+    pub fn background_rows(&self) -> Vec<crate::view::diagnostics::DiagnosticRow> {
+        self.background_policy
+            .as_ref()
+            .map(crate::view::diagnostics::background_rows)
+            .unwrap_or_default()
+    }
     pub fn error(&self) -> Option<String> {
         self.error.clone()
     }

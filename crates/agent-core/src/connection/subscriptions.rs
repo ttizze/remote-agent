@@ -49,6 +49,7 @@ impl Owner {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
+            StreamKey::Background => tokio::spawn(follow(target, call, Payload::Background)),
         };
         let failures = network
             .streams
@@ -140,6 +141,18 @@ impl Owner {
         self.open_stream(
             StreamKey::Keybindings,
             Call::Keybindings(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The Host's background policy and power snapshot, followed by semantic
+    /// lease or power changes.
+    pub(super) fn subscribe_background(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Background,
+            Call::SubscribeBackground(agent_protocol::models::Empty {}),
         );
     }
 
@@ -258,6 +271,8 @@ impl Owner {
         if let Some(thread) = self.state.selected_thread.clone() {
             self.subscribe_thread(&thread);
         }
+        self.subscribe_background();
+        self.refresh_accounts_if_due(super::owner::now_ms());
     }
 
     fn current(&self, key: &StreamKey, generation: u64) -> bool {
@@ -322,6 +337,7 @@ impl Owner {
             }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
+            StreamKey::Background => self.subscribe_background(),
         }
     }
 
@@ -364,6 +380,10 @@ impl Owner {
                 self.healthy(&StreamKey::Keybindings);
                 self.state.keybindings = Some(Arc::new(config));
             }
+            (StreamKey::Background, Payload::Background(snapshot)) => {
+                self.healthy(&StreamKey::Background);
+                self.state.background_policy = Some(snapshot);
+            }
             _ => {}
         }
     }
@@ -389,7 +409,10 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
+                StreamKey::Setup(_)
+                | StreamKey::TerminalMetadata
+                | StreamKey::Keybindings
+                | StreamKey::Background => {}
             }
             self.schedule_resubscribe(key);
             return;

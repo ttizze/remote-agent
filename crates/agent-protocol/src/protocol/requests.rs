@@ -111,4 +111,13 @@ contracts! {
     Revoke, "host/revoke" => (op::RevokeDevice, m::Empty) [clone],
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
+    ReadBackground, "host/background/read" => (crate::background::ReadBackground, crate::background::BackgroundPolicySnapshot) [clone],
+    ReportClientActivity, "host/background/reportActivity" => (crate::background::ReportClientActivity, crate::background::BackgroundPolicySnapshot) [clone],
+    ReportHostPowerState, "host/background/reportPower" => (crate::background::HostPowerSnapshot, m::Empty) [clone],
+    RemoveClientActivity, "host/background/removeActivity" => (crate::background::RemoveClientActivity, crate::background::BackgroundPolicySnapshot) [clone],
+    SubscribeBackground, "host/background/subscribe" => (m::Empty, crate::background::BackgroundPolicySnapshot),
+    ReadHostResources, "host/diagnostics/hostResources" => (crate::background::ReadHostResources, crate::background::HostResourcesSnapshot) [clone],
+    ReadProcessDiagnostics, "host/diagnostics/processes" => (crate::background::ReadProcessDiagnostics, crate::background::ProcessDiagnosticsResult) [clone],
+    ReadProcessResourceHistory, "host/diagnostics/processHistory" => (crate::background::ReadProcessResourceHistory, crate::background::ProcessResourceHistoryResult) [clone],
+    ReadTraceDiagnostics, "host/diagnostics/traces" => (crate::background::ReadTraceDiagnostics, crate::background::TraceDiagnosticsResult) [clone],
 }

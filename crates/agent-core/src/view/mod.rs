@@ -6,6 +6,7 @@ pub mod appearance;
 pub mod archived;
 pub mod attachments;
 pub mod checkpoints;
+pub mod diagnostics;
 pub mod collation;
 pub mod composer;
 pub mod header;

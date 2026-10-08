@@ -1,6 +1,7 @@
 //! Conversation decisions and projections. This crate has no process, filesystem,
 //! database, async runtime, global clock, or random ID source.
 mod answers;
+mod background;
 mod composer;
 mod context;
 mod fact;
@@ -17,6 +18,7 @@ mod shell;
 mod task;
 mod usage;
 pub use answers::*;
+pub use background::*;
 pub use composer::*;
 pub use context::*;
 pub use fact::*;

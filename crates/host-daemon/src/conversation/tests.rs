@@ -211,6 +211,7 @@ async fn host_with(codex: Arc<dyn Spawner>, spawner: Arc<ReplaySpawner>) -> Host
             spawner: codex,
             browser: Arc::new(|_| None),
             models: Arc::new(NoModels),
+            background: crate::background::BackgroundOwner::new(state.clone()),
         },
         service.shared(),
     )
@@ -711,6 +712,7 @@ async fn a_turn_cut_by_shutdown_is_settled_when_the_host_starts_again() {
                 spawner,
                 browser: Arc::new(|_| None),
                 models: Arc::new(NoModels),
+                background: crate::background::BackgroundOwner::new(state.clone()),
             },
             host.service.shared(),
         )

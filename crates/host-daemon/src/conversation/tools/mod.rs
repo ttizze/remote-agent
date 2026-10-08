@@ -3,6 +3,7 @@
 //! committed thread state.
 mod backend;
 mod catalog;
+mod diagnostics;
 mod orchestrator;
 mod project;
 mod read;
@@ -483,6 +484,11 @@ impl AgentTools {
             "project_list" => self.project_list(scope, &input).await,
             "project_read" => self.project_read(scope, &input).await,
             "project_create" => self.project_create(scope, &input).await,
+            "background_status" => self.background_status(scope).await,
+            "host_resources" => self.host_resources(scope).await,
+            "process_diagnostics" => self.process_diagnostics(scope).await,
+            "process_resource_history" => self.process_resource_history(scope, &input).await,
+            "trace_diagnostics" => self.trace_diagnostics(scope, &input).await,
             _ => {
                 return error_content(&format!("Tool {name} not found"));
             }

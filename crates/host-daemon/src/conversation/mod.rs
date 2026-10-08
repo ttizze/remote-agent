@@ -63,6 +63,7 @@ pub(crate) struct ConversationConfig {
     pub(crate) spawner: Arc<dyn Spawner>,
     pub(crate) browser: BrowserConfig,
     pub(crate) models: Arc<dyn ModelCatalog>,
+    pub(crate) background: Arc<crate::background::BackgroundOwner>,
 }
 
 pub(crate) struct Conversation {
@@ -110,6 +111,7 @@ impl Conversation {
             projects: resources.projects.clone(),
             files: resources.files.clone(),
             models: config.models,
+            background: config.background,
         })));
         Ok(Arc::new(Self {
             runtime,

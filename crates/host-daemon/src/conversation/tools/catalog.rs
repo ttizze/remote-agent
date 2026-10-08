@@ -589,7 +589,59 @@ fn project() -> Vec<Value> {
 
 /// Every served tool.
 pub(crate) fn tools() -> Vec<Value> {
-    [orchestrator(), thread(), project()].concat()
+    [orchestrator(), thread(), project(), diagnostics()].concat()
+}
+
+fn diagnostics() -> Vec<Value> {
+    vec![
+        tool(
+            "background_status",
+            Some("Read background activity"),
+            "Read the Host-owned background activity leases, power state, and opportunistic work gate.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "host_resources",
+            Some("Read Host resources"),
+            "Read one demand-driven local Host resource sample owned by the Host process.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "process_diagnostics",
+            Some("Read process diagnostics"),
+            "Read signalable child, provider, and terminal process diagnostics from the local Host sample.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "process_resource_history",
+            Some("Read process resource history"),
+            "Read bounded local process resource history for the requested window and bucket size.",
+            json!({
+                "windowMs": int(1_000, Some(3_600_000)),
+                "bucketMs": int(1_000, Some(3_600_000)),
+            }),
+            &[],
+            READ,
+        ),
+        tool(
+            "trace_diagnostics",
+            Some("Read trace diagnostics"),
+            "Read bounded local trace and warning records from the Host diagnostics directory.",
+            json!({
+                "traceFilePath": string(),
+                "maxFiles": int(0, Some(16)),
+                "slowSpanThresholdMs": {"type":"number","minimum":0},
+            }),
+            &[],
+            READ,
+        ),
+    ]
 }
 
 /// The tools annotated read-only, which a read-only Claude sandbox pre-approves.
