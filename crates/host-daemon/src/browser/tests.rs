@@ -68,23 +68,37 @@ async fn cancelled_start_discards_an_artifact_already_offered_by_the_monitor() {
     let browser = Browser::start(root.path().join("profile")).await.unwrap();
     let key = ("thread".to_owned(), "tab".to_owned());
     let path = root.path().join("recording.webm");
+    let previous = root.path().join("previous.webm");
     std::fs::write(&path, b"cancelled").unwrap();
+    std::fs::write(&previous, b"previous").unwrap();
     browser.recording_artifacts.lock().await.insert(
         key.clone(),
-        vec![agent_protocol::preview::PreviewRecordingArtifact {
-            id: "cancelled".into(),
-            tab_id: key.1.clone(),
-            path: path.to_string_lossy().into_owned(),
-            mime_type: "video/webm;codecs=vp9".into(),
-            size_bytes: 9,
-            created_at: "2026-01-01T00:00:00Z".into(),
-        }],
+        vec![
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "previous".into(),
+                tab_id: key.1.clone(),
+                path: previous.to_string_lossy().into_owned(),
+                mime_type: "video/webm;codecs=vp9".into(),
+                size_bytes: 8,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "cancelled".into(),
+                tab_id: key.1.clone(),
+                path: path.to_string_lossy().into_owned(),
+                mime_type: "video/webm;codecs=vp9".into(),
+                size_bytes: 9,
+                created_at: "2026-01-01T00:00:01Z".into(),
+            },
+        ],
     );
 
     browser.discard_recording_artifact_path(&key, &path).await;
 
     assert!(!path.exists());
-    assert!(browser.completed_recording(&key).await.is_none());
+    assert!(previous.exists());
+    assert_eq!(browser.completed_recording(&key).await.unwrap().id, "previous");
+    let _ = std::fs::remove_file(previous);
     browser.shutdown().await;
 }
 
@@ -110,8 +124,10 @@ fn completed_recording_retention_is_global_across_open_preview_tabs() {
 
     assert_eq!(artifacts.len(), MAX_RETAINED_RECORDINGS);
     assert_eq!(removed.len(), 2);
-    assert_eq!(removed[0], std::path::PathBuf::from("/tmp/recording-0.webm"));
-    assert_eq!(removed[1], std::path::PathBuf::from("/tmp/recording-1.webm"));
+    assert_eq!(removed[0].1, std::path::PathBuf::from("/tmp/recording-0.webm"));
+    assert_eq!(removed[1].1, std::path::PathBuf::from("/tmp/recording-1.webm"));
+    assert_eq!(removed[0].0, ("thread".into(), "tab-0".into()));
+    assert_eq!(removed[1].0, ("thread".into(), "tab-1".into()));
 }
 
 #[test]

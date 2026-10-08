@@ -55,6 +55,7 @@ pub(crate) struct SharedResources {
     pub(crate) worktrees: Arc<Worktrees>,
     pub(crate) files: WorkspaceFiles,
     pub(crate) terminals: Arc<Terminals>,
+    pub(crate) devices: Arc<crate::device::DeviceService>,
 }
 
 pub(crate) struct ConversationConfig {
@@ -110,7 +111,7 @@ impl Conversation {
             projects: resources.projects.clone(),
             files: resources.files.clone(),
             models: config.models,
-        })));
+        })).with_devices(resources.devices.clone()));
         Ok(Arc::new(Self {
             runtime,
             resources,

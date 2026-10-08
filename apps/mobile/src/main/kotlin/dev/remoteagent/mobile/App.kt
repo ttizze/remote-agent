@@ -47,6 +47,8 @@ internal sealed interface Route {
 
     data class Thread(val id: String) : Route
 
+    data class Device(val threadId: String) : Route
+
     /** "Choose project" before a new task's draft, or to change the draft's project. */
     data object ChooseProject : Route
 

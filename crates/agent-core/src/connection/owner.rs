@@ -76,6 +76,7 @@ pub(super) enum StreamKey {
     Preview(ThreadId),
     TerminalMetadata,
     Keybindings,
+    Device(ThreadId),
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {

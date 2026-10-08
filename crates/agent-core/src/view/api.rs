@@ -118,6 +118,10 @@ fn thread(id: String) -> Option<ThreadId> {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn device(&self) -> crate::view::device::DeviceView {
+        crate::view::device::device_view(self)
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,

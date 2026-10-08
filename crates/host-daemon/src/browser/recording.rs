@@ -218,6 +218,7 @@ async fn run_capture(
     let session = match command_with_cancel(
         &mut socket,
         &mut next_id,
+        tab_id,
         None,
         "Target.attachToTarget",
         json!({"targetId":tab_id,"flatten":true}),
@@ -243,6 +244,7 @@ async fn run_capture(
     if let Err(error) = command_with_cancel(
         &mut socket,
         &mut next_id,
+        tab_id,
         Some(&session),
         "Page.enable",
         json!({}),
@@ -251,7 +253,7 @@ async fn run_capture(
     )
     .await
     {
-        cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
         note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
@@ -259,7 +261,7 @@ async fn run_capture(
     let mut encoder = match Encoder::start(output).await {
         Ok(encoder) => encoder,
         Err(error) => {
-            cleanup_cdp(&mut socket, &mut next_id, &session).await;
+            cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
             notify_startup(&mut startup, Err(error.clone()));
             return Err(error);
         }
@@ -267,6 +269,7 @@ async fn run_capture(
     if let Err(error) = command_with_cancel(
         &mut socket,
         &mut next_id,
+        tab_id,
         Some(&session),
         "Page.startScreencast",
         json!({
@@ -281,7 +284,7 @@ async fn run_capture(
     )
     .await
     {
-        cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
         encoder.abort().await;
         note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
@@ -289,7 +292,7 @@ async fn run_capture(
     }
     if cancel.is_cancelled() || stop.is_cancelled() {
         let error = "recording start was cancelled".to_owned();
-        cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
         encoder.abort().await;
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
@@ -317,7 +320,7 @@ async fn run_capture(
                 deadline_reached = true;
                 break capture_termination_result(CaptureTermination::Deadline);
             },
-            message = next_screencast_frame(&mut socket) => {
+            message = next_screencast_frame(&mut socket, tab_id, &session) => {
                 let (frame, timestamp, session_id) = match message {
                     Ok(ScreencastEvent::Frame(frame, timestamp, session_id)) => {
                         (frame, timestamp, session_id)
@@ -381,20 +384,37 @@ async fn run_capture(
                     if let Err(error) = send_command_with_cancel(
                         &mut socket,
                         &mut next_id,
+                        tab_id,
                         Some(&session),
                         "Page.screencastFrameAck",
                         json!({"sessionId":session_id}),
                         &cancel,
                         &stop,
                     ).await {
+                        if is_target_detached_error(&error) {
+                            externally_detached.store(true, Ordering::Release);
+                            detached = true;
+                            break capture_termination_result(CaptureTermination::Detached);
+                        }
                         break Err(error);
                     }
                 }
             }
         }
     };
-    let cleanup_result = cleanup_cdp(&mut socket, &mut next_id, &session).await;
+    let cleanup_result = cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+    let cleanup_detached = cleanup_result
+        .as_ref()
+        .is_err_and(|error| is_target_detached_error(error));
+    if cleanup_detached {
+        externally_detached.store(true, Ordering::Release);
+        detached = true;
+    }
     if let Err(error) = capture_result {
+        if detached || is_target_detached_error(&error) {
+            externally_detached.store(true, Ordering::Release);
+            return encoder.finish().await;
+        }
         encoder.abort().await;
         return Err(error);
     }
@@ -418,6 +438,8 @@ async fn run_capture(
 
 async fn next_screencast_frame(
     socket: &mut WebSocketStream<ConnectStream>,
+    target_id: &str,
+    session: &str,
 ) -> Result<ScreencastEvent, String> {
     loop {
         let Some(message) = socket.next().await else {
@@ -434,10 +456,13 @@ async fn next_screencast_frame(
         }
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| format!("recording screencast response is invalid: {error}"))?;
-        if is_detached_event(&value) {
+        if is_detached_event(&value, target_id, Some(session)) {
             return Ok(ScreencastEvent::Detached);
         }
         if value["method"] != "Page.screencastFrame" {
+            continue;
+        }
+        if value["sessionId"].as_str() != Some(session) {
             continue;
         }
         let data = value["params"]["data"]
@@ -452,12 +477,37 @@ async fn next_screencast_frame(
     }
 }
 
-fn is_detached_event(value: &Value) -> bool {
-    value["method"] == "Target.detachedFromTarget" || value["method"] == "Target.targetCrashed"
+fn is_detached_event(value: &Value, target_id: &str, session: Option<&str>) -> bool {
+    match value["method"].as_str() {
+        Some("Target.detachedFromTarget") => {
+            value["params"]["targetId"].as_str() == Some(target_id)
+                && session.is_none_or(|session| {
+                    value["params"]["sessionId"].as_str() == Some(session)
+                })
+        }
+        Some("Target.targetCrashed") => {
+            value["params"]["targetId"].as_str() == Some(target_id)
+                && session_event_matches(value, session)
+        }
+        _ => false,
+    }
+}
+
+/// Target.targetCrashed is normally emitted without a sessionId. If Chrome
+/// includes one, it must still belong to this recording's attached session;
+/// an unrelated popup event must never terminate this capture.
+fn session_event_matches(value: &Value, session: Option<&str>) -> bool {
+    value["sessionId"]
+        .as_str()
+        .is_none_or(|event_session| session == Some(event_session))
+}
+
+fn is_target_detached_error(error: &str) -> bool {
+    error.contains("target detached")
 }
 
 fn note_target_detached(error: &str, externally_detached: &AtomicBool) {
-    if error.contains("target detached") {
+    if is_target_detached_error(error) {
         externally_detached.store(true, Ordering::Release);
     }
 }
@@ -465,6 +515,7 @@ fn note_target_detached(error: &str, externally_detached: &AtomicBool) {
 async fn cleanup_cdp(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: &str,
 ) -> Result<(), String> {
     // Wait for both responses, with a bound per command.  A failed stop must
@@ -473,6 +524,7 @@ async fn cleanup_cdp(
     let stop = cleanup_command(
         socket,
         next_id,
+        target_id,
         Some(session),
         "Page.stopScreencast",
         json!({}),
@@ -481,6 +533,7 @@ async fn cleanup_cdp(
     let detach = cleanup_command(
         socket,
         next_id,
+        target_id,
         None,
         "Target.detachFromTarget",
         json!({"sessionId":session}),
@@ -494,13 +547,14 @@ const CDP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 async fn cleanup_command(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
 ) -> Result<(), String> {
     tokio::time::timeout(
         CDP_CLEANUP_TIMEOUT,
-        command(socket, next_id, session, method, params),
+        command(socket, next_id, target_id, session, method, params),
     )
     .await
     .map_err(|_| {
@@ -606,13 +660,14 @@ fn is_partial_artifact(path: &Path) -> bool {
 async fn command(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
     tokio::time::timeout(
         CDP_COMMAND_TIMEOUT,
-        command_inner(socket, next_id, session, method, params),
+        command_inner(socket, next_id, target_id, session, method, params),
     )
     .await
     .map_err(|_| {
@@ -626,6 +681,7 @@ async fn command(
 async fn command_inner(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
@@ -638,7 +694,7 @@ async fn command_inner(
         };
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| format!("recording {method} response is invalid: {error}"))?;
-        if is_detached_event(&value) {
+        if is_detached_event(&value, target_id, session) {
             return Err(format!("recording {method} target detached"));
         }
         if value["id"].as_u64() != Some(id) {
@@ -655,6 +711,7 @@ async fn command_inner(
 async fn command_with_cancel(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
@@ -662,7 +719,7 @@ async fn command_with_cancel(
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<Value, String> {
     tokio::select! {
-        result = command(socket, next_id, session, method, params) => result,
+        result = command(socket, next_id, target_id, session, method, params) => result,
         _ = cancel.cancelled() => Err(format!("recording {method} was cancelled")),
         _ = stop.cancelled() => Err(format!("recording {method} was cancelled")),
     }
@@ -699,6 +756,7 @@ async fn send_command(
 async fn send_command_with_cancel(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
+    _target_id: &str,
     session: Option<&str>,
     method: &str,
     params: Value,
@@ -1014,9 +1072,34 @@ mod tests {
 
     #[test]
     fn external_target_close_is_a_capture_termination_event() {
-        assert!(is_detached_event(&json!({"method":"Target.detachedFromTarget"})));
-        assert!(is_detached_event(&json!({"method":"Target.targetCrashed"})));
-        assert!(!is_detached_event(&json!({"method":"Page.screencastFrame"})));
+        let detached = json!({
+            "method":"Target.detachedFromTarget",
+            "params":{"targetId":"target","sessionId":"session"}
+        });
+        let crashed = json!({
+            "method":"Target.targetCrashed",
+            "params":{"targetId":"target"}
+        });
+        assert!(is_detached_event(&detached, "target", Some("session")));
+        assert!(is_detached_event(&detached, "target", None));
+        assert!(!is_detached_event(&detached, "popup", Some("session")));
+        assert!(!is_detached_event(&detached, "target", Some("other")));
+        assert!(is_detached_event(&crashed, "target", Some("session")));
+        assert!(!is_detached_event(&crashed, "popup", Some("session")));
+        assert!(!is_detached_event(
+            &json!({
+                "method":"Target.targetCrashed",
+                "sessionId":"popup-session",
+                "params":{"targetId":"target"}
+            }),
+            "target",
+            Some("session")
+        ));
+        assert!(!is_detached_event(
+            &json!({"method":"Page.screencastFrame"}),
+            "target",
+            Some("session")
+        ));
     }
 
     #[test]

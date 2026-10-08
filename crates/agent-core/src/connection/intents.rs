@@ -26,7 +26,7 @@ use agent_domain::{
     ApprovalDecision, Command, InteractionMode, MessageId, Plan, PlanRef, RunId, RuntimeRequestId,
     State, ThreadId, Timestamp,
 };
-use agent_protocol::{conversation as c, models as m, operations as op};
+use agent_protocol::{conversation as c, device as d, models as m, operations as op};
 use std::sync::Arc;
 
 pub(super) enum Next {
@@ -52,6 +52,108 @@ fn thread_id(value: String) -> Result<ThreadId, PeerError> {
 }
 fn run_id(value: String) -> Result<RunId, PeerError> {
     RunId::new(value).map_err(invalid)
+}
+
+fn device_platform(value: &str) -> Result<d::DevicePlatform, PeerError> {
+    match value {
+        "ios" => Ok(d::DevicePlatform::Ios),
+        "android" => Ok(d::DevicePlatform::Android),
+        _ => Err(invalid("Device platform must be ios or android")),
+    }
+}
+fn device_text_size(value: &str) -> Result<d::DeviceTextSize, PeerError> {
+    match value {
+        "small" => Ok(d::DeviceTextSize::Small),
+        "default" => Ok(d::DeviceTextSize::Default),
+        "large" => Ok(d::DeviceTextSize::Large),
+        "extraLarge" => Ok(d::DeviceTextSize::ExtraLarge),
+        _ => Err(invalid("Unknown device text size")),
+    }
+}
+fn device_color_filter(value: &str) -> Result<d::DeviceColorFilter, PeerError> {
+    match value {
+        "none" => Ok(d::DeviceColorFilter::None),
+        "grayscale" => Ok(d::DeviceColorFilter::Grayscale),
+        "redGreen" => Ok(d::DeviceColorFilter::RedGreen),
+        "greenRed" => Ok(d::DeviceColorFilter::GreenRed),
+        "blueYellow" => Ok(d::DeviceColorFilter::BlueYellow),
+        _ => Err(invalid("Unknown device color filter")),
+    }
+}
+fn device_orientation(value: &str) -> Result<d::DeviceOrientation, PeerError> {
+    match value {
+        "portrait" => Ok(d::DeviceOrientation::Portrait),
+        "landscapeLeft" => Ok(d::DeviceOrientation::LandscapeLeft),
+        "portraitUpsideDown" => Ok(d::DeviceOrientation::PortraitUpsideDown),
+        "landscapeRight" => Ok(d::DeviceOrientation::LandscapeRight),
+        _ => Err(invalid("Unknown device orientation")),
+    }
+}
+fn device_permission(value: &str) -> Result<d::DevicePermission, PeerError> {
+    match value {
+        "camera" => Ok(d::DevicePermission::Camera),
+        "microphone" => Ok(d::DevicePermission::Microphone),
+        "photos" => Ok(d::DevicePermission::Photos),
+        "contacts" => Ok(d::DevicePermission::Contacts),
+        "calendar" => Ok(d::DevicePermission::Calendar),
+        "reminders" => Ok(d::DevicePermission::Reminders),
+        "location" => Ok(d::DevicePermission::Location),
+        "notifications" => Ok(d::DevicePermission::Notifications),
+        "motion" => Ok(d::DevicePermission::Motion),
+        "mediaLibrary" => Ok(d::DevicePermission::MediaLibrary),
+        "faceId" => Ok(d::DevicePermission::FaceId),
+        _ => Err(invalid("Unknown device permission")),
+    }
+}
+fn device_permission_decision(value: &str) -> Result<d::DevicePermissionDecision, PeerError> {
+    match value {
+        "grant" => Ok(d::DevicePermissionDecision::Grant),
+        "revoke" => Ok(d::DevicePermissionDecision::Revoke),
+        "reset" => Ok(d::DevicePermissionDecision::Reset),
+        _ => Err(invalid("Unknown device permission decision")),
+    }
+}
+fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, PeerError> {
+    Ok(match action {
+        DeviceActionIntent::SetAppearance { dark } => d::DeviceActionKind::SetAppearance(
+            if dark { d::DeviceAppearance::Dark } else { d::DeviceAppearance::Light },
+        ),
+        DeviceActionIntent::SetTextSize { size } => d::DeviceActionKind::SetTextSize(device_text_size(&size)?),
+        DeviceActionIntent::SetToggle { setting, value } => d::DeviceActionKind::SetToggle { setting, value },
+        DeviceActionIntent::SetLiquidGlass { value } => d::DeviceActionKind::SetLiquidGlass(value),
+        DeviceActionIntent::SetColorFilter { filter } => d::DeviceActionKind::SetColorFilter(device_color_filter(&filter)?),
+        DeviceActionIntent::SetOrientation { orientation } => d::DeviceActionKind::SetOrientation(device_orientation(&orientation)?),
+        DeviceActionIntent::SetLocation { latitude, longitude } => d::DeviceActionKind::SetLocation { latitude, longitude },
+        DeviceActionIntent::ClearLocation => d::DeviceActionKind::ClearLocation,
+        DeviceActionIntent::SetPermission { app_id, permission, decision } => d::DeviceActionKind::SetPermission {
+            app_id,
+            permission: device_permission(&permission)?,
+            decision: device_permission_decision(&decision)?,
+        },
+        DeviceActionIntent::OpenUrl { url } => d::DeviceActionKind::OpenUrl(url),
+        DeviceActionIntent::LaunchApp { app_id } => d::DeviceActionKind::LaunchApp(app_id),
+        DeviceActionIntent::TerminateApp { app_id } => d::DeviceActionKind::TerminateApp(app_id),
+        DeviceActionIntent::Shake => d::DeviceActionKind::Shake,
+        DeviceActionIntent::SendPush { app_id, payload } => d::DeviceActionKind::SendPush {
+            app_id,
+            payload: serde_json::from_str(&payload).map_err(|_| invalid("Push payload must be JSON"))?,
+        },
+        DeviceActionIntent::Touch { phase, x, y } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y }),
+        DeviceActionIntent::Key { code, down } => d::DeviceActionKind::Input(d::DeviceInputKind::Key { code, down }),
+        DeviceActionIntent::HardwareButton { button } => d::DeviceActionKind::Input(d::DeviceInputKind::HardwareButton(device_hardware_button(&button)?)),
+        DeviceActionIntent::Rotate => d::DeviceActionKind::Input(d::DeviceInputKind::Rotate),
+        DeviceActionIntent::Fold { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Fold { command }),
+        DeviceActionIntent::Duo { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Duo { command }),
+    })
+}
+fn device_touch_phase(value: &str) -> Result<d::DeviceTouchPhase, PeerError> {
+    match value { "begin" => Ok(d::DeviceTouchPhase::Begin), "move" => Ok(d::DeviceTouchPhase::Move), "end" => Ok(d::DeviceTouchPhase::End), _ => Err(invalid("Unknown device touch phase")) }
+}
+fn device_hardware_button(value: &str) -> Result<d::DeviceHardwareButton, PeerError> {
+    match value { "home" => Ok(d::DeviceHardwareButton::Home), "back" => Ok(d::DeviceHardwareButton::Back), "recents" => Ok(d::DeviceHardwareButton::Recents), "power" => Ok(d::DeviceHardwareButton::Power), "appSwitcher" => Ok(d::DeviceHardwareButton::AppSwitcher), _ => Err(invalid("Unknown device hardware button")) }
+}
+fn device_recording_format(value: &str) -> Result<d::DeviceRecordingFormat, PeerError> {
+    match value { "raw" | "rawFrames" => Ok(d::DeviceRecordingFormat::RawFrames), "mjpeg" => Ok(d::DeviceRecordingFormat::Mjpeg), "avcc" => Ok(d::DeviceRecordingFormat::Avcc), _ => Err(invalid("Unknown device recording format")) }
 }
 fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
     Ok(match value {
@@ -1440,6 +1542,117 @@ impl Owner {
             }
             Intent::CreateInvitation => Next::call(Call::Invite(m::Empty {}), None),
             Intent::RevokeDevice { id } => Next::call(Call::Revoke(op::RevokeDevice { id }), None),
+            Intent::LoadDevices => Next::call(Call::DeviceList(d::DeviceListInput::default()), None),
+            Intent::InspectDevices { host_id: _ } => Next::call(Call::DeviceList(d::DeviceListInput { inspect_only: true, ..Default::default() }), None),
+            Intent::UpdateDeviceTool { host_id: _, tool } => Next::call(Call::DeviceList(d::DeviceListInput { update_tool: Some(match tool.as_str() { "hub" => d::DeviceTool::Hub, "agent" => d::DeviceTool::Agent, _ => return Err(invalid("Unknown device tool")), }), ..Default::default() }), None),
+            Intent::RetryDeviceHost { host_id } => Next::call(Call::DeviceList(d::DeviceListInput { retry_host_id: Some(host_id), ..Default::default() }), None),
+            Intent::ConfigureDevices {
+                enabled,
+                agent_access_enabled,
+                onboarding_completed,
+            } => Next::call(
+                Call::DeviceConfigure(d::DeviceConfigureInput {
+                    enabled,
+                    agent_access_enabled,
+                    onboarding_completed,
+                }),
+                None,
+            ),
+            Intent::UpdateDeviceHosts { hosts } => Next::call(
+                Call::DeviceHosts(d::DeviceHostsInput {
+                    hosts: hosts
+                        .into_iter()
+                        .map(|host| d::DeviceHostConfig {
+                            id: host.id,
+                            label: host.label,
+                            target: host.target,
+                            identity_file: host.identity_file,
+                            port: host.port,
+                        })
+                        .collect(),
+                }),
+                None,
+            ),
+            Intent::OpenDevice {
+                host_id,
+                device_id,
+                platform,
+                boot,
+            } => Next::call(
+                Call::DeviceOpen(d::DeviceOpenInput {
+                    thread_id: self.selected()?,
+                    host_id,
+                    device_id,
+                    platform: device_platform(&platform)?,
+                    boot,
+                }),
+                None,
+            ),
+            Intent::CloseDevice {
+                host_id,
+                device_id,
+                shutdown,
+            } => Next::call(
+                Call::DeviceClose(d::DeviceCloseInput {
+                    thread_id: self.selected()?,
+                    host_id,
+                    device_id,
+                    shutdown,
+                }),
+                None,
+            ),
+            Intent::LoadDeviceDetail { host_id, device_id } => Next::call(
+                Call::DeviceDetail(d::DeviceDetailInput { host_id, device_id }),
+                None,
+            ),
+            Intent::DeviceAction {
+                host_id,
+                device_id,
+                action,
+            } => {
+                let action = device_action(action)?;
+                match action {
+                    d::DeviceActionKind::Input(input) => Next::call(
+                        Call::DeviceInput(d::DeviceInput { host_id, device_id, input }),
+                        None,
+                    ),
+                    action => Next::call(
+                        Call::DeviceAction(d::DeviceActionInput { host_id, device_id, action }),
+                        None,
+                    ),
+                }
+            }
+            Intent::CaptureDeviceScreenshot { host_id, device_id } => Next::call(
+                Call::DeviceScreenshot(d::DeviceScreenshotInput { host_id, device_id }),
+                None,
+            ),
+            Intent::LoadDeviceAccessibility { host_id, device_id } => Next::call(
+                Call::DeviceAccessibility(d::DeviceAccessibilityInput { host_id, device_id }),
+                None,
+            ),
+            Intent::LoadDeviceEventLog { host_id, device_id, limit } => Next::call(
+                Call::DeviceEventLog(d::DeviceEventLogInput { host_id, device_id, limit }),
+                None,
+            ),
+            Intent::StartDeviceRecording { host_id, device_id, format } => Next::call(
+                Call::DeviceRecordingStart(d::DeviceRecordingStartInput { thread_id: self.selected()?, host_id, device_id, format: device_recording_format(&format)? }),
+                None,
+            ),
+            Intent::StopDeviceRecording { host_id, device_id } => Next::call(
+                Call::DeviceRecordingStop(d::DeviceRecordingStopInput { thread_id: self.selected()?, host_id, device_id }),
+                None,
+            ),
+            Intent::SubscribeDevice => {
+                let thread = self.selected()?;
+                self.subscribe_device(&thread);
+                Next::Done
+            }
+            Intent::UnsubscribeDevice => {
+                if let Some(thread) = &self.state.selected_thread {
+                    self.close_stream(&super::owner::StreamKey::Device(thread.clone()));
+                }
+                Next::Done
+            }
             Intent::AddProject { path } => {
                 Next::call(Call::AddProject(op::AddProject { cwd: path }), None)
             }

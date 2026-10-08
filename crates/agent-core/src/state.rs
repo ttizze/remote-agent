@@ -427,6 +427,8 @@ pub struct Snapshot {
     pub thread_undo: crate::commands::undo::ThreadUndo,
     /// Timeline rows already built; every snapshot of the store shares them.
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
+    /// Host-owned simulator and emulator state for the Device surface.
+    pub device: DeviceState,
 }
 
 /// The device's fold of Host preview metadata. Pixels remain in the browser
@@ -481,6 +483,9 @@ impl PreviewState {
             .into_iter()
             .map(|status| (status.tab_id.clone(), status))
             .collect();
+        for tab_id in result.invalidated_recordings {
+            self.last_recordings.remove(&tab_id);
+        }
         if server_epoch_changed {
             self.last_recordings.clear();
         } else {
@@ -593,6 +598,7 @@ mod preview_state_tests {
                 updated_at: String::new(),
             }],
             recordings: vec![],
+            invalidated_recordings: vec![],
             local_servers: vec![],
             scanned_at: String::new(),
             server_epoch: epoch.into(),
@@ -600,6 +606,26 @@ mod preview_state_tests {
             scanner_epoch: "scanner".into(),
             scanner_revision: revision,
         }
+    }
+
+    #[test]
+    fn drops_core_artifact_references_evicted_by_host_retention() {
+        let mut state = PreviewState::default();
+        state.last_recordings.insert(
+            "old".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "recording".into(),
+                tab_id: "old".into(),
+                path: "/tmp/recording.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "0".into(),
+            },
+        );
+        let mut result = list("epoch", 1, "old");
+        result.invalidated_recordings = vec!["old".into()];
+        state.apply_list(result);
+        assert!(state.last_recordings.is_empty());
     }
 
     #[test]
@@ -1174,6 +1200,41 @@ pub enum AnswerEdit {
     Custom { text: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceHostInput {
+    pub id: String,
+    pub label: String,
+    pub target: String,
+    pub identity_file: Option<String>,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceActionIntent {
+    SetAppearance { dark: bool },
+    SetTextSize { size: String },
+    SetToggle { setting: String, value: bool },
+    SetLiquidGlass { value: String },
+    SetColorFilter { filter: String },
+    SetOrientation { orientation: String },
+    SetLocation { latitude: f64, longitude: f64 },
+    ClearLocation,
+    SetPermission { app_id: String, permission: String, decision: String },
+    OpenUrl { url: String },
+    LaunchApp { app_id: String },
+    TerminateApp { app_id: String },
+    Shake,
+    SendPush { app_id: String, payload: String },
+    Touch { phase: String, x: f32, y: f32 },
+    Key { code: String, down: bool },
+    HardwareButton { button: String },
+    Rotate,
+    Fold { command: String },
+    Duo { command: String },
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
@@ -1704,6 +1765,64 @@ pub enum Intent {
     RevokeDevice {
         id: String,
     },
+
+    // Device panel and Host-owned simulator/emulator control.
+    LoadDevices,
+    InspectDevices { host_id: Option<String> },
+    UpdateDeviceTool { host_id: Option<String>, tool: String },
+    RetryDeviceHost { host_id: String },
+    ConfigureDevices {
+        enabled: Option<bool>,
+        agent_access_enabled: Option<bool>,
+        onboarding_completed: Option<bool>,
+    },
+    UpdateDeviceHosts {
+        hosts: Vec<DeviceHostInput>,
+    },
+    OpenDevice {
+        host_id: Option<String>,
+        device_id: String,
+        platform: String,
+        boot: bool,
+    },
+    CloseDevice {
+        host_id: Option<String>,
+        device_id: Option<String>,
+        shutdown: bool,
+    },
+    LoadDeviceDetail {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    DeviceAction {
+        host_id: Option<String>,
+        device_id: String,
+        action: DeviceActionIntent,
+    },
+    CaptureDeviceScreenshot {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    LoadDeviceAccessibility {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    LoadDeviceEventLog {
+        host_id: Option<String>,
+        device_id: String,
+        limit: u16,
+    },
+    StartDeviceRecording {
+        host_id: Option<String>,
+        device_id: String,
+        format: String,
+    },
+    StopDeviceRecording {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    SubscribeDevice,
+    UnsubscribeDevice,
 }
 
 #[cfg(test)]

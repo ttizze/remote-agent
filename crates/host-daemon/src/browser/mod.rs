@@ -276,6 +276,7 @@ impl Browser {
                 Err(error) => Err(format!("recording task terminated: {error}")),
             };
             let mut paths_to_remove = Vec::new();
+            let mut invalidated_recordings = Vec::new();
             if let Ok(artifact) = &result {
                 let mut artifacts = recording_artifacts.lock().await;
                 let entries = artifacts.entry(monitor_key.clone()).or_default();
@@ -285,12 +286,23 @@ impl Browser {
                 while entries.len() > 1 {
                     paths_to_remove.push(PathBuf::from(entries.remove(0).path));
                 }
-                paths_to_remove.extend(prune_completed_recordings(
+                let evicted = prune_completed_recordings(
                     &mut artifacts,
                     MAX_RETAINED_RECORDINGS,
-                ));
+                );
+                for (key, path) in evicted {
+                    invalidated_recordings.push(key);
+                    paths_to_remove.push(path);
+                }
             }
             drop(recording_artifacts);
+            if let Some(preview) = preview.as_ref() {
+                for (thread, tab_id) in &invalidated_recordings {
+                    if let Ok(thread_id) = agent_domain::ThreadId::new(thread.clone()) {
+                        preview.recording_artifact_removed(&thread_id, tab_id);
+                    }
+                }
+            }
             for path in paths_to_remove {
                 let _ = tokio::fs::remove_file(path).await;
             }
@@ -359,6 +371,19 @@ impl Browser {
         if let Some(preview) = self.preview.get()
             && let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned())
         {
+            if preview.get(&thread_id, tab_id).is_err() {
+                // MCP may start recording a live browser target immediately
+                // after a Host reconnect, before PreviewList has rehydrated
+                // its metadata owner.
+                let _ = preview.open(
+                    thread_id.clone(),
+                    tab_id.to_owned(),
+                    None,
+                    PreviewViewportSetting::Fill,
+                    PreviewAppearance::System,
+                    PreviewZoom::X100,
+                );
+            }
             if let Err(error) = preview.recording_started(thread_id, status.clone()) {
                 self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
                     .await;
@@ -957,6 +982,12 @@ impl Browser {
         if request_cancel.is_cancelled() {
             return Err(format!("closing Preview tab {tab_id} was cancelled"));
         }
+        if let Some(Err(error)) = stop_result.as_ref() {
+            // Keep the tab and its recording owner available when finalization
+            // failed. Closing here would discard the only retryable session
+            // while the client still has no usable artifact.
+            return Err(format!("Preview tab was not closed because recording stop failed: {error}"));
+        }
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
         {
@@ -973,12 +1004,7 @@ impl Browser {
             }
         };
         if let Err(error) = close_result {
-            return Err(match stop_result {
-                Some(Err(stop_error)) => {
-                    format!("closing Preview tab failed: {error}; recording stop failed: {stop_error}")
-                }
-                _ => error,
-            });
+            return Err(error);
         }
         let page = state.pages.get_mut(thread).unwrap();
         page.tabs.retain(|id| id != tab_id);
@@ -997,11 +1023,6 @@ impl Browser {
         {
             preview.close(&thread_id, Some(tab_id));
         }
-        if let Some(Err(error)) = stop_result {
-            return Err(format!(
-                "Preview tab closed but recording stop failed: {error}"
-            ));
-        }
         Ok(())
     }
 
@@ -1014,7 +1035,7 @@ impl Browser {
     ) -> Result<agent_protocol::preview::PreviewListResult, String> {
         let thread_id = agent_domain::ThreadId::new(thread.to_owned())
             .map_err(|_| "browser scope is invalid".to_owned())?;
-        let mut browser_result = {
+        let (mut browser_result, detached_preview_tabs) = {
             let mut state = self.state.lock().await;
             self.ensure(&mut state, thread).await?;
             let (tabs, viewports, settings) = {
@@ -1027,6 +1048,30 @@ impl Browser {
             };
             let chrome = state.chrome.as_mut().unwrap();
             let targets = chrome.targets().await?;
+            let live_targets = targets
+                .iter()
+                .map(|target| target.target_id.as_str())
+                .collect::<HashSet<_>>();
+            let detached_preview_tabs = {
+                let page = state.pages.get_mut(thread).unwrap();
+                let detached = page
+                    .preview_tabs
+                    .iter()
+                    .filter(|tab_id| !live_targets.contains(tab_id.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                page.tabs.retain(|tab_id| live_targets.contains(tab_id.as_str()));
+                page.viewports.retain(|tab_id, _| live_targets.contains(tab_id.as_str()));
+                page.preview_tabs.retain(|tab_id| live_targets.contains(tab_id.as_str()));
+                page.preview_settings.retain(|tab_id, _| live_targets.contains(tab_id.as_str()));
+                if !live_targets.contains(page.active.as_str()) {
+                    page.active = page.tabs.last().cloned().unwrap_or_default();
+                }
+                for tab_id in &detached {
+                    chrome.forget_target(tab_id);
+                }
+                detached
+            };
             let sessions = targets
                 .into_iter()
                 .filter(|target| tabs.contains(&target.target_id))
@@ -1065,23 +1110,32 @@ impl Browser {
                     }
                 })
                 .collect();
-            agent_protocol::preview::PreviewListResult {
+            (
+                agent_protocol::preview::PreviewListResult {
                 sessions,
                 recordings: Vec::new(),
+                invalidated_recordings: Vec::new(),
                 local_servers: Vec::new(),
                 scanned_at: String::new(),
                 server_epoch: String::new(),
                 revision: 0,
                 scanner_epoch: String::new(),
                 scanner_revision: 0,
-            }
+                },
+                detached_preview_tabs,
+            )
         };
+        let live_tab_ids = browser_result
+            .sessions
+            .iter()
+            .map(|session| session.tab_id.clone())
+            .collect::<HashSet<_>>();
         browser_result.recordings = self
             .recordings
             .lock()
             .await
             .iter()
-            .filter(|((scope, _), _)| scope == thread)
+            .filter(|((scope, tab_id), _)| scope == thread && live_tab_ids.contains(tab_id))
             .map(|((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: tab_id.clone(),
                 recording: true,
@@ -1095,14 +1149,83 @@ impl Browser {
         ) else {
             return Ok(browser_result);
         };
+        if let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned()) {
+            for tab_id in detached_preview_tabs {
+                preview.close(&thread_id, Some(&tab_id));
+            }
+        }
         preview_ports.set_terminal_owners(terminals.preview_process_owners());
         let discovered = preview_ports
             .scan_snapshot(&[], &terminals.summaries_now())
             .await?;
         let mut result = preview.list(&thread_id);
-        if result.sessions.is_empty() {
-            result.sessions = browser_result.sessions;
+        let live_ids = live_tab_ids;
+        for stale in result
+            .sessions
+            .iter()
+            .filter(|session| !live_ids.contains(session.tab_id.as_str()))
+            .map(|session| session.tab_id.clone())
+            .collect::<Vec<_>>()
+        {
+            preview.close(&thread_id, Some(&stale));
         }
+        result = preview.list(&thread_id);
+        let known_ids = result
+            .sessions
+            .iter()
+            .map(|session| session.tab_id.as_str())
+            .collect::<HashSet<_>>();
+        for session in browser_result
+            .sessions
+            .iter()
+            .filter(|session| !known_ids.contains(session.tab_id.as_str()))
+        {
+            // Browser tabs can outlive the metadata owner across a Host
+            // reconnect. Rehydrate the owner before clients issue recording
+            // or navigation calls against the still-live target.
+            let url = match &session.nav_status {
+                agent_protocol::preview::PreviewNavStatus::Idle => None,
+                agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => {
+                    Some(url.as_str())
+                }
+            };
+            if preview
+                .open(
+                    thread_id.clone(),
+                    session.tab_id.clone(),
+                    url,
+                    session.viewport,
+                    session.appearance,
+                    session.zoom,
+                )
+                .is_ok()
+            {
+                let _ = preview.report_status(
+                    &thread_id,
+                    &session.tab_id,
+                    session.nav_status.clone(),
+                    session.can_go_back,
+                    session.can_go_forward,
+                );
+            }
+        }
+        result = preview.list(&thread_id);
+        let metadata = result
+            .sessions
+            .into_iter()
+            .map(|session| (session.tab_id.clone(), session))
+            .collect::<HashMap<_, _>>();
+        for session in &mut browser_result.sessions {
+            if let Some(previous) = metadata.get(&session.tab_id) {
+                session.viewport = previous.viewport;
+                session.zoom = previous.zoom;
+                session.appearance = previous.appearance;
+            }
+        }
+        result.sessions = browser_result.sessions;
+        result.recordings = browser_result.recordings;
         result.local_servers = discovered.servers;
         result.scanned_at = discovered.scanned_at;
         result.scanner_epoch = discovered.epoch;
@@ -1224,7 +1347,7 @@ fn forget_detached_preview_target(state: &mut State, thread: &str, tab_id: &str)
 fn prune_completed_recordings(
     artifacts: &mut HashMap<RecordingKey, Vec<RecordingArtifact>>,
     maximum: usize,
-) -> Vec<PathBuf> {
+) -> Vec<(RecordingKey, PathBuf)> {
     let mut removed = Vec::new();
     while artifacts.values().map(Vec::len).sum::<usize>() > maximum {
         let Some((key, index, _)) = artifacts
@@ -1250,7 +1373,7 @@ fn prune_completed_recordings(
             let path = PathBuf::from(entries.remove(index).path);
             (path, entries.is_empty())
         };
-        removed.push(path);
+        removed.push((key, path));
         if empty {
             artifacts.remove(&key);
         }
