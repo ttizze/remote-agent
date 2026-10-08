@@ -1,6 +1,6 @@
 //! Host-owned background policy, power probes, local resource samples, and
 //! trace diagnostics.  The domain crate supplies all decisions and views.
-use crate::power_events::next_suspend_lifecycle_event;
+use crate::power_events::SuspendLifecycleSource;
 use agent_domain::{
     BackgroundActivityPolicy, BackgroundBooleanState, BackgroundPolicySnapshot, BackgroundScope,
     ClientActivityLease, ClientActivityReport, HostPowerSnapshot, HostPowerSource,
@@ -1835,30 +1835,36 @@ impl BackgroundOwner {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next_power_sample_ms = now().millis();
-            let mut suspend_event = Box::pin(next_suspend_lifecycle_event(&stop));
+            let mut suspend_events = SuspendLifecycleSource::start(&stop);
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => {
                         probe_stop.cancel();
+                        suspend_events.shutdown().await;
                         return;
                     },
-                    event = &mut suspend_event => {
+                    event = suspend_events.recv() => {
                         let Some(owner) = owner.upgrade() else {
                             probe_stop.cancel();
+                            suspend_events.shutdown().await;
                             return;
                         };
                         let Some(event) = event else {
                             probe_stop.cancel();
+                            suspend_events.shutdown().await;
                             return;
                         };
                         let _mutation = owner.mutation.lock().await;
                         if owner.power.report_lifecycle(event.suspended()).await {
                             let _ = owner.publish().await;
                         }
-                        suspend_event = Box::pin(next_suspend_lifecycle_event(&stop));
                     },
                     _ = interval.tick() => {
-                        let Some(owner) = owner.upgrade() else { return; };
+                        let Some(owner) = owner.upgrade() else {
+                            probe_stop.cancel();
+                            suspend_events.shutdown().await;
+                            return;
+                        };
                         let (leases_changed, interval_ms, current_ms) = {
                             let _mutation = owner.mutation.lock().await;
                             let current = now();
@@ -1886,6 +1892,7 @@ impl BackgroundOwner {
                             tokio::select! {
                                 _ = stop.cancelled() => {
                                     probe_stop.cancel();
+                                    suspend_events.shutdown().await;
                                     return;
                                 }
                                 changed = owner.publish_power_sample() => changed,
@@ -2689,6 +2696,187 @@ mod tests {
             owner.resources.snapshot(stored).health.desktop.status,
             ResourceSourceStatus::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn node_power_reports_cannot_publish_desktop_process_rows() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        let monitor = DesktopProcessMonitor::new();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::NodeLinux,
+                    stale: false,
+                    desktop_processes: monitor.sample(),
+                    updated_at: at.clone(),
+                    ..unknown_power(at)
+                },
+                true,
+            )
+            .await;
+        assert!(owner.power.snapshot().await.desktop_processes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_are_authoritative_until_a_matching_resume() {
+        let monitor = HostPowerMonitor::new();
+        let at = now();
+        let initial = HostPowerSnapshot {
+            source: native_power_source(),
+            stale: false,
+            updated_at: at.clone(),
+            ..unknown_power(at.clone())
+        };
+        assert!(monitor.report(initial).await);
+
+        let suspended_at = Timestamp::from_millis(at.millis() + 1).unwrap();
+        assert!(monitor.report_lifecycle_at(true, suspended_at.clone()).await);
+        let suspended = monitor.snapshot().await;
+        assert!(suspended.suspended);
+        assert!(!suspended.stale);
+        assert!(host_power_constrained(
+            &suspended,
+            &BackgroundActivityPolicy::preset(BackgroundActivityProfile::Balanced),
+        ));
+
+        let awake_sample = HostPowerSnapshot {
+            source: native_power_source(),
+            stale: false,
+            suspended: false,
+            updated_at: Timestamp::from_millis(suspended_at.millis() + 1).unwrap(),
+            ..unknown_power(suspended_at.clone())
+        };
+        assert!(!monitor.report(awake_sample).await);
+        assert!(monitor.snapshot().await.suspended);
+
+        assert!(monitor
+            .report_lifecycle_at(
+                false,
+                Timestamp::from_millis(suspended_at.millis() + 2).unwrap(),
+            )
+            .await);
+        let resumed = monitor.snapshot().await;
+        assert!(!resumed.suspended);
+        assert!(!resumed.stale);
+    }
+
+    #[tokio::test]
+    async fn owner_stop_cancels_the_lifecycle_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = BackgroundOwner::new(directory.path().to_owned());
+        let stop = CancellationToken::new();
+        let mut task = owner.spawn(stop.clone());
+        stop.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .expect("background owner did not stop")
+            .expect("background owner task failed");
+        assert_eq!(result, ());
+        assert!(owner.probe_stop.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn desktop_power_receiver_reports_native_publisher_health() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        let snapshot = HostPowerSnapshot {
+            source: HostPowerSource::DesktopMain,
+            stale: false,
+            on_battery: BackgroundBooleanState::False,
+            updated_at: at.clone(),
+            ..unknown_power(at)
+        };
+        owner.report_power(snapshot, true).await;
+        let telemetry = owner.resources.snapshot(owner.power.snapshot().await);
+        assert_eq!(telemetry.health.desktop.status, ResourceSourceStatus::Healthy);
+        assert_eq!(telemetry.health.desktop.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn stale_desktop_power_cannot_mask_a_fresh_host_observation() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        let host = HostPowerSnapshot {
+            source: HostPowerSource::NodeLinux,
+            stale: false,
+            updated_at: at.clone(),
+            ..unknown_power(at.clone())
+        };
+        owner.power.report(host).await;
+        owner
+            .report_power(HostPowerSnapshot {
+                source: HostPowerSource::DesktopMain,
+                stale: true,
+                updated_at: Timestamp::from_millis(at.millis() + 1).unwrap(),
+                ..unknown_power(at)
+            }, true)
+            .await;
+        assert_eq!(owner.power.snapshot().await.source, HostPowerSource::NodeLinux);
+        assert!(!owner.power.snapshot().await.stale);
+    }
+
+    #[tokio::test]
+    async fn remote_desktop_publisher_is_rejected_by_the_host_owner() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::DesktopMain,
+                    stale: false,
+                    updated_at: Timestamp::from_millis(at.millis() + 86_400_000).unwrap(),
+                    ..unknown_power(at)
+                },
+                false,
+            )
+            .await;
+        let snapshot = owner.power.snapshot().await;
+        assert_eq!(snapshot.source, HostPowerSource::Unknown);
+        assert!(snapshot.stale);
+    }
+
+    #[tokio::test]
+    async fn remote_native_power_report_is_rejected_even_with_a_host_source_label() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::NodeLinux,
+                    stale: false,
+                    on_battery: BackgroundBooleanState::True,
+                    updated_at: at.clone(),
+                    ..unknown_power(at)
+                },
+                false,
+            )
+            .await;
+        let snapshot = owner.power.snapshot().await;
+        assert_eq!(snapshot.source, HostPowerSource::Unknown);
+        assert!(snapshot.stale);
+    }
+
+    #[tokio::test]
+    async fn host_normalizes_future_power_timestamps_and_keeps_desktop_health_scoped() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let now_before = now().millis();
+        let future = Timestamp::from_millis(now_before + 86_400_000).unwrap();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::NodeLinux,
+                    stale: false,
+                    updated_at: future,
+                    ..unknown_power(Timestamp::from_millis(now_before).unwrap())
+                },
+                true,
+            )
+            .await;
+        let stored = owner.power.snapshot().await;
+        assert!(stored.updated_at.millis() >= now_before);
+        assert!(stored.updated_at.millis() < now_before + 10_000);
+        assert_eq!(owner.resources.snapshot(stored).health.desktop.status, ResourceSourceStatus::Unavailable);
     }
 
     #[tokio::test]
