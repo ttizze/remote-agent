@@ -2,6 +2,10 @@
 use crate::execution::TurnStatus;
 use serde::{Deserialize, Serialize};
 
+pub const TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS: u32 = 10 * 60;
+pub const TASK_ACTIVITY_BACKGROUND_FRESHNESS_SECONDS: u32 = 30;
+pub const TASK_ACTIVITY_DISMISS_SECONDS: u32 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PushEnvironment {

@@ -1,8 +1,10 @@
 //! Per-device registrations survive a phone connection closing, but expire with the activity.
 use super::client::ResultKind;
-use agent_core::presentation::task_activity::task_activity_timing;
 use agent_protocol::{
-    live_activity::{RegisterLiveActivity, TaskActivityDisplay, TaskActivitySummary},
+    live_activity::{
+        RegisterLiveActivity, TASK_ACTIVITY_DISMISS_SECONDS, TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS,
+        TaskActivityDisplay, TaskActivitySummary,
+    },
     session::SessionRef,
 };
 use serde::Serialize;
@@ -154,7 +156,6 @@ impl Registry {
     pub fn deliveries(&mut self, now: u64) -> Vec<Delivery> {
         self.entries.retain(|_, entry| entry.expires > now);
         let mut deliveries = Vec::new();
-        let timing = task_activity_timing(false, true);
         for ((owner, activity), entry) in &mut self.entries {
             if entry.due > now {
                 continue;
@@ -166,13 +167,8 @@ impl Registry {
                 "content-state":entry.content,
             });
             if entry.content.display.ongoing {
-                aps["stale-date"] = serde_json::json!(
-                    now + u64::from(
-                        timing
-                            .stale_after_seconds
-                            .expect("remote updates have a freshness limit")
-                    )
-                );
+                aps["stale-date"] =
+                    serde_json::json!(now + u64::from(TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS));
                 aps["relevance-score"] = serde_json::json!(if entry.content.display.urgent {
                     100
                 } else {
@@ -180,7 +176,7 @@ impl Registry {
                 });
             } else {
                 aps["dismissal-date"] =
-                    serde_json::json!(now + u64::from(timing.dismiss_after_seconds));
+                    serde_json::json!(now + u64::from(TASK_ACTIVITY_DISMISS_SECONDS));
             }
             deliveries.push(Delivery {
                 owner: owner.clone(),

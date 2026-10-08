@@ -1,7 +1,10 @@
 //! Compact task state for system surfaces. Never expose message or command bodies.
 use crate::models::task_active;
 use crate::{models::SessionStatus, session::SessionRef, state::Snapshot};
-use agent_protocol::live_activity::{TaskActivityDisplay, TaskActivitySummary, task_phase};
+use agent_protocol::live_activity::{
+    TASK_ACTIVITY_BACKGROUND_FRESHNESS_SECONDS, TASK_ACTIVITY_DISMISS_SECONDS,
+    TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS, TaskActivityDisplay, TaskActivitySummary, task_phase,
+};
 use std::collections::BTreeSet;
 
 struct TaskActivity {
@@ -28,14 +31,12 @@ pub struct TaskActivityTiming {
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn task_activity_timing(foreground: bool, remote_updates: bool) -> TaskActivityTiming {
     TaskActivityTiming {
-        stale_after_seconds: if remote_updates {
-            Some(10 * 60)
-        } else if foreground {
-            None
-        } else {
-            Some(30)
+        stale_after_seconds: match (foreground, remote_updates) {
+            (_, true) => Some(TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS),
+            (true, false) => None,
+            _ => Some(TASK_ACTIVITY_BACKGROUND_FRESHNESS_SECONDS),
         },
-        dismiss_after_seconds: 60,
+        dismiss_after_seconds: TASK_ACTIVITY_DISMISS_SECONDS,
     }
 }
 
