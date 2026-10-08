@@ -7,6 +7,8 @@ import android.graphics.RectF
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.graphics.SurfaceTexture
+import android.os.Handler
+import android.os.HandlerThread
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -23,6 +25,8 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         val keyframe: Boolean,
     )
 
+    private val worker = HandlerThread("device-video-decoder").apply { start() }
+    private val handler = Handler(worker.looper)
     private var textureView: TextureView? = null
     private var surfaceTexture: SurfaceTexture? = null
     private var surface: Surface? = null
@@ -33,6 +37,8 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private var codecDescription: ByteArray? = null
     private var needsKeyframe = true
     private var lastSequence: ULong? = null
+    private var outputPumpScheduled = false
+    @Volatile private var closed = false
     private val pending = ArrayDeque<Frame>()
 
     fun attach(textureView: TextureView) {
@@ -44,14 +50,18 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     }
 
     fun reset(streamKey: String, width: Int, height: Int) {
-        if (this.streamKey == streamKey && this.width == width && this.height == height) return
-        closeCodec()
-        this.streamKey = streamKey
-        this.width = width.coerceAtLeast(1)
-        this.height = height.coerceAtLeast(1)
-        codecDescription = null
-        needsKeyframe = true
-        pending.clear()
+        if (closed) return
+        handler.post {
+            if (this.streamKey == streamKey && this.width == width && this.height == height) return@post
+            closeCodec()
+            this.streamKey = streamKey
+            this.width = width.coerceAtLeast(1)
+            this.height = height.coerceAtLeast(1)
+            codecDescription = null
+            needsKeyframe = true
+            lastSequence = null
+            pending.clear()
+        }
     }
 
     fun submit(
@@ -61,60 +71,92 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         timestampUs: ULong?,
         keyframe: Boolean,
     ) {
-        if (lastSequence == sequence && encoding != "avcc-description") {
-            drainPending()
-            return
+        if (closed) return
+        val copy = payload.copyOf()
+        handler.post {
+            submitOnWorker(copy, encoding, sequence, timestampUs, keyframe)
         }
+    }
+
+    private fun submitOnWorker(
+        payload: ByteArray,
+        encoding: String,
+        sequence: ULong,
+        timestampUs: ULong?,
+        keyframe: Boolean,
+    ) {
+        if (closed) return
+        if (lastSequence?.let { sequence <= it } == true) return
+        if (lastSequence?.let { sequence - it > 1uL } == true) requestKeyframeResync()
         lastSequence = sequence
         if (encoding == "avcc-description") {
+            if (codecDescription?.contentEquals(payload) == true) return
             codecDescription = payload.copyOf()
-            if (codec != null) closeCodec()
+            requestKeyframeResync()
+            return
         }
-        if (encoding != "h264" && encoding != "semu" && encoding != "avcc-description") return
+        if (encoding != "h264" && encoding != "semu") return
         pending.addLast(
             Frame(
-                payload = payload.copyOf(),
+                payload = payload,
                 encoding = encoding,
                 timestampUs = timestampUs?.toLong() ?: sequence.toLong(),
                 keyframe = keyframe,
             ),
         )
-        while (pending.size > MAX_PENDING_FRAMES) pending.removeFirst()
+        while (pending.size > MAX_PENDING_FRAMES) {
+            pending.removeFirst()
+            requestKeyframeResync()
+        }
         drainPending()
     }
 
-    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        if (surfaceTexture === surface && this.surface != null) return
-        this.surface?.release()
-        surfaceTexture = surface
-        this.surface = Surface(surface)
-        configureCodecIfPossible()
-        drainPending()
+    private fun requestKeyframeResync() {
+        closeCodec()
+        pending.clear()
+        needsKeyframe = true
+    }
+
+    override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+        if (closed) return
+        handler.post {
+            if (this.surfaceTexture === texture && this.surface != null) return@post
+            if (this.surfaceTexture != null || this.surface != null) {
+                releaseSurfaceOnWorker()
+            } else {
+                closeCodec()
+            }
+            this.surfaceTexture = texture
+            this.surface = Surface(texture)
+            if (this.width <= 0) this.width = width.coerceAtLeast(1)
+            if (this.height <= 0) this.height = height.coerceAtLeast(1)
+            configureCodecIfPossible()
+            drainPending()
+        }
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-        closeCodec()
-        this.surface?.release()
-        this.surface = null
-        this.surfaceTexture = null
+        if (!closed) handler.post { releaseSurfaceOnWorker() }
         return true
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
 
     fun close() {
+        if (closed) return
+        closed = true
         textureView?.surfaceTextureListener = null
         textureView = null
-        surface?.release()
-        surface = null
-        surfaceTexture = null
-        closeCodec()
-        pending.clear()
-        codecDescription = null
-        streamKey = null
-        lastSequence = null
+        handler.post {
+            releaseSurfaceOnWorker()
+            pending.clear()
+            codecDescription = null
+            streamKey = null
+            lastSequence = null
+        }
+        worker.quitSafely()
     }
 
     private fun configureCodecIfPossible() {
@@ -129,10 +171,15 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
                 sps?.let { format.setByteBuffer("csd-0", ByteBuffer.wrap(it)) }
                 pps?.let { format.setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
             }
-            MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { decoder ->
+            val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            try {
                 decoder.configure(format, outputSurface, null, 0)
                 decoder.start()
                 codec = decoder
+            } catch (error: Throwable) {
+                runCatching { decoder.stop() }
+                runCatching { decoder.release() }
+                throw error
             }
         }.onFailure {
             closeCodec()
@@ -158,13 +205,20 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             }
             if (index < 0) break
             val input = decoder.getInputBuffer(index)
-            if (input == null || frame.payload.isEmpty()) {
+            val payload = normalizeH264Payload(frame.payload)
+            if (input == null || payload.isEmpty()) {
+                runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }
+                    .onFailure { closeCodec() }
                 pending.removeFirst()
+                if (codec == null) return
                 continue
             }
-            val payload = normalizeH264Payload(frame.payload)
             if (payload.size > input.capacity()) {
+                runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }
+                    .onFailure { closeCodec() }
                 pending.removeFirst()
+                requestKeyframeResync()
+                if (codec == null) return
                 continue
             }
             input.clear()
@@ -180,6 +234,18 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             if (codec == null) return
         }
         drainOutput(decoder)
+        scheduleOutputPump()
+    }
+
+    private fun scheduleOutputPump() {
+        if (outputPumpScheduled || closed || codec == null) return
+        outputPumpScheduled = true
+        handler.postDelayed({
+            outputPumpScheduled = false
+            if (closed || codec == null) return@postDelayed
+            drainOutput(codec ?: return@postDelayed)
+            drainPending()
+        }, OUTPUT_PUMP_INTERVAL_MS)
     }
 
     private fun drainOutput(decoder: MediaCodec) {
@@ -204,12 +270,22 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         runCatching { decoder.stop() }
         runCatching { decoder.release() }
         needsKeyframe = true
+    }
+
+    private fun releaseSurfaceOnWorker() {
+        closeCodec()
+        outputPumpScheduled = false
+        pending.clear()
         lastSequence = null
+        surface?.release()
+        surface = null
+        surfaceTexture = null
     }
 
     private companion object {
         const val MAX_PENDING_FRAMES = 8
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
+        const val OUTPUT_PUMP_INTERVAL_MS = 16L
     }
 }
 
@@ -306,7 +382,7 @@ internal fun splitCodecDescription(payload: ByteArray): Pair<ByteArray?, ByteArr
             offset += length
         }
         if (!valid) return null to null
-        return sps to pps
+        return sps?.withAnnexBPrefix() to pps?.withAnnexBPrefix()
     }
     val nalUnits = annexBNalUnits(payload)
     return nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1f) == 7 } to
@@ -314,26 +390,29 @@ internal fun splitCodecDescription(payload: ByteArray): Pair<ByteArray?, ByteArr
 }
 
 private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
-    val starts = mutableListOf<Int>()
+    val starts = mutableListOf<Pair<Int, Int>>()
     var index = 0
-    while (index + 3 < payload.size) {
+    while (index + 2 < payload.size) {
         val length = when {
             payload[index] == 0.toByte() && payload[index + 1] == 0.toByte() && payload[index + 2] == 1.toByte() -> 3
             index + 4 <= payload.size && payload[index] == 0.toByte() && payload[index + 1] == 0.toByte() && payload[index + 2] == 0.toByte() && payload[index + 3] == 1.toByte() -> 4
             else -> 0
         }
         if (length > 0) {
-            starts += index + length
+            starts += index to (index + length)
             index += length
         } else {
             index++
         }
     }
-    return starts.mapIndexedNotNull { position, start ->
-        val end = starts.getOrNull(position + 1) ?: payload.size
+    return starts.mapIndexedNotNull { position, (_, start) ->
+        val end = starts.getOrNull(position + 1)?.first ?: payload.size
         if (start < end) payload.copyOfRange(start, end) else null
     }
 }
+
+private fun ByteArray.withAnnexBPrefix(): ByteArray =
+    ANNEX_B_START_CODE + this
 
 private fun ByteArray.startsWithAnnexB(): Boolean =
     size >= 3 && ((this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||
