@@ -217,8 +217,8 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
                 runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }
                     .onFailure { closeCodec() }
                 pending.removeFirst()
-                requestKeyframeResync()
                 if (codec == null) return
+                requestKeyframeResync()
                 continue
             }
             input.clear()
