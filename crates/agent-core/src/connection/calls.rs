@@ -19,6 +19,8 @@ pub(super) struct JobResult {
     pub complete: Option<Waiter>,
     pub sent: Option<(String, Draft)>,
     pub diff_generation: Option<u64>,
+    pub duo_request: Option<DeviceDuoRequest>,
+    pub device_input_target: Option<DeviceInputTarget>,
 }
 
 fn provider_update_outcome(update: op::ProviderUpdate) -> Result<Outcome, PeerError> {
@@ -216,7 +218,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::PreviewRecordingStop(_) => {
             Reply::PreviewRecordingArtifact(peer.request(call).await?)
         }
-        Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
+        Call::PreviewReportStatus(_)
+        | Call::PreviewClose(_)
+        | Call::PreviewRefresh(_)
+        | Call::PreviewClearProfileData(_) => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
         }
@@ -289,6 +294,16 @@ impl Owner {
         complete: Option<Waiter>,
         sent: Option<(String, Draft)>,
     ) {
+        self.job_with_duo(call, complete, sent, None);
+    }
+
+    pub(super) fn job_with_duo(
+        &mut self,
+        call: Call,
+        complete: Option<Waiter>,
+        sent: Option<(String, Draft)>,
+        duo_request: Option<DeviceDuoRequest>,
+    ) {
         let account_request = matches!(&call, Call::ListAccounts(_));
         let previous_attempt = self.usage_refresh_last_attempt_ms;
         if account_request {
@@ -321,6 +336,9 @@ impl Owner {
                     self.accounts_refresh_in_flight_epoch = None;
                     self.usage_refresh_last_attempt_ms = previous_attempt;
                 }
+                if let Some(request) = duo_request.as_ref() {
+                    self.state.device.fail_duo(request, error.to_string());
+                }
                 if let Some(complete) = complete {
                     self.state.error = Some(error.to_string());
                     let _ = complete.send(Err(error));
@@ -329,11 +347,25 @@ impl Owner {
             }
         };
         let (peer, epoch) = (network.peer.clone(), network.epoch);
+        let duo_call = duo_request.is_some();
         network.spawn(async move {
-            let result = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err(invalid("Request cancelled")),
-                result = execute(&peer, &call) => result,
+            let result = if duo_call {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(invalid("Request cancelled")),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(5), execute(&peer, &call)) => {
+                        match result {
+                            Ok(result) => result,
+                            Err(_) => Err(invalid("Device Duo control timed out")),
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(invalid("Request cancelled")),
+                    result = execute(&peer, &call) => result,
+                }
             };
             let _ = sender
                 .send(Event::Finished(
@@ -344,6 +376,64 @@ impl Owner {
                         complete,
                         sent,
                         diff_generation,
+                        duo_request,
+                        device_input_target: None,
+                    }),
+                ))
+                .await;
+        });
+    }
+
+    /// Executes a core-planned sequence of DeviceInput calls in order. The
+    /// state mutation is already applied before this job starts; a failed
+    /// batch clears that epoch's input ownership so a later surface cannot
+    /// inherit stale pressed keys.
+    pub(super) fn job_device_inputs(
+        &mut self,
+        inputs: Vec<d::DeviceInput>,
+        target: DeviceInputTarget,
+        complete: Option<Waiter>,
+    ) {
+        let Some(last_input) = inputs.last().cloned() else {
+            if let Some(complete) = complete {
+                let _ = complete.send(Ok(Outcome::Applied));
+            }
+            return;
+        };
+        let sender = self.sender.clone();
+        let network = match self.network() {
+            Ok(network) => network,
+            Err(error) => {
+                self.state.device.clear_input_state(&target);
+                if let Some(complete) = complete {
+                    self.state.error = Some(error.to_string());
+                    let _ = complete.send(Err(error));
+                }
+                return;
+            }
+        };
+        let (peer, epoch) = (network.peer.clone(), network.epoch);
+        let serial = self.device_input_serial.clone();
+        network.spawn(async move {
+            let _serial_guard = serial.lock().await;
+            let mut result = Ok(Reply::Done);
+            for input in inputs {
+                result = execute(&peer, &Call::DeviceInput(input)).await;
+                if result.is_err() {
+                    break;
+                }
+            }
+            let _ = sender
+                .send(Event::Finished(
+                    epoch,
+                    Box::new(JobResult {
+                        call: Call::DeviceInput(last_input),
+                        result,
+                        complete,
+                        sent: None,
+                        diff_generation: None,
+                        duo_request: None,
+                        device_input_target: Some(target),
                     }),
                 ))
                 .await;
@@ -387,6 +477,8 @@ impl Owner {
                         complete: Some(complete),
                         sent: None,
                         diff_generation: None,
+                        duo_request: None,
+                        device_input_target: None,
                     }),
                 ))
                 .await;
@@ -487,6 +579,8 @@ impl Owner {
             complete,
             sent,
             diff_generation,
+            duo_request,
+            device_input_target,
         } = result;
         let cancelled = match &call {
             Call::Transcribe(params) => params
@@ -585,6 +679,9 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
+                if let Some(target) = device_input_target.as_ref() {
+                    self.state.device.clear_input_state(target);
+                }
                 self.preview_recording_failed(&call);
                 if !cancelled
                     && (complete.is_some()
@@ -628,6 +725,9 @@ impl Owner {
                     self.state
                         .device
                         .fail_duo_for_input(&thread_id, request, error.to_string());
+                }
+                if let Some(request) = duo_request.as_ref() {
+                    self.state.device.fail_duo(request, error.to_string());
                 }
                 match &call {
                     Call::ProviderCommands(request) => {
@@ -702,10 +802,31 @@ impl Owner {
                 Err(error)
             }
             Ok(reply) => {
+                let next_duo = if matches!(&reply, Reply::Done) {
+                    duo_request
+                        .as_ref()
+                        .and_then(|request| self.state.device.complete_duo(request, true, None))
+                } else {
+                    None
+                };
                 if complete.is_some() {
                     self.state.error = None;
                 }
                 self.reply(&call, reply, sent, diff_generation);
+                if let Some(next) = next_duo {
+                    self.job_with_duo(
+                        Call::DeviceInput(d::DeviceInput {
+                            host_id: next.host_id.clone(),
+                            device_id: next.device_id.clone(),
+                            input: d::DeviceInputKind::Duo {
+                                command: super::intents::device_duo_command(next.command.clone()),
+                            },
+                        }),
+                        None,
+                        None,
+                        Some(next),
+                    );
+                }
                 if let Some(update) = provider_update {
                     provider_update_outcome(update)
                 } else {
@@ -1219,24 +1340,7 @@ impl Owner {
                     .scheduled_tasks
                     .retain(|existing| existing.id != task.id);
             }
-            Reply::Done => {
-                if let Call::DeviceInput(request) = call
-                    && let Some(thread_id) = self.state.selected_thread.clone()
-                    && let Some(next) = self.state.device.complete_duo_for_input(&thread_id, request)
-                {
-                    self.job(
-                        Call::DeviceInput(d::DeviceInput {
-                            host_id: next.host_id,
-                            device_id: next.device_id,
-                            input: d::DeviceInputKind::Duo {
-                                command: super::intents::device_duo_command(next.command),
-                            },
-                        }),
-                        None,
-                        None,
-                    );
-                }
-            }
+            Reply::Done => {}
         }
         match call {
             Call::RemoveRemote(params) => {

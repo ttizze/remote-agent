@@ -7,8 +7,7 @@
 //! downloaded by a desktop client or consumed by the browser MCP bridge.
 
 use agent_protocol::preview::{
-    PREVIEW_RECORDING_MAX_BYTES, PREVIEW_RECORDING_MAX_DURATION_SECONDS,
-    PreviewRecordingArtifact,
+    PREVIEW_RECORDING_MAX_BYTES, PREVIEW_RECORDING_MAX_DURATION_SECONDS, PreviewRecordingArtifact,
 };
 use async_tungstenite::{WebSocketStream, tokio::ConnectStream, tungstenite::Message};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,8 +17,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -42,7 +41,10 @@ pub(crate) const MIME_TYPE: &str = "video/webm;codecs=vp9";
 
 #[derive(Clone, Debug)]
 pub(crate) enum InputEvent {
-    Key { label: String, down: bool },
+    Key {
+        label: String,
+        down: bool,
+    },
     Pointer {
         phase: PointerPhase,
         x: f64,
@@ -89,7 +91,9 @@ pub(crate) fn new_overlay() -> OverlayHandle {
 }
 
 pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
-    let Ok(mut state) = overlay.lock() else { return };
+    let Ok(mut state) = overlay.lock() else {
+        return;
+    };
     let now = Instant::now();
     match event {
         InputEvent::Key { label, down } => {
@@ -98,7 +102,13 @@ pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
                 expires_at: (!down).then_some(now + Duration::from_millis(900)),
             });
         }
-        InputEvent::Pointer { phase, x, y, width, height } => match phase {
+        InputEvent::Pointer {
+            phase,
+            x,
+            y,
+            width,
+            height,
+        } => match phase {
             PointerPhase::Down => {
                 state.pointer = Some(PointerOverlay {
                     x,
@@ -141,7 +151,11 @@ pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
     }
 }
 
-fn decorate_jpeg(frame: &[u8], overlay: &OverlayHandle, options: agent_protocol::preview::PreviewRecordingOptions) -> Result<Vec<u8>, String> {
+fn decorate_jpeg(
+    frame: &[u8],
+    overlay: &OverlayHandle,
+    options: agent_protocol::preview::PreviewRecordingOptions,
+) -> Result<Vec<u8>, String> {
     if !options.show_key_presses && !options.show_mouse_presses {
         return Ok(frame.to_vec());
     }
@@ -168,8 +182,7 @@ fn decorate_jpeg(frame: &[u8], overlay: &OverlayHandle, options: agent_protocol:
             .unwrap_or(0.0);
         let cx = (pointer.x / f64::from(pointer.width.max(1)) * f64::from(width)) as i32;
         let cy = (pointer.y / f64::from(pointer.height.max(1)) * f64::from(height)) as i32;
-        let radius = (20.0 * (1.0 + f64::from(progress) * 0.5)
-            * f64::from(width)
+        let radius = (20.0 * (1.0 + f64::from(progress) * 0.5) * f64::from(width)
             / f64::from(pointer.width.max(1))) as i32;
         draw_ring(&mut image, cx, cy, radius.max(2), [88, 176, 255]);
     }
@@ -229,7 +242,8 @@ fn draw_glyph(image: &mut image::RgbImage, left: i32, top: i32, character: char,
                     for dx in 0..scale {
                         let x = left + column * scale + dx;
                         let y = top + row as i32 * scale + dy;
-                        if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32 {
+                        if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32
+                        {
                             image.put_pixel(x as u32, y as u32, image::Rgb([255, 255, 255]));
                         }
                     }
@@ -241,44 +255,118 @@ fn draw_glyph(image: &mut image::RgbImage, left: i32, top: i32, character: char,
 
 fn glyph_pattern(character: char) -> [u8; 7] {
     match character.to_ascii_uppercase() {
-        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
-        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
-        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
-        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100],
-        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
-        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
-        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
-        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
-        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
-        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        '5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
-        '6' => [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
-        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b11100],
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b11100,
+        ],
         '-' => [0, 0, 0, 0b11111, 0, 0, 0],
-        _ => [0b11111, 0b10001, 0b10101, 0b10101, 0b10101, 0b10001, 0b11111],
+        _ => [
+            0b11111, 0b10001, 0b10101, 0b10101, 0b10101, 0b10001, 0b11111,
+        ],
     }
 }
 
@@ -327,9 +415,8 @@ pub(crate) fn start(
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<StartResult, String> {
-    std::fs::create_dir_all(&recording_directory).map_err(|error| {
-        format!("recording storage is unavailable: {error}")
-    })?;
+    std::fs::create_dir_all(&recording_directory)
+        .map_err(|error| format!("recording storage is unavailable: {error}"))?;
     prune_directory(&recording_directory, protected_paths)?;
     let id = format!("browser-recording-{}", uuid::Uuid::new_v4().simple());
     let artifact_path = recording_directory.join(format!("{id}.webm"));
@@ -415,9 +502,7 @@ async fn run(
                 created_at: chrono::Utc::now().to_rfc3339(),
             })
         }
-        Err(error) => {
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -550,15 +635,13 @@ async fn run_capture(
         return Err(error);
     }
     notify_startup(&mut startup, Ok(()));
-    let deadline = tokio::time::sleep(Duration::from_secs(
-        PREVIEW_RECORDING_MAX_DURATION_SECONDS,
-    ));
+    let deadline = tokio::time::sleep(Duration::from_secs(PREVIEW_RECORDING_MAX_DURATION_SECONDS));
     tokio::pin!(deadline);
     let mut frames = 0u64;
     let mut encoded_frames = 0u64;
     let mut encoded_input_bytes = 0u64;
-    let max_encoded_frames = PREVIEW_RECORDING_MAX_DURATION_SECONDS
-        .saturating_mul(u64::from(options.frame_rate));
+    let max_encoded_frames =
+        PREVIEW_RECORDING_MAX_DURATION_SECONDS.saturating_mul(u64::from(options.frame_rate));
     let mut first_timestamp = None;
     let mut detached = false;
     let mut deadline_reached = false;
@@ -746,9 +829,8 @@ fn is_detached_event(value: &Value, target_id: &str, session: Option<&str>) -> b
     match value["method"].as_str() {
         Some("Target.detachedFromTarget") => {
             value["params"]["targetId"].as_str() == Some(target_id)
-                && session.is_none_or(|session| {
-                    value["params"]["sessionId"].as_str() == Some(session)
-                })
+                && session
+                    .is_none_or(|session| value["params"]["sessionId"].as_str() == Some(session))
         }
         Some("Target.targetCrashed") => {
             value["params"]["targetId"].as_str() == Some(target_id)
@@ -851,8 +933,12 @@ fn frame_repetition_count(
     output_fps: f64,
     max_encoded_frames: u64,
 ) -> u64 {
-    let Some(first) = first_timestamp else { return 1; };
-    let Some(timestamp) = timestamp.filter(|timestamp| timestamp.is_finite() && *timestamp >= first) else {
+    let Some(first) = first_timestamp else {
+        return 1;
+    };
+    let Some(timestamp) =
+        timestamp.filter(|timestamp| timestamp.is_finite() && *timestamp >= first)
+    else {
         return 1;
     };
     let elapsed_frames = (timestamp - first) * output_fps;
@@ -863,7 +949,10 @@ fn frame_repetition_count(
         return max_encoded_frames.saturating_add(1);
     }
     let target = elapsed_frames.round().max(0.0) as u64;
-    target.saturating_add(1).saturating_sub(encoded_frames).max(1)
+    target
+        .saturating_add(1)
+        .saturating_sub(encoded_frames)
+        .max(1)
 }
 
 fn notify_startup(
@@ -887,7 +976,10 @@ fn prune_directory(directory: &Path, protected_paths: &[PathBuf]) -> Result<(), 
         })
         .collect::<Vec<_>>();
     files.sort_by_key(|(_, metadata)| metadata.modified().ok());
-    let mut total = files.iter().map(|(_, metadata)| metadata.len()).sum::<u64>();
+    let mut total = files
+        .iter()
+        .map(|(_, metadata)| metadata.len())
+        .sum::<u64>();
     for (path, metadata) in files {
         let protected = protected_paths
             .iter()
@@ -1041,6 +1133,7 @@ struct Encoder {
     child: Child,
     input: Option<ChildStdin>,
     output: PathBuf,
+    executable: PathBuf,
 }
 
 async fn read_bounded<R>(reader: R) -> Result<Vec<u8>, String>
@@ -1113,9 +1206,7 @@ impl Encoder {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let encoders = run_bounded_command(probe).await.map_err(|error| {
-            format!(
-                "recording initialize-media-recorder failed: ffmpeg is unavailable: {error}"
-            )
+            format!("recording initialize-media-recorder failed: ffmpeg is unavailable: {error}")
         })?;
         let encoder_list = format!(
             "{}{}",
@@ -1252,10 +1343,7 @@ impl Encoder {
             String::from_utf8_lossy(&validation.stderr)
         );
         if !validation.status.success() || !validation_detail.to_ascii_lowercase().contains("vp9") {
-            let detail = validation_detail
-                .chars()
-                .take(1024)
-                .collect::<String>();
+            let detail = validation_detail.chars().take(1024).collect::<String>();
             return Err(format!(
                 "recording save-artifact is not a decodable WebM video: {detail}"
             ));
@@ -1281,7 +1369,10 @@ mod tests {
     fn artifact_paths_use_a_host_generated_id_and_webm_extension() {
         let id = format!("browser-recording-{}", uuid::Uuid::new_v4().simple());
         assert!(id.starts_with("browser-recording-"));
-        assert!(id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        );
         assert_eq!(format!("{id}.webm").ends_with(".webm"), true);
     }
 
@@ -1296,9 +1387,18 @@ mod tests {
     fn screencast_timestamps_expand_gaps_into_encoder_frames() {
         let max = PREVIEW_RECORDING_MAX_DURATION_SECONDS * 30;
         assert_eq!(frame_repetition_count(None, Some(10.0), 0, 30.0, max), 1);
-        assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 1, 30.0, max), 3);
-        assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 4, 30.0, max), 1);
-        assert_eq!(frame_repetition_count(Some(10.0), Some(9.0), 1, 30.0, max), 1);
+        assert_eq!(
+            frame_repetition_count(Some(10.0), Some(10.1), 1, 30.0, max),
+            3
+        );
+        assert_eq!(
+            frame_repetition_count(Some(10.0), Some(10.1), 4, 30.0, max),
+            1
+        );
+        assert_eq!(
+            frame_repetition_count(Some(10.0), Some(9.0), 1, 30.0, max),
+            1
+        );
         assert_eq!(frame_repetition_count(Some(10.0), None, 1, 30.0, max), 1);
         assert_eq!(
             frame_repetition_count(Some(0.0), Some(f64::MAX), 0, 60.0, 120 * 60),
@@ -1310,17 +1410,29 @@ mod tests {
     fn recording_options_bound_frame_rate_and_overlay_preferences() {
         use agent_protocol::preview::PreviewRecordingOptions;
         assert!(PreviewRecordingOptions::default().validate().is_ok());
-        assert!(PreviewRecordingOptions { frame_rate: 60, show_key_presses: true, show_mouse_presses: true }.validate().is_ok());
-        assert!(PreviewRecordingOptions { frame_rate: 24, ..PreviewRecordingOptions::default() }.validate().is_err());
+        assert!(
+            PreviewRecordingOptions {
+                frame_rate: 60,
+                show_key_presses: true,
+                show_mouse_presses: true
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            PreviewRecordingOptions {
+                frame_rate: 24,
+                ..PreviewRecordingOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn cleanup_reports_both_failed_cdp_commands() {
-        let error = combine_cleanup_results(
-            Err("stop failed".into()),
-            Err("detach failed".into()),
-        )
-        .unwrap_err();
+        let error = combine_cleanup_results(Err("stop failed".into()), Err("detach failed".into()))
+            .unwrap_err();
         assert!(error.contains("stop failed"));
         assert!(error.contains("detach failed"));
     }
@@ -1395,9 +1507,7 @@ mod tests {
         (
             matches!(
                 phase,
-                FakeCdpPhase::Encoding
-                    | FakeCdpPhase::Screencasting
-                    | FakeCdpPhase::Stopping
+                FakeCdpPhase::Encoding | FakeCdpPhase::Screencasting | FakeCdpPhase::Stopping
             ),
             matches!(
                 phase,
@@ -1408,21 +1518,37 @@ mod tests {
             ),
             matches!(
                 phase,
-                FakeCdpPhase::Encoding
-                    | FakeCdpPhase::Screencasting
-                    | FakeCdpPhase::Stopping
+                FakeCdpPhase::Encoding | FakeCdpPhase::Screencasting | FakeCdpPhase::Stopping
             ),
         )
     }
 
     #[test]
     fn fake_cdp_lifecycle_always_detaches_and_aborts_started_encoders() {
-        assert_eq!(fake_cleanup_actions(FakeCdpPhase::Connected), (false, false, false));
-        assert_eq!(fake_cleanup_actions(FakeCdpPhase::Attached), (false, true, false));
-        assert_eq!(fake_cleanup_actions(FakeCdpPhase::Encoding), (true, true, true));
-        assert_eq!(fake_cleanup_actions(FakeCdpPhase::Screencasting), (true, true, true));
-        assert_eq!(fake_cleanup_actions(FakeCdpPhase::Stopping), (true, true, true));
-        assert_eq!(fake_cleanup_actions(FakeCdpPhase::Finished), (false, false, false));
+        assert_eq!(
+            fake_cleanup_actions(FakeCdpPhase::Connected),
+            (false, false, false)
+        );
+        assert_eq!(
+            fake_cleanup_actions(FakeCdpPhase::Attached),
+            (false, true, false)
+        );
+        assert_eq!(
+            fake_cleanup_actions(FakeCdpPhase::Encoding),
+            (true, true, true)
+        );
+        assert_eq!(
+            fake_cleanup_actions(FakeCdpPhase::Screencasting),
+            (true, true, true)
+        );
+        assert_eq!(
+            fake_cleanup_actions(FakeCdpPhase::Stopping),
+            (true, true, true)
+        );
+        assert_eq!(
+            fake_cleanup_actions(FakeCdpPhase::Finished),
+            (false, false, false)
+        );
     }
 
     #[test]

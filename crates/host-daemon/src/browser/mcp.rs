@@ -5,19 +5,27 @@ use agent_transport::peer::{JsonlReader, JsonlWriter};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+#[cfg(not(unix))]
+use std::net::Ipv4Addr;
+use std::{path::Path, sync::Arc, time::Duration};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
 const MAX_MESSAGE: usize = 6 * 1024 * 1024;
+const TOKEN_ENV: &str = "AGENT_TOOLS_TOKEN";
 
 pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let listener =
-            tokio::net::UnixListener::bind(browser.socket()).map_err(|e| e.to_string())?;
-        std::fs::set_permissions(browser.socket(), std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
+            tokio::net::UnixListener::bind(browser.socket_path()).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(
+            browser.socket_path(),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .map_err(|e| e.to_string())?;
+        browser.set_bridge_endpoint(browser.socket_path().to_string_lossy().into_owned())?;
         let weak = Arc::downgrade(browser);
         let stop = browser.stop.clone();
         tokio::spawn(async move {
@@ -31,40 +39,7 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
                         let Ok((socket, _)) = accepted else { break; };
                         let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
                         let Some(browser) = weak.upgrade() else { break; };
-                        calls.spawn(async move {
-                            let _permit = permit;
-                            let (read, write) = socket.into_split();
-                            let mut input = JsonlReader::with_max_message_bytes(read, 64 * 1024);
-                            let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
-                            let Ok(Ok(Some(line))) = tokio::time::timeout(std::time::Duration::from_secs(5), input.read_line()).await else { return; };
-                            let Ok(request) = serde_json::from_str::<BridgeRequest>(&line) else { return; };
-                            let request_cancel = CancellationToken::new();
-                            let request_future = bridge_request(
-                                &browser,
-                                request,
-                                request_cancel.clone(),
-                            );
-                            tokio::pin!(request_future);
-                            let result = tokio::select! {
-                                result = &mut request_future => result,
-                                _ = input.read_line() => {
-                                    // MCP cancellation closes this bridge
-                                    // socket.  Drain the request after
-                                    // cancelling it so a recording start can
-                                    // detach CDP and clean its encoder before
-                                    // the Host task is dropped.
-                                    request_cancel.cancel();
-                                    let _ = request_future.await;
-                                    return;
-                                },
-                                _ = browser.stop.cancelled() => {
-                                    request_cancel.cancel();
-                                    let _ = request_future.await;
-                                    return;
-                                },
-                            };
-                            if let Ok(line) = serde_json::to_string(&result) { let _ = output.write_line(&line).await; }
-                        });
+                        calls.spawn(serve_connection(socket, browser, permit));
                     }
                 }
             }
@@ -75,18 +50,112 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     {
-        let _ = browser;
-        Err("Shared BEX browser currently requires a Unix Host.".into())
+        // Bind synchronously before handing the socket to Tokio.  This keeps
+        // the listener setup identical on every Tokio runtime and avoids
+        // relying on an async bind future during synchronous Host startup.
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let listener = tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        browser.set_bridge_endpoint(format!("tcp://{address}"))?;
+        let weak = Arc::downgrade(browser);
+        let stop = browser.stop.clone();
+        tokio::spawn(async move {
+            let capacity = Arc::new(tokio::sync::Semaphore::new(32));
+            let mut calls = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    Some(_) = calls.join_next(), if !calls.is_empty() => {},
+                    accepted = listener.accept() => {
+                        let Ok((socket, _)) = accepted else { break; };
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
+                        let Some(browser) = weak.upgrade() else { break; };
+                        calls.spawn(serve_connection(socket, browser, permit));
+                    }
+                }
+            }
+            calls.abort_all();
+            while calls.join_next().await.is_some() {}
+        });
+        Ok(())
+    }
+}
+
+async fn serve_connection<S>(
+    socket: S,
+    browser: Arc<Browser>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let _permit = permit;
+    let (read, write) = tokio::io::split(socket);
+    let mut input = JsonlReader::with_max_message_bytes(read, 64 * 1024);
+    let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
+    let Ok(Ok(Some(line))) = tokio::time::timeout(Duration::from_secs(5), input.read_line()).await
+    else {
+        return;
+    };
+    let Ok(envelope) = serde_json::from_str::<AuthenticatedBridgeRequest>(&line) else {
+        return;
+    };
+    let Some(scope) = browser.bridge_scope(&envelope.token) else {
+        return;
+    };
+    let request = envelope.request;
+    let request_cancel = CancellationToken::new();
+    let request_future = bridge_request(&browser, &scope, request, request_cancel.clone());
+    tokio::pin!(request_future);
+    let result = tokio::select! {
+        result = &mut request_future => result,
+        _ = input.read_line() => {
+            // MCP cancellation closes this bridge socket. Drain the request
+            // after cancelling it so recording cleanup can finish in the Host.
+            request_cancel.cancel();
+            let _ = request_future.await;
+            return;
+        },
+        _ = browser.stop.cancelled() => {
+            request_cancel.cancel();
+            let _ = request_future.await;
+            return;
+        },
+    };
+    if let Ok(line) = serde_json::to_string(&result) {
+        let _ = output.write_line(&line).await;
     }
 }
 
 #[derive(Serialize, Deserialize)]
 enum BridgeRequest {
-    Browser { thread: String, action: BrowserAction },
-    PreviewList { thread: String },
-    PreviewClose { thread: String, tab_id: Option<String> },
-    PreviewRecordingStart { thread: String, tab_id: Option<String> },
-    PreviewRecordingStop { thread: String, tab_id: Option<String> },
+    Browser {
+        thread: String,
+        action: BrowserAction,
+    },
+    PreviewList {
+        thread: String,
+    },
+    PreviewClose {
+        thread: String,
+        tab_id: Option<String>,
+    },
+    PreviewRecordingStart {
+        thread: String,
+        tab_id: Option<String>,
+        options: agent_protocol::preview::PreviewRecordingOptions,
+    },
+    PreviewRecordingStop {
+        thread: String,
+        tab_id: Option<String>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct AuthenticatedBridgeRequest {
+    token: String,
+    request: BridgeRequest,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,26 +169,34 @@ enum BridgeResponse {
 
 async fn bridge_request(
     browser: &Browser,
+    scope: &super::BrowserBridgeScope,
     request: BridgeRequest,
     request_cancel: CancellationToken,
 ) -> Result<BridgeResponse, String> {
+    let thread = &scope.thread;
+    let owner = &scope.owner;
     match request {
-        BridgeRequest::Browser { thread, action } => browser
-            .agent(&thread, action)
+        BridgeRequest::Browser { action, .. } => browser
+            .agent_for_owner(owner, thread, action)
             .await
             .map(BridgeResponse::Frame),
-        BridgeRequest::PreviewList { thread } => browser
-            .preview_list(&thread)
+        BridgeRequest::PreviewList { .. } => browser
+            .preview_list_for_owner(owner, thread)
             .await
             .map(BridgeResponse::PreviewList),
-        BridgeRequest::PreviewClose { thread, tab_id } => {
+        BridgeRequest::PreviewClose { tab_id, .. } => {
             if let Some(tab_id) = tab_id {
                 browser
-                    .close_preview_tab_with_cancel(&thread, &tab_id, request_cancel.clone())
+                    .close_preview_tab_with_cancel_for_owner(
+                        owner,
+                        thread,
+                        &tab_id,
+                        request_cancel.clone(),
+                    )
                     .await?;
             } else {
                 let preview = tokio::select! {
-                    result = browser.preview_list(&thread) => result?,
+                    result = browser.preview_list_for_owner(owner, thread) => result?,
                     _ = request_cancel.cancelled() => {
                         return Err("closing Preview tabs was cancelled".to_owned());
                     }
@@ -131,8 +208,9 @@ async fn bridge_request(
                     .collect::<Vec<_>>();
                 for tab_id in tabs {
                     browser
-                        .close_preview_tab_with_cancel(
-                            &thread,
+                        .close_preview_tab_with_cancel_for_owner(
+                            owner,
+                            thread,
                             &tab_id,
                             request_cancel.clone(),
                         )
@@ -141,30 +219,40 @@ async fn bridge_request(
             }
             Ok(BridgeResponse::Empty)
         }
-        BridgeRequest::PreviewRecordingStart { thread, tab_id } => {
+        BridgeRequest::PreviewRecordingStart { tab_id, options, .. } => {
             let tab_id = match tab_id {
                 Some(tab_id) => tab_id,
-                None => browser.preview_active_tab(&thread).await?,
+                None => browser.preview_active_tab_for_owner(owner, thread).await?,
             };
             browser
-                .start_preview_recording_with_cancel(
-                    &thread,
+                .start_preview_recording_with_cancel_for_owner(
+                    owner,
+                    thread,
                     &tab_id,
-                    agent_protocol::preview::PreviewRecordingOptions::default(),
+                    options,
                     request_cancel,
                 )
-            .await
-            .map(BridgeResponse::PreviewRecordingStatus)
+                .await
+                .map(BridgeResponse::PreviewRecordingStatus)
         }
-        BridgeRequest::PreviewRecordingStop { thread, tab_id } => {
+        BridgeRequest::PreviewRecordingStop { tab_id, .. } => {
             let tab_id = match tab_id {
                 Some(tab_id) => tab_id,
-                None => browser.active_recording_tab(&thread).await?,
+                None => {
+                    browser
+                        .active_recording_tab_for_owner(owner, thread)
+                        .await?
+                }
             };
             browser
-                .stop_preview_recording_with_cancel(&thread, &tab_id, request_cancel)
-            .await
-            .map(BridgeResponse::PreviewRecordingArtifact)
+                .stop_preview_recording_with_cancel_for_owner(
+                    owner,
+                    thread,
+                    &tab_id,
+                    request_cancel,
+                )
+                .await
+                .map(BridgeResponse::PreviewRecordingArtifact)
         }
     }
 }
@@ -191,7 +279,12 @@ fn preview_close_tool() -> Value {
 
 fn preview_recording_start_tool() -> Value {
     json!({"name":"preview_recording_start", "description":"Start bounded Host-side recording of a Preview tab. The returned status includes the start timestamp; use preview_recording_stop to finalize the WebM artifact.",
-        "inputSchema":{"type":"object","properties":{"tab_id":{"type":"string"}},"additionalProperties":false}})
+        "inputSchema":{"type":"object","properties":{
+            "tab_id":{"type":"string"},
+            "frame_rate":{"type":"integer","enum":[30,60]},
+            "show_key_presses":{"type":"boolean"},
+            "show_mouse_presses":{"type":"boolean"}
+        },"additionalProperties":false}})
 }
 
 fn preview_recording_stop_tool() -> Value {
@@ -251,10 +344,18 @@ fn content(result: Result<BridgeResponse, String>) -> Value {
         Ok(BridgeResponse::Frame(frame)) => json!({"content":[
             {"type":"text","text":json!({"tabs":frame.tabs,"active_tab":frame.tab_id,"width":frame.width,"height":frame.height,"dialog":frame.dialog}).to_string()},
             {"type":"image","mimeType":"image/jpeg","data":STANDARD.encode(frame.image)}],"isError":false}),
-        Ok(BridgeResponse::PreviewList(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
-        Ok(BridgeResponse::PreviewRecordingStatus(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
-        Ok(BridgeResponse::PreviewRecordingArtifact(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
-        Ok(BridgeResponse::Empty) => json!({"content":[{"type":"text","text":"Preview tab closed"}],"isError":false}),
+        Ok(BridgeResponse::PreviewList(result)) => {
+            json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false})
+        }
+        Ok(BridgeResponse::PreviewRecordingStatus(result)) => {
+            json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false})
+        }
+        Ok(BridgeResponse::PreviewRecordingArtifact(result)) => {
+            json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false})
+        }
+        Ok(BridgeResponse::Empty) => {
+            json!({"content":[{"type":"text","text":"Preview tab closed"}],"isError":false})
+        }
         Err(error) => json!({"content":[{"type":"text","text":error}],"isError":true}),
     }
 }
@@ -263,7 +364,7 @@ enum ToolCall {
     Browser(BrowserAction),
     PreviewList,
     PreviewClose(Option<String>),
-    PreviewRecordingStart(Option<String>),
+    PreviewRecordingStart(Option<String>, agent_protocol::preview::PreviewRecordingOptions),
     PreviewRecordingStop(Option<String>),
 }
 
@@ -273,11 +374,49 @@ fn parse_tool_call(name: &str, value: &Value) -> Result<ToolCall, String> {
         Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
         Some(_) => Err("tab_id must be a string when provided".into()),
     };
+    let recording_options = || {
+        let frame_rate = value
+            .get("frame_rate")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or_else(|| "frame_rate must be 30 or 60".to_owned())
+            })
+            .transpose()?
+            .unwrap_or(30);
+        let options = agent_protocol::preview::PreviewRecordingOptions {
+            frame_rate,
+            show_key_presses: value
+                .get("show_key_presses")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| "show_key_presses must be a boolean".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(false),
+            show_mouse_presses: value
+                .get("show_mouse_presses")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| "show_mouse_presses must be a boolean".to_owned())
+                })
+                .transpose()?
+                .unwrap_or(false),
+        };
+        options.validate().map_err(|error| error.to_owned())?;
+        Ok::<_, String>(options)
+    };
     match name {
         "bex_browser" => parse_action(value).map(ToolCall::Browser),
         "preview_list" => Ok(ToolCall::PreviewList),
         "preview_close" => Ok(ToolCall::PreviewClose(optional_tab_id()?)),
-        "preview_recording_start" => Ok(ToolCall::PreviewRecordingStart(optional_tab_id()?)),
+        "preview_recording_start" => Ok(ToolCall::PreviewRecordingStart(
+            optional_tab_id()?,
+            recording_options()?,
+        )),
         "preview_recording_stop" => Ok(ToolCall::PreviewRecordingStop(optional_tab_id()?)),
         _ => Err("unknown browser tool".into()),
     }
@@ -328,7 +467,7 @@ pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
                                         ToolCall::Browser(action) => BridgeRequest::Browser { thread, action },
                                         ToolCall::PreviewList => BridgeRequest::PreviewList { thread },
                                         ToolCall::PreviewClose(tab_id) => BridgeRequest::PreviewClose { thread, tab_id },
-                                        ToolCall::PreviewRecordingStart(tab_id) => BridgeRequest::PreviewRecordingStart { thread, tab_id },
+                                        ToolCall::PreviewRecordingStart(tab_id, options) => BridgeRequest::PreviewRecordingStart { thread, tab_id, options },
                                         ToolCall::PreviewRecordingStop(tab_id) => BridgeRequest::PreviewRecordingStop { thread, tab_id },
                                     };
                                     (id, content(bridge(&socket, request).await))
@@ -357,28 +496,48 @@ pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
 }
 
 async fn bridge(socket: &Path, request: BridgeRequest) -> Result<BridgeResponse, String> {
-    #[cfg(unix)]
-    {
-        let socket = tokio::net::UnixStream::connect(socket)
+    let token =
+        std::env::var(TOKEN_ENV).map_err(|_| "browser bridge authentication is unavailable")?;
+    let line = serde_json::to_string(&AuthenticatedBridgeRequest { token, request })
+        .map_err(|e| e.to_string())?;
+    let endpoint = socket.to_string_lossy();
+    if let Some(address) = endpoint.strip_prefix("tcp://") {
+        let address = address
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| "invalid browser bridge endpoint")?;
+        let socket = tokio::net::TcpStream::connect(address)
             .await
             .map_err(|_| "BEX Hostに接続できません。会話を開き直してください。")?;
         let (read, write) = socket.into_split();
         let mut output = JsonlWriter::with_max_message_bytes(write, 64 * 1024);
-        output
-            .write_line(&serde_json::to_string(&request).map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| e.to_string())?;
+        output.write_line(&line).await.map_err(|e| e.to_string())?;
         let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
             .read_line()
             .await
             .map_err(|e| e.to_string())?
             .ok_or("BEX Hostとの接続が切れました。")?;
         serde_json::from_str(&line).map_err(|_| "invalid browser response")?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (socket, request);
-        Err("Shared BEX browser currently requires a Unix Host.".into())
+    } else {
+        #[cfg(unix)]
+        {
+            let socket = tokio::net::UnixStream::connect(socket)
+                .await
+                .map_err(|_| "BEX Hostに接続できません。会話を開き直してください。")?;
+            let (read, write) = socket.into_split();
+            let mut output = JsonlWriter::with_max_message_bytes(write, 64 * 1024);
+            output.write_line(&line).await.map_err(|e| e.to_string())?;
+            let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
+                .read_line()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("BEX Hostとの接続が切れました。")?;
+            serde_json::from_str(&line).map_err(|_| "invalid browser response")?
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = line;
+            Err("invalid browser bridge endpoint".into())
+        }
     }
 }
 
@@ -405,5 +564,35 @@ mod tests {
             parse_tool_call("preview_recording_stop", &json!({"tab_id": "tab"})).unwrap(),
             ToolCall::PreviewRecordingStop(Some(tab)) if tab == "tab"
         ));
+    }
+
+    #[test]
+    fn recording_start_parses_bounded_options() {
+        let call = parse_tool_call(
+            "preview_recording_start",
+            &json!({
+                "tab_id": "tab",
+                "frame_rate": 60,
+                "show_key_presses": true,
+                "show_mouse_presses": true
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            call,
+            ToolCall::PreviewRecordingStart(
+                Some(tab),
+                agent_protocol::preview::PreviewRecordingOptions {
+                    frame_rate: 60,
+                    show_key_presses: true,
+                    show_mouse_presses: true
+                }
+            ) if tab == "tab"
+        ));
+        let error = match parse_tool_call("preview_recording_start", &json!({"frame_rate": 24})) {
+            Ok(_) => panic!("unsupported frame rates must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("30 or 60"));
     }
 }

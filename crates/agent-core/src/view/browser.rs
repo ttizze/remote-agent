@@ -93,8 +93,18 @@ impl BrowserSettings {
                 "browser profiles are limited to {BROWSER_PROFILE_MAX_COUNT} custom profiles"
             ));
         }
+        let mut profile_ids = BTreeSet::new();
         for profile in &self.profiles {
             validate_profile(profile)?;
+            if is_built_in_browser_profile_id(&profile.id) {
+                return Err("built-in browser profiles cannot be stored as custom profiles".into());
+            }
+            if !profile_ids.insert(profile.id.as_str()) {
+                return Err("browser profile ids must be unique".into());
+            }
+            if profile.kind != BrowserProfileKind::Persistent {
+                return Err("custom browser profiles must be persistent".into());
+            }
         }
         Ok(())
     }
@@ -177,7 +187,10 @@ pub fn resolve_browser_profiles(user_profiles: &[BrowserProfile]) -> Vec<Browser
 }
 
 pub fn is_built_in_browser_profile_id(id: &str) -> bool {
-    matches!(id, DEFAULT_BROWSER_PROFILE_ID | INCOGNITO_BROWSER_PROFILE_ID)
+    matches!(
+        id,
+        DEFAULT_BROWSER_PROFILE_ID | INCOGNITO_BROWSER_PROFILE_ID
+    )
 }
 
 pub fn find_browser_profile<'a>(
@@ -255,10 +268,9 @@ pub fn create_browser_profile(
     {
         return Err("browser profile id is already in use".into());
     }
-    let base = normalize_browser_profile_name(
-        requested_name.unwrap_or(DEFAULT_NEW_BROWSER_PROFILE_NAME),
-    )
-    .ok_or_else(|| "browser profile names must be non-empty".to_owned())?;
+    let base =
+        normalize_browser_profile_name(requested_name.unwrap_or(DEFAULT_NEW_BROWSER_PROFILE_NAME))
+            .ok_or_else(|| "browser profile names must be non-empty".to_owned())?;
     let names = resolve_browser_profiles(profiles)
         .into_iter()
         .map(|profile| profile.name)
@@ -267,8 +279,8 @@ pub fn create_browser_profile(
     let mut suffix = 2u32;
     while names.contains(&name) {
         let suffix_text = format!(" {suffix}");
-        let available = BROWSER_PROFILE_NAME_MAX_LENGTH
-            .saturating_sub(suffix_text.encode_utf16().count());
+        let available =
+            BROWSER_PROFILE_NAME_MAX_LENGTH.saturating_sub(suffix_text.encode_utf16().count());
         let prefix = base
             .chars()
             .scan(0usize, |units, character| {
@@ -345,9 +357,7 @@ pub fn validate_browser_viewport(viewport: &PreviewViewportSetting) -> Result<()
             agent_protocol::preview::PREVIEW_VIEWPORT_MAX_DIMENSION
         ));
     }
-    if u64::from(width) * u64::from(height)
-        > agent_protocol::preview::PREVIEW_VIEWPORT_MAX_AREA
-    {
+    if u64::from(width) * u64::from(height) > agent_protocol::preview::PREVIEW_VIEWPORT_MAX_AREA {
         return Err(format!(
             "browser viewport area must not exceed {} pixels",
             agent_protocol::preview::PREVIEW_VIEWPORT_MAX_AREA
@@ -377,7 +387,11 @@ mod tests {
         let resolved = settings.resolved();
         assert_eq!(resolved.profile_id, DEFAULT_BROWSER_PROFILE_ID);
         assert_eq!(
-            resolved.profiles.iter().map(|profile| profile.id.as_str()).collect::<Vec<_>>(),
+            resolved
+                .profiles
+                .iter()
+                .map(|profile| profile.id.as_str())
+                .collect::<Vec<_>>(),
             vec![DEFAULT_BROWSER_PROFILE_ID, INCOGNITO_BROWSER_PROFILE_ID]
         );
     }
@@ -491,12 +505,9 @@ mod tests {
         )
         .expect("collision profile");
         assert_eq!(second.name, "New profile 2");
-        let renamed = rename_browser_profile(
-            &[first.clone(), second.clone()],
-            &first.id,
-            "  Work  ",
-        )
-        .expect("rename");
+        let renamed =
+            rename_browser_profile(&[first.clone(), second.clone()], &first.id, "  Work  ")
+                .expect("rename");
         assert_eq!(renamed[0].name, "Work");
         assert!(rename_browser_profile(&renamed, DEFAULT_BROWSER_PROFILE_ID, "x").is_err());
         let removed = remove_browser_profile(&renamed, &second.id).expect("remove");

@@ -224,6 +224,9 @@ pub(super) struct Owner {
     pub visited: BTreeMap<ThreadId, Timestamp>,
     pub waiters: BTreeMap<CommandId, Waiter>,
     pub dictations: BTreeMap<String, CancellationToken>,
+    /// Serializes modifier transitions and releases so ordered DeviceInput
+    /// batches cannot overtake one another across native surfaces.
+    pub device_input_serial: Arc<tokio::sync::Mutex<()>>,
     /// The shell, outbox and Working preference the list holds last saw.
     pub observed_list: Option<ObservedList>,
     /// The thread whose setup "Work locally" is cancelling.
@@ -310,6 +313,7 @@ impl Owner {
             visited: BTreeMap::new(),
             waiters: BTreeMap::new(),
             dictations: BTreeMap::new(),
+            device_input_serial: Arc::new(tokio::sync::Mutex::new(())),
             observed_list: None,
             work_locally: None,
             stream_publish_pending: false,
@@ -893,6 +897,8 @@ impl Owner {
     fn disconnected(&mut self, error: String) {
         self.interrupt_uploads();
         self.abandon_requests();
+        self.state.device.clear_duo_on_disconnect();
+        self.state.device.clear_input_state_on_disconnect();
         self.accounts_refresh_in_flight_epoch = None;
         self.load_balancing_resources_in_flight = false;
         self.state.host_resources_received_at_ms = None;

@@ -10,14 +10,18 @@ async fn stdio_browser_tool_is_typed_and_does_not_expose_generic_execution() {
         .await
         .unwrap();
     let config = browser.provider_config("test-thread").unwrap();
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_host-daemon"))
-        .args(
-            config["args"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|arg| arg.as_str().unwrap()),
-        )
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_host-daemon"));
+    command.args(
+        config["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap()),
+    );
+    for (key, value) in config["env"].as_object().unwrap() {
+        command.env(key, value.as_str().unwrap());
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true)
@@ -183,6 +187,7 @@ async fn cancelled_mcp_call_keeps_the_bridge_responsive() {
         .arg(&socket)
         .arg("--thread")
         .arg("cancel-thread")
+        .env("AGENT_TOOLS_TOKEN", "test")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true)

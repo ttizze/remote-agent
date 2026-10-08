@@ -134,6 +134,79 @@ pub struct DeviceScreenView {
     pub table_mode_available: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceTouchPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Projects a native pointer through a centered `ContentScale.Fit` surface.
+/// Points in the letterbox bars are ignored so clients cannot send touches
+/// outside the device framebuffer. The calculation uses f64 intermediates so
+/// finite f32 dimensions cannot underflow the fit ratio before normalization.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn project_touch_point(
+    x: f32,
+    y: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+    content_width: f32,
+    content_height: f32,
+) -> Option<DeviceTouchPoint> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !viewport_width.is_finite()
+        || !viewport_height.is_finite()
+        || !content_width.is_finite()
+        || !content_height.is_finite()
+        || viewport_width <= 0.0
+        || viewport_height <= 0.0
+        || content_width <= 0.0
+        || content_height <= 0.0
+    {
+        return None;
+    }
+    let x = f64::from(x);
+    let y = f64::from(y);
+    let viewport_width = f64::from(viewport_width);
+    let viewport_height = f64::from(viewport_height);
+    let content_width = f64::from(content_width);
+    let content_height = f64::from(content_height);
+    let scale = (viewport_width / content_width).min(viewport_height / content_height);
+    let rendered_width = content_width * scale;
+    let rendered_height = content_height * scale;
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !rendered_width.is_finite()
+        || !rendered_height.is_finite()
+        || rendered_width <= 0.0
+        || rendered_height <= 0.0
+    {
+        return None;
+    }
+    let left = (viewport_width - rendered_width) / 2.0;
+    let top = (viewport_height - rendered_height) / 2.0;
+    if !left.is_finite()
+        || !top.is_finite()
+        || x < left
+        || x > left + rendered_width
+        || y < top
+        || y > top + rendered_height
+    {
+        return None;
+    }
+    let normalized_x = ((x - left) / rendered_width).clamp(0.0, 1.0);
+    let normalized_y = ((y - top) / rendered_height).clamp(0.0, 1.0);
+    if !normalized_x.is_finite() || !normalized_y.is_finite() {
+        return None;
+    }
+    Some(DeviceTouchPoint {
+        x: normalized_x as f32,
+        y: normalized_y as f32,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceRecordingView {
@@ -326,11 +399,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 sequence: frame.sequence,
             })
             .collect(),
-        video_frames: state
-            .video_frames
-            .values()
-            .map(video_frame_view)
-            .collect(),
+        video_frames: state.video_frames.values().map(video_frame_view).collect(),
         video_events: state
             .video_events
             .values()
@@ -422,33 +491,38 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 bytes: vec![],
             })
             .collect(),
-        last_recording: state.last_recording.as_ref().map(|recording| DeviceRecordingView {
-            thread_id: recording.status.thread_id.to_string(),
-            host_id: recording.status.host_id.clone(),
-            device_id: recording.status.device_id.clone(),
-            recording_id: recording.status.recording_id,
-            session_epoch: recording.status.session_epoch.clone(),
-            format: recording_format_name(recording.status.format).into(),
-            file_name: recording.status.file_name.clone(),
-            mime_type: recording.status.mime_type.clone(),
-            started_at: recording.status.started_at.clone(),
-            frame_count: recording.status.frame_count,
-            byte_count: recording.status.byte_count,
-            error: recording.status.error.clone(),
-            bytes: recording.bytes.clone(),
-        }),
+        last_recording: state
+            .last_recording
+            .as_ref()
+            .map(|recording| DeviceRecordingView {
+                thread_id: recording.status.thread_id.to_string(),
+                host_id: recording.status.host_id.clone(),
+                device_id: recording.status.device_id.clone(),
+                recording_id: recording.status.recording_id,
+                session_epoch: recording.status.session_epoch.clone(),
+                format: recording_format_name(recording.status.format).into(),
+                file_name: recording.status.file_name.clone(),
+                mime_type: recording.status.mime_type.clone(),
+                started_at: recording.status.started_at.clone(),
+                frame_count: recording.status.frame_count,
+                byte_count: recording.status.byte_count,
+                error: recording.status.error.clone(),
+                bytes: recording.bytes.clone(),
+            }),
         duo_controls: state
             .duo_controls
             .iter()
-            .map(|((thread_id, host_id, device_id, session_epoch), control)| DeviceDuoControlView {
-                thread_id: thread_id.clone(),
-                host_id: host_id.clone(),
-                device_id: device_id.clone(),
-                session_epoch: session_epoch.clone(),
-                pending: control.pending,
-                requested: control.requested.as_ref().map(device_duo_command_name),
-                error: control.error.clone(),
-            })
+            .map(
+                |((thread_id, host_id, device_id, session_epoch), control)| DeviceDuoControlView {
+                    thread_id: thread_id.clone(),
+                    host_id: host_id.clone(),
+                    device_id: device_id.clone(),
+                    session_epoch: session_epoch.clone(),
+                    pending: control.pending,
+                    requested: control.requested.as_ref().map(device_duo_command_name),
+                    error: control.error.clone(),
+                },
+            )
             .collect(),
         error: state.error.clone(),
     }
@@ -478,7 +552,9 @@ fn device_duo_command_name(command: &crate::state::DeviceDuoCommandIntent) -> St
         crate::state::DeviceDuoCommandIntent::Pose { value } => format!("pose:{value:?}"),
         crate::state::DeviceDuoCommandIntent::Table { value } => format!("table:{value}"),
         crate::state::DeviceDuoCommandIntent::Physical { value } => format!("physical:{value:?}"),
-        crate::state::DeviceDuoCommandIntent::Orientation { value } => format!("orientation:{value:?}"),
+        crate::state::DeviceDuoCommandIntent::Orientation { value } => {
+            format!("orientation:{value:?}")
+        }
     }
 }
 
@@ -541,5 +617,38 @@ mod tests {
         assert_eq!(view.status, "disabled");
         assert!(!view.enabled);
         assert!(view.hosts.is_empty());
+    }
+
+    #[test]
+    fn touch_projection_rejects_letterbox_and_accepts_edges() {
+        assert_eq!(
+            project_touch_point(50.0, 50.0, 100.0, 100.0, 100.0, 50.0),
+            Some(DeviceTouchPoint { x: 0.5, y: 0.5 })
+        );
+        assert_eq!(
+            project_touch_point(0.0, 25.0, 100.0, 100.0, 100.0, 50.0),
+            Some(DeviceTouchPoint { x: 0.0, y: 0.5 })
+        );
+        assert_eq!(
+            project_touch_point(100.0, 75.0, 100.0, 100.0, 100.0, 50.0),
+            Some(DeviceTouchPoint { x: 1.0, y: 1.0 })
+        );
+        assert!(project_touch_point(50.0, 10.0, 100.0, 100.0, 100.0, 50.0).is_none());
+    }
+
+    #[test]
+    fn touch_projection_keeps_finite_extreme_dimensions() {
+        let projected = project_touch_point(
+            f32::MIN_POSITIVE,
+            f32::MAX / 2.0,
+            f32::MAX / 2.0,
+            f32::MAX,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+        )
+        .expect("finite dimensions should remain projectable");
+        assert!(projected.x.is_finite() && projected.y.is_finite());
+        assert!((0.0..=1.0).contains(&projected.x));
+        assert!((0.0..=1.0).contains(&projected.y));
     }
 }

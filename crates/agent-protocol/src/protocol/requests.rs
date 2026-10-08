@@ -137,6 +137,7 @@ contracts! {
     PreviewList, "host/preview/list" => (crate::preview::PreviewList, crate::preview::PreviewListResult) [clone],
     PreviewSubscribe, "host/preview/subscribe" => (crate::preview::PreviewSubscribe, crate::preview::PreviewListResult),
     PreviewOpen, "host/preview/open" => (crate::preview::PreviewOpen, crate::preview::PreviewSessionSnapshot) [clone],
+    PreviewClearProfileData, "host/preview/profile/clearData" => (crate::preview::PreviewClearProfileData, crate::models::Empty) [clone],
     PreviewNavigate, "host/preview/navigate" => (crate::preview::PreviewNavigate, crate::preview::PreviewSessionSnapshot) [clone],
     PreviewResize, "host/preview/resize" => (crate::preview::PreviewResize, crate::preview::PreviewSessionSnapshot) [clone],
     PreviewSetAppearance, "host/preview/appearance" => (crate::preview::PreviewSetAppearance, crate::preview::PreviewSessionSnapshot) [clone],

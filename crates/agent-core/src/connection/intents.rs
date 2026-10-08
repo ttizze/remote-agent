@@ -37,12 +37,21 @@ pub(super) enum Next {
     Commands(Vec<PendingCommand>),
     /// A request whose reply resolves the intent.
     Call(Box<Call>, Option<Box<(String, Draft)>>),
+    /// A Duo request carries its immutable session identity through the
+    /// asynchronous Host call so a reconnect cannot complete the wrong one.
+    DuoCall(Box<Call>, DeviceDuoRequest, Option<Box<(String, Draft)>>),
     /// Applied at once with this outcome.
     Outcome(Outcome),
+    /// Ordered DeviceInput calls planned by the core input owner.
+    DeviceInputs(Vec<d::DeviceInput>, DeviceInputTarget),
 }
 impl Next {
     pub(super) fn call(call: Call, sent: Option<(String, Draft)>) -> Self {
         Self::Call(Box::new(call), sent.map(Box::new))
+    }
+
+    pub(super) fn duo_call(call: Call, request: DeviceDuoRequest) -> Self {
+        Self::DuoCall(Box::new(call), request, None)
     }
 }
 
@@ -275,8 +284,8 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
             payload: serde_json::from_str(&payload)
                 .map_err(|_| invalid("Push payload must be JSON"))?,
         },
-        DeviceActionIntent::Touch { phase, x, y, raw } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y, raw }),
-        DeviceActionIntent::Key { code, key, down, meta, ctrl } => {
+        DeviceActionIntent::Touch { phase, x, y } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y, raw: false }),
+        DeviceActionIntent::Key { code, key, down, meta, ctrl, shift: _, alt: _ } => {
             d::DeviceActionKind::Input(d::DeviceInputKind::Key { code, key, down, meta, ctrl })
         }
         DeviceActionIntent::HardwareButton { button } => d::DeviceActionKind::Input(d::DeviceInputKind::HardwareButton(device_hardware_button(&button)?)),
@@ -435,6 +444,15 @@ impl Owner {
                 }
             }
             Ok(Next::Call(call, sent)) => self.job(*call, Some(complete), sent.map(|sent| *sent)),
+            Ok(Next::DuoCall(call, request, sent)) => self.job_with_duo(
+                *call,
+                Some(complete),
+                sent.map(|sent| *sent),
+                Some(request),
+            ),
+            Ok(Next::DeviceInputs(inputs, target)) => {
+                self.job_device_inputs(inputs, target, Some(complete))
+            }
         }
     }
 
@@ -2605,16 +2623,45 @@ impl Owner {
                     let Some(request) = request else {
                         return Ok(Next::Done);
                     };
-                    return Ok(Next::call(
+                    return Ok(Next::duo_call(
                         Call::DeviceInput(d::DeviceInput {
-                            host_id: request.host_id,
-                            device_id: request.device_id,
+                            host_id: request.host_id.clone(),
+                            device_id: request.device_id.clone(),
                             input: d::DeviceInputKind::Duo {
-                                command: device_duo_command(request.command),
+                                command: device_duo_command(request.command.clone()),
                             },
                         }),
-                        None,
+                        request,
                     ));
+                }
+                if let DeviceActionIntent::Key {
+                    code,
+                    key,
+                    down,
+                    meta,
+                    ctrl,
+                    shift,
+                    alt,
+                } = action
+                {
+                    let plan = self.state.device.key_input_plan(
+                        self.selected()?,
+                        host_id,
+                        device_id,
+                        code,
+                        key,
+                        down,
+                        DeviceModifierFacts {
+                            shift,
+                            alt,
+                            meta,
+                            ctrl,
+                        },
+                    )?;
+                    return Ok(match plan.inputs.len() {
+                        0 => Next::Done,
+                        _ => Next::DeviceInputs(plan.inputs, plan.target),
+                    });
                 }
                 let action = device_action(action)?;
                 match action {
@@ -2626,6 +2673,23 @@ impl Owner {
                         Call::DeviceAction(d::DeviceActionInput { host_id, device_id, action }),
                         None,
                     ),
+                }
+            }
+            Intent::ReleaseDeviceInput {
+                host_id,
+                device_id,
+                session_epoch,
+            } => {
+                let plan = self.state.device.release_input_plan(
+                    self.selected()?,
+                    host_id,
+                    device_id,
+                    session_epoch,
+                )?;
+                match plan {
+                    None => Next::Done,
+                    Some(plan) if plan.inputs.is_empty() => Next::Done,
+                    Some(plan) => Next::DeviceInputs(plan.inputs, plan.target),
                 }
             }
             Intent::CaptureDeviceScreenshot { host_id, device_id } => Next::call(
@@ -2694,6 +2758,11 @@ impl Owner {
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewOpen(request), None)
+            }
+            Intent::PreviewClearProfileData { profile_id } => {
+                let request = agent_protocol::preview::PreviewClearProfileData { profile_id };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewClearProfileData(request), None)
             }
             Intent::PreviewNavigate { tab_id, url } => {
                 let request = agent_protocol::preview::PreviewNavigate {

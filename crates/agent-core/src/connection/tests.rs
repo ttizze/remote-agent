@@ -1044,6 +1044,8 @@ fn job(
         complete: None,
         sent,
         diff_generation: None,
+        duo_request: None,
+        device_input_target: None,
     }
 }
 
@@ -1115,6 +1117,8 @@ fn a_remote_pairing_receipt_observes_the_registered_host() {
         complete: Some(complete),
         sent: None,
         diff_generation: None,
+        duo_request: None,
+        device_input_target: None,
     });
     assert_eq!(
         receipt.try_recv().unwrap().unwrap(),
@@ -3441,6 +3445,8 @@ fn reloading_a_diff_focus_invalidates_the_old_preview_and_lazy_files() {
         complete: None,
         sent: None,
         diff_generation: Some(stale_generation),
+        duo_request: None,
+        device_input_target: None,
     });
     assert!(owner.state.sources.diff_preview.as_ref().unwrap().result.is_none());
     owner.finished(JobResult {
@@ -3453,6 +3459,8 @@ fn reloading_a_diff_focus_invalidates_the_old_preview_and_lazy_files() {
         complete: None,
         sent: None,
         diff_generation: Some(current_generation),
+        duo_request: None,
+        device_input_target: None,
     });
     assert!(owner
         .state

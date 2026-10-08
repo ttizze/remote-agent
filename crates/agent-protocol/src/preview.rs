@@ -35,14 +35,13 @@ impl Default for PreviewAppearance {
     }
 }
 
-/// Where a clicked link opens on a device with an in-app Preview surface.
+/// Where links open when a client offers an in-app Preview surface.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 #[serde(rename_all = "lowercase")]
 pub enum BrowserLinkTarget {
-    /// The operating system's default browser.
     #[default]
     System,
-    /// A tab in the in-app Preview surface.
     App,
 }
 
@@ -362,6 +361,9 @@ pub struct PreviewTerminalOwner {
 pub struct PreviewListResult {
     pub sessions: Vec<PreviewSessionSnapshot>,
     pub recordings: Vec<PreviewRecordingStatus>,
+    /// Completed artifacts that were evicted by the Host retention owner.
+    /// Clients must drop any Save/Attach reference for these tabs.
+    pub invalidated_recordings: Vec<String>,
     pub local_servers: Vec<DiscoveredLocalServer>,
     pub scanned_at: String,
     pub server_epoch: String,
@@ -531,6 +533,21 @@ impl PreviewOpen {
         Ok(())
     }
 }
+
+/// Clears cookies, cache and origin storage for one Host browser profile.
+/// The Host keeps the profile identity scoped to its own browser context; the
+/// caller removes the durable settings row only after this operation succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClearProfileData {
+    pub profile_id: String,
+}
+impl PreviewClearProfileData {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_profile_id(&self.profile_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewNavigate {
@@ -704,6 +721,13 @@ pub enum PreviewEvent {
         created_at: String,
         status: PreviewRecordingStatus,
     },
+    RecordingArtifactRemoved {
+        thread_id: agent_domain::ThreadId,
+        tab_id: String,
+        revision: u64,
+        server_epoch: String,
+        created_at: String,
+    },
 }
 
 pub fn normalize_preview_url(input: &str) -> Result<String, String> {
@@ -778,6 +802,13 @@ mod tests {
         assert!(PreviewRecordingStop { thread_id, tab_id: String::new() }
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn profile_data_clear_requires_a_scoped_profile_id() {
+        assert!(PreviewClearProfileData { profile_id: "profile-a".into() }.validate().is_ok());
+        assert!(PreviewClearProfileData { profile_id: String::new() }.validate().is_err());
+        assert!(PreviewClearProfileData { profile_id: "bad\nprofile".into() }.validate().is_err());
     }
 
     #[test]

@@ -265,6 +265,12 @@ private struct DecodedDeviceFrame {
     let data: Data
 }
 
+private struct DeviceDecodeRequest {
+    let input: [DeviceVideoFrameView]
+    let threadId: String
+    let generation: UInt64
+}
+
 /// Serializes decoder state away from SwiftUI. The actor owns VideoToolbox,
 /// Core Image and all sequence checks; the main actor only turns the returned
 /// bounded image data into a view image.
@@ -332,6 +338,9 @@ private actor DeviceFrameDecoderWorker {
 /// so a delayed delta from one panel cannot corrupt the other panel's image.
 @MainActor
 final class DeviceFrameStore: ObservableObject {
+    private static let maxAdmittedBytes = 16 * 1024 * 1024
+    private static let maxAdmittedFrameBytes = 8 * 1024 * 1024
+
     struct RenderedFrame: Identifiable {
         let id: String
         let threadId: String
@@ -348,18 +357,58 @@ final class DeviceFrameStore: ObservableObject {
     private let worker = DeviceFrameDecoderWorker()
     private var generation: UInt64 = 0
     private var consumeTask: Task<Void, Never>?
+    private var decodeInFlight = false
+    private var pendingRequest: DeviceDecodeRequest?
+    private var resetTask: Task<Void, Never>?
+    private var resetSerial: UInt64 = 0
 
     func consume(_ input: [DeviceVideoFrameView], threadId: String) {
-        generation = generation.saturatingAdd(1)
-        let request = generation
-        consumeTask?.cancel()
+        generation = generation &+ 1
+        let request = DeviceDecodeRequest(
+            input: Self.admit(input, threadId: threadId),
+            threadId: threadId,
+            generation: generation
+        )
+        if decodeInFlight || resetTask != nil {
+            // A frame revision is a snapshot, so only the newest snapshot has
+            // any value once a decode is already running. Replacing this one
+            // slot keeps both request count and retained payload bytes bounded.
+            pendingRequest = request
+        } else {
+            start(request)
+        }
+    }
+
+    private static func admit(_ input: [DeviceVideoFrameView], threadId: String) -> [DeviceVideoFrameView] {
+        var selected: [(Int, DeviceVideoFrameView)] = []
+        var bytes = 0
+        for (index, frame) in input.enumerated().reversed() {
+            guard frame.threadId == threadId,
+                  !frame.payload.isEmpty,
+                  frame.payload.count <= maxAdmittedFrameBytes,
+                  bytes <= maxAdmittedBytes - frame.payload.count else { continue }
+            selected.append((index, frame))
+            bytes += frame.payload.count
+        }
+        selected.sort { $0.0 < $1.0 }
+        return selected.map { $0.1 }
+    }
+
+    private func start(_ request: DeviceDecodeRequest) {
+        decodeInFlight = true
         let worker = worker
         consumeTask = Task { [weak self] in
-            let decoded = await worker.consume(input, threadId: threadId)
-            guard !Task.isCancelled, let self, self.generation == request else { return }
+            let decoded = await worker.consume(request.input, threadId: request.threadId)
+            guard let self else { return }
+            self.finish(request, decoded: decoded)
+        }
+    }
+
+    private func finish(_ request: DeviceDecodeRequest, decoded: [DecodedDeviceFrame]) {
+        if request.generation == generation {
             for frame in decoded {
                 guard let image = UIImage(data: frame.data) else { continue }
-                self.frames[frame.key] = RenderedFrame(
+                frames[frame.key] = RenderedFrame(
                     id: frame.key,
                     threadId: frame.threadId,
                     sessionEpoch: frame.sessionEpoch,
@@ -372,6 +421,15 @@ final class DeviceFrameStore: ObservableObject {
                 )
             }
         }
+        decodeInFlight = false
+        consumeTask = nil
+        startPendingIfReady()
+    }
+
+    private func startPendingIfReady() {
+        guard !decodeInFlight, resetTask == nil, let next = pendingRequest else { return }
+        pendingRequest = nil
+        start(next)
     }
 
     func frames(for threadId: String) -> [RenderedFrame] {
@@ -379,17 +437,26 @@ final class DeviceFrameStore: ObservableObject {
     }
 
     func reset(threadId: String) {
-        generation = generation.saturatingAdd(1)
+        generation = generation &+ 1
+        pendingRequest = nil
         consumeTask?.cancel()
-        consumeTask = nil
         let prefix = "\(threadId):"
         frames = frames.filter { !$0.key.hasPrefix(prefix) }
+        resetTask?.cancel()
+        resetSerial = resetSerial &+ 1
+        let serial = resetSerial
         let worker = worker
-        Task { await worker.reset(threadId: threadId) }
+        resetTask = Task { [weak self] in
+            await worker.reset(threadId: threadId)
+            guard let self, self.resetSerial == serial else { return }
+            self.resetTask = nil
+            self.startPendingIfReady()
+        }
     }
 
     deinit {
         consumeTask?.cancel()
+        resetTask?.cancel()
     }
 }
 

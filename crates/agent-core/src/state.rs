@@ -1727,13 +1727,15 @@ pub enum DeviceActionIntent {
     TerminateApp { app_id: String },
     Shake,
     SendPush { app_id: String, payload: String },
-    Touch { phase: String, x: f32, y: f32, raw: bool },
+    Touch { phase: String, x: f32, y: f32 },
     Key {
         code: String,
         key: String,
         down: bool,
         meta: bool,
         ctrl: bool,
+        shift: bool,
+        alt: bool,
     },
     HardwareButton { button: String },
     Rotate,
@@ -1874,6 +1876,9 @@ pub enum Intent {
         appearance: agent_protocol::preview::PreviewAppearance,
         zoom: agent_protocol::preview::PreviewZoom,
         profile_id: Option<String>,
+    },
+    PreviewClearProfileData {
+        profile_id: String,
     },
     PreviewNavigate {
         tab_id: String,
@@ -2644,6 +2649,13 @@ pub enum Intent {
         host_id: Option<String>,
         device_id: String,
         action: DeviceActionIntent,
+    },
+    /// Releases the key state owned by one native surface before focus,
+    /// subscription, or device-session ownership changes.
+    ReleaseDeviceInput {
+        host_id: Option<String>,
+        device_id: String,
+        session_epoch: Option<String>,
     },
     CaptureDeviceScreenshot {
         host_id: Option<String>,
