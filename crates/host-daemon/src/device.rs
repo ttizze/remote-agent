@@ -4770,7 +4770,7 @@ impl DeviceService {
                     host_id: key.0.clone(),
                     device_id: key.1.clone(),
                     session_epoch: session.session_epoch,
-                    app,
+                    app: app.clone(),
                     received_at: now_iso(),
                 }));
         }

@@ -1378,20 +1378,20 @@ impl HostRpcService {
                             } => result,
                         };
                         match result {
-                            Ok(Ok(event))
+                            Ok(event)
                                 if crate::device::DeviceService::event_belongs_to_thread(
                                     &event, &thread,
                                 ) =>
                             {
                                 return Some(vec![event]);
                             }
-                            Ok(Ok(_)) => continue,
-                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                            Ok(_) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                 return Some(vec![agent_protocol::device::DeviceEvent::State(
                                     devices.state_async().await,
                                 )]);
                             }
-                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 return None;
                             }
                         }

@@ -471,9 +471,11 @@ mod tests {
             })
             .collect();
         assert!(quoted.iter().any(|text| text.contains("Assistant quote:")));
-        assert!(quoted
-            .iter()
-            .any(|text| text.contains("Use `cache[key]` and *keep* this.")));
+        assert!(
+            quoted
+                .iter()
+                .any(|text| text.contains("Use `cache[key]` and *keep* this."))
+        );
         assert!(blocks.iter().any(|block| {
             match block {
                 MarkdownBlock::Paragraph { style, .. } if !style.quoted => {

@@ -60,7 +60,7 @@ pub(crate) struct DeviceInputTarget {
     pub session_epoch: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DeviceInputPlan {
     pub inputs: Vec<agent_protocol::device::DeviceInput>,
     pub target: DeviceInputTarget,
