@@ -327,8 +327,8 @@ struct DeviceScreen: View {
     var body: some View {
         let view = model.snapshot.device()
         let threadSessions = view.sessions.filter { $0.threadId == threadId }
-        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.openedAt)" }.joined(separator: ",")
-        let sessionEpochs = Dictionary(uniqueKeysWithValues: threadSessions.map { ("\($0.hostId):\($0.deviceId)", $0.openedAt) })
+        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.sessionEpoch)" }.joined(separator: ",")
+        let sessionEpochs = Dictionary(uniqueKeysWithValues: threadSessions.map { ("\($0.hostId):\($0.deviceId)", $0.sessionEpoch) })
         let decodedFrames = deviceFrames.frames(for: threadId)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -517,7 +517,6 @@ struct DeviceScreen: View {
                                             deviceId: frame.deviceId,
                                             screenId: frame.screenId,
                                             size: proxy.size,
-                                            raw: deviceRawTouch(view, hostId: frame.hostId, deviceId: frame.deviceId, screenId: frame.screenId),
                                         ))
                                     }
                                 }
@@ -540,7 +539,6 @@ struct DeviceScreen: View {
                                             deviceId: frame.deviceId,
                                             screenId: 0,
                                             size: proxy.size,
-                                            raw: deviceRawTouch(view, hostId: frame.hostId, deviceId: frame.deviceId, screenId: 0),
                                         ))
                             }
                         }
@@ -568,14 +566,14 @@ struct DeviceScreen: View {
                                 Button("Save recording") {
                                     guard recording.error == nil,
                                           !recording.bytes.isEmpty,
-                                          let fileExtension = recording.artifactExtension,
-                                          recording.artifactMimeType != nil else {
+                                          !recording.fileName.isEmpty,
+                                          !recording.mimeType.isEmpty else {
                                         model.notice = "The Host did not return a playable device recording. Save is unavailable until recording finalization succeeds."
                                         return
                                     }
                                     recordingDocument = DeviceRecordingDocument(data: Data(recording.bytes))
-                                    recordingFileName = "device-recording.\(fileExtension)"
-                                    recordingContentType = UTType(filenameExtension: fileExtension) ?? .data
+                                    recordingFileName = recording.fileName
+                                    recordingContentType = UTType(filenameExtension: URL(fileURLWithPath: recording.fileName).pathExtension) ?? .data
                                     exportingRecording = true
                                 }
                             Button("Attach recording") {
@@ -583,15 +581,15 @@ struct DeviceScreen: View {
                                     let directory = try AttachmentFiles.directory()
                                     guard recording.error == nil,
                                           !recording.bytes.isEmpty,
-                                          let fileExtension = recording.artifactExtension,
-                                          let mimeType = recording.artifactMimeType else {
+                                          !recording.fileName.isEmpty,
+                                          !recording.mimeType.isEmpty else {
                                         model.notice = "The Host did not return a playable device recording. Attach is unavailable until recording finalization succeeds."
                                         return
                                     }
-                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).\(fileExtension)")
+                                    let url = directory.appendingPathComponent(recording.fileName)
                                     try Data(recording.bytes).write(to: url, options: .atomic)
                                     model.perform(.attachFiles(draftKey: model.snapshot.currentDraftKey(), files: [
-                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: mimeType)
+                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: recording.mimeType)
                                     ]))
                                 } catch {
                                     model.notice = error.localizedDescription
@@ -626,7 +624,7 @@ struct DeviceScreen: View {
             let next = model.snapshot.device()
             let nextEpochs = Dictionary(uniqueKeysWithValues: next.sessions
                 .filter { $0.threadId == threadId }
-                .map { ("\($0.hostId):\($0.deviceId)", $0.openedAt) })
+                .map { ("\($0.hostId):\($0.deviceId)", $0.sessionEpoch) })
             deviceFrames.consume(next.videoEvents, threadId: threadId, sessionEpochs: nextEpochs)
             let sessions = model.snapshot.device().sessions
             for session in sessions where session.threadId == threadId {
@@ -649,7 +647,7 @@ struct DeviceScreen: View {
         }
     }
 
-    private func deviceTouchGesture(hostId: String, deviceId: String, screenId: Int, size: CGSize, raw: Bool) -> some Gesture {
+    private func deviceTouchGesture(hostId: String, deviceId: String, screenId: Int, size: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let key = "\(hostId):\(deviceId):\(screenId)"
@@ -660,7 +658,7 @@ struct DeviceScreen: View {
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1)), raw: raw),
+                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
                 ))
             }
             .onEnded { value in
@@ -670,7 +668,7 @@ struct DeviceScreen: View {
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1)), raw: raw),
+                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
                 ))
             }
     }
@@ -688,12 +686,6 @@ private struct DeviceRecordingDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
-    }
-}
-
-private func deviceRawTouch(_ view: DeviceView, hostId: String, deviceId: String, screenId: Int) -> Bool {
-    view.screens.contains { screen in
-        screen.hostId == hostId && screen.deviceId == deviceId && (screen.screenId.map(Int.init) ?? 0) == screenId && screen.rawTouch
     }
 }
 

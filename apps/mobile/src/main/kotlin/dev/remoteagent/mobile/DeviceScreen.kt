@@ -59,11 +59,6 @@ import java.io.File
 
 private data class StreamKey(val hostId: String, val deviceId: String, val screenId: Int, val sessionEpoch: String)
 
-private fun rawTouchFor(view: DeviceView, hostId: String, deviceId: String, screenId: Int): Boolean =
-    view.screens.any {
-        it.hostId == hostId && it.deviceId == deviceId && (it.screenId?.toInt() ?: 0) == screenId && it.rawTouch
-    }
-
 private data class DeviceKeyFacts(
     val code: String,
     val key: String,
@@ -78,7 +73,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val context = LocalContext.current
     val hostProfile = model.profileId
     val threadSessions = view.sessions.filter { it.threadId == threadId }
-    val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}:${it.openedAt}" }
+    val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}:${it.sessionEpoch}" }
     val liveEvents = view.videoEvents.filter { it.threadId == threadId }
     LaunchedEffect(threadId, hostProfile) {
         model.perform(Intent.OpenThread(threadId))
@@ -222,7 +217,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         )
                     }) { Text("Rotate") }
                     Button(onClick = {
-                        model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "avcc"))
+                        model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "mp4"))
                     }) { Text("Record") }
                     Button(onClick = {
                         model.perform(Intent.StopDeviceRecording(session.hostId, session.deviceId))
@@ -369,7 +364,6 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                 frame,
                                 epoch,
                                 stream.screenId,
-                                rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
                             )
                             "h264", "semu", "avcc-description" -> DeviceH264Frame(
                                 model,
@@ -377,7 +371,6 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                 ordered,
                                 epoch,
                                 stream.screenId,
-                                rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
                             )
                             else -> Text("Unsupported live device frame format: ${frame.encoding}")
                         }
@@ -408,10 +401,10 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 item(key = "last-recording-${recording.deviceId}-${recording.byteCount}") {
                     Text("Recording ready · ${recording.frameCount} frames · ${recording.byteCount} bytes")
                     recording.error?.let { error -> Text("Recording failed: $error") }
-                    val extension = recording.artifactExtension
-                    val mimeType = recording.artifactMimeType
+                    val fileName = recording.fileName
+                    val mimeType = recording.mimeType
                     if (recording.error == null && recording.bytes.isNotEmpty() &&
-                        extension != null && mimeType != null
+                        fileName.isNotBlank() && mimeType.isNotBlank()
                     ) {
                         var savedPath by remember(recording.byteCount) { mutableStateOf<String?>(null) }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -420,7 +413,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                     ?: context.filesDir
                                 val file = File(
                                     directory,
-                                    "device-${recording.deviceId}-${recording.byteCount}.$extension",
+                                    fileName,
                                 )
                                 runCatching {
                                     directory.mkdirs()
@@ -431,7 +424,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                             Button(onClick = {
                                 val file = File(
                                     context.cacheDir,
-                                    "device-${recording.deviceId}-${recording.byteCount}.$extension",
+                                    fileName,
                                 )
                                 runCatching { file.writeBytes(recording.bytes) }
                                     .onSuccess {
@@ -450,7 +443,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         savedPath?.let { Text("Saved to $it") }
                     }
                     if (recording.error == null && recording.bytes.isNotEmpty() &&
-                        (extension == null || mimeType == null)
+                        (fileName.isBlank() || mimeType.isBlank())
                     ) {
                         Text("Recording is not a playable artifact; save and attach are unavailable")
                     }
@@ -467,7 +460,6 @@ private fun DeviceJpegFrame(
     frame: dev.remoteagent.core.DeviceVideoFrameView,
     sessionEpoch: String,
     screenId: Int,
-    rawTouch: Boolean,
 ) {
     val bitmap = remember(frame.sequence) {
         BitmapFactory.decodeByteArray(frame.payload, 0, frame.payload.size)?.asImageBitmap()
@@ -484,7 +476,6 @@ private fun DeviceJpegFrame(
                     frame.deviceId,
                     sessionEpoch,
                     screenId,
-                    rawTouch,
                     frame.width.toInt(),
                     frame.height.toInt(),
                 ),
@@ -502,7 +493,6 @@ private fun DeviceH264Frame(
     frames: List<dev.remoteagent.core.DeviceVideoFrameView>,
     sessionEpoch: String,
     screenId: Int,
-    rawTouch: Boolean,
 ) {
     val frame = frames.lastOrNull() ?: return
     val decoder = remember { DeviceVideoDecoder() }
@@ -521,7 +511,6 @@ private fun DeviceH264Frame(
                 frame.deviceId,
                 sessionEpoch,
                 screenId,
-                rawTouch,
                 frame.width.toInt(),
                 frame.height.toInt(),
             ),
@@ -599,10 +588,9 @@ private fun Modifier.deviceTouchInput(
     deviceId: String,
     sessionEpoch: String,
     screenId: Int,
-    rawTouch: Boolean,
     contentWidth: Int,
     contentHeight: Int,
-): Modifier = pointerInput(hostId, deviceId, sessionEpoch, screenId, rawTouch, contentWidth, contentHeight) {
+): Modifier = pointerInput(hostId, deviceId, sessionEpoch, screenId, contentWidth, contentHeight) {
     awaitEachGesture {
         awaitPointerEventScope {
             val down = awaitFirstDown()
@@ -623,7 +611,7 @@ private fun Modifier.deviceTouchInput(
                     Intent.DeviceAction(
                         hostId,
                         deviceId,
-                        DeviceActionIntent.Touch(phase, point.x, point.y, rawTouch),
+                        DeviceActionIntent.Touch(phase, point.x, point.y),
                     ),
                 )
                 return true
@@ -654,7 +642,11 @@ private fun Modifier.deviceTouchInput(
 
 private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, deviceId: String): Modifier =
     focusable().onPreviewKeyEvent { event ->
-        val facts = deviceKeyFacts(event.nativeKeyEvent) ?: return@onPreviewKeyEvent false
+        // Android's device stream sends key actions on keydown only. The Host
+        // maps the actual key value to either a text or navigation event and
+        // does not emit a second action for keyup.
+        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        val facts = deviceKeyFacts(event.nativeKeyEvent) ?: return@onPreviewKeyEvent true
         model.perform(
             Intent.DeviceAction(
                 hostId,
@@ -662,7 +654,7 @@ private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, devi
                 DeviceActionIntent.Key(
                     facts.code,
                     facts.key,
-                    event.type == KeyEventType.KeyDown,
+                    true,
                     facts.meta,
                     facts.ctrl,
                 ),
@@ -688,7 +680,10 @@ private fun deviceKeyFacts(event: AndroidKeyEvent): DeviceKeyFacts? {
         AndroidKeyEvent.KEYCODE_PAGE_DOWN -> "PageDown"
         else -> {
             val unicode = event.unicodeChar
-            if (!Character.isValidCodePoint(unicode) || unicode == 0) return null
+            // The Android transport accepts the same UTF-16 single-unit key
+            // values as the reference stream. Supplementary characters are
+            // represented by two units and must not be sent as one text key.
+            if (!Character.isValidCodePoint(unicode) || Character.charCount(unicode) != 1 || unicode == 0) return null
             String(Character.toChars(unicode))
         }
     }

@@ -140,31 +140,24 @@ pub struct DeviceState {
 }
 
 impl DeviceState {
+    fn accepts_thread_event(&self, thread_id: &agent_domain::ThreadId, host_id: &str, device_id: &str, epoch: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            &session.thread_id == thread_id
+                && session.host_id == host_id
+                && session.device_id == device_id
+                && session.session_epoch == epoch
+        })
+    }
+
+    fn accepts_device_event(&self, host_id: &str, device_id: &str, epoch: &str) -> bool {
+        self.sessions.iter().any(|session| {
+            session.host_id == host_id && session.device_id == device_id && session.session_epoch == epoch
+        })
+    }
+
     pub fn apply_event(&mut self, event: DeviceEvent) {
         match event {
             DeviceEvent::State(service) => {
-                let reopened = self
-                    .sessions
-                    .iter()
-                    .filter_map(|previous| {
-                        service
-                            .sessions
-                            .iter()
-                            .find(|current| {
-                                current.thread_id == previous.thread_id
-                                    && current.host_id == previous.host_id
-                                    && current.device_id == previous.device_id
-                            })
-                            .filter(|current| current.opened_at != previous.opened_at)
-                            .map(|_| {
-                                (
-                                    previous.thread_id.to_string(),
-                                    previous.host_id.clone(),
-                                    previous.device_id.clone(),
-                                )
-                            })
-                    })
-                    .collect::<std::collections::BTreeSet<_>>();
                 self.sessions = service.sessions.clone();
                 self.service = Some(service);
                 let active = self
@@ -178,32 +171,84 @@ impl DeviceState {
                         )
                     })
                     .collect::<std::collections::BTreeSet<_>>();
-                self.frames.retain(|key, _| active.contains(key));
-                self.video_frames.retain(|key, _| {
-                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                self.frames.retain(|key, frame| {
+                    active.contains(key)
+                        && self.sessions.iter().any(|session| {
+                            session.thread_id.to_string() == key.0
+                                && session.host_id == key.1
+                                && session.device_id == key.2
+                                && session.session_epoch == frame.session_epoch
+                        })
                 });
-                self.video_events.retain(|key, _| {
+                self.video_frames.retain(|key, frame| {
                     active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                        && self.sessions.iter().any(|session| {
+                            session.thread_id.to_string() == key.0
+                                && session.host_id == key.1
+                                && session.device_id == key.2
+                                && session.session_epoch == frame.session_epoch
+                        })
                 });
-                self.frames
-                    .retain(|key, _| !reopened.contains(key));
-                self.video_frames
-                    .retain(|key, _| !reopened.contains(&(key.0.clone(), key.1.clone(), key.2.clone())));
-                self.video_events
-                    .retain(|key, _| !reopened.contains(&(key.0.clone(), key.1.clone(), key.2.clone())));
+                self.video_events.retain(|key, events| {
+                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                        && !events.is_empty()
+                        && events.iter().all(|frame| {
+                            self.sessions.iter().any(|session| {
+                                session.thread_id.to_string() == key.0
+                                    && session.host_id == key.1
+                                    && session.device_id == key.2
+                                    && session.session_epoch == frame.session_epoch
+                            })
+                        })
+                });
                 let active_devices = self
                     .sessions
                     .iter()
                     .map(|session| (session.host_id.clone(), session.device_id.clone()))
                     .collect::<std::collections::BTreeSet<_>>();
+                let active_epochs = self.sessions.iter().fold(
+                    BTreeMap::<(String, String), BTreeSet<String>>::new(),
+                    |mut epochs, session| {
+                        epochs
+                            .entry((session.host_id.clone(), session.device_id.clone()))
+                            .or_default()
+                            .insert(session.session_epoch.clone());
+                        epochs
+                    },
+                );
                 self.details
                     .retain(|key, _| active_devices.contains(key));
-                self.accessibility.retain(|key, _| active_devices.contains(key));
-                self.event_log.retain(|key, _| active_devices.contains(key));
-                self.foreground.retain(|key, _| active_devices.contains(key));
-                self.screens.retain(|key, _| {
+                self.accessibility.retain(|key, tree| {
+                    active_devices.contains(key)
+                        && active_epochs
+                            .get(key)
+                            .is_some_and(|epochs| epochs.contains(&tree.session_epoch))
+                });
+                self.event_log.retain(|key, entries| {
+                    if !active_devices.contains(key) {
+                        return false;
+                    }
+                    entries.retain(|entry| {
+                        active_epochs
+                            .get(key)
+                            .is_some_and(|epochs| epochs.contains(&entry.session_epoch))
+                    });
+                    !entries.is_empty()
+                });
+                self.foreground.retain(|key, update| {
+                    active_devices.contains(key)
+                        && active_epochs
+                            .get(key)
+                            .is_some_and(|epochs| epochs.contains(&update.session_epoch))
+                });
+                self.screens.retain(|key, screen| {
                     active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
-                        && !reopened.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                        && self.sessions.iter().any(|session| {
+                            session.thread_id.to_string() == key.0
+                                && session.host_id == key.1
+                                && session.device_id == key.2
+                                && session.session_epoch == screen.session_epoch
+                        })
                 });
                 self.recordings.retain(|(thread, host, device), _| active.contains(&(thread.clone(), host.clone(), device.clone())));
                 if self.last_recording.as_ref().is_some_and(|recording| {
@@ -218,11 +263,7 @@ impl DeviceState {
                 self.error = None;
             }
             DeviceEvent::Frame(frame) => {
-                if !self.sessions.iter().any(|session| {
-                    session.thread_id == frame.thread_id
-                        && session.host_id == frame.device.host_id
-                        && session.device_id == frame.device.id
-                }) {
+                if !self.accepts_thread_event(&frame.thread_id, &frame.device.host_id, &frame.device.id, &frame.session_epoch) {
                     return;
                 }
                 self.frames.insert(
@@ -235,11 +276,7 @@ impl DeviceState {
                 );
             }
             DeviceEvent::Video(frame) => {
-                if !self.sessions.iter().any(|session| {
-                    session.thread_id == frame.thread_id
-                        && session.host_id == frame.device.host_id
-                        && session.device_id == frame.device.id
-                }) {
+                if !self.accepts_thread_event(&frame.thread_id, &frame.device.host_id, &frame.device.id, &frame.session_epoch) {
                     return;
                 }
                 let key = (
@@ -261,18 +298,14 @@ impl DeviceState {
                 retain_video_tail(events);
             }
             DeviceEvent::Accessibility(tree) => {
-                if !self.sessions.iter().any(|session| {
-                    session.host_id == tree.host_id && session.device_id == tree.device_id
-                }) {
+                if !self.accepts_device_event(&tree.host_id, &tree.device_id, &tree.session_epoch) {
                     return;
                 }
                 self.accessibility
                     .insert((tree.host_id.clone(), tree.device_id.clone()), tree);
             }
             DeviceEvent::EventLog(entry) => {
-                if !self.sessions.iter().any(|session| {
-                    session.host_id == entry.host_id && session.device_id == entry.device_id
-                }) {
+                if !self.accepts_device_event(&entry.host_id, &entry.device_id, &entry.session_epoch) {
                     return;
                 }
                 let log = self
@@ -289,42 +322,20 @@ impl DeviceState {
                 }
             }
             DeviceEvent::Foreground(update) => {
-                if !self.sessions.iter().any(|session| {
-                    session.host_id == update.host_id && session.device_id == update.device_id
-                }) {
+                if !self.accepts_device_event(&update.host_id, &update.device_id, &update.session_epoch) {
                     return;
                 }
                 self.foreground.insert((update.host_id.clone(), update.device_id.clone()), update);
             }
             DeviceEvent::Screen(screen) => {
-                if let (Some(thread), Some(host), Some(device)) = (&screen.thread_id, &screen.host_id, &screen.device_id) {
-                    if !self.sessions.iter().any(|session| {
-                        &session.thread_id == thread
-                            && &session.host_id == host
-                            && &session.device_id == device
-                    }) {
-                        return;
-                    }
-                    self.screens.insert(
-                        (
-                            thread.to_string(),
-                            host.clone(),
-                            device.clone(),
-                            screen.screen_id.unwrap_or(0),
-                        ),
-                        screen,
-                    );
+                if let (Some(thread), Some(host), Some(device)) = (&screen.thread_id, &screen.host_id, &screen.device_id)
+                    && self.accepts_thread_event(thread, host, device, &screen.session_epoch)
+                {
+                    self.screens.insert((thread.to_string(), host.clone(), device.clone(), screen.screen_id.unwrap_or(0)), screen);
                 }
             }
             DeviceEvent::Recording(status) => {
                 let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
-                if !self.sessions.iter().any(|session| {
-                    session.thread_id == status.thread_id
-                        && session.host_id == status.host_id
-                        && session.device_id == status.device_id
-                }) {
-                    return;
-                }
                 if status.active {
                     self.recordings.insert(key, status);
                 } else {
@@ -337,13 +348,6 @@ impl DeviceState {
                     recording.status.host_id.clone(),
                     recording.status.device_id.clone(),
                 );
-                if !self.sessions.iter().any(|session| {
-                    session.thread_id == recording.status.thread_id
-                        && session.host_id == recording.status.host_id
-                        && session.device_id == recording.status.device_id
-                }) {
-                    return;
-                }
                 self.recordings.remove(&key);
                 self.last_recording = Some(recording);
             }
@@ -393,6 +397,7 @@ mod tests {
             device_id: device.into(),
             platform: DevicePlatform::Android,
             opened_at: "0".into(),
+            session_epoch: "0".into(),
         }
     }
 
@@ -406,6 +411,7 @@ mod tests {
         }));
         state.apply_event(DeviceEvent::Frame(DeviceFrame {
             thread_id: current.thread_id.clone(),
+            session_epoch: current.session_epoch.clone(),
             device: DeviceSummary {
                 host_id: current.host_id.clone(),
                 id: current.device_id.clone(),
@@ -449,7 +455,9 @@ mod tests {
             thread_id: current.thread_id.clone(),
             host_id: current.host_id.clone(),
             device_id: current.device_id.clone(),
-            format: DeviceRecordingFormat::Avcc,
+            format: DeviceRecordingFormat::Mp4,
+            file_name: "device.mp4".into(),
+            mime_type: "video/mp4".into(),
             active: true,
             started_at: "0".into(),
             frame_count: 1,
@@ -460,7 +468,6 @@ mod tests {
         assert_eq!(state.recordings.len(), 1);
         state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
             status: DeviceRecordingStatus { active: false, ..status },
-            artifact: None,
             bytes: vec![1, 2],
         }));
         assert!(state.recordings.is_empty());
@@ -481,6 +488,7 @@ mod tests {
         for screen_id in [Some(1), Some(3)] {
             state.apply_event(DeviceEvent::Screen(DeviceScreenConfig {
                 thread_id: Some(current.thread_id.clone()),
+                session_epoch: current.session_epoch.clone(),
                 host_id: Some(current.host_id.clone()),
                 device_id: Some(current.device_id.clone()),
                 width: 100,
@@ -510,6 +518,7 @@ mod tests {
         }));
         let frame = |sequence| DeviceVideoFrame {
             thread_id: current.thread_id.clone(),
+            session_epoch: current.session_epoch.clone(),
             device: DeviceSummary {
                 host_id: current.host_id.clone(),
                 id: current.device_id.clone(),
@@ -554,6 +563,7 @@ mod tests {
         }));
         let frame = DeviceVideoFrame {
             thread_id: current.thread_id.clone(),
+            session_epoch: current.session_epoch.clone(),
             device: DeviceSummary {
                 host_id: current.host_id.clone(),
                 id: current.device_id.clone(),
@@ -589,6 +599,7 @@ mod tests {
         }));
         let frame = DeviceVideoFrame {
             thread_id: current.thread_id.clone(),
+            session_epoch: current.session_epoch.clone(),
             device: DeviceSummary {
                 host_id: current.host_id.clone(),
                 id: current.device_id.clone(),
@@ -610,6 +621,7 @@ mod tests {
         state.apply_event(DeviceEvent::Video(frame));
         let mut reopened = current;
         reopened.opened_at = "1".into();
+        reopened.session_epoch = "1".into();
         state.apply_event(DeviceEvent::State(DeviceServiceState {
             sessions: vec![reopened.clone()],
             ..DeviceServiceState::default()
@@ -619,6 +631,7 @@ mod tests {
 
         let next = DeviceVideoFrame {
             thread_id: reopened.thread_id,
+            session_epoch: reopened.session_epoch,
             device: DeviceSummary {
                 host_id: reopened.host_id,
                 id: reopened.device_id,

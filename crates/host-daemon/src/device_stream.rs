@@ -7,8 +7,6 @@
 use agent_protocol::device::DeviceFrameEncoding;
 
 pub const MAX_STREAM_CHUNK: usize = 8 * 1024 * 1024;
-const MJPEG_BOUNDARY: &[u8] = b"--remote-agent-device";
-const MJPEG_END: &[u8] = b"--remote-agent-device--\r\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportFrame {
@@ -154,21 +152,18 @@ pub fn jpeg_bounds(bytes: &[u8]) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// A bounded recorder for the device transports. AVCC recordings are finalized
-/// as a fragmented MP4 containing the H.264 access units; MJPEG recordings use
-/// a standard multipart response body. RawFrames remains the explicit raw
-/// transport option for callers that need the live protocol records.
+/// A bounded recorder for the device transport. H.264 access units are
+/// finalized as one playable fragmented MP4 with an independent track for
+/// each Duo screen.
 #[derive(Debug, Clone)]
-pub struct RawFrameRecorder {
+pub struct Mp4Recorder {
     format: agent_protocol::device::DeviceRecordingFormat,
     started_at: String,
     frame_count: u64,
     byte_count: u64,
     bytes: Vec<u8>,
     finished: bool,
-    transport: Option<RecordingTransport>,
-    video_description: Option<Vec<u8>>,
-    video_samples: Vec<RecordedVideoSample>,
+    video_tracks: std::collections::BTreeMap<Option<u8>, RecordedVideoTrack>,
     video_payload_bytes: usize,
     finish_error: Option<String>,
 }
@@ -180,14 +175,13 @@ struct RecordedVideoSample {
     keyframe: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecordingTransport {
-    Avcc,
-    Mjpeg,
-    Png,
+#[derive(Debug, Clone, Default)]
+struct RecordedVideoTrack {
+    description: Option<Vec<u8>>,
+    samples: Vec<RecordedVideoSample>,
 }
 
-impl RawFrameRecorder {
+impl Mp4Recorder {
     pub fn new(format: agent_protocol::device::DeviceRecordingFormat, started_at: String) -> Self {
         Self {
             format,
@@ -196,22 +190,9 @@ impl RawFrameRecorder {
             byte_count: 0,
             bytes: Vec::new(),
             finished: false,
-            transport: None,
-            video_description: None,
-            video_samples: Vec::new(),
+            video_tracks: std::collections::BTreeMap::new(),
             video_payload_bytes: 0,
             finish_error: None,
-        }
-    }
-
-    fn use_transport(&mut self, transport: RecordingTransport) -> Result<(), String> {
-        match self.transport {
-            Some(current) if current != transport => Err("device recording received incompatible frame transports".into()),
-            Some(_) => Ok(()),
-            None => {
-                self.transport = Some(transport);
-                Ok(())
-            }
         }
     }
 
@@ -219,45 +200,15 @@ impl RawFrameRecorder {
         if self.finished {
             return Err("device recording has already been finalized".into());
         }
-        match self.format {
-            agent_protocol::device::DeviceRecordingFormat::Mjpeg => {
-                self.append_mjpeg_frame(frame)?;
-            }
-            agent_protocol::device::DeviceRecordingFormat::Avcc => {
-                if !matches!(frame.encoding, DeviceFrameEncoding::AvccDescription | DeviceFrameEncoding::H264 | DeviceFrameEncoding::Jpeg | DeviceFrameEncoding::Semu) {
-                    return Err("device AVCC recording received an unsupported frame".into());
-                }
-                self.use_transport(RecordingTransport::Avcc)?;
-                self.append_playable_video_frame(frame)?;
-            }
-            agent_protocol::device::DeviceRecordingFormat::RawFrames => {
-                let transport = match frame.encoding {
-                    DeviceFrameEncoding::AvccDescription | DeviceFrameEncoding::H264 | DeviceFrameEncoding::Jpeg | DeviceFrameEncoding::Semu => RecordingTransport::Avcc,
-                    DeviceFrameEncoding::Png => RecordingTransport::Png,
-                    DeviceFrameEncoding::Mjpeg => RecordingTransport::Mjpeg,
-                };
-                self.use_transport(transport)?;
-                if self.transport == Some(RecordingTransport::Png) && self.frame_count != 0 {
-                    return Err("device PNG recording accepts one still frame; use MJPEG for a sequence".into());
-                }
-                if matches!(frame.encoding, DeviceFrameEncoding::AvccDescription | DeviceFrameEncoding::H264 | DeviceFrameEncoding::Jpeg | DeviceFrameEncoding::Semu) {
-                    self.append_video_frame(frame)?;
-                } else if frame.encoding == DeviceFrameEncoding::Mjpeg {
-                    self.append_mjpeg_frame(frame)?;
-                } else {
-                    if self.bytes.len().saturating_add(frame.payload.len()) > MAX_STREAM_CHUNK {
-                        return Err("device recording exceeded the Host byte limit".into());
-                    }
-                    self.bytes.extend_from_slice(&frame.payload);
-                }
-            }
+        if self.format != agent_protocol::device::DeviceRecordingFormat::Mp4 {
+            return Err("device recording format is unavailable".into());
         }
+        if !matches!(frame.encoding, DeviceFrameEncoding::AvccDescription | DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu) {
+            return Err("device MP4 recording received a non-H.264 frame".into());
+        }
+        self.append_playable_video_frame(frame)?;
         self.frame_count = self.frame_count.saturating_add(1);
-        self.byte_count = if self.format == agent_protocol::device::DeviceRecordingFormat::Avcc {
-            self.video_payload_bytes as u64
-        } else {
-            self.bytes.len() as u64
-        };
+        self.byte_count = self.video_payload_bytes as u64;
         Ok(())
     }
 
@@ -266,22 +217,12 @@ impl RawFrameRecorder {
             return;
         }
         self.finished = true;
-        match self.transport {
-            Some(RecordingTransport::Mjpeg) if !self.bytes.is_empty() => {
-                self.bytes.extend_from_slice(MJPEG_END);
-                self.byte_count = self.bytes.len() as u64;
+        match build_fragmented_mp4(&self.video_tracks) {
+            Ok(bytes) => {
+                self.byte_count = bytes.len() as u64;
+                self.bytes = bytes;
             }
-            Some(RecordingTransport::Avcc) => match build_fragmented_mp4(&self.video_description, &self.video_samples) {
-                Ok(bytes) => {
-                    self.byte_count = bytes.len() as u64;
-                    self.bytes = bytes;
-                }
-                Err(error) => self.finish_error = Some(error),
-            },
-            None if self.format == agent_protocol::device::DeviceRecordingFormat::Avcc => {
-                self.finish_error = Some("device recording ended before an H.264 frame arrived".into());
-            }
-            _ => {}
+            Err(error) => self.finish_error = Some(error),
         }
     }
 
@@ -297,88 +238,34 @@ impl RawFrameRecorder {
         self.bytes
     }
 
-    fn append_avcc_envelope(&mut self, tag: u8, payload: &[u8]) -> Result<(), String> {
-        let length = u32::try_from(payload.len().saturating_add(1)).map_err(|_| "device frame is too large")?;
-        if self.bytes.len().saturating_add(5).saturating_add(payload.len()) > MAX_STREAM_CHUNK {
-            return Err("device recording exceeded the Host byte limit".into());
-        }
-        self.bytes.extend_from_slice(&length.to_be_bytes());
-        self.bytes.push(tag);
-        self.bytes.extend_from_slice(payload);
-        Ok(())
-    }
-
-    fn append_mjpeg_frame(&mut self, frame: &TransportFrame) -> Result<(), String> {
-        if !matches!(frame.encoding, DeviceFrameEncoding::Mjpeg | DeviceFrameEncoding::Jpeg) {
-            return Err("device MJPEG recording received a non-JPEG frame".into());
-        }
-        self.use_transport(RecordingTransport::Mjpeg)?;
-        let (start, end) = jpeg_bounds(&frame.payload)
-            .ok_or_else(|| "device MJPEG recording received an invalid JPEG frame".to_owned())?;
-        let payload = &frame.payload[start..end];
-        let header = format!(
-            "{}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-            String::from_utf8_lossy(MJPEG_BOUNDARY),
-            payload.len()
-        );
-        if self
-            .bytes
-            .len()
-            .saturating_add(header.len())
-            .saturating_add(payload.len())
-            .saturating_add(2)
-            .saturating_add(MJPEG_END.len())
-            > MAX_STREAM_CHUNK
-        {
-            return Err("device recording exceeded the Host byte limit".into());
-        }
-        self.bytes.extend_from_slice(header.as_bytes());
-        self.bytes.extend_from_slice(payload);
-        self.bytes.extend_from_slice(b"\r\n");
-        Ok(())
-    }
-
-    fn append_video_frame(&mut self, frame: &TransportFrame) -> Result<(), String> {
-        let tag = match frame.encoding {
-            DeviceFrameEncoding::AvccDescription => 1,
-            DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu => if frame.keyframe { 2 } else { 3 },
-            DeviceFrameEncoding::Jpeg => 4,
-            DeviceFrameEncoding::Mjpeg | DeviceFrameEncoding::Png => unreachable!(),
-        };
-        let payload = if matches!(frame.encoding, DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu) {
-            let mut payload = Vec::with_capacity(frame.payload.len().saturating_add(64));
-            if let Some(metadata) = frame_metadata(frame) {
-                append_h264_timestamp_sei(&mut payload, metadata.as_bytes());
-            }
-            payload.extend_from_slice(&frame.payload);
-            payload
-        } else {
-            frame.payload.clone()
-        };
-        self.append_avcc_envelope(tag, &payload)
-    }
-
     fn append_playable_video_frame(&mut self, frame: &TransportFrame) -> Result<(), String> {
         match frame.encoding {
             DeviceFrameEncoding::AvccDescription => {
                 if frame.payload.len() > MAX_STREAM_CHUNK {
                     return Err("device recording codec description exceeded the Host limit".into());
                 }
-                if let Some(description) = &self.video_description {
+                let track = self.video_tracks.entry(frame.screen_id).or_default();
+                if let Some(description) = &track.description {
                     if description != &frame.payload {
                         return Err("device recording codec description changed during capture".into());
                     }
                 } else {
-                    self.video_description = Some(frame.payload.clone());
+                    track.description = Some(frame.payload.clone());
                 }
             }
             DeviceFrameEncoding::Jpeg => {
-                // The helper may send a JPEG seed before H.264 starts. It is
-                // useful for a live canvas but is not a sample in an H.264
-                // movie, so count it without putting an image into the track.
+                return Err("device MP4 recording received a JPEG seed".into());
             }
             DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu => {
+                let keyframe = frame.keyframe || annex_b_has_keyframe(&frame.payload);
                 let mut payload = length_prefixed_h264(&frame.payload)?;
+                if payload.is_empty() {
+                    return Err("device recording received an empty H.264 frame".into());
+                }
+                let track = self.video_tracks.entry(frame.screen_id).or_default();
+                if track.samples.is_empty() && !frame.keyframe && !annex_b_has_keyframe(&frame.payload) {
+                    return Err("device recording started with a delta frame".into());
+                }
                 if let Some(metadata) = frame_metadata(frame) {
                     let sei = h264_user_data_sei(metadata.as_bytes());
                     let length = u32::try_from(sei.len()).map_err(|_| "device recording metadata is too large")?;
@@ -391,10 +278,10 @@ impl RawFrameRecorder {
                     return Err("device recording exceeded the Host byte limit".into());
                 }
                 self.video_payload_bytes = self.video_payload_bytes.saturating_add(payload.len());
-                self.video_samples.push(RecordedVideoSample {
+                track.samples.push(RecordedVideoSample {
                     payload,
                     timestamp_us: frame.timestamp_us,
-                    keyframe: frame.keyframe,
+                    keyframe,
                 });
             }
             DeviceFrameEncoding::Mjpeg | DeviceFrameEncoding::Png => unreachable!(),
@@ -412,22 +299,6 @@ fn frame_metadata(frame: &TransportFrame) -> Option<String> {
             frame.screen_id.map_or_else(|| "none".into(), |screen| screen.to_string())
         )
     })
-}
-
-fn append_h264_timestamp_sei(bytes: &mut Vec<u8>, metadata: &[u8]) {
-    bytes.extend_from_slice(&[0, 0, 0, 1, 0x06]);
-    let mut write_size = |mut size: usize| {
-        while size >= 255 {
-            bytes.push(255);
-            size -= 255;
-        }
-        bytes.push(size as u8);
-    };
-    write_size(5);
-    write_size(16 + metadata.len());
-    bytes.extend_from_slice(b"remote-agent-sei");
-    bytes.extend_from_slice(metadata);
-    bytes.push(0x80);
 }
 
 fn h264_user_data_sei(metadata: &[u8]) -> Vec<u8> {
@@ -599,51 +470,6 @@ fn mp4_matrix(output: &mut Vec<u8>) {
     }
 }
 
-fn build_fragmented_mp4(
-    description: &Option<Vec<u8>>,
-    samples: &[RecordedVideoSample],
-) -> Result<Vec<u8>, String> {
-    if samples.is_empty() {
-        return Err("device recording ended before an H.264 frame arrived".into());
-    }
-    let description = description
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .or_else(|| avcc_description_from_samples(samples))
-        .ok_or_else(|| "device recording did not provide an H.264 codec description".to_owned())?;
-    let sps = avcc_sps(&description).ok_or_else(|| "device recording codec description was invalid".to_owned())?;
-    let (width, height) = sps_dimensions(&sps).unwrap_or((1, 1));
-    let durations = sample_durations(samples);
-    let mut media_data = Vec::new();
-    for sample in samples {
-        media_data.extend_from_slice(&sample.payload);
-    }
-    let ftyp = mp4_box(
-        b"ftyp",
-        &[
-            b"isom".as_slice(),
-            &0x0000_0200_u32.to_be_bytes(),
-            b"isom".as_slice(),
-            b"iso6".as_slice(),
-            b"mp41".as_slice(),
-            b"avc1".as_slice(),
-        ]
-        .concat(),
-    )?;
-    let moov = build_mp4_moov(&description, width, height)?;
-    let moof = build_mp4_moof(&durations, samples, media_data.len())?;
-    let mdat = mp4_box(b"mdat", &media_data)?;
-    let mut output = Vec::with_capacity(ftyp.len().saturating_add(moov.len()).saturating_add(moof.len()).saturating_add(mdat.len()));
-    output.extend_from_slice(&ftyp);
-    output.extend_from_slice(&moov);
-    output.extend_from_slice(&moof);
-    output.extend_from_slice(&mdat);
-    if output.len() > MAX_STREAM_CHUNK {
-        return Err("device recording exceeded the Host limit after MP4 finalization".into());
-    }
-    Ok(output)
-}
-
 fn sample_durations(samples: &[RecordedVideoSample]) -> Vec<u32> {
     let default_duration = 16_667_u64;
     let fallback = samples
@@ -666,7 +492,81 @@ fn sample_durations(samples: &[RecordedVideoSample]) -> Vec<u32> {
         .collect()
 }
 
-fn build_mp4_moov(description: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+#[derive(Debug, Clone)]
+struct PreparedVideoTrack {
+    id: u32,
+    description: Vec<u8>,
+    samples: Vec<RecordedVideoSample>,
+    width: u32,
+    height: u32,
+}
+
+fn build_fragmented_mp4(
+    tracks: &std::collections::BTreeMap<Option<u8>, RecordedVideoTrack>,
+) -> Result<Vec<u8>, String> {
+    let mut prepared = Vec::with_capacity(tracks.len());
+    for track in tracks.values() {
+        if track.samples.is_empty() {
+            continue;
+        }
+        if !track.samples[0].keyframe {
+            return Err("device recording started with a delta frame".into());
+        }
+        let description = if let Some(description) = &track.description {
+            description.clone()
+        } else {
+            avcc_description_from_samples(&track.samples)
+                .ok_or_else(|| "device recording did not provide an H.264 codec description".to_owned())?
+        };
+        let sps = avcc_sps(&description).ok_or_else(|| "device recording codec description was invalid".to_owned())?;
+        let (width, height) = sps_dimensions(&sps)
+            .ok_or_else(|| "device recording codec description had invalid dimensions".to_owned())?;
+        prepared.push(PreparedVideoTrack {
+            id: u32::try_from(prepared.len().saturating_add(1)).map_err(|_| "too many device recording screens")?,
+            description,
+            samples: track.samples.clone(),
+            width,
+            height,
+        });
+    }
+    if prepared.is_empty() {
+        return Err("device recording ended before an H.264 frame arrived".into());
+    }
+    let mut media_data = Vec::new();
+    let mut media_offsets = Vec::with_capacity(prepared.len());
+    for track in &prepared {
+        media_offsets.push(media_data.len());
+        for sample in &track.samples {
+            media_data.extend_from_slice(&sample.payload);
+        }
+    }
+    let ftyp = mp4_box(
+        b"ftyp",
+        &[
+            b"isom".as_slice(),
+            &0x0000_0200_u32.to_be_bytes(),
+            b"isom".as_slice(),
+            b"iso6".as_slice(),
+            b"mp41".as_slice(),
+            b"avc1".as_slice(),
+        ]
+        .concat(),
+    )?;
+    let moov = build_mp4_moov(&prepared)?;
+    let moof = build_mp4_moof(&prepared, &media_offsets)?;
+    let mdat = mp4_box(b"mdat", &media_data)?;
+    let mut output = Vec::with_capacity(ftyp.len().saturating_add(moov.len()).saturating_add(moof.len()).saturating_add(mdat.len()));
+    output.extend_from_slice(&ftyp);
+    output.extend_from_slice(&moov);
+    output.extend_from_slice(&moof);
+    output.extend_from_slice(&mdat);
+    if output.len() > MAX_STREAM_CHUNK {
+        return Err("device recording exceeded the Host limit after MP4 finalization".into());
+    }
+    Ok(output)
+}
+
+fn build_mp4_moov(tracks: &[PreparedVideoTrack]) -> Result<Vec<u8>, String> {
     let mut mvhd_payload = Vec::new();
     mp4_u32(0, &mut mvhd_payload);
     mp4_u32(0, &mut mvhd_payload);
@@ -678,13 +578,25 @@ fn build_mp4_moov(description: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     mvhd_payload.extend_from_slice(&[0; 8]);
     mp4_matrix(&mut mvhd_payload);
     mvhd_payload.extend_from_slice(&[0; 24]);
-    mp4_u32(2, &mut mvhd_payload);
+    mp4_u32(u32::try_from(tracks.len().saturating_add(1)).map_err(|_| "too many device recording tracks")?, &mut mvhd_payload);
     let mvhd = mp4_full_box(b"mvhd", 0, 0, &mvhd_payload)?;
 
+    let mut tracks_payload = Vec::new();
+    let mut trex_payload = Vec::new();
+    for track in tracks {
+        tracks_payload.extend_from_slice(&build_mp4_trak(track)?);
+        trex_payload.extend_from_slice(&build_mp4_trex(track)?);
+    }
+    let mvex = mp4_box(b"mvex", &trex_payload)?;
+    tracks_payload.extend_from_slice(&mvex);
+    mp4_box(b"moov", &[mvhd, tracks_payload].concat())
+}
+
+fn build_mp4_trak(track: &PreparedVideoTrack) -> Result<Vec<u8>, String> {
     let mut tkhd_payload = Vec::new();
     mp4_u32(0, &mut tkhd_payload);
     mp4_u32(0, &mut tkhd_payload);
-    mp4_u32(1, &mut tkhd_payload);
+    mp4_u32(track.id, &mut tkhd_payload);
     mp4_u32(0, &mut tkhd_payload);
     mp4_u32(0, &mut tkhd_payload);
     tkhd_payload.extend_from_slice(&[0; 8]);
@@ -693,8 +605,8 @@ fn build_mp4_moov(description: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     mp4_u16(0, &mut tkhd_payload);
     mp4_u16(0, &mut tkhd_payload);
     mp4_matrix(&mut tkhd_payload);
-    mp4_fixed(width.saturating_mul(1 << 16), &mut tkhd_payload);
-    mp4_fixed(height.saturating_mul(1 << 16), &mut tkhd_payload);
+    mp4_fixed(track.width.saturating_mul(1 << 16), &mut tkhd_payload);
+    mp4_fixed(track.height.saturating_mul(1 << 16), &mut tkhd_payload);
     let tkhd = mp4_full_box(b"tkhd", 0, 7, &tkhd_payload)?;
 
     let mut mdhd_payload = Vec::new();
@@ -727,13 +639,13 @@ fn build_mp4_moov(description: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     let dref = mp4_full_box(b"dref", 0, 0, &dref_payload)?;
     let dinf = mp4_box(b"dinf", &dref)?;
 
-    let avcc = mp4_box(b"avcC", description)?;
+    let avcc = mp4_box(b"avcC", &track.description)?;
     let mut avc1_payload = Vec::new();
     avc1_payload.extend_from_slice(&[0; 6]);
     mp4_u16(1, &mut avc1_payload);
     avc1_payload.extend_from_slice(&[0; 16]);
-    mp4_u16(u16::try_from(width).unwrap_or(u16::MAX), &mut avc1_payload);
-    mp4_u16(u16::try_from(height).unwrap_or(u16::MAX), &mut avc1_payload);
+    mp4_u16(u16::try_from(track.width).map_err(|_| "device recording width is too large")?, &mut avc1_payload);
+    mp4_u16(u16::try_from(track.height).map_err(|_| "device recording height is too large")?, &mut avc1_payload);
     mp4_fixed(0x0048_0000, &mut avc1_payload);
     mp4_fixed(0x0048_0000, &mut avc1_payload);
     mp4_u32(0, &mut avc1_payload);
@@ -757,55 +669,55 @@ fn build_mp4_moov(description: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     let stbl = mp4_box(b"stbl", &[stsd, stts, stsc, stsz, stco].concat())?;
     let minf = mp4_box(b"minf", &[vmhd, dinf, stbl].concat())?;
     let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat())?;
-    let trak = mp4_box(b"trak", &[tkhd, mdia].concat())?;
+    mp4_box(b"trak", &[tkhd, mdia].concat())
+}
 
+fn build_mp4_trex(track: &PreparedVideoTrack) -> Result<Vec<u8>, String> {
     let mut trex_payload = Vec::new();
-    mp4_u32(1, &mut trex_payload);
+    mp4_u32(track.id, &mut trex_payload);
     mp4_u32(1, &mut trex_payload);
     mp4_u32(16_667, &mut trex_payload);
     mp4_u32(0, &mut trex_payload);
     mp4_u32(0x0101_0000, &mut trex_payload);
-    let trex = mp4_full_box(b"trex", 0, 0, &trex_payload)?;
-    let mvex = mp4_box(b"mvex", &trex)?;
-    mp4_box(b"moov", &[mvhd, trak, mvex].concat())
+    mp4_full_box(b"trex", 0, 0, &trex_payload)
 }
 
-fn build_mp4_moof(
-    durations: &[u32],
-    samples: &[RecordedVideoSample],
-    media_data_len: usize,
-) -> Result<Vec<u8>, String> {
+fn build_mp4_moof(tracks: &[PreparedVideoTrack], media_offsets: &[usize]) -> Result<Vec<u8>, String> {
     let mut mfhd_payload = Vec::new();
     mp4_u32(1, &mut mfhd_payload);
     let mfhd = mp4_full_box(b"mfhd", 0, 0, &mfhd_payload)?;
 
-    let mut tfhd_payload = Vec::new();
-    mp4_u32(1, &mut tfhd_payload);
-    let tfhd = mp4_full_box(b"tfhd", 0, 0x020000, &tfhd_payload)?;
-    let mut tfdt_payload = Vec::new();
-    mp4_u64(0, &mut tfdt_payload);
-    let tfdt = mp4_full_box(b"tfdt", 1, 0, &tfdt_payload)?;
-
-    let make_moof = |data_offset: i32| -> Result<Vec<u8>, String> {
-        let mut trun_payload = Vec::new();
-        mp4_u32(u32::try_from(samples.len()).map_err(|_| "too many device recording frames")?, &mut trun_payload);
-        trun_payload.extend_from_slice(&data_offset.to_be_bytes());
-        for (duration, sample) in durations.iter().zip(samples) {
-            mp4_u32(*duration, &mut trun_payload);
-            mp4_u32(u32::try_from(sample.payload.len()).map_err(|_| "device recording frame is too large")?, &mut trun_payload);
-            mp4_u32(if sample.keyframe { 0x0200_0000 } else { 0x0101_0000 }, &mut trun_payload);
+    let make_moof = |data_offsets: &[i32]| -> Result<Vec<u8>, String> {
+        let mut trafs = Vec::new();
+        for (track, data_offset) in tracks.iter().zip(data_offsets) {
+            let mut tfhd_payload = Vec::new();
+            mp4_u32(track.id, &mut tfhd_payload);
+            let tfhd = mp4_full_box(b"tfhd", 0, 0x020000, &tfhd_payload)?;
+            let mut tfdt_payload = Vec::new();
+            mp4_u64(0, &mut tfdt_payload);
+            let tfdt = mp4_full_box(b"tfdt", 1, 0, &tfdt_payload)?;
+            let durations = sample_durations(&track.samples);
+            let mut trun_payload = Vec::new();
+            mp4_u32(u32::try_from(track.samples.len()).map_err(|_| "too many device recording frames")?, &mut trun_payload);
+            trun_payload.extend_from_slice(&data_offset.to_be_bytes());
+            for (duration, sample) in durations.iter().zip(&track.samples) {
+                mp4_u32(*duration, &mut trun_payload);
+                mp4_u32(u32::try_from(sample.payload.len()).map_err(|_| "device recording frame is too large")?, &mut trun_payload);
+                mp4_u32(if sample.keyframe { 0x0200_0000 } else { 0x0101_0000 }, &mut trun_payload);
+            }
+            let trun = mp4_full_box(b"trun", 0, 0x000701, &trun_payload)?;
+            trafs.extend_from_slice(&mp4_box(b"traf", &[tfhd, tfdt, trun].concat())?);
         }
-        let trun = mp4_full_box(b"trun", 0, 0x000701, &trun_payload)?;
-        let traf = mp4_box(b"traf", &[tfhd.clone(), tfdt.clone(), trun].concat())?;
-        mp4_box(b"moof", &[mfhd.clone(), traf].concat())
+        mp4_box(b"moof", &[mfhd.clone(), trafs].concat())
     };
-    let initial = make_moof(0)?;
-    let data_offset = i32::try_from(initial.len().saturating_add(8)).map_err(|_| "device recording MP4 offset is too large")?;
-    let moof = make_moof(data_offset)?;
-    if media_data_len > MAX_STREAM_CHUNK {
-        return Err("device recording media data exceeded the Host limit".into());
-    }
-    Ok(moof)
+    let initial_offsets = vec![0; tracks.len()];
+    let initial = make_moof(&initial_offsets)?;
+    let base = initial.len().saturating_add(8);
+    let data_offsets = media_offsets
+        .iter()
+        .map(|offset| i32::try_from(base.saturating_add(*offset)).map_err(|_| "device recording MP4 offset is too large"))
+        .collect::<Result<Vec<_>, _>>()?;
+    make_moof(&data_offsets)
 }
 
 fn sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
@@ -962,6 +874,46 @@ impl<'a> BitReader<'a> {
 mod tests {
     use super::*;
 
+    fn valid_description() -> Vec<u8> {
+        let sps = [0x67, 0x42, 0x00, 0x1f, 0x95, 0xa8, 0x14, 0x01, 0x6e, 0x40];
+        let pps = [0x68, 0xce, 0x3c, 0x80];
+        let mut description = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
+        description.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        description.extend_from_slice(&sps);
+        description.push(1);
+        description.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+        description.extend_from_slice(&pps);
+        description
+    }
+
+    fn keyframe() -> Vec<u8> {
+        vec![0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00]
+    }
+
+    fn delta() -> Vec<u8> {
+        vec![0, 0, 0, 1, 0x41, 0x9a, 0x22]
+    }
+
+    fn count_boxes(bytes: &[u8], wanted: &[u8; 4]) -> usize {
+        let mut count = 0;
+        let mut offset = 0;
+        while offset.saturating_add(8) <= bytes.len() {
+            let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            if size < 8 || offset.saturating_add(size) > bytes.len() {
+                break;
+            }
+            if &bytes[offset + 4..offset + 8] == wanted {
+                count += 1;
+            }
+            let kind = &bytes[offset + 4..offset + 8];
+            if [b"moov".as_slice(), b"trak".as_slice(), b"mdia".as_slice(), b"minf".as_slice(), b"dinf".as_slice(), b"stbl".as_slice(), b"stsd".as_slice(), b"avc1".as_slice(), b"moof".as_slice(), b"traf".as_slice()].contains(&kind) {
+                count += count_boxes(&bytes[offset + 8..offset + size], wanted);
+            }
+            offset += size;
+        }
+        count
+    }
+
     #[test]
     fn avcc_demuxer_handles_fragmented_and_unknown_envelopes() {
         let mut input = Vec::new();
@@ -980,11 +932,11 @@ mod tests {
         let mut packet = b"SEMU".to_vec();
         packet.extend_from_slice(&[1, 1, 0, 0]);
         packet.extend_from_slice(&42_u64.to_be_bytes());
-        packet.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+        packet.extend_from_slice(&keyframe());
         let frame = parse_semu_packet(&packet);
         assert_eq!(frame.timestamp_us, Some(42));
         assert!(frame.keyframe);
-        assert_eq!(frame.payload, [0, 0, 0, 1, 0x65]);
+        assert_eq!(frame.payload, keyframe());
     }
 
     #[test]
@@ -993,156 +945,54 @@ mod tests {
     }
 
     #[test]
-    fn avcc_recorder_finalizes_as_a_fragmented_mp4() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::Avcc, "now".into());
-        recorder
-            .push(&TransportFrame {
-                payload: vec![1, 0x42, 0, 0x1e, 0xff, 0xe1, 0, 2, 0x67, 0x42, 1, 0, 1, 0x68],
-                encoding: DeviceFrameEncoding::AvccDescription,
-                keyframe: true,
-                timestamp_us: None,
-                screen_id: None,
-            })
-            .unwrap();
-        recorder
-            .push(&TransportFrame {
-                payload: vec![0, 0, 0, 1, 0x65, 1, 2],
-                encoding: DeviceFrameEncoding::H264,
-                keyframe: true,
-                timestamp_us: Some(42),
-                screen_id: Some(3),
-            })
-            .unwrap();
-        assert_eq!(recorder.frame_count(), 2);
+    fn mp4_recording_finalizes_with_playable_track_metadata() {
+        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        recorder.push(&TransportFrame { payload: valid_description(), encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
+        recorder.push(&TransportFrame { payload: keyframe(), encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: Some(42), screen_id: None }).unwrap();
+        recorder.push(&TransportFrame { payload: delta(), encoding: DeviceFrameEncoding::H264, keyframe: false, timestamp_us: Some(59_000), screen_id: None }).unwrap();
+        assert_eq!(recorder.frame_count(), 3);
         let bytes = recorder.into_bytes();
         assert_eq!(&bytes[4..8], b"ftyp");
-        assert!(bytes.windows(4).any(|window| window == b"moov"));
+        assert_eq!(count_boxes(&bytes, b"trak"), 1);
+        assert_eq!(count_boxes(&bytes, b"avcC"), 1);
+        assert_eq!(count_boxes(&bytes, b"traf"), 1);
         assert!(bytes.windows(4).any(|window| window == b"moof"));
         assert!(bytes.windows(4).any(|window| window == b"mdat"));
         assert!(bytes.windows(12).any(|window| window == b"timestamp=42"));
+        assert_eq!(sps_dimensions(&valid_description()[8..18]), Some((1280, 720)));
     }
 
     #[test]
-    fn mjpeg_recordings_are_a_bounded_multipart_stream() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::Mjpeg, "now".into());
-        recorder.push(&TransportFrame {
-            payload: vec![0xff, 0xd8, 1, 0xff, 0xd9],
-            encoding: DeviceFrameEncoding::Mjpeg,
-            keyframe: true,
-            timestamp_us: None,
-            screen_id: None,
-        }).unwrap();
-        let body = String::from_utf8_lossy(recorder.bytes());
-        assert!(body.starts_with("--remote-agent-device\r\nContent-Type: image/jpeg\r\nContent-Length: 5\r\n\r\n"));
-        assert!(recorder.bytes().ends_with(b"\r\n"));
+    fn mp4_recording_keeps_duo_screens_in_separate_tracks() {
+        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        for screen_id in [Some(1), Some(3)] {
+            recorder.push(&TransportFrame { payload: valid_description(), encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id }).unwrap();
+            recorder.push(&TransportFrame { payload: keyframe(), encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: Some(1), screen_id }).unwrap();
+        }
         let bytes = recorder.into_bytes();
-        assert!(bytes.ends_with(b"--remote-agent-device--\r\n"));
+        assert_eq!(count_boxes(&bytes, b"trak"), 2);
+        assert_eq!(count_boxes(&bytes, b"avcC"), 2);
+        assert_eq!(count_boxes(&bytes, b"traf"), 2);
     }
 
     #[test]
-    fn raw_mjpeg_recordings_use_the_same_multipart_framing() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::RawFrames, "now".into());
-        recorder
-            .push(&TransportFrame {
-                payload: vec![0xff, 0xd8, 1, 0xff, 0xd9],
-                encoding: DeviceFrameEncoding::Mjpeg,
-                keyframe: true,
-                timestamp_us: None,
-                screen_id: None,
-            })
-            .unwrap();
-        let bytes = recorder.into_bytes();
-        assert!(bytes.starts_with(b"--remote-agent-device\r\n"));
-        assert!(bytes.ends_with(b"--remote-agent-device--\r\n"));
-    }
+    fn mp4_recording_rejects_an_initial_delta_and_invalid_description() {
+        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        recorder.push(&TransportFrame { payload: valid_description(), encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
+        assert!(recorder.push(&TransportFrame { payload: delta(), encoding: DeviceFrameEncoding::H264, keyframe: false, timestamp_us: None, screen_id: None }).is_err());
 
-    #[test]
-    fn semu_recordings_keep_annex_b_frames_inside_playable_mp4() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::Avcc, "now".into());
-        recorder
-            .push(&TransportFrame {
-                payload: vec![1, 0x42, 0, 0x1e, 0xff, 0xe1, 0, 2, 0x67, 0x42, 1, 0, 1, 0x68],
-                encoding: DeviceFrameEncoding::AvccDescription,
-                keyframe: true,
-                timestamp_us: None,
-                screen_id: None,
-            })
-            .unwrap();
-        recorder.push(&TransportFrame {
-            payload: vec![0, 0, 0, 1, 0x65],
-            encoding: DeviceFrameEncoding::Semu,
-            keyframe: true,
-            timestamp_us: Some(42),
-            screen_id: Some(3),
-        }).unwrap();
-        let bytes = recorder.into_bytes();
-        assert!(bytes.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
-        assert!(String::from_utf8_lossy(&bytes).contains("timestamp=42"));
-        assert!(String::from_utf8_lossy(&bytes).contains("screen=3"));
-    }
-
-    #[test]
-    fn raw_recordings_keep_avcc_description_and_video_in_one_valid_transport() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::RawFrames, "now".into());
-        recorder
-            .push(&TransportFrame {
-                payload: vec![1, 2, 3],
-                encoding: DeviceFrameEncoding::AvccDescription,
-                keyframe: true,
-                timestamp_us: None,
-                screen_id: None,
-            })
-            .unwrap();
-        recorder
-            .push(&TransportFrame {
-                payload: vec![0, 0, 0, 1, 0x65],
-                encoding: DeviceFrameEncoding::H264,
-                keyframe: true,
-                timestamp_us: Some(9),
-                screen_id: None,
-            })
-            .unwrap();
-        let chunks = AvccDemuxer::default().push(recorder.bytes()).unwrap();
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].kind, AvccChunkKind::Description);
-        assert_eq!(chunks[0].payload, [1, 2, 3]);
-        assert_eq!(chunks[1].kind, AvccChunkKind::Keyframe);
-        assert!(chunks[1].payload.windows(5).any(|window| window == [0, 0, 0, 1, 0x65]));
-    }
-
-    #[test]
-    fn raw_recordings_reject_mixed_still_and_video_transports() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::RawFrames, "now".into());
-        recorder
-            .push(&TransportFrame {
-                payload: vec![137, 80, 78, 71],
-                encoding: DeviceFrameEncoding::Png,
-                keyframe: true,
-                timestamp_us: None,
-                screen_id: None,
-            })
-            .unwrap();
-        assert!(recorder
-            .push(&TransportFrame {
-                payload: vec![0, 0, 0, 1, 0x65],
-                encoding: DeviceFrameEncoding::H264,
-                keyframe: true,
-                timestamp_us: None,
-                screen_id: None,
-            })
-            .is_err());
+        let mut invalid = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        invalid.push(&TransportFrame { payload: vec![1, 0x42, 0, 0x1f, 0xff, 0xe1, 0, 1, 0x67, 0x42, 1, 0, 1, 0x68], encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
+        invalid.push(&TransportFrame { payload: keyframe(), encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
+        invalid.finish();
+        assert!(invalid.finish_error().is_some());
+        assert!(invalid.bytes().is_empty());
     }
 
     #[test]
     fn recorder_rejects_a_frame_that_would_cross_the_host_bound() {
-        let mut recorder = RawFrameRecorder::new(agent_protocol::device::DeviceRecordingFormat::RawFrames, "now".into());
-        let frame = TransportFrame {
-            payload: vec![0; MAX_STREAM_CHUNK],
-            encoding: DeviceFrameEncoding::Png,
-            keyframe: true,
-            timestamp_us: None,
-            screen_id: None,
-        };
+        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        let frame = TransportFrame { payload: vec![0; MAX_STREAM_CHUNK], encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: None, screen_id: None };
         assert!(recorder.push(&frame).is_err());
         assert_eq!(recorder.frame_count(), 0);
         assert_eq!(recorder.byte_count(), 0);

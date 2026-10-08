@@ -36,8 +36,6 @@ final class DeviceVideoDecoder {
         switch frame.encoding {
         case "jpeg", "mjpeg":
             return UIImage(data: Data(frame.payload))
-        case "png":
-            return UIImage(data: Data(frame.payload))
         case "avcc-description":
             guard configure(description: frame.payload) else { return nil }
             awaitingKeyframe = true

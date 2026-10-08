@@ -182,7 +182,7 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
             app_id,
             payload: serde_json::from_str(&payload).map_err(|_| invalid("Push payload must be JSON"))?,
         },
-        DeviceActionIntent::Touch { phase, x, y, raw } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y, raw }),
+        DeviceActionIntent::Touch { phase, x, y } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y }),
         DeviceActionIntent::Key { code, key, down, meta, ctrl } => {
             d::DeviceActionKind::Input(d::DeviceInputKind::Key { code, key, down, meta, ctrl })
         }
@@ -199,7 +199,7 @@ fn device_hardware_button(value: &str) -> Result<d::DeviceHardwareButton, PeerEr
     match value { "home" => Ok(d::DeviceHardwareButton::Home), "back" => Ok(d::DeviceHardwareButton::Back), "recents" => Ok(d::DeviceHardwareButton::Recents), "power" => Ok(d::DeviceHardwareButton::Power), "appSwitcher" => Ok(d::DeviceHardwareButton::AppSwitcher), _ => Err(invalid("Unknown device hardware button")) }
 }
 fn device_recording_format(value: &str) -> Result<d::DeviceRecordingFormat, PeerError> {
-    match value { "raw" | "rawFrames" => Ok(d::DeviceRecordingFormat::RawFrames), "mjpeg" => Ok(d::DeviceRecordingFormat::Mjpeg), "avcc" => Ok(d::DeviceRecordingFormat::Avcc), _ => Err(invalid("Unknown device recording format")) }
+    match value { "mp4" => Ok(d::DeviceRecordingFormat::Mp4), _ => Err(invalid("Unknown device recording format")) }
 }
 fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
     Ok(match value {

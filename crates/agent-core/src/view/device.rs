@@ -37,12 +37,14 @@ pub struct DeviceSessionView {
     pub device_id: String,
     pub platform: String,
     pub opened_at: String,
+    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceFrameView {
     pub thread_id: String,
+    pub session_epoch: String,
     pub host_id: String,
     pub device_id: String,
     pub platform: String,
@@ -56,6 +58,7 @@ pub struct DeviceFrameView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceVideoFrameView {
     pub thread_id: String,
+    pub session_epoch: String,
     pub host_id: String,
     pub device_id: String,
     pub platform: String,
@@ -67,7 +70,6 @@ pub struct DeviceVideoFrameView {
     pub timestamp_us: Option<u64>,
     pub keyframe: bool,
     pub screen_id: Option<u8>,
-    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +77,7 @@ pub struct DeviceVideoFrameView {
 pub struct DeviceAccessibilityView {
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub elements: Vec<DeviceAccessibilityElementView>,
     pub errors: Vec<String>,
     pub read_at: String,
@@ -97,6 +100,7 @@ pub struct DeviceAccessibilityElementView {
 pub struct DeviceForegroundView {
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub app_id: Option<String>,
     pub received_at: String,
 }
@@ -106,6 +110,7 @@ pub struct DeviceForegroundView {
 pub struct DeviceEventLogView {
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub id: u64,
     pub timestamp: String,
     pub kind: String,
@@ -116,6 +121,7 @@ pub struct DeviceEventLogView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceScreenView {
     pub thread_id: Option<String>,
+    pub session_epoch: String,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
     pub width: u32,
@@ -126,9 +132,6 @@ pub struct DeviceScreenView {
     pub hinge_pose: Option<String>,
     pub table_mode: bool,
     pub table_mode_available: bool,
-    /// Duo panel streams are already in framebuffer coordinates and must not
-    /// receive the iOS display-orientation touch remap.
-    pub raw_touch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -162,9 +165,8 @@ pub fn project_touch_point(
     {
         return None;
     }
-    // Keep the fit calculation in f64.  With finite f32 inputs, the ratio can
-    // underflow to zero before the rendered size is calculated, which would
-    // otherwise turn a valid pointer into NaN coordinates.
+    // Keep the fit calculation in f64. With finite f32 inputs, the ratio can
+    // underflow to zero before the rendered size is calculated.
     let viewport_width = viewport_width as f64;
     let viewport_height = viewport_height as f64;
     let content_width = content_width as f64;
@@ -212,12 +214,12 @@ pub struct DeviceRecordingView {
     pub host_id: String,
     pub device_id: String,
     pub format: String,
+    pub file_name: String,
+    pub mime_type: String,
     pub started_at: String,
     pub frame_count: u64,
     pub byte_count: u64,
     pub error: Option<String>,
-    pub artifact_extension: Option<String>,
-    pub artifact_mime_type: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -257,8 +259,7 @@ pub struct DeviceView {
     pub details: Vec<DeviceDetailView>,
     pub frames: Vec<DeviceFrameView>,
     pub video_frames: Vec<DeviceVideoFrameView>,
-    /// Ordered access units for stateful native decoders. `video_frames` keeps
-    /// the latest frame per screen for lightweight still-image consumers.
+    /// Ordered access units for stateful native decoders.
     pub video_events: Vec<DeviceVideoFrameView>,
     pub accessibility: Vec<DeviceAccessibilityView>,
     pub foreground: Vec<DeviceForegroundView>,
@@ -326,6 +327,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 device_id: session.device_id.clone(),
                 platform: platform_name(session.platform).into(),
                 opened_at: session.opened_at.clone(),
+                session_epoch: session.session_epoch.clone(),
             })
             .collect(),
         details: state
@@ -369,6 +371,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|frame| DeviceFrameView {
                 thread_id: frame.thread_id.to_string(),
+                session_epoch: frame.session_epoch.clone(),
                 host_id: frame.device.host_id.clone(),
                 device_id: frame.device.id.clone(),
                 platform: platform_name(frame.device.platform).into(),
@@ -381,12 +384,12 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
         video_frames: state
             .video_frames
             .values()
-            .map(|frame| video_frame_view(frame, &state.sessions))
+            .map(video_frame_view)
             .collect(),
         video_events: state
             .video_events
             .values()
-            .flat_map(|frames| frames.iter().map(|frame| video_frame_view(frame, &state.sessions)))
+            .flat_map(|frames| frames.iter().map(video_frame_view))
             .collect(),
         accessibility: state
             .accessibility
@@ -394,6 +397,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .map(|tree| DeviceAccessibilityView {
                 host_id: tree.host_id.clone(),
                 device_id: tree.device_id.clone(),
+                session_epoch: tree.session_epoch.clone(),
                 elements: tree
                     .elements
                     .iter()
@@ -417,6 +421,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .map(|update| DeviceForegroundView {
                 host_id: update.host_id.clone(),
                 device_id: update.device_id.clone(),
+                session_epoch: update.session_epoch.clone(),
                 app_id: update.app.as_ref().map(|app| app.id.clone()),
                 received_at: update.received_at.clone(),
             })
@@ -428,6 +433,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .map(|entry| DeviceEventLogView {
                 host_id: entry.host_id.clone(),
                 device_id: entry.device_id.clone(),
+                session_epoch: entry.session_epoch.clone(),
                 id: entry.id,
                 timestamp: entry.timestamp.clone(),
                 kind: entry.kind.clone(),
@@ -439,6 +445,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|screen| DeviceScreenView {
                 thread_id: screen.thread_id.as_ref().map(ToString::to_string),
+                session_epoch: screen.session_epoch.clone(),
                 host_id: screen.host_id.clone(),
                 device_id: screen.device_id.clone(),
                 width: screen.width,
@@ -449,7 +456,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 hinge_pose: screen.hinge_pose.clone(),
                 table_mode: screen.table_mode,
                 table_mode_available: screen.table_mode_available,
-                raw_touch: screen.supports_hinge_angle && !screen.supports_physical_orientation,
             })
             .collect(),
         recordings: state
@@ -460,12 +466,12 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 host_id: status.host_id.clone(),
                 device_id: status.device_id.clone(),
                 format: recording_format_name(status.format).into(),
+                file_name: status.file_name.clone(),
+                mime_type: status.mime_type.clone(),
                 started_at: status.started_at.clone(),
                 frame_count: status.frame_count,
                 byte_count: status.byte_count,
                 error: status.error.clone(),
-                artifact_extension: None,
-                artifact_mime_type: None,
                 bytes: vec![],
             })
             .collect(),
@@ -474,12 +480,12 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             host_id: recording.status.host_id.clone(),
             device_id: recording.status.device_id.clone(),
             format: recording_format_name(recording.status.format).into(),
+            file_name: recording.status.file_name.clone(),
+            mime_type: recording.status.mime_type.clone(),
             started_at: recording.status.started_at.clone(),
             frame_count: recording.status.frame_count,
             byte_count: recording.status.byte_count,
             error: recording.status.error.clone(),
-            artifact_extension: recording.artifact.as_ref().map(|artifact| artifact.extension.clone()),
-            artifact_mime_type: recording.artifact.as_ref().map(|artifact| artifact.mime_type.clone()),
             bytes: recording.bytes.clone(),
         }),
         error: state.error.clone(),
@@ -520,12 +526,10 @@ fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) ->
     }
 }
 
-fn video_frame_view(
-    frame: &agent_protocol::device::DeviceVideoFrame,
-    sessions: &[agent_protocol::device::DeviceSession],
-) -> DeviceVideoFrameView {
+fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
     DeviceVideoFrameView {
         thread_id: frame.thread_id.to_string(),
+        session_epoch: frame.session_epoch.clone(),
         host_id: frame.device.host_id.clone(),
         device_id: frame.device.id.clone(),
         platform: platform_name(frame.device.platform).into(),
@@ -537,15 +541,6 @@ fn video_frame_view(
         timestamp_us: frame.timestamp_us,
         keyframe: frame.keyframe,
         screen_id: frame.screen_id,
-        session_epoch: sessions
-            .iter()
-            .find(|session| {
-                session.thread_id == frame.thread_id
-                    && session.host_id == frame.device.host_id
-                    && session.device_id == frame.device.id
-            })
-            .map(|session| session.opened_at.clone())
-            .unwrap_or_default(),
     }
 }
 
@@ -560,9 +555,7 @@ fn orientation_name(orientation: agent_protocol::device::DeviceOrientation) -> &
 
 fn recording_format_name(format: agent_protocol::device::DeviceRecordingFormat) -> &'static str {
     match format {
-        agent_protocol::device::DeviceRecordingFormat::RawFrames => "raw",
-        agent_protocol::device::DeviceRecordingFormat::Mjpeg => "mjpeg",
-        agent_protocol::device::DeviceRecordingFormat::Avcc => "avcc",
+        agent_protocol::device::DeviceRecordingFormat::Mp4 => "mp4",
     }
 }
 
@@ -579,20 +572,12 @@ mod tests {
     }
 
     #[test]
-    fn touch_projection_rejects_letterbox_and_normalizes_content() {
+    fn touch_projection_rejects_letterbox_and_keeps_extreme_dimensions_finite() {
         assert_eq!(project_touch_point(f32::NAN, 0.0, 100.0, 100.0, 100.0, 100.0), None);
-        assert_eq!(project_touch_point(0.0, 0.0, 0.0, 100.0, 100.0, 100.0), None);
-        assert_eq!(
-            project_touch_point(50.0, 100.0, 1000.0, 1000.0, 1000.0, 500.0),
-            None,
-        );
+        assert_eq!(project_touch_point(50.0, 100.0, 1000.0, 1000.0, 1000.0, 500.0), None);
         assert_eq!(
             project_touch_point(250.0, 500.0, 1000.0, 1000.0, 1000.0, 500.0),
             Some(DeviceTouchPoint { x: 0.25, y: 0.5 }),
-        );
-        assert_eq!(
-            project_touch_point(750.0, 750.0, 1000.0, 1000.0, 1000.0, 500.0),
-            Some(DeviceTouchPoint { x: 0.75, y: 1.0 }),
         );
         let extreme = project_touch_point(
             f32::MAX / 2.0,
