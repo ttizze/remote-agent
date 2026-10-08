@@ -449,12 +449,12 @@ struct DeviceScreen: View {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .key(code: "Enter", down: true)
+                                    action: .key(code: "Enter", key: "Enter", down: true, meta: false, ctrl: false)
                                 ))
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .key(code: "Enter", down: false)
+                                    action: .key(code: "Enter", key: "Enter", down: false, meta: false, ctrl: false)
                                 ))
                             }
                             Button("Rotate") {
