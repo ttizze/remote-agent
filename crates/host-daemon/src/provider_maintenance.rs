@@ -320,7 +320,7 @@ pub(crate) fn update_command(
             return Err("Homebrew updates do not accept a target version".into());
         }
         let name = segments[index + 1];
-        let args = if *segments[index] == "caskroom" {
+        let args = if segments[index] == "caskroom" {
             vec!["upgrade".into(), "--cask".into(), name.into()]
         } else {
             vec!["upgrade".into(), name.into()]
@@ -728,8 +728,8 @@ pub(crate) async fn update(
         return Err("provider versions must use x.y.z form".into());
     }
     let mut command = update_command(driver, &binary, home.as_deref(), target_version.as_deref())?;
-    let version = match target_version {
-        Some(version) => version,
+    let version = match target_version.as_deref() {
+        Some(version) => version.to_owned(),
         None if command
             .args
             .iter()
@@ -760,7 +760,7 @@ pub(crate) async fn update(
     }
     let mut child = tokio::process::Command::new(&executable)
         .args(&command.args)
-        .envs(&command.environment)
+        .envs(command.environment.iter().map(|(key, value)| (key, value)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

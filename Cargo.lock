@@ -240,6 +240,7 @@ dependencies = [
 name = "agent-transport"
 version = "0.1.0"
 dependencies = [
+ "agent-domain",
  "agent-protocol",
  "futures-util",
  "iroh",
@@ -1079,7 +1080,6 @@ dependencies = [
  "gpui-wry",
  "host-daemon",
  "image",
- "libc",
  "lb-wry",
  "libc",
  "objc2 0.6.4",

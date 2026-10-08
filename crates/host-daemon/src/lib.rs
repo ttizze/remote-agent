@@ -1,5 +1,6 @@
 mod account_usage;
 mod acp_registry;
+mod acp_runtime;
 mod background;
 pub use background::{DesktopProcessMonitor, sample_desktop_power, sample_local_power};
 pub mod browser;

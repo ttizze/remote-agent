@@ -227,7 +227,7 @@ fn package_name(package: &str) -> Option<&str> {
     (separator > 0).then_some(&package[..separator])
 }
 
-fn package_version(package: &str, runner: &str) -> Option<&str> {
+fn package_version<'a>(package: &'a str, runner: &str) -> Option<&'a str> {
     let (separator, length) = if runner == "uvx" {
         (package.rfind("==")?, 2)
     } else {
@@ -1078,14 +1078,15 @@ fn normalize_auth_methods(
                 .then(|| bounded_value(method, "link", 2_048))
                 .flatten()
                 .filter(|link| valid_https_url(link));
+            let command = (auth_type == "terminal")
+                .then(|| terminal_auth_command(agent, method))
+                .flatten();
             Some(AcpProbeAuthMethod {
                 id,
                 name,
                 description: bounded_value(method, "description", 1_024),
                 auth_type,
-                command: (auth_type == "terminal")
-                    .then(|| terminal_auth_command(agent, method))
-                    .flatten(),
+                command,
                 env_var_names,
                 link,
             })
@@ -1131,7 +1132,7 @@ fn normalize_config_options(
     Option<String>,
     Vec<agent_domain::OptionDescriptor>,
 ) {
-    let mut models = Vec::new();
+    let mut models: Vec<AcpProbeModel> = Vec::new();
     let mut current_model_id = None;
     let mut descriptors = Vec::new();
     let options = value
@@ -1271,7 +1272,7 @@ pub(crate) async fn probe(
     Ok(AcpProbeResult {
         agent_id: params.agent_id.clone(),
         ready: true,
-        icon: agent.icon,
+        icon: agent.icon.clone(),
         auth_methods: normalize_auth_methods(&initialize, &agent),
         models,
         current_model_id,

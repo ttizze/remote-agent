@@ -764,7 +764,7 @@ impl PushService {
                     state,
                     access_token,
                     alert_enabled,
-                )
+                )?
             }
         };
         self.send_request(request).await

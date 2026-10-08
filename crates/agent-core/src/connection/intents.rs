@@ -270,7 +270,6 @@ fn push_registration(
     request.validate().map_err(invalid)?;
     Ok(request)
 }
-}
 
 /// The proposed plan the composer offers to implement or refine, by the
 /// plan follow-up rules of the open thread and its draft.

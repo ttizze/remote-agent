@@ -3602,7 +3602,7 @@ impl HostRpcService {
             driver,
             binary,
             home,
-            environment,
+            environment.into_iter().collect(),
             params.target_version.clone(),
         )
         .await
