@@ -67,4 +67,14 @@ class AndroidAppModelTest {
             Dispatchers.resetMain()
         }
     }
+
+    @Test
+    fun coldStartRemovalUsesTheRetainedHostPrincipalWithoutARegistrationCache() {
+        val context = RuntimeEnvironment.getApplication()
+        val expected = PushRegistrationStore.deviceId(context, "host-cold-start")
+        assertEquals(
+            expected,
+            pushDeviceIdForUnregister(context, "host-cold-start", null),
+        )
+    }
 }

@@ -7,7 +7,7 @@
 
 use agent_domain::{
     ACTIVITY_LINK_LIMIT, ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT,
-    BackgroundKind, RunStatus, ThreadRelationship, bounded_activity_text,
+    BackgroundKind, RunStatus, ThreadRelationship, bounded_activity_link, bounded_activity_text,
 };
 use agent_protocol::push::{
     ApnsEnvironment, PushActivityEvent, PushActivityItem, PushActivityPhase, PushContentState,
@@ -1363,88 +1363,18 @@ fn encode_component(value: &str) -> String {
     encoded
 }
 
-fn bounded_deep_link(value: &str) -> String {
-    if valid_deep_link(value) {
-        value.to_owned()
-    } else {
-        String::new()
-    }
-}
-
-fn valid_deep_link(value: &str) -> bool {
-    if value.encode_utf16().count() > ACTIVITY_LINK_LIMIT {
-        return false;
-    }
-    let Ok(url) = url::Url::parse(value) else {
-        return false;
-    };
-    url.scheme() == "remoteagent"
-        && url.host_str() == Some("threads")
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.path_segments().is_some_and(|segments| {
-            let segments = segments.collect::<Vec<_>>();
-            segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
-        })
-}
-
 fn content_state(event: &PushActivityEvent, active: &[PushActivityEvent]) -> PushContentState {
-    let mut events = active.to_vec();
-    if !events
+    let mut records = active
         .iter()
-        .any(|value| value.thread_id == event.thread_id)
-    {
-        events.push(event.clone());
-    }
-    let active_count = events
-        .iter()
-        .filter(|value| !value.phase.is_terminal())
-        .count() as u32;
-    let updated_at = events
-        .iter()
-        .map(|value| value.occurred_at_ms)
-        .max()
-        .unwrap_or(event.occurred_at_ms);
-    events.sort_by(|left, right| {
-        activity_priority(left.phase)
-            .cmp(&activity_priority(right.phase))
-            .then_with(|| right.occurred_at_ms.cmp(&left.occurred_at_ms))
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-    });
-    events.truncate(ACTIVITY_ROWS_LIMIT);
-    let displayed_active_count = events
-        .iter()
-        .filter(|value| !value.phase.is_terminal())
-        .count() as u32;
-    let activities = events
-        .iter()
-        .map(|value| value.activity_item(timestamp(value.occurred_at_ms)))
+        .map(PushActivityEvent::activity_record)
         .collect::<Vec<_>>();
-    PushContentState {
-        title: event.project_title.clone(),
-        subtitle: if displayed_active_count <= 1 && activities.len() == 1 {
-            event.headline.clone()
-        } else if active_count > 0 {
-            format!("{active_count} active agent activities")
-        } else {
-            event.headline.clone()
-        },
-        active_count,
-        updated_at: timestamp(updated_at),
-        activities,
+    if !records
+        .iter()
+        .any(|value| value.environment_id == event.host_id && value.thread_id == event.thread_id)
+    {
+        records.push(event.activity_record());
     }
-}
-
-fn activity_priority(phase: PushActivityPhase) -> u8 {
-    match phase {
-        PushActivityPhase::WaitingForApproval | PushActivityPhase::WaitingForInput => 0,
-        PushActivityPhase::Failed => 1,
-        PushActivityPhase::Starting | PushActivityPhase::Running => 2,
-        PushActivityPhase::Completed | PushActivityPhase::Stale => 3,
-    }
+    agent_domain::activity_content_state(&records).into()
 }
 
 fn timestamp(millis: i64) -> String {
@@ -1490,7 +1420,7 @@ fn apns_notification_request(
         .trim_matches('"')
         .to_owned();
     let updated_at = timestamp(event.occurred_at_ms);
-    let deep_link = bounded_deep_link(&event.deep_link);
+    let deep_link = bounded_activity_link(&event.deep_link);
     let body = serde_json::json!({
         "aps": {
             "alert": {
@@ -1702,7 +1632,7 @@ fn fcm_notification_request(
         ("alertBody", alert_body),
         ("alert", if alert_enabled { "1".into() } else { "0".into() }),
         ("updatedAt", timestamp(event.occurred_at_ms)),
-        ("deepLink", bounded_deep_link(&event.deep_link)),
+        ("deepLink", bounded_activity_link(&event.deep_link)),
     ]);
     if registration.preferences.live_activities_enabled {
         data.insert("activity", bounded_content_state(state)?);
@@ -1877,21 +1807,17 @@ fn bounded_content_state_value(
     let mut compact = state.clone();
     compact.title = bounded_activity_text(&compact.title, ACTIVITY_SUMMARY_LIMIT);
     compact.subtitle = bounded_activity_text(&compact.subtitle, ACTIVITY_SUMMARY_LIMIT);
+    // The domain projection has already selected attention rows and ordered
+    // them. This layer only fits that canonical state into the provider byte
+    // budget; it must not make a second semantic selection.
     let mut activities = compact.activities;
-    activities.sort_by(|left, right| {
-        activity_priority(left.phase)
-            .cmp(&activity_priority(right.phase))
-            .then_with(|| right.updated_at.cmp(&left.updated_at))
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-    });
     activities.truncate(ACTIVITY_ROWS_LIMIT);
     compact.activities = Vec::new();
     for activity in activities {
         let mut bounded = activity.clone();
         // Identifiers and deep links are routing data. Truncating them creates
         // a different thread target, so an over-budget row is omitted below.
-        if bounded.deep_link.encode_utf16().count() > ACTIVITY_LINK_LIMIT
-            || !valid_deep_link(&bounded.deep_link)
+        if bounded_activity_link(&bounded.deep_link) != bounded.deep_link
         {
             continue;
         }
@@ -1935,7 +1861,7 @@ fn bounded_content_state_value(
 }
 
 fn activity_fits_bounds(activity: &agent_protocol::push::PushActivityItem) -> bool {
-    valid_deep_link(&activity.deep_link)
+    bounded_activity_link(&activity.deep_link) == activity.deep_link
         && bounded_activity_text(&activity.project_title, ACTIVITY_SUMMARY_LIMIT)
             == activity.project_title
         && bounded_activity_text(&activity.thread_title, ACTIVITY_SUMMARY_LIMIT)
@@ -2049,8 +1975,14 @@ mod tests {
             thread_deep_link("host/id", "thread id"),
             "remoteagent://threads/host%2Fid/thread%20id"
         );
-        assert!(!valid_deep_link("remoteagent://threads/host//thread"));
-        assert!(!valid_deep_link("remoteagent://threads/host/thread/"));
+        assert_eq!(
+            bounded_activity_link("remoteagent://threads/host//thread"),
+            ""
+        );
+        assert_eq!(
+            bounded_activity_link("remoteagent://threads/host/thread/"),
+            ""
+        );
     }
 
     #[test]
@@ -2168,12 +2100,12 @@ mod tests {
             active_count: 6,
             updated_at: "2026-10-08T00:00:00.000Z".into(),
             activities: vec![
+                make("approval", PushActivityPhase::WaitingForApproval),
                 make("running-a", PushActivityPhase::Running),
                 make("running-b", PushActivityPhase::Running),
                 make("running-c", PushActivityPhase::Running),
                 make("running-d", PushActivityPhase::Running),
                 make("running-e", PushActivityPhase::Running),
-                make("approval", PushActivityPhase::WaitingForApproval),
             ],
         };
         let bounded = bounded_content_state_value(&state).unwrap();
@@ -2255,7 +2187,7 @@ mod tests {
             deep_link: thread_deep_link("host", "thread"),
             occurred_at_ms: 1,
         };
-        let state = event.content_state(timestamp(event.occurred_at_ms));
+        let state = content_state(&event, &[]);
         let mut registration = registration();
         registration.platform = PushPlatform::Android;
         registration.bundle_id = None;

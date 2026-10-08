@@ -3,6 +3,7 @@ package dev.remoteagent.mobile
 import android.net.Uri
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import dev.remoteagent.core.aggregateAgentActivityContentStatesJson
 import dev.remoteagent.core.agentActivityWidgetJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -92,22 +93,11 @@ private fun retainedActivityStates(states: Map<String, JsonObject>): List<Pair<S
 
 private fun aggregateActivityState(states: List<Pair<String, JsonObject>>): String? {
     if (states.isEmpty()) return null
-    val allRows = states.flatMap { (_, parsed) -> (parsed["activities"] as? JsonArray).orEmpty() }.take(64)
-    val activeCount = states.sumOf { (_, parsed) ->
-        (parsed["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0) ?: 0
-    }
-    val title = (states.firstOrNull()?.second?.get("title") as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
-        ?: "Agent activity"
-    val subtitle = (states.firstOrNull()?.second?.get("subtitle") as? JsonPrimitive)?.content.orEmpty()
-    val updatedAt = states.maxOfOrNull { (_, parsed) -> (parsed["updatedAt"] as? JsonPrimitive)?.content.orEmpty() }.orEmpty()
-    val aggregate = buildJsonObject {
-        put("title", title)
-        put("subtitle", subtitle)
-        put("activeCount", activeCount)
-        put("updatedAt", updatedAt)
-        put("activities", JsonArray(allRows))
-    }
-    return Json.encodeToString(JsonObject.serializer(), aggregate)
+    val input = Json.encodeToString(
+        JsonArray.serializer(),
+        JsonArray(states.map { (_, parsed) -> parsed }),
+    )
+    return aggregateAgentActivityContentStatesJson(input)
 }
 
 /** Stores one Host state and returns the serialized cross-Host aggregate. */

@@ -50,4 +50,17 @@ class AgentPushMessagingServiceTest {
         assertNull(parseActivityPresentation("""{"activeCount":{},"activities":[]}"""))
         assertNull(parseActivityPresentation("""{"activeCount":1,"activities":{}}"""))
     }
+
+    @Test
+    fun coldStartRemovalReconstructsTheSameHostScopedDeviceId() {
+        val base = "device-base"
+        assertEquals(
+            PushRegistrationStore.scopedDeviceId(base, "host-a"),
+            PushRegistrationStore.scopedDeviceId(base, "host-a"),
+        )
+        assertFalse(
+            PushRegistrationStore.scopedDeviceId(base, "host-a") ==
+                PushRegistrationStore.scopedDeviceId(base, "host-b"),
+        )
+    }
 }

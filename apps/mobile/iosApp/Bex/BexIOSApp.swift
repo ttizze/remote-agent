@@ -24,6 +24,9 @@ struct BexIOSApp: App {
                             await pushCenter?.reconcileActivities(states: states)
                         }
                     }
+                    model.setPushDeviceIdProvider { [weak pushCenter] hostId in
+                        pushCenter?.deviceIdForPush(hostId: hostId)
+                    }
                     pushCenter.configure(
                         register: { [weak model] hostId, registration in
                             model?.registerPush(hostId: hostId, registration: registration)

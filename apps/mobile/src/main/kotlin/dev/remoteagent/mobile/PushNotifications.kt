@@ -83,7 +83,11 @@ internal object PushRegistrationStore {
 
     /** Each Host gets a stable principal so its registration cannot overwrite another Host. */
     fun deviceId(context: Context, hostId: String): String {
-        val base = baseDeviceId(context)
+        return scopedDeviceId(baseDeviceId(context), hostId)
+    }
+
+    /** Pure counterpart used by cold-start removal and unit tests. */
+    internal fun scopedDeviceId(base: String, hostId: String): String {
         val candidate = "$base:$hostId"
         if (candidate.toByteArray(Charsets.UTF_8).size <= 128) return candidate
         val digest = MessageDigest.getInstance("SHA-256")
@@ -99,14 +103,6 @@ internal object PushRegistrationStore {
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().putString(TOKEN, token).apply()
     }
 
-    fun liveActivitiesEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean("ongoing-enabled", true)
-
-    fun setLiveActivitiesEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit()
-            .putBoolean("ongoing-enabled", enabled)
-            .apply()
-    }
 }
 
 internal object PushNotificationCenter {

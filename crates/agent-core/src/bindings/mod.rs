@@ -1,8 +1,11 @@
 //! Native binding boundary. Core owns all conversation state and effects.
+mod activity;
 mod domain;
 mod ids;
 mod protocol;
 mod snapshot;
+
+pub use activity::{agent_activity_content_state_json, aggregate_agent_activity_content_states_json};
 
 use crate::{
     connection::{Outcome, StoreOptions},

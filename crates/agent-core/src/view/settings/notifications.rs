@@ -37,7 +37,11 @@ fn mode_choices() -> Vec<super::SettingChoice> {
 }
 
 pub(super) const SECTION: Section = Section {
-    ids: &[SettingId::NotificationMode, SettingId::InAppNotifications],
+    ids: &[
+        SettingId::NotificationMode,
+        SettingId::InAppNotifications,
+        SettingId::LiveActivities,
+    ],
     host: |context: &Context| {
         let preferences = &context.snapshot.preferences;
         Some(section(
@@ -71,6 +75,18 @@ pub(super) const SECTION: Section = Section {
                         },
                     )
                 },
+                SettingsRow {
+                    resettable: preferences.live_activities_enabled
+                        != Preferences::default().live_activities_enabled,
+                    ..row(
+                        SettingId::LiveActivities,
+                        "Live activity",
+                        Some("Keep active agent work visible in the system activity surface."),
+                        SettingControl::Switch {
+                            on: preferences.live_activities_enabled,
+                        },
+                    )
+                },
             ],
             Some("Operating-system delivery still follows the platform's notification permission."),
         ))
@@ -98,6 +114,9 @@ pub(super) const SECTION: Section = Section {
             (SettingId::InAppNotifications, SettingValue::Switch { on }) => {
                 Some(Intent::SetInAppNotificationsEnabled { enabled: *on })
             }
+            (SettingId::LiveActivities, SettingValue::Switch { on }) => {
+                Some(Intent::SetLiveActivitiesEnabled { enabled: *on })
+            }
             _ => None,
         }
     },
@@ -107,6 +126,9 @@ pub(super) const SECTION: Section = Section {
         }),
         SettingId::InAppNotifications => Some(Intent::SetInAppNotificationsEnabled {
             enabled: Preferences::default().in_app_notifications_enabled,
+        }),
+        SettingId::LiveActivities => Some(Intent::SetLiveActivitiesEnabled {
+            enabled: Preferences::default().live_activities_enabled,
         }),
         _ => None,
     },
@@ -129,6 +151,7 @@ mod tests {
         let mut snapshot = Snapshot::default();
         snapshot.preferences.notification_mode = NotificationMode::Notifications;
         snapshot.preferences.in_app_notifications_enabled = false;
+        snapshot.preferences.live_activities_enabled = false;
         let view = settings_view(
             &snapshot,
             None,
@@ -149,6 +172,7 @@ mod tests {
             }
         );
         assert_eq!(rows[1].control, SettingControl::Switch { on: false });
+        assert_eq!(rows[2].control, SettingControl::Switch { on: false });
         assert_eq!(
             (SECTION.intent)(
                 &snapshot,
@@ -159,6 +183,15 @@ mod tests {
             Some(Intent::SetNotificationMode {
                 mode: NotificationMode::Sound
             })
+        );
+        assert_eq!(
+            (SECTION.intent)(
+                &snapshot,
+                &SettingsScope::Host,
+                SettingId::LiveActivities,
+                &SettingValue::Switch { on: true }
+            ),
+            Some(Intent::SetLiveActivitiesEnabled { enabled: true })
         );
     }
 }

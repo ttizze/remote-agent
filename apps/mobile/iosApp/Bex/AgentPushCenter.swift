@@ -53,7 +53,6 @@ extension Notification.Name {
 final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     static let appGroup = "group.com.ttizze.b-codex"
     private static let deviceIdKey = "push.device-id"
-    private static let liveActivitiesKey = "push.live-activities-enabled"
 
     private let notificationCenter = UNUserNotificationCenter.current()
     private var registerHandler: ((String, AgentPushRegistration) -> Void)?
@@ -145,9 +144,10 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         notificationCenter.delegate = self
         let hosts = knownHostIds()
         let wantsAlerts = hosts.contains { preferences(for: $0).notificationsEnabled }
+        let wantsLiveActivities = hosts.contains { preferences(for: $0).liveActivitiesEnabled }
         if !wantsAlerts {
             notificationEnabled = false
-            if liveActivitiesEnabled { UIApplication.shared.registerForRemoteNotifications() }
+            if wantsLiveActivities { UIApplication.shared.registerForRemoteNotifications() }
             submitRegistrations()
             setActiveForKnownHosts()
             return
@@ -161,8 +161,8 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
                 || current.authorizationStatus == .ephemeral
         }
         // ActivityKit push tokens also use APNs registration. Requesting this
-        // token does not show an alert when the core preference is disabled.
-        if notificationEnabled || liveActivitiesEnabled { UIApplication.shared.registerForRemoteNotifications() }
+        // token does not show an alert when only Live Activities are enabled.
+        if notificationEnabled || wantsLiveActivities { UIApplication.shared.registerForRemoteNotifications() }
         submitRegistrations()
         setActiveForKnownHosts()
     }
@@ -172,16 +172,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     }
 
     private func preferences(for hostId: String) -> AgentPushPreferences {
-        var value = preferencesProvider?(hostId) ?? .default
-        value = AgentPushPreferences(
-            notificationsEnabled: value.notificationsEnabled,
-            notifyOnApproval: value.notifyOnApproval,
-            notifyOnInput: value.notifyOnInput,
-            notifyOnCompletion: value.notifyOnCompletion,
-            notifyOnFailure: value.notifyOnFailure,
-            liveActivitiesEnabled: value.liveActivitiesEnabled && liveActivitiesEnabled,
-        )
-        return value
+        preferencesProvider?(hostId) ?? .default
     }
 
     private func setActiveForKnownHosts(_ active: Bool) {
@@ -245,17 +236,10 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         return "\(baseDeviceId):\(digest)"
     }
 
-    private var liveActivitiesEnabled: Bool {
-        defaults.object(forKey: Self.liveActivitiesKey) as? Bool ?? true
-    }
-
-    func setLiveActivitiesEnabled(_ enabled: Bool) {
-        defaults.set(enabled, forKey: Self.liveActivitiesKey)
-        if !enabled {
-            if #available(iOS 16.1, *) { endAllActivities() }
-        }
-        submitRegistrations()
-        setActiveForKnownHosts()
+    /// Returns the stable per-Host principal even after an in-memory
+    /// registration has been discarded during a cold-start profile removal.
+    func deviceIdForPush(hostId: String) -> String {
+        deviceId(for: hostId)
     }
 
     func shutdown() {
@@ -342,15 +326,15 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
 
     @available(iOS 16.1, *)
     private func reconcileActivitiesNow(states: [String: AgentActivityAttributes.ContentState]) async {
-        guard liveActivitiesEnabled else { endAllActivities(); return }
         let known = Set(knownHostIds())
-        for (hostId, id) in activityIds where !known.contains(hostId) {
+        let enabled = Set(known.filter { preferences(for: $0).liveActivitiesEnabled })
+        for (hostId, id) in activityIds where !enabled.contains(hostId) {
             await endActivity(
                 hostId: hostId,
                 contentState: states[hostId] ?? emptyContentState(),
             )
         }
-        for hostId in known {
+        for hostId in enabled {
             let state = states[hostId]
             if let state, state.activeCount > 0 {
                 if activityIds[hostId] != nil {
@@ -368,29 +352,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
             }
         }
         submitRegistrations()
-    }
-
-    @available(iOS 16.1, *)
-    private func endAllActivities() {
-        let activities = Activity<AgentActivityAttributes>.activities
-        activityIds.removeAll()
-        activityHosts.removeAll()
-        activityTokens.removeAll()
-        startingHosts.removeAll()
-        for task in activityTokenTasks.values { task.cancel() }
-        for task in activityStateTasks.values { task.cancel() }
-        activityTokenTasks.removeAll()
-        activityStateTasks.removeAll()
-        pendingActivityStates = nil
-        submitRegistrations()
-        for activity in activities {
-            Task { @MainActor in
-                await activity.end(
-                    ActivityContent(state: activity.content.state, staleDate: nil),
-                    dismissalPolicy: .immediate,
-                )
-            }
-        }
     }
 
     @available(iOS 16.1, *)

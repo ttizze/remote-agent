@@ -87,6 +87,7 @@ pub struct PreferencesView {
     pub follow_up: FollowUpBehavior,
     pub notification_mode: crate::view::notifications::NotificationMode,
     pub in_app_notifications_enabled: bool,
+    pub live_activities_enabled: bool,
     pub load_balancing_enabled: bool,
 }
 
@@ -506,6 +507,7 @@ impl Snapshot {
             follow_up: self.follow_up,
             notification_mode: preferences.notification_mode,
             in_app_notifications_enabled: preferences.in_app_notifications_enabled,
+            live_activities_enabled: preferences.live_activities_enabled,
             load_balancing_enabled: preferences.load_balancing_enabled,
         }
     }

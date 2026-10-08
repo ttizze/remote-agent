@@ -990,6 +990,10 @@ impl Owner {
                 self.state.preferences.in_app_notifications_enabled = enabled;
                 Next::Done
             }
+            Intent::SetLiveActivitiesEnabled { enabled } => {
+                self.state.preferences.live_activities_enabled = enabled;
+                Next::Done
+            }
             Intent::SetLoadBalancingEnabled { enabled } => {
                 self.state.preferences.load_balancing_enabled = enabled;
                 Next::Done

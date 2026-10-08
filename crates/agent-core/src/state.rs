@@ -2144,6 +2144,10 @@ pub enum Intent {
     SetInAppNotificationsEnabled {
         enabled: bool,
     },
+    /// Controls the persistent Live Activity/ongoing activity presentation.
+    SetLiveActivitiesEnabled {
+        enabled: bool,
+    },
     /// Enables weighted routing of new threads across matching environments.
     SetLoadBalancingEnabled {
         enabled: bool,

@@ -5,6 +5,18 @@ import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
+    private struct PushActivitySource: Encodable {
+        let environmentId: String
+        let threadId: String
+        let projectTitle: String
+        let threadTitle: String
+        let modelTitle: String
+        let phase: String
+        let headline: String
+        let updatedAtMs: Int64
+        let deepLink: String
+    }
+
     private struct PendingLoadBalancedNewThread {
         let projectId: String
         let sourceEnvironmentId: String
@@ -62,6 +74,7 @@ final class BexAppViewModel: ObservableObject {
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
     private var pushRegistrations: [String: AgentPushRegistration] = [:]
+    private var pushDeviceIdProvider: ((String) -> String?)?
     private var pendingPushActive: [String: (deviceId: String, active: Bool)] = [:]
     private var pushGenerations: [String: UInt64] = [:]
     /// The Host store that has accepted the current registration. A retained
@@ -595,86 +608,45 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func activityContentState(_ source: AgentCore.Snapshot) -> AgentActivityAttributes.ContentState? {
-        let activities = source.awarenessActivities()
-        guard !activities.isEmpty else { return nil }
-        let items = activities.compactMap { activity -> AgentActivityAttributes.Item? in
-            let phase = canonicalActivityPhase(activity.phase)
-            let environmentId = activity.environmentId.isEmpty ? (source.environmentId() ?? "") : activity.environmentId
-            guard !environmentId.isEmpty, !activity.threadId.isEmpty else { return nil }
-            return AgentActivityAttributes.Item(
-                environmentId: environmentId,
+        let environmentId = source.environmentId() ?? ""
+        let records = source.awarenessActivities().compactMap { activity -> PushActivitySource? in
+            let environment = activity.environmentId.isEmpty ? environmentId : activity.environmentId
+            guard !environment.isEmpty, !activity.threadId.isEmpty else { return nil }
+            return PushActivitySource(
+                environmentId: environment,
                 threadId: activity.threadId,
                 projectTitle: activity.projectTitle,
                 threadTitle: activity.threadTitle,
                 modelTitle: activity.modelTitle ?? "Model",
-                phase: phase,
-                status: activityStatus(phase),
-                updatedAt: activityTimestamp(activity.updatedAtMs),
+                phase: activity.phase,
+                headline: activity.headline,
+                updatedAtMs: activity.updatedAtMs,
                 deepLink: AgentPushCenter.threadDeepLink(
-                    hostId: environmentId,
+                    hostId: environment,
                     threadId: activity.threadId
                 )
             )
         }
-        guard !items.isEmpty else { return nil }
-        let activeCount = items.reduce(into: UInt32(0)) { result, item in
-            if !["completed", "failed", "stale"].contains(item.phase) { result += 1 }
-        }
-        let subtitle: String
-        if activeCount == 1, let item = items.first, items.count == 1 {
-            subtitle = item.status
-        } else if activeCount > 0 {
-            subtitle = "\(activeCount) active agent activities"
-        } else {
-            subtitle = items.first?.status ?? "Agent activity"
-        }
-        return AgentActivityAttributes.ContentState(
-            title: items.first?.projectTitle ?? "Agent activity",
-            subtitle: subtitle,
-            activeCount: activeCount,
-            updatedAt: items.map(\.updatedAt).max() ?? activityTimestamp(0),
-            activities: items
-        )
+        guard !records.isEmpty,
+              let data = try? JSONEncoder().encode(records),
+              let json = String(data: data, encoding: .utf8),
+              let stateData = AgentCore.agentActivityContentStateJson(json: json).data(using: .utf8)
+        else { return nil }
+        return try? JSONDecoder().decode(AgentActivityAttributes.ContentState.self, from: stateData)
     }
 
-    private func canonicalActivityPhase(_ value: String) -> String {
-        switch value {
-        case "waitingApproval", "waiting_for_approval": return "waiting_for_approval"
-        case "waitingInput", "waiting_for_input": return "waiting_for_input"
-        case "starting", "running", "completed", "failed", "stale": return value
-        default: return "stale"
-        }
-    }
-
-    private func activityStatus(_ phase: String) -> String {
-        switch phase {
-        case "starting": return "Connecting"
-        case "running": return "Working"
-        case "waiting_for_approval": return "Approval"
-        case "waiting_for_input": return "Input"
-        case "completed": return "Done"
-        case "failed": return "Failed"
-        default: return "Waiting"
-        }
-    }
-
-    private func activityTimestamp(_ millis: Int64) -> String {
-        ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(max(0, millis)) / 1_000))
-    }
-
-    /// Core owns the notification mode for each retained Host; APNs
-    /// authorization is combined with it by AgentPushCenter.
+    /// Core owns the Live Activity preference for each retained Host; APNs
+    /// authorization and the device token remain native facts.
     func pushPreferences(hostId: String) -> AgentPushPreferences {
         let source = hostId == selectedProfileId ? snapshot : environmentSnapshots[hostId]
-        let mode = source?.preferences().notificationMode
-        let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
+        let liveActivitiesEnabled = source?.preferences().liveActivitiesEnabled ?? true
         return AgentPushPreferences(
-            notificationsEnabled: notificationsEnabled,
-            notifyOnApproval: notificationsEnabled,
-            notifyOnInput: notificationsEnabled,
-            notifyOnCompletion: notificationsEnabled,
-            notifyOnFailure: notificationsEnabled,
-            liveActivitiesEnabled: true
+            notificationsEnabled: true,
+            notifyOnApproval: true,
+            notifyOnInput: true,
+            notifyOnCompletion: true,
+            notifyOnFailure: true,
+            liveActivitiesEnabled: liveActivitiesEnabled
         )
     }
 
@@ -810,18 +782,21 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func unregisterPush(_ hostId: String) -> Task<Void, Never>? {
-        guard let registration = pushRegistrations[hostId] else { return nil }
+        let deviceId = pushRegistrations[hostId]?.deviceId ?? pushDeviceIdProvider?(hostId)
         pushGenerations[hostId, default: 0] &+= 1
         pendingPushActive[hostId] = nil
         pushRegistrations.removeValue(forKey: hostId)
         registeredPushOwners.removeValue(forKey: hostId)
         registeredPushConfigurations.removeValue(forKey: hostId)
-        guard let owner = pushOwner(hostId) else { return nil }
-        let deviceId = registration.deviceId
+        guard let owner = pushOwner(hostId), let deviceId else { return nil }
         do {
             let receipt = try owner.dispatch(intent: .unregisterPushDevice(deviceId: deviceId))
             return Task { _ = try? await receipt.wait() }
         } catch { return nil }
+    }
+
+    func setPushDeviceIdProvider(_ provider: @escaping (String) -> String?) {
+        pushDeviceIdProvider = provider
     }
 
     private func scopedValue(_ value: String?) -> (String?, String?) {
@@ -1029,13 +1004,14 @@ extension BexAppViewModel {
                 )
             }
         }
-        let notificationModeChanged = snapshot.preferences().notificationMode != next.preferences().notificationMode
+        let pushPreferencesChanged = snapshot.preferences().liveActivitiesEnabled
+            != next.preferences().liveActivitiesEnabled
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
         if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
         }
-        if notificationModeChanged {
+        if pushPreferencesChanged {
             if let id = selectedProfileId { registerPushIfReady(id) }
         }
         if threadChanged {
