@@ -479,6 +479,18 @@ async fn run_command(
         };
         tokio::select! {
             biased;
+            _ = timed_out => {
+                stop_process(
+                    &mut child,
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    &reader_cancel,
+                )
+                .await;
+                return Err(anyhow!(CommandTimedOut {
+                    timeout: timeout.unwrap_or_default(),
+                }));
+            }
             _ = process_cancel.cancelled(), if cancellation_enabled => {
                 stop_process(
                     &mut child,
@@ -512,18 +524,6 @@ async fn run_command(
                 if let (Some(trace), Some(progress)) = (trace.as_mut(), progress.as_mut()) {
                     trace.read(*progress);
                 }
-            }
-            _ = timed_out => {
-                stop_process(
-                    &mut child,
-                    &mut stdout_task,
-                    &mut stderr_task,
-                    &reader_cancel,
-                )
-                .await;
-                return Err(anyhow!(CommandTimedOut {
-                    timeout: timeout.unwrap_or_default(),
-                }));
             }
         }
     }
@@ -743,5 +743,34 @@ mod tests {
             Progress::Output { line, .. } => line.len() <= MAX_LINE_BYTES,
             _ => true,
         }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_deadline_wins_over_continuous_newline_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("git");
+        std::fs::write(&executable, "#!/bin/sh\nwhile :; do printf 'x\\n'; done\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![directory.path().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let path = std::env::join_paths(paths).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let env = [("PATH", path.as_str())];
+        let started = std::time::Instant::now();
+        let error = execute(Execute {
+            env: &env,
+            timeout: Some(Duration::from_millis(100)),
+            max_output_bytes: 1024,
+            ..Execute::new(directory.path(), &[])
+        })
+        .await
+        .expect_err("a continuous output producer must hit its deadline");
+        assert!(error.downcast_ref::<CommandTimedOut>().is_some(), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{error}");
     }
 }

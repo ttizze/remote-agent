@@ -171,8 +171,9 @@ async fn send_terminal(
     cancel: &CancellationToken,
 ) {
     tokio::select! {
-        _ = cancel.cancelled() => {}
+        biased;
         _ = sender.send(message) => {}
+        _ = cancel.cancelled() => {}
     }
 }
 
@@ -700,6 +701,111 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admitted_action_cancels_an_active_hook_before_releasing_its_permit() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        let hooks = directory.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        git(&["config", "core.hooksPath", "hooks"]);
+        let ready = directory.path().join("hook-ready");
+        let release = directory.path().join("hook-release");
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf 'started\\n'\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nexit 1\n",
+                ready.display(),
+                release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(directory.path().join("file.txt"), "change\n").unwrap();
+        git(&["add", "file.txt"]);
+
+        let broadcaster = super::VcsStatusBroadcaster::new(
+            None,
+            Arc::new(|| Duration::from_secs(3600)),
+        );
+        let session_cancel = CancellationToken::new();
+        let request = RunStackedAction {
+            action_id: "action:active-hook".into(),
+            cwd: directory.path().to_string_lossy().into_owned(),
+            action: StackedAction::Commit,
+            commit_message: Some("Test cancellation".into()),
+            feature_branch: false,
+            file_paths: None,
+            thread_id: None,
+            project_id: None,
+        };
+        let (first, mut receiver) = super::start(
+            request,
+            None,
+            None,
+            broadcaster.clone(),
+            session_cancel.clone(),
+        )
+        .unwrap();
+        assert!(matches!(first.kind, ActionProgressKind::ActionStarted { .. }));
+        for _ in 0..200 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ready.exists(), "the admitted action never reached its hook");
+        assert!(broadcaster.has_active_actions());
+
+        let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                if matches!(
+                    &event.kind,
+                    ActionProgressKind::ActionFinished { .. }
+                        | ActionProgressKind::ActionFailed { .. }
+                ) {
+                    let _ = terminal_tx.send(event);
+                    return;
+                }
+            }
+        });
+        session_cancel.cancel();
+        // Let the hook leave if Git has already been killed. The action's
+        // terminal event still has to pass through the bounded progress path.
+        std::fs::write(&release, "release\n").unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(3), terminal_rx)
+            .await
+            .expect("active cancellation did not produce a terminal event")
+            .expect("terminal event watcher dropped");
+        assert!(matches!(
+            terminal.kind,
+            ActionProgressKind::ActionFailed { .. }
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while broadcaster.has_active_actions() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the action permit was not released after terminal delivery");
     }
 }
 
