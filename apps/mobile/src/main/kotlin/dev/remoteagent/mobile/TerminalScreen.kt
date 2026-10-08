@@ -142,7 +142,7 @@ internal fun TerminalScreen(
                 textSize,
                 onTextSize = {
                     model.perform(Intent.SetTerminalFontSize(it))
-                    AppTheme.update(context, AppTheme.appearance.copy(terminalFontSize = it.toDouble()))
+                    AppTheme.update(context, AppTheme.appearance.copy(terminalFontSize = it))
                 },
                 onSelect = { terminalId = it },
                 onNew = { terminalId = "" },

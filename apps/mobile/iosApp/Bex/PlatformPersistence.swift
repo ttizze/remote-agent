@@ -34,8 +34,8 @@ enum SnapshotFiles {
         UserDefaults.standard.data(forKey: "bex.orchestration-model-defaults") ?? Data()
     }
 
-    static func saveModelPreferences(_ data: Data) async throws {
-        try await Task.detached(priority: .utility) {
+    static func saveModelPreferences(_ data: Data) async {
+        await Task.detached(priority: .utility) {
             UserDefaults.standard.set(data, forKey: "bex.orchestration-model-defaults")
         }.value
     }

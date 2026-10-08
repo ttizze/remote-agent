@@ -314,11 +314,9 @@ extension BexAppViewModel {
         clientPreferencesData = data
         clientPreferencesGeneration &+= 1
         let previous = persistenceWrite
-        persistenceWrite = Task { [weak self] in
+        persistenceWrite = Task {
             await previous?.value
-            do {
-                try await SnapshotFiles.saveModelPreferences(data)
-            } catch { self?.notice = error.localizedDescription }
+            await SnapshotFiles.saveModelPreferences(data)
         }
     }
 

@@ -118,12 +118,8 @@ final class BexAppViewModel: ObservableObject {
            let canonical = try? snapshot.serializeModelPreferences(),
            canonical != clientPreferencesData {
             clientPreferencesData = canonical
-            Task { [weak self] in
-                do {
-                    try await SnapshotFiles.saveModelPreferences(canonical)
-                } catch {
-                    self?.notice = error.localizedDescription
-                }
+            Task {
+                await SnapshotFiles.saveModelPreferences(canonical)
             }
         }
         if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),

@@ -195,7 +195,7 @@ extension BexAppViewModel {
     func requestLoadBalancingResources() {
         perform(.refreshLoadBalancingResources)
         for owner in backgroundOwners.values {
-            try? owner.dispatch(intent: .refreshLoadBalancingResources)
+            _ = try? owner.dispatch(intent: .refreshLoadBalancingResources)
         }
     }
 
