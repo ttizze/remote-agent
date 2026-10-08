@@ -983,7 +983,6 @@ impl HostRpcService {
     }
 
     pub(crate) async fn accept_handoff_if_idle(&self) -> anyhow::Result<bool> {
-        let gate = self.inner.handoff_gate.write().await;
         if self
             .inner
             .handoff_draining
@@ -992,6 +991,10 @@ impl HostRpcService {
         {
             return Ok(false);
         }
+        // Publish the drain before waiting on active readers. This closes
+        // new admissions immediately and gives callers/tests an observable
+        // barrier while the handoff writer waits for the current owners.
+        let gate = self.inner.handoff_gate.write().await;
         if self.has_active_tasks() {
             self.inner.handoff_draining.store(false, Ordering::Release);
             return Ok(false);
@@ -1056,7 +1059,14 @@ impl HostRpcService {
     ) -> Result<tokio_util::sync::CancellationToken, String> {
         self.inner.connections.cancellation(session)
     }
-    pub fn close_session(&self, session: SessionId) {
+    pub async fn close_session(&self, session: SessionId) {
+        // Session cleanup owns a background lease mutation. Keep it inside
+        // the same admission as other owner work so a handoff cannot pass
+        // the idle probe and then observe this cleanup after shutdown.
+        let _gate = self
+            .acquire_handoff_gate(true)
+            .await
+            .expect("session cleanup admission remains available during handoff");
         self.inner.connections.close_session(session);
         self.inner
             .awareness
@@ -1067,10 +1077,7 @@ impl HostRpcService {
         self.inner.resources.shared.terminals.close_session(session);
         self.inner.resources.shared.files.clear_session(session);
         self.inner.resources.dictation.close_session(session);
-        let background = self.inner.resources.background.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move { background.close_session(session).await });
-        }
+        self.inner.resources.background.close_session(session).await;
     }
     pub(crate) fn revoke_device(&self, principal: &str) {
         self.inner
@@ -4158,8 +4165,13 @@ mod handoff_service_tests {
             .expect("second operation admission");
         let handoff_service = service.clone();
         let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
-
-        tokio::task::yield_now().await;
+        for _ in 0..100 {
+            if service.handoff_is_draining() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.handoff_is_draining(), "handoff admission barrier is pending");
         assert!(!handoff.is_finished(), "handoff must wait for both operations");
         drop(first);
         tokio::task::yield_now().await;
@@ -4183,7 +4195,16 @@ mod handoff_service_tests {
             .expect("held operation admission");
         let handoff_service = service.clone();
         let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
-        tokio::task::yield_now().await;
+        for _ in 0..100 {
+            if service.handoff_is_draining() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            service.handoff_is_draining(),
+            "handoff must publish its pending admission barrier"
+        );
 
         let session = service.open_session();
         let session_id = session.id();
@@ -4206,6 +4227,41 @@ mod handoff_service_tests {
             .expect("dispatch task")
             .expect("status dispatch");
         drop(result);
+        let accepted = tokio::time::timeout(Duration::from_secs(1), handoff)
+            .await
+            .expect("handoff completes")
+            .expect("handoff task")
+            .expect("handoff inspection");
+        assert!(!accepted);
+    }
+
+    #[tokio::test]
+    async fn session_cleanup_is_awaited_through_handoff_admission() {
+        let (_directory, service) = test_service();
+        let held = service
+            .acquire_handoff_gate(false)
+            .await
+            .expect("held operation admission");
+        let handoff_service = service.clone();
+        let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
+        for _ in 0..100 {
+            if service.handoff_is_draining() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.handoff_is_draining(), "handoff admission barrier is pending");
+
+        let session = service.open_session();
+        let session_id = session.id();
+        let cleanup_service = service.clone();
+        let cleanup = tokio::spawn(async move { cleanup_service.close_session(session_id).await });
+        drop(held);
+
+        tokio::time::timeout(Duration::from_secs(1), cleanup)
+            .await
+            .expect("session cleanup completes")
+            .expect("session cleanup task");
         let accepted = tokio::time::timeout(Duration::from_secs(1), handoff)
             .await
             .expect("handoff completes")

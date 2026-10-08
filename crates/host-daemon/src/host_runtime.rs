@@ -365,7 +365,7 @@ impl HostRuntime {
         while transfers.join_next().await.is_some() {}
         while decoders.join_next().await.is_some() {}
         self.active.lock().unwrap().remove(&id);
-        self.service.close_session(id);
+        self.service.close_session(id).await;
         result
     }
     async fn pair_node(&self, node: NodeId, invitation: uuid::Uuid) -> Result<()> {
