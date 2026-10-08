@@ -104,6 +104,8 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version || '' }}
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_RUN_NUMBER: ${{ github.run_number }}
+          ANDROID_STORE_URL: ${{ vars.ANDROID_STORE_URL || '' }}
+          IOS_STORE_URL: ${{ vars.IOS_STORE_URL || '' }}
         run: |
           set -euo pipefail
           args=(
@@ -117,6 +119,8 @@ jobs:
             --github-output
           )
           if [[ -n "$RELEASE_VERSION" ]]; then args+=(--version "$RELEASE_VERSION"); fi
+          if [[ -n "$ANDROID_STORE_URL" ]]; then args+=(--android-store-url "$ANDROID_STORE_URL"); fi
+          if [[ -n "$IOS_STORE_URL" ]]; then args+=(--ios-store-url "$IOS_STORE_URL"); fi
           scripts/release-metadata.sh "${args[@]}"
           jq -e --arg sha "$RELEASE_SHA" '.commit == $sha' release/metadata.json >/dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

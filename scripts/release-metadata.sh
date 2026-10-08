@@ -9,6 +9,8 @@ release_date=$(date -u +%Y%m%d)
 run_number=0
 commit=$(git -C "$root" rev-parse HEAD)
 repository=${GITHUB_REPOSITORY:-}
+android_store_url=
+ios_store_url=
 build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 output=
 github_output=false
@@ -24,6 +26,8 @@ Options:
   --run-number NUMBER     CI run number (default: 0 for local checks)
   --sha SHA               release commit (default: HEAD)
   --repository OWNER/REPO GitHub repository used for the update URL
+  --android-store-url URL configured Play surface for native update links
+  --ios-store-url URL     configured TestFlight/App Store surface for native update links
   --build-time ISO8601    build timestamp (default: current UTC time)
   --output PATH            write JSON metadata to PATH
   --github-output         append scalar values to GITHUB_OUTPUT
@@ -39,6 +43,8 @@ while (($#)); do
         --run-number) run_number=${2:?missing run number}; shift 2 ;;
         --sha) commit=${2:?missing sha}; shift 2 ;;
         --repository) repository=${2:?missing repository}; shift 2 ;;
+        --android-store-url) android_store_url=${2:?missing Android store URL}; shift 2 ;;
+        --ios-store-url) ios_store_url=${2:?missing iOS store URL}; shift 2 ;;
         --build-time) build_time=${2:?missing build time}; shift 2 ;;
         --output) output=${2:?missing output path}; shift 2 ;;
         --github-output) github_output=true; shift ;;
@@ -100,6 +106,20 @@ if [[ -n $repository ]]; then
     update_url="https://github.com/$repository/releases/download/$tag/$manifest"
 fi
 
+for store_url in "$android_store_url" "$ios_store_url"; do
+    [[ -z $store_url || $store_url =~ ^https://[^[:space:]]+$ ]] || {
+        echo "native store URLs must be absolute HTTPS URLs" >&2
+        exit 1
+    }
+done
+native_updates='{}'
+if [[ -n $android_store_url ]]; then
+    native_updates=$(jq -cn --arg url "$android_store_url" '{android: {url: $url}}')
+fi
+if [[ -n $ios_store_url ]]; then
+    native_updates=$(jq -cn --argjson updates "$native_updates" --arg url "$ios_store_url" '$updates + {ios: {url: $url}}')
+fi
+
 metadata=$(jq -cn \
     --arg base_version "$base_version" \
     --arg channel "$channel" \
@@ -110,10 +130,12 @@ metadata=$(jq -cn \
     --arg release_name "$release_name" \
     --arg manifest "$manifest" \
     --arg update_url "$update_url" \
+    --argjson native_updates "$native_updates" \
     --arg built_at "$build_time" \
     '{schema: 1, base_version: $base_version, channel: $channel, version: $version, tag: $tag,
       commit: $commit, short_commit: $short_commit, release_name: $release_name,
       manifest: $manifest, update_url: (if $update_url == "" then null else $update_url end),
+      native_updates: $native_updates,
       built_at: $built_at}')
 
 if [[ -n $output ]]; then

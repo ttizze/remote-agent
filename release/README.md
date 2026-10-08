@@ -11,7 +11,7 @@ scheduled or manual run with publication enabled creates the concrete GitHub
 release and attaches `<channel>.json`, which contains the commit, version,
 checksums, and update URL. Metadata does not claim publication before the
 GitHub release command succeeds. `scripts/release-update-check.mjs` consumes
-that manifest as a pure comparison and does not contact GitHub.
+that manifest as a pure comparison and does not contact GitHub unless the caller explicitly supplies `--metadata-url`.
 
 Host archives embed the lockfile-pinned Agent SDK and bridge, but do not copy a
 Nix-store Node executable into the artifact. The runtime requires Node.js 18 or
@@ -28,6 +28,25 @@ empty-password keychain and temporary certificate material under a mode-700
 values are written to logs or checked-in files. Mobile store upload is limited
 to the trusted scheduled path or an explicitly requested manual run from
 `main`.
+
+## Update transactions
+
+`scripts/release-update-check.mjs` is the shared update contract for Host and
+desktop consumers. It validates release metadata, selects the platform asset,
+bounds release notes, and keeps pure check/download/install state transitions
+separate from network, filesystem, archive, and restart effects. The effectful
+helpers accept injected effects so contract tests never contact GitHub or
+replace a running process. A download is accepted only after both the manifest
+size and SHA-256 match; installation extracts into a private version directory
+and returns `restart_required` for the owning supervisor to decide when to hand
+off.
+
+The CLI supports local metadata (`--metadata`) and a configured HTTPS manifest
+(`--metadata-url`), with optional `--download` and `--install-dir` staging. It
+never restarts a Host or desktop process by itself. Native Android and iOS
+checks expose a Play/TestFlight URL only when release metadata was given an
+explicit `ANDROID_STORE_URL` or `IOS_STORE_URL` repository variable. Missing
+variables produce no native link and do not imply that a store release exists.
 
 ## Naming audit
 
