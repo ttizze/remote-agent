@@ -3,7 +3,7 @@ package dev.remoteagent.mobile
 import android.view.KeyEvent as AndroidKeyEvent
 import android.graphics.BitmapFactory
 import android.os.Environment
-import android.view.SurfaceView
+import android.view.TextureView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -392,7 +392,7 @@ private fun DeviceH264Frame(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                SurfaceView(context).also { decoder.attach(it) }
+                TextureView(context).also { decoder.attach(it) }
             },
             update = {
                 decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())

@@ -2,14 +2,15 @@ package dev.remoteagent.mobile
 
 import android.media.MediaCodec
 import android.media.MediaFormat
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
 /** A bounded, stateful H.264 decoder for the Host's live device transport. */
-internal class DeviceVideoDecoder : SurfaceHolder.Callback {
+internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private data class Frame(
         val payload: ByteArray,
         val encoding: String,
@@ -19,7 +20,8 @@ internal class DeviceVideoDecoder : SurfaceHolder.Callback {
         val keyframe: Boolean,
     )
 
-    private var holder: SurfaceHolder? = null
+    private var textureView: TextureView? = null
+    private var surface: Surface? = null
     private var codec: MediaCodec? = null
     private var streamKey: String? = null
     private var width = 0
@@ -28,12 +30,12 @@ internal class DeviceVideoDecoder : SurfaceHolder.Callback {
     private var needsKeyframe = true
     private val pending = ArrayDeque<Frame>()
 
-    fun attach(surfaceView: SurfaceView) {
-        if (holder === surfaceView.holder) return
-        holder?.removeCallback(this)
-        holder = surfaceView.holder
-        holder?.addCallback(this)
-        if (holder?.surface?.isValid == true) configureCodecIfPossible()
+    fun attach(textureView: TextureView) {
+        if (this.textureView === textureView) return
+        this.textureView?.surfaceTextureListener = null
+        this.textureView = textureView
+        textureView.surfaceTextureListener = this
+        if (textureView.isAvailable) textureView.surfaceTexture?.let { onSurfaceTextureAvailable(it, textureView.width, textureView.height) }
     }
 
     fun reset(streamKey: String, width: Int, height: Int) {
@@ -75,20 +77,28 @@ internal class DeviceVideoDecoder : SurfaceHolder.Callback {
         drainPending()
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        this.surface = Surface(surface)
         configureCodecIfPossible()
         drainPending()
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
         closeCodec()
+        this.surface?.release()
+        this.surface = null
+        return true
     }
 
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+
     fun close() {
-        holder?.removeCallback(this)
-        holder = null
+        textureView?.surfaceTextureListener = null
+        textureView = null
+        surface?.release()
+        surface = null
         closeCodec()
         pending.clear()
         codecDescription = null
@@ -97,8 +107,8 @@ internal class DeviceVideoDecoder : SurfaceHolder.Callback {
 
     private fun configureCodecIfPossible() {
         if (codec != null || width <= 0 || height <= 0) return
-        val surface = holder?.surface ?: return
-        if (!surface.isValid) return
+        val outputSurface = surface ?: return
+        if (!outputSurface.isValid) return
         runCatching {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
@@ -108,7 +118,7 @@ internal class DeviceVideoDecoder : SurfaceHolder.Callback {
                 pps?.let { format.setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
             }
             MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also { decoder ->
-                decoder.configure(format, surface, null, 0)
+                decoder.configure(format, outputSurface, null, 0)
                 decoder.start()
                 codec = decoder
             }
