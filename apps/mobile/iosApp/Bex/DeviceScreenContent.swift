@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct DeviceScreenContent: View {
     @ObservedObject var model: BexAppViewModel

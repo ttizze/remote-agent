@@ -5,7 +5,7 @@ import SwiftUI
 /// Host request; this screen only edits the draft and presents the pickers.
 struct ScheduledTasksScreen: View {
     @ObservedObject var model: BexAppViewModel
-    @Environment(.dismiss) private var dismiss
+    @Environment(\.dismiss) private var dismiss
     @State private var draft: ScheduledTaskDraft?
     @State private var selectedId: String?
     @State private var saveError: String?

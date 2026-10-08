@@ -4,7 +4,7 @@ import SwiftUI
 struct ScheduledTaskBranchPicker: View {
     @ObservedObject var model: BexAppViewModel
     @Binding var draft: ScheduledTaskDraft
-    @Environment(.dismiss) private var dismiss
+    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
 
     private var baseBranch: String {
