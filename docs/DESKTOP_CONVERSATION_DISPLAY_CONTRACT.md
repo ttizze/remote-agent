@@ -120,21 +120,28 @@ complete retrieval and reopening.
 
 ## Conversation navigation
 
-- The sidebar nests Codex subagent conversations below their direct parent,
-  including deeper descendants. Native parent IDs determine lineage; forked
-  side chats remain independent conversations. Agent nicknames label untitled
-  children. Children share their root's project section and do not consume the
-  root conversation display limits. Each child retains its own running/unread
-  indicator and opens its own native history on click. Parent disclosures open
-  initially and allow hiding children without opening a different conversation.
-  List refreshes discover running children without requiring the parent turn to
-  finish. Search matches remain reachable when their parent is outside the page.
-  Native read-only conversations display the shared input restriction and keep
-  Send disabled.
-  Claude child transcripts continue to use the originating activity detail;
-  they do not yet have independent native session identities.
-  Acceptance: `subagents_keep_direct_lineage_provider_identity_and_parent_project`,
+- The left conversation list contains parent conversations and independent forks;
+  native subagents do not appear as conversations in desktop or mobile lists.
+  Desktop's right panel includes an Agents tab and a conversation-header shortcut.
+  At wide desktop widths it shows beside the parent conversation. Opening or closing
+  it preserves the selected parent and its draft. At narrow widths it uses the
+  existing right-panel layout.
+- The Agents panel monitors only the selected conversation's native children and
+  descendants, using provider-scoped parent IDs. Rows keep stable identity and
+  order during activity updates and show available names, running/unread state,
+  model and activity detail. Cached observations remain visible offline. Live
+  observations take precedence over stale activity events. List refreshes discover
+  children without waiting for the parent turn to finish; children do not consume
+  root conversation display limits. Claude tasks use their originating activity's
+  identity and status without inventing independent native sessions. Rows monitor
+  activity without navigating away from the parent. Native read-only conversations
+  retain the shared input restriction and disabled Send.
+  Acceptance: `conversation_list_excludes_subagents_without_hiding_forks_or_other_providers`,
+  `agents_are_scoped_to_the_selected_parent_and_keep_stable_identity`,
+  `native_events_enrich_one_agent_without_reparenting_it`,
+  `claude_activity_updates_the_same_row_without_a_native_child_session`,
   `children_follow_visible_roots_without_consuming_title_limits`, and desktop
+  `agents_open_to_the_right_without_changing_parent_or_draft` and
   `pending_operations_do_not_block_task_navigation`.
 
 - Desktop, iPhone and Android show a down-arrow button at the bottom center of

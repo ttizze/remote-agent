@@ -400,32 +400,15 @@ impl Desktop {
         project_id: Option<&str>,
         cx: &Context<Self>,
     ) -> Vec<SidebarMenuItem> {
-        let mut buttons: Vec<(u32, SidebarMenuItem)> = Vec::new();
-        for thread in threads
+        threads
             .iter()
-            .rev()
             .filter(|thread| thread.project_id.as_deref() == project_id)
-        {
-            let mut children = Vec::new();
-            while buttons
-                .last()
-                .is_some_and(|(depth, _)| *depth > thread.depth)
-            {
-                children.push(buttons.pop().unwrap().1);
-            }
-            let button = self
-                .thread_button(thread, cx)
-                .children(children)
-                .default_open(true)
-                .when(project_id.is_some() && thread.depth == 0, |button| {
-                    button.icon(Icon::empty().size_4())
-                });
-            buttons.push((thread.depth, button));
-        }
-        buttons
-            .into_iter()
-            .rev()
-            .map(|(_, button)| button)
+            .map(|thread| {
+                self.thread_button(thread, cx)
+                    .when(project_id.is_some(), |button| {
+                        button.icon(Icon::empty().size_4())
+                    })
+            })
             .collect()
     }
 
@@ -452,7 +435,6 @@ impl Desktop {
             ),
         });
         SidebarMenuItem::new(thread.title.clone())
-            .when(thread.depth > 0, |button| button.icon(IconName::Bot))
             .active(self.selected() == Some(&id) && self.tab != Tab::Settings)
             .suffix(move |_, _| {
                 div()
@@ -702,19 +684,9 @@ mod tests {
                 );
             });
         }
-        let root = window.debug_bounds("task-0").unwrap();
         assert!(
-            root.size.height > gpui::px(56.),
-            "the child is rendered below its parent"
-        );
-        window.simulate_click(
-            gpui::point(root.left() + gpui::px(70.), root.bottom() - gpui::px(16.)),
-            Modifiers::default(),
-        );
-        window.run_until_parked();
-        assert_eq!(
-            store.snapshot().navigation.thread_id.as_ref().unwrap().id,
-            "child"
+            window.debug_bounds("task-2").is_none(),
+            "subagents are not left-sidebar conversations"
         );
     }
 }
