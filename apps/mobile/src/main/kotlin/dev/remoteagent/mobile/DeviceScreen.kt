@@ -2,6 +2,8 @@ package dev.remoteagent.mobile
 
 import android.view.KeyEvent as AndroidKeyEvent
 import android.graphics.BitmapFactory
+import android.os.Environment
+import android.view.TextureView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -21,7 +23,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.Modifier
@@ -35,12 +40,15 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.focus.focusable
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import dev.remoteagent.core.DeviceActionIntent
 import dev.remoteagent.core.DeviceView
 import dev.remoteagent.core.Intent
+import java.io.File
 
 /** Native device picker, setup and live frame surface for a conversation. */
 @Composable
@@ -49,6 +57,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val context = LocalContext.current
     val threadSessions = view.sessions.filter { it.threadId == threadId }
     val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}" }
+    val liveFrames = view.videoFrames.filter { it.threadId == threadId }
     LaunchedEffect(threadId) {
         model.perform(Intent.OpenThread(threadId))
         model.perform(Intent.LoadDevices)
@@ -82,6 +91,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             item { Text("Host status: ${view.status}") }
+            view.error?.let { error -> item { Text("Device error: $error") } }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { model.perform(Intent.InspectDevices(null)) }) { Text("Inspect tools") }
@@ -192,37 +202,52 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                     Button(onClick = {
                         model.perform(Intent.StopDeviceRecording(session.hostId, session.deviceId))
                     }) { Text("Stop record") }
+                    if (session.platform == "android") {
+                        Button(onClick = {
+                            model.perform(
+                                Intent.DeviceAction(
+                                    session.hostId,
+                                    session.deviceId,
+                                    DeviceActionIntent.Fold("table"),
+                                ),
+                            )
+                        }) { Text("Fold") }
+                        Button(onClick = {
+                            model.perform(
+                                Intent.DeviceAction(
+                                    session.hostId,
+                                    session.deviceId,
+                                    DeviceActionIntent.Duo("toggle"),
+                                ),
+                            )
+                        }) { Text("Duo") }
+                    }
                     Button(onClick = {
                         model.perform(Intent.CloseDevice(session.hostId, session.deviceId, true))
                     }) { Text("Power off") }
                 }
                 detail?.foregroundApp?.let { app -> Text("Foreground: " + app) }
             }
-            view.frames.filter { it.threadId == threadId }.maxByOrNull { it.sequence }?.let { frame ->
-                item(key = "frame-${frame.sequence}") {
-                    val bitmap = remember(frame.sequence) {
-                        BitmapFactory.decodeByteArray(frame.png, 0, frame.png.size)?.asImageBitmap()
-                    }
-                    bitmap?.let {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .size(320.dp)
-                                .deviceKeyInput(model, frame.hostId, frame.deviceId)
-                                .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
-                        ) {
-                            Image(it, "Live device frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                            DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
+            view.screens
+                .filter { it.threadId == threadId }
+                .sortedBy { it.screenId ?: 0 }
+                .forEach { screen ->
+                    item(key = "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId ?: 0}") {
+                        Text(
+                            "Screen ${screen.screenId ?: 0}: ${screen.width}×${screen.height} · " +
+                                "${screen.orientation}" +
+                                (screen.hingeAngle?.let { " · hinge ${it.toInt()}°" } ?: ""),
+                        )
+                        if (screen.tableModeAvailable) {
+                            Text(if (screen.tableMode) "Table mode on" else "Table mode off")
                         }
                     }
                 }
-            }
-            view.videoFrames
-                .filter { it.threadId == threadId && (it.encoding == "jpeg" || it.encoding == "mjpeg") }
-                .maxByOrNull { it.sequence }?.let { frame ->
-                    item(key = "video-frame-${frame.sequence}") {
+            if (liveFrames.isEmpty()) {
+                view.frames.filter { it.threadId == threadId }.maxByOrNull { it.sequence }?.let { frame ->
+                    item(key = "frame-${frame.sequence}") {
                         val bitmap = remember(frame.sequence) {
-                            BitmapFactory.decodeByteArray(frame.payload, 0, frame.payload.size)?.asImageBitmap()
+                            BitmapFactory.decodeByteArray(frame.png, 0, frame.png.size)?.asImageBitmap()
                         }
                         bitmap?.let {
                             Box(
@@ -232,19 +257,29 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                     .deviceKeyInput(model, frame.hostId, frame.deviceId)
                                     .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
                             ) {
-                                Image(it, "Live device video frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                                Image(it, "Live device frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                                 DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
                             }
                         }
-                }
-            }
-            view.videoFrames
-                .firstOrNull { it.threadId == threadId && (it.encoding == "h264" || it.encoding == "semu") }
-                ?.let {
-                    item(key = "unsupported-video-${it.sequence}") {
-                        Text("Live H.264 device video is unavailable in this native decoder")
                     }
                 }
+            } else {
+                liveFrames
+                    .groupBy { it.screenId ?: 0 }
+                    .toSortedMap()
+                    .forEach { (screenId, frames) ->
+                        frames.maxByOrNull { it.sequence }?.let { frame ->
+                            item(key = "video-frame-${frame.hostId}-${frame.deviceId}-$screenId-${frame.sequence}") {
+                                if (frames.size > 1 || screenId != 0) Text("Live screen $screenId")
+                                when (frame.encoding) {
+                                    "jpeg", "mjpeg" -> DeviceJpegFrame(model, view, frame)
+                                    "h264", "semu", "avcc-description" -> DeviceH264Frame(model, view, frame)
+                                    else -> Text("Unsupported live device frame format: ${frame.encoding}")
+                                }
+                            }
+                        }
+                    }
+            }
             view.accessibility
                 .filter { tree -> threadSessions.any { it.hostId == tree.hostId && it.deviceId == tree.deviceId } }
                 .forEach { tree ->
@@ -268,21 +303,113 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
             view.lastRecording?.takeIf { it.threadId == threadId }?.let { recording ->
                 item(key = "last-recording-${recording.deviceId}-${recording.byteCount}") {
                     Text("Recording ready · ${recording.frameCount} frames · ${recording.byteCount} bytes")
-                    Button(onClick = {
-                        val file = java.io.File(context.cacheDir, "device-${recording.deviceId}-${recording.byteCount}.bin")
-                        file.writeBytes(recording.bytes)
-                        model.perform(
-                            Intent.AttachFiles(
-                                threadId,
-                                listOf(dev.remoteagent.core.LocalFile(file.path, file.name, "application/octet-stream")),
-                            ),
-                        )
-                    }) { Text("Attach recording") }
+                    recording.error?.let { error -> Text("Recording failed: $error") }
+                    if (recording.error == null && recording.bytes.isNotEmpty()) {
+                        val artifact = recordingArtifact(recording.format)
+                        var savedPath by remember(recording.byteCount) { mutableStateOf<String?>(null) }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                val directory = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                                    ?: context.filesDir
+                                val file = File(
+                                    directory,
+                                    "device-${recording.deviceId}-${recording.byteCount}.${artifact.extension}",
+                                )
+                                runCatching {
+                                    directory.mkdirs()
+                                    file.writeBytes(recording.bytes)
+                                    savedPath = file.absolutePath
+                                }.onFailure { model.notice = "Could not save recording: ${it.message}" }
+                            }) { Text("Save") }
+                            Button(onClick = {
+                                val file = File(
+                                    context.cacheDir,
+                                    "device-${recording.deviceId}-${recording.byteCount}.${artifact.extension}",
+                                )
+                                runCatching { file.writeBytes(recording.bytes) }
+                                    .onSuccess {
+                                        model.perform(
+                                            Intent.AttachFiles(
+                                                threadId,
+                                                listOf(dev.remoteagent.core.LocalFile(file.path, file.name, artifact.mimeType)),
+                                            ),
+                                        ) { result ->
+                                            result.exceptionOrNull()?.let { model.notice = "Could not attach recording: ${it.message}" }
+                                        }
+                                    }
+                                    .onFailure { model.notice = "Could not prepare recording: ${it.message}" }
+                            }) { Text("Attach") }
+                        }
+                        savedPath?.let { Text("Saved to $it") }
+                    }
                 }
             }
         }
         }
     }
+
+@Composable
+private fun DeviceJpegFrame(
+    model: AndroidAppModel,
+    view: DeviceView,
+    frame: dev.remoteagent.core.DeviceVideoFrameView,
+) {
+    val bitmap = remember(frame.sequence) {
+        BitmapFactory.decodeByteArray(frame.payload, 0, frame.payload.size)?.asImageBitmap()
+    }
+    bitmap?.let {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .size(320.dp)
+                .deviceKeyInput(model, frame.hostId, frame.deviceId)
+                .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
+        ) {
+            Image(it, "Live device video frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
+        }
+    }
+}
+
+@Composable
+private fun DeviceH264Frame(
+    model: AndroidAppModel,
+    view: DeviceView,
+    frame: dev.remoteagent.core.DeviceVideoFrameView,
+) {
+    val decoder = remember { DeviceVideoDecoder() }
+    val streamKey = "${frame.hostId}:${frame.deviceId}:${frame.screenId ?: 0}"
+    DisposableEffect(decoder) {
+        onDispose { decoder.close() }
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .size(320.dp)
+            .deviceKeyInput(model, frame.hostId, frame.deviceId)
+            .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
+    ) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                TextureView(context).also { decoder.attach(it) }
+            },
+            update = {
+                decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())
+                decoder.submit(
+                    payload = frame.payload.toByteArray(),
+                    encoding = frame.encoding,
+                    width = frame.width.toInt(),
+                    height = frame.height.toInt(),
+                    sequence = frame.sequence,
+                    timestampUs = frame.timestampUs,
+                    keyframe = frame.keyframe,
+                )
+            },
+        )
+        DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
+    }
+}
 
 @Composable
 private fun DeviceAccessibilityOverlay(view: DeviceView, hostId: String, deviceId: String) {
@@ -340,7 +467,7 @@ private fun Modifier.deviceTouchInput(
 }
 
 private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, deviceId: String): Modifier =
-    onPreviewKeyEvent { event ->
+    focusable().onPreviewKeyEvent { event ->
         val code = when (event.nativeKeyEvent.keyCode) {
             AndroidKeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
             AndroidKeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
