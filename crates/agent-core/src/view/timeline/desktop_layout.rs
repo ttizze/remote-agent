@@ -338,6 +338,7 @@ mod tests {
                 context: None,
                 decorations: UserMessageDecorations {
                     attribution: None,
+                    automation: None,
                     intent: None,
                     collapsible: false,
                     status_chip: None,
