@@ -16,17 +16,13 @@ pub const RESOURCE_HISTORY_MAX_TOP_PROCESSES: usize = 100;
 pub const TRACE_TOP_LIMIT: usize = 10;
 pub const TRACE_RECENT_LIMIT: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BackgroundBooleanState {
     True,
     False,
+    #[default]
     Unknown,
-}
-impl Default for BackgroundBooleanState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 impl BackgroundBooleanState {
     pub fn is_true(self) -> bool {
@@ -34,24 +30,21 @@ impl BackgroundBooleanState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum HostPowerThermalState {
+    #[default]
     Unknown,
     Nominal,
     Fair,
     Serious,
     Critical,
 }
-impl Default for HostPowerThermalState {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum HostPowerSource {
+    #[default]
     Unknown,
     NodeMacosShell,
     NodeMacosNative,
@@ -59,11 +52,6 @@ pub enum HostPowerSource {
     NodeWindows,
     DesktopMain,
     ElectronMain,
-}
-impl Default for HostPowerSource {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,17 +110,13 @@ impl HostPowerSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackgroundActivityProfile {
+    #[default]
     Balanced,
     Performance,
     BatterySaver,
-}
-impl Default for BackgroundActivityProfile {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,46 +218,34 @@ pub fn scope_key(scope: &BackgroundScope) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackgroundClientKind {
     Web,
     DesktopRenderer,
     Mobile,
+    #[default]
     Unknown,
 }
-impl Default for BackgroundClientKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackgroundAppState {
     Active,
     Inactive,
     Background,
+    #[default]
     Unknown,
 }
-impl Default for BackgroundAppState {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackgroundBatteryState {
+    #[default]
     Unknown,
     Unplugged,
     Charging,
     Full,
-}
-impl Default for BackgroundBatteryState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,13 +368,12 @@ pub fn upsert_client_activity_lease(
             })
             .map(|(key, value)| (key.clone(), value.updated_at.millis()))
             .collect::<Vec<_>>();
-        if same_connection.len() >= MAX_CLIENT_ACTIVITY_LEASES_PER_RPC_CLIENT {
-            if let Some((oldest, _)) = same_connection
+        if same_connection.len() >= MAX_CLIENT_ACTIVITY_LEASES_PER_RPC_CLIENT
+            && let Some((oldest, _)) = same_connection
                 .into_iter()
                 .min_by_key(|(key, updated)| (*updated, key.clone()))
-            {
-                next.remove(&oldest);
-            }
+        {
+            next.remove(&oldest);
         }
     }
     next.insert(key, lease);
@@ -557,18 +528,14 @@ pub enum ResourceProcessCategory {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceTelemetryIoSemantics {
     Storage,
     Logical,
     AllIo,
+    #[default]
     Unavailable,
-}
-impl Default for ResourceTelemetryIoSemantics {
-    fn default() -> Self {
-        Self::Unavailable
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -684,19 +651,15 @@ impl HostResourcesSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceSourceStatus {
+    #[default]
     Starting,
     Healthy,
     Degraded,
     Unavailable,
     Stopped,
-}
-impl Default for ResourceSourceStatus {
-    fn default() -> Self {
-        Self::Starting
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,7 +679,7 @@ impl Default for ResourceSourceHealth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceHealth {
     pub native: ResourceSourceHealth,
@@ -728,21 +691,6 @@ pub struct ResourceHealth {
     pub scanned_process_count: u64,
     pub retained_process_count: u64,
     pub inaccessible_process_count: u64,
-}
-impl Default for ResourceHealth {
-    fn default() -> Self {
-        Self {
-            native: ResourceSourceHealth::default(),
-            desktop: ResourceSourceHealth::default(),
-            sidecar_version: None,
-            sidecar_pid: None,
-            restart_count: 0,
-            collection_duration_micros: 0,
-            scanned_process_count: 0,
-            retained_process_count: 0,
-            inaccessible_process_count: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1276,18 +1224,14 @@ impl TraceDiagnosticsAggregator {
         };
         let started_at = nanos_timestamp(object.get("startTimeUnixNano"));
         self.record_count += 1;
-        if started_at.as_ref().map_or(false, |started_at| {
+        if started_at.as_ref().is_some_and(|started_at| {
             self.first_span_at
                 .as_ref()
-                .map_or(true, |old| started_at < old)
+                .is_none_or(|old| started_at < old)
         }) {
             self.first_span_at = started_at;
         }
-        if self
-            .last_span_at
-            .as_ref()
-            .map_or(true, |old| &ended_at > old)
-        {
+        if self.last_span_at.as_ref().is_none_or(|old| &ended_at > old) {
             self.last_span_at = Some(ended_at.clone());
         }
         let exit = object.get("exit").and_then(Value::as_object);

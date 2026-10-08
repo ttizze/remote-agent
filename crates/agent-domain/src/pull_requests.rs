@@ -59,21 +59,16 @@ pub enum PullRequestAction {
     Revert,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PullRequestLinkSource {
+    #[default]
     Manual,
     Created,
     Agent,
     Stack,
     #[serde(rename = "stack-dismissed")]
     StackDismissed,
-}
-
-impl Default for PullRequestLinkSource {
-    fn default() -> Self {
-        Self::Manual
-    }
 }
 
 impl PullRequestLinkSource {
@@ -422,10 +417,10 @@ pub fn resolve_pull_request_chains(links: &[PullRequestLink]) -> Vec<Vec<PullReq
             continue;
         };
         let branch = format!("{}:{}:{}", link.host, link.repository, snapshot.base_branch);
-        if let Some(Some(parent)) = by_head.get(&branch) {
-            if parent.key() != link.key() {
-                has_child.insert(parent.key().canonical());
-            }
+        if let Some(Some(parent)) = by_head.get(&branch)
+            && parent.key() != link.key()
+        {
+            has_child.insert(parent.key().canonical());
         }
     }
     for top in &remaining {

@@ -67,14 +67,14 @@ fn at_time<Tz: TimeZone>(
         .earliest()
         .is_none()
         && timezone.from_local_datetime(&day_end).earliest().is_none();
-    if whole_date_missing {
-        if let Some(candidate) = (1..=2).find_map(|days| {
+    if whole_date_missing
+        && let Some(candidate) = (1..=2).find_map(|days| {
             let candidate_date = date.checked_add_signed(Duration::days(days))?;
             let candidate_local = candidate_date.and_hms_opt(hour, minute, 0)?;
             timezone.from_local_datetime(&candidate_local).earliest()
-        }) {
-            return Some(candidate);
-        }
+        })
+    {
+        return Some(candidate);
     }
 
     // A daylight-saving transition can skip a non-hour interval (Lord Howe

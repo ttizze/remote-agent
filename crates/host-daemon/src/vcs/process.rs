@@ -652,7 +652,9 @@ mod tests {
             .collect();
         assert!(kinds.contains(&"start:pre-commit".to_owned()), "{kinds:?}");
         assert!(
-            kinds.contains(&"Stdout:checking formatting".to_owned()),
+            // Git forwards hook stdout through the commit command's stderr
+            // when the command's own output is captured.
+            kinds.contains(&"Stderr:checking formatting".to_owned()),
             "{kinds:?}"
         );
         assert!(kinds.contains(&"Stderr:lint".to_owned()), "{kinds:?}");

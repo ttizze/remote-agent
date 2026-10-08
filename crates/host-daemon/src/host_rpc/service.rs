@@ -1261,10 +1261,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.background_stream(cancel).await);
         }
-        Ok(
-            Response::from_result(self.request(session, call, desktop_publisher_allowed).await)
-                .into(),
+        Ok(Response::from_result(
+            Box::pin(self.request(session, call, desktop_publisher_allowed)).await,
         )
+        .into())
     }
 
     /// The current policy snapshot, followed by semantic power or lease

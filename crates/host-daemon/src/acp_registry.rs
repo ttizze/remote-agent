@@ -855,14 +855,14 @@ async fn fetch_agents() -> Result<Vec<AcpRegistryAgent>, String> {
 }
 
 fn rank(agent: &AcpRegistryAgent, query: &str) -> Option<u8> {
-    let query = query.trim().to_ascii_lowercase();
+    let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Some(100);
     }
-    let id = agent.id.to_ascii_lowercase();
-    let name = agent.name.to_ascii_lowercase();
-    let authors = agent.authors.join(" ").to_ascii_lowercase();
-    let description = agent.description.to_ascii_lowercase();
+    let id = agent.id.to_lowercase();
+    let name = agent.name.to_lowercase();
+    let authors = agent.authors.join(" ").to_lowercase();
+    let description = agent.description.to_lowercase();
     let terms: Vec<_> = query.split_whitespace().collect();
     if id == query || name == query {
         return Some(100);
@@ -1314,16 +1314,24 @@ mod tests {
         }
     }
 
+    // Reference: apps/server/src/provider/acp/AcpRegistrySupport.ts:569-592.
+    // The exact and prefix ID/name tiers intentionally have equal rank.
     #[test]
-    fn search_ranking_prefers_id_then_name_then_description() {
+    fn search_ranking_matches_reference_tiers() {
         let query = "alpha";
-        assert!(
-            rank(&agent("alpha", "Other", ""), query) > rank(&agent("other", "Alpha", ""), query)
-        );
-        assert!(
+        assert_eq!(
+            rank(&agent("alpha", "Other", ""), query),
             rank(&agent("other", "Alpha", ""), query)
-                > rank(&agent("other", "Other", "Alpha"), query)
         );
+        assert_eq!(
+            rank(&agent("alpha-agent", "Other", ""), query),
+            rank(&agent("other", "Alpha Agent", ""), query)
+        );
+        assert!(
+            rank(&agent("alpha-agent-other", "Other", ""), "alpha agent")
+                > rank(&agent("other", "Other", "alpha agent"), "alpha agent")
+        );
+        assert_eq!(rank(&agent("other", "MÜNCHEN", ""), "münchen"), Some(100));
         assert_eq!(rank(&agent("other", "Other", ""), query), None);
     }
 

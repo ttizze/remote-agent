@@ -124,7 +124,7 @@ pub fn activity_message_is_fresh(updated_at_ms: i64, now_ms: i64) -> bool {
         .checked_sub(now_ms)
         .or_else(|| now_ms.checked_sub(updated_at_ms))
         .unwrap_or(i64::MAX);
-    delta <= ACTIVITY_MESSAGE_MAX_AGE_MS && delta >= -ACTIVITY_MESSAGE_MAX_AGE_MS
+    (-ACTIVITY_MESSAGE_MAX_AGE_MS..=ACTIVITY_MESSAGE_MAX_AGE_MS).contains(&delta)
 }
 
 pub fn activity_expiry_at_ms(phase: &str, updated_at_ms: i64) -> i64 {
@@ -159,6 +159,10 @@ pub fn activity_notification_is_fresh(phase: &str, updated_at_ms: i64, now_ms: i
     ) || { now_ms.saturating_sub(updated_at_ms) <= TERMINAL_NOTIFICATION_FRESHNESS_MS }
 }
 
+/// Each input is an independent provider or persisted-state fact. Keep them
+/// explicit so callers cannot hide stale, expiry, or dismissal state in a
+/// mutable wrapper.
+#[allow(clippy::too_many_arguments)]
 pub fn activity_delivery_decision(
     delivery_updated_at_ms: i64,
     source_updated_at_ms: i64,
@@ -199,6 +203,10 @@ pub struct ActivityAlert {
 /// Resolves only newly entered attention/terminal rows. Presentation updates
 /// to an already waiting or completed row stay silent; the caller may still
 /// deliver the updated activity content state.
+///
+/// The notification gates remain explicit because they come from separate
+/// persisted preferences and platform authorization facts.
+#[allow(clippy::too_many_arguments)]
 pub fn activity_alert_for_transition(
     previous: &[ActivityRecord],
     next: &[ActivityRecord],
@@ -653,7 +661,11 @@ pub fn bounded_activity_link(value: &str) -> String {
                     let segments = segments.collect::<Vec<_>>();
                     segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
                 })));
-    valid.then(|| value.to_owned()).unwrap_or_default()
+    if valid {
+        value.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 /// Trims a display string and bounds it in UTF-16 units without splitting a
