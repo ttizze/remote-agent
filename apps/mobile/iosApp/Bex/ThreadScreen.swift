@@ -465,7 +465,18 @@ struct DeviceScreen: View {
                                 model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "mp4"))
                             }
                             Button("Stop record") {
-                                model.perform(.stopDeviceRecording(hostId: session.hostId, deviceId: session.deviceId))
+                                if let recording = view.recordings.first(where: {
+                                    $0.threadId == threadId
+                                        && $0.hostId == session.hostId
+                                        && $0.deviceId == session.deviceId
+                                }) {
+                                    model.perform(.stopDeviceRecording(
+                                        hostId: session.hostId,
+                                        deviceId: session.deviceId,
+                                        recordingId: recording.recordingId,
+                                        sessionEpoch: recording.sessionEpoch
+                                    ))
+                                }
                             }
                             Button("Power off") {
                                 model.perform(.closeDevice(hostId: session.hostId, deviceId: session.deviceId, shutdown: true))

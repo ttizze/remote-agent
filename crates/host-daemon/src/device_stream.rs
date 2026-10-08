@@ -157,7 +157,6 @@ pub fn jpeg_bounds(bytes: &[u8]) -> Option<(usize, usize)> {
 /// each Duo screen.
 #[derive(Debug, Clone)]
 pub struct Mp4Recorder {
-    format: agent_protocol::device::DeviceRecordingFormat,
     started_at: String,
     frame_count: u64,
     byte_count: u64,
@@ -182,9 +181,8 @@ struct RecordedVideoTrack {
 }
 
 impl Mp4Recorder {
-    pub fn new(format: agent_protocol::device::DeviceRecordingFormat, started_at: String) -> Self {
+    pub fn new(started_at: String) -> Self {
         Self {
-            format,
             started_at,
             frame_count: 0,
             byte_count: 0,
@@ -199,9 +197,6 @@ impl Mp4Recorder {
     pub fn push(&mut self, frame: &TransportFrame) -> Result<(), String> {
         if self.finished {
             return Err("device recording has already been finalized".into());
-        }
-        if self.format != agent_protocol::device::DeviceRecordingFormat::Mp4 {
-            return Err("device recording format is unavailable".into());
         }
         if !matches!(frame.encoding, DeviceFrameEncoding::AvccDescription | DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu) {
             return Err("device MP4 recording received a non-H.264 frame".into());
@@ -226,7 +221,6 @@ impl Mp4Recorder {
         }
     }
 
-    pub fn format(&self) -> agent_protocol::device::DeviceRecordingFormat { self.format }
     pub fn started_at(&self) -> &str { &self.started_at }
     pub fn frame_count(&self) -> u64 { self.frame_count }
     pub fn byte_count(&self) -> u64 { self.byte_count }
@@ -428,6 +422,17 @@ fn avcc_sps(description: &[u8]) -> Option<Vec<u8>> {
     let length = u16::from_be_bytes(description.get(offset..offset + 2)?.try_into().ok()?) as usize;
     offset += 2;
     Some(description.get(offset..offset + length)?.to_vec())
+}
+
+pub(crate) fn avcc_dimensions(description: &[u8]) -> Option<(u32, u32)> {
+    avcc_sps(description).and_then(|sps| sps_dimensions(&sps))
+}
+
+pub(crate) fn h264_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let nals = split_annex_b(bytes).unwrap_or_else(|| vec![bytes.to_vec()]);
+    nals.into_iter()
+        .find(|nal| nal.first().is_some_and(|byte| byte & 0x1f == 7))
+        .and_then(|sps| sps_dimensions(&sps))
 }
 
 fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -887,31 +892,150 @@ mod tests {
     }
 
     fn keyframe() -> Vec<u8> {
-        vec![0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00]
+        // A small Annex-B IDR access unit from the fixed H.264 fixture used
+        // by the stream tests.  It contains a complete slice header and
+        // residual bits, rather than only the three-byte NAL prefix.
+        vec![0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x04, 0x3f]
     }
 
     fn delta() -> Vec<u8> {
-        vec![0, 0, 0, 1, 0x41, 0x9a, 0x22]
+        // A fixed P-slice access unit paired with the fixture above.
+        vec![0, 0, 0, 1, 0x41, 0x9a, 0x23, 0x6c, 0x41, 0x97, 0x6d, 0x7a, 0x0d, 0x74, 0xa1, 0x76]
     }
 
-    fn count_boxes(bytes: &[u8], wanted: &[u8; 4]) -> usize {
-        let mut count = 0;
+    #[derive(Debug)]
+    struct ParsedMp4Box<'a> {
+        kind: [u8; 4],
+        start: usize,
+        size: usize,
+        payload: &'a [u8],
+    }
+
+    fn parse_mp4(bytes: &[u8]) -> Result<Vec<ParsedMp4Box<'_>>, String> {
+        let mut boxes = Vec::new();
+        walk_mp4_boxes(bytes, 0, &mut boxes)?;
+        Ok(boxes)
+    }
+
+    fn walk_mp4_boxes<'a>(bytes: &'a [u8], base: usize, output: &mut Vec<ParsedMp4Box<'a>>) -> Result<(), String> {
         let mut offset = 0;
-        while offset.saturating_add(8) <= bytes.len() {
-            let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            if size < 8 || offset.saturating_add(size) > bytes.len() {
-                break;
+        while offset < bytes.len() {
+            if bytes.len().saturating_sub(offset) < 8 {
+                return Err("MP4 parser found a truncated box header".into());
             }
-            if &bytes[offset + 4..offset + 8] == wanted {
-                count += 1;
+            let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().map_err(|_| "MP4 box size is invalid")?) as usize;
+            if size < 8 || size > bytes.len().saturating_sub(offset) {
+                return Err("MP4 parser found an invalid box size".into());
             }
-            let kind = &bytes[offset + 4..offset + 8];
-            if [b"moov".as_slice(), b"trak".as_slice(), b"mdia".as_slice(), b"minf".as_slice(), b"dinf".as_slice(), b"stbl".as_slice(), b"stsd".as_slice(), b"avc1".as_slice(), b"moof".as_slice(), b"traf".as_slice()].contains(&kind) {
-                count += count_boxes(&bytes[offset + 8..offset + size], wanted);
+            let kind = bytes[offset + 4..offset + 8].try_into().map_err(|_| "MP4 box type is invalid")?;
+            let payload = &bytes[offset + 8..offset + size];
+            output.push(ParsedMp4Box { kind, start: base + offset, size, payload });
+            if let Some(child_offset) = mp4_child_offset(&kind, payload)? {
+                walk_mp4_boxes(&payload[child_offset..], base + offset + 8 + child_offset, output)?;
             }
             offset += size;
         }
-        count
+        Ok(())
+    }
+
+    fn mp4_child_offset(kind: &[u8; 4], payload: &[u8]) -> Result<Option<usize>, String> {
+        let offset = match kind {
+            b"moov" | b"trak" | b"mdia" | b"minf" | b"dinf" | b"stbl" | b"mvex" | b"moof" | b"traf" => 0,
+            b"stsd" | b"dref" => 8,
+            b"avc1" => 78,
+            _ => return Ok(None),
+        };
+        if payload.len() < offset {
+            return Err(format!("MP4 {kind:?} payload is shorter than its child header"));
+        }
+        Ok(Some(offset))
+    }
+
+    fn count_boxes(boxes: &[ParsedMp4Box<'_>], wanted: &[u8; 4]) -> usize {
+        boxes.iter().filter(|item| &item.kind == wanted).count()
+    }
+
+    fn read_u32(bytes: &[u8]) -> Result<u32, String> {
+        bytes
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_be_bytes)
+            .ok_or_else(|| "MP4 field is truncated".into())
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ParsedSample {
+        duration: u32,
+        size: u32,
+        flags: u32,
+    }
+
+    fn parse_trun(item: &ParsedMp4Box<'_>) -> Result<(i32, Vec<ParsedSample>), String> {
+        if item.kind != *b"trun" || item.payload.len() < 12 {
+            return Err("MP4 trun is truncated".into());
+        }
+        let flags = u32::from_be_bytes([0, item.payload[1], item.payload[2], item.payload[3]]);
+        if flags != 0x000701 {
+            return Err(format!("MP4 trun flags are {flags:#x}, expected sample offsets and fields"));
+        }
+        let count = read_u32(&item.payload[4..8])? as usize;
+        let data_offset = i32::from_be_bytes(item.payload[8..12].try_into().map_err(|_| "MP4 trun offset is invalid")?);
+        let expected = 12_usize.saturating_add(count.saturating_mul(12));
+        if item.payload.len() != expected {
+            return Err("MP4 trun sample table has an invalid length".into());
+        }
+        let mut samples = Vec::with_capacity(count);
+        for chunk in item.payload[12..].chunks_exact(12) {
+            samples.push(ParsedSample {
+                duration: read_u32(&chunk[..4])?,
+                size: read_u32(&chunk[4..8])?,
+                flags: read_u32(&chunk[8..12])?,
+            });
+        }
+        Ok((data_offset, samples))
+    }
+
+    fn parse_tfhd_track_id(item: &ParsedMp4Box<'_>) -> Result<u32, String> {
+        if item.kind != *b"tfhd" || item.payload.len() < 8 {
+            return Err("MP4 tfhd is truncated".into());
+        }
+        let flags = u32::from_be_bytes([0, item.payload[1], item.payload[2], item.payload[3]]);
+        if flags != 0x020000 {
+            return Err("MP4 tfhd is missing default-base-is-moof".into());
+        }
+        read_u32(&item.payload[4..8])
+    }
+
+    fn sample_nal_types(mdat: &[u8], start: usize, samples: &[ParsedSample]) -> Result<Vec<Vec<u8>>, String> {
+        let mut cursor = start;
+        let mut all_types = Vec::with_capacity(samples.len());
+        for sample in samples {
+            let end = cursor.saturating_add(sample.size as usize);
+            if end > mdat.len() {
+                return Err("MP4 trun sample extends beyond mdat".into());
+            }
+            let mut offset = cursor;
+            let mut types = Vec::new();
+            while offset < end {
+                if end.saturating_sub(offset) < 4 {
+                    return Err("MP4 sample has a truncated AVC length prefix".into());
+                }
+                let length = read_u32(&mdat[offset..offset + 4])? as usize;
+                offset += 4;
+                let nal_end = offset.saturating_add(length);
+                if length == 0 || nal_end > end {
+                    return Err("MP4 sample has an invalid AVC NAL length".into());
+                }
+                types.push(mdat[offset] & 0x1f);
+                offset = nal_end;
+            }
+            if offset != end || types.is_empty() {
+                return Err("MP4 sample has no complete AVC NAL units".into());
+            }
+            all_types.push(types);
+            cursor = end;
+        }
+        Ok(all_types)
     }
 
     #[test]
@@ -946,42 +1070,78 @@ mod tests {
 
     #[test]
     fn mp4_recording_finalizes_with_playable_track_metadata() {
-        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        let mut recorder = Mp4Recorder::new("now".into());
         recorder.push(&TransportFrame { payload: valid_description(), encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
         recorder.push(&TransportFrame { payload: keyframe(), encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: Some(42), screen_id: None }).unwrap();
         recorder.push(&TransportFrame { payload: delta(), encoding: DeviceFrameEncoding::H264, keyframe: false, timestamp_us: Some(59_000), screen_id: None }).unwrap();
         assert_eq!(recorder.frame_count(), 3);
         let bytes = recorder.into_bytes();
         assert_eq!(&bytes[4..8], b"ftyp");
-        assert_eq!(count_boxes(&bytes, b"trak"), 1);
-        assert_eq!(count_boxes(&bytes, b"avcC"), 1);
-        assert_eq!(count_boxes(&bytes, b"traf"), 1);
-        assert!(bytes.windows(4).any(|window| window == b"moof"));
-        assert!(bytes.windows(4).any(|window| window == b"mdat"));
-        assert!(bytes.windows(12).any(|window| window == b"timestamp=42"));
+        let boxes = parse_mp4(&bytes).unwrap();
+        assert_eq!(count_boxes(&boxes, b"trak"), 1);
+        assert_eq!(count_boxes(&boxes, b"avcC"), 1);
+        assert_eq!(count_boxes(&boxes, b"traf"), 1);
+        let avcc = boxes.iter().find(|item| item.kind == *b"avcC").unwrap();
+        assert_eq!(avcc.payload, valid_description());
+        let moof = boxes.iter().find(|item| item.kind == *b"moof").unwrap();
+        let mdat = boxes.iter().find(|item| item.kind == *b"mdat").unwrap();
+        let tfhd = boxes.iter().find(|item| item.kind == *b"tfhd").unwrap();
+        assert_eq!(parse_tfhd_track_id(tfhd).unwrap(), 1);
+        let trun = boxes.iter().find(|item| item.kind == *b"trun").unwrap();
+        let (data_offset, samples) = parse_trun(trun).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].duration, 58_958);
+        assert_eq!(samples[1].duration, 58_958);
+        assert_eq!(samples[0].flags, 0x0200_0000);
+        assert_eq!(samples[1].flags, 0x0101_0000);
+        assert_eq!(moof.start as i32 + data_offset, (mdat.start + 8) as i32);
+        let mdat_payload = &bytes[mdat.start + 8..mdat.start + mdat.size];
+        assert_eq!(samples.iter().map(|sample| sample.size as usize).sum::<usize>(), mdat_payload.len());
+        assert_eq!(sample_nal_types(mdat_payload, 0, &samples).unwrap(), [vec![6, 5], vec![6, 1]]);
         assert_eq!(sps_dimensions(&valid_description()[8..18]), Some((1280, 720)));
     }
 
     #[test]
     fn mp4_recording_keeps_duo_screens_in_separate_tracks() {
-        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        let mut recorder = Mp4Recorder::new("now".into());
         for screen_id in [Some(1), Some(3)] {
             recorder.push(&TransportFrame { payload: valid_description(), encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id }).unwrap();
             recorder.push(&TransportFrame { payload: keyframe(), encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: Some(1), screen_id }).unwrap();
         }
         let bytes = recorder.into_bytes();
-        assert_eq!(count_boxes(&bytes, b"trak"), 2);
-        assert_eq!(count_boxes(&bytes, b"avcC"), 2);
-        assert_eq!(count_boxes(&bytes, b"traf"), 2);
+        let boxes = parse_mp4(&bytes).unwrap();
+        assert_eq!(count_boxes(&boxes, b"trak"), 2);
+        assert_eq!(count_boxes(&boxes, b"avcC"), 2);
+        assert_eq!(count_boxes(&boxes, b"traf"), 2);
+        let moof = boxes.iter().find(|item| item.kind == *b"moof").unwrap();
+        let mdat = boxes.iter().find(|item| item.kind == *b"mdat").unwrap();
+        let track_ids = boxes
+            .iter()
+            .filter(|item| item.kind == *b"tfhd")
+            .map(|item| parse_tfhd_track_id(item).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(track_ids, [1, 2]);
+        let mdat_payload = &bytes[mdat.start + 8..mdat.start + mdat.size];
+        let mut media_offset = 0;
+        for trun in boxes.iter().filter(|item| item.kind == *b"trun") {
+            let (data_offset, samples) = parse_trun(trun).unwrap();
+            assert_eq!(samples.len(), 1);
+            assert_eq!(samples[0].duration, 16_667);
+            assert_eq!(samples[0].flags, 0x0200_0000);
+            assert_eq!(moof.start as i32 + data_offset, (mdat.start + 8 + media_offset) as i32);
+            assert_eq!(sample_nal_types(mdat_payload, media_offset, &samples).unwrap(), [vec![6, 5]]);
+            media_offset += samples[0].size as usize;
+        }
+        assert_eq!(media_offset, mdat_payload.len());
     }
 
     #[test]
     fn mp4_recording_rejects_an_initial_delta_and_invalid_description() {
-        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        let mut recorder = Mp4Recorder::new("now".into());
         recorder.push(&TransportFrame { payload: valid_description(), encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
         assert!(recorder.push(&TransportFrame { payload: delta(), encoding: DeviceFrameEncoding::H264, keyframe: false, timestamp_us: None, screen_id: None }).is_err());
 
-        let mut invalid = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        let mut invalid = Mp4Recorder::new("now".into());
         invalid.push(&TransportFrame { payload: vec![1, 0x42, 0, 0x1f, 0xff, 0xe1, 0, 1, 0x67, 0x42, 1, 0, 1, 0x68], encoding: DeviceFrameEncoding::AvccDescription, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
         invalid.push(&TransportFrame { payload: keyframe(), encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: None, screen_id: None }).unwrap();
         invalid.finish();
@@ -991,7 +1151,7 @@ mod tests {
 
     #[test]
     fn recorder_rejects_a_frame_that_would_cross_the_host_bound() {
-        let mut recorder = Mp4Recorder::new(agent_protocol::device::DeviceRecordingFormat::Mp4, "now".into());
+        let mut recorder = Mp4Recorder::new("now".into());
         let frame = TransportFrame { payload: vec![0; MAX_STREAM_CHUNK], encoding: DeviceFrameEncoding::H264, keyframe: true, timestamp_us: None, screen_id: None };
         assert!(recorder.push(&frame).is_err());
         assert_eq!(recorder.frame_count(), 0);

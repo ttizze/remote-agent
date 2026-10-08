@@ -684,10 +684,26 @@ impl Desktop {
                 .child(Button::new(SharedString::from(format!("device-stop-record-{host_id}-{device_id}"))).label("Stop record").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
-                    move |view, _, _, _| view.perform(Intent::StopDeviceRecording {
-                        host_id: Some(host_id.clone()),
-                        device_id: device_id.clone(),
-                    })
+                    move |view, _, _, _| {
+                        let recording = view
+                            .snapshot
+                            .device()
+                            .recordings
+                            .into_iter()
+                            .find(|recording| {
+                                recording.host_id == host_id
+                                    && recording.device_id == device_id
+                                    && recording.thread_id == view.thread_id().unwrap_or_default()
+                            });
+                        if let Some(recording) = recording {
+                            view.perform(Intent::StopDeviceRecording {
+                                host_id: Some(host_id.clone()),
+                                device_id: device_id.clone(),
+                                recording_id: recording.recording_id,
+                                session_epoch: recording.session_epoch,
+                            });
+                        }
+                    }
                 })))
                 .child(Button::new(SharedString::from(format!("device-power-off-{host_id}-{device_id}"))).label("Power off").xsmall().on_click(cx.listener({
                     move |view, _, _, _| view.perform(Intent::CloseDevice {
