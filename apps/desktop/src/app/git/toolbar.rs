@@ -1,5 +1,5 @@
 use super::control::{action_intent, pull_intent};
-use crate::app::{Desktop, color, icon};
+use crate::app::{Desktop, color, ui::icon};
 use agent_core::{
     state::{Intent, RefScope},
     view::git::{
@@ -9,15 +9,16 @@ use agent_core::{
 };
 use gpui_kit::{
     component::{
+        Sizable,
         button::{Button, ButtonVariants},
+        h_flex,
         menu::{DropdownMenu, PopupMenuItem},
     },
-    prelude::FluentBuilder,
     *,
 };
 
 /// Renders the compact branch and quick-action controls in the chat header.
-pub(super) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyElement {
+pub(in crate::app) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyElement {
     let cwd = view.snapshot.cwd();
     let status = view.snapshot.git.status.get(&cwd);
     let busy = view.snapshot.git.actions.values().any(|event| {

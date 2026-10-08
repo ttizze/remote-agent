@@ -12,7 +12,9 @@ use gpui_kit::{
     component::{
         Sizable,
         button::{Button, ButtonVariants},
-        h_flex, v_flex,
+        h_flex,
+        scroll::ScrollableElement,
+        v_flex,
     },
     prelude::FluentBuilder,
     *,
@@ -434,7 +436,7 @@ impl Desktop {
                                     .author
                                     .as_ref()
                                     .map(|author| author.login.clone())
-                                    .unwrap_or_else(|| "Unknown"),
+                                    .unwrap_or_else(|| "Unknown".to_owned()),
                             ),
                         )
                         .child(
@@ -602,7 +604,8 @@ impl Desktop {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
+                    .id("pull-request-list")
                     .gap_1()
                     .p_2()
                     .children(rows),

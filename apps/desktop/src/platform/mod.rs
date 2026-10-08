@@ -1329,10 +1329,9 @@ async fn active_window_metadata(
         let script = format!(
             "tell application \"System Events\"\n    set frontProcess to first application process whose frontmost is true\n    set appName to name of frontProcess\n    set windowTitle to \"\"\n    try\n        set windowTitle to name of front window of frontProcess\n    end try\n    {accessibility}\n    return appName & linefeed & windowTitle & linefeed & capturedText\nend tell"
         );
-        let output =
-            run_snapshot_command(tokio::process::Command::new("osascript").args(["-e", &script]))
-                .await
-                .ok()?;
+        let mut command = tokio::process::Command::new("osascript");
+        command.args(["-e", &script]);
+        let output = run_snapshot_command(command).await.ok()?;
         if !output.status.success() {
             return None;
         }
@@ -1447,13 +1446,18 @@ Write-Output $titleBuffer.ToString()
 pub(crate) async fn snapshot_permission_granted(include_accessibility: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
-        !include_accessibility
-            || run_snapshot_command(tokio::process::Command::new("osascript").args([
+        if !include_accessibility {
+            true
+        } else {
+            let mut command = tokio::process::Command::new("osascript");
+            command.args([
                 "-e",
                 "tell application \"System Events\" to get name of first application process whose frontmost is true",
-            ]))
-            .await
-            .is_ok_and(|output| output.status.success())
+            ]);
+            run_snapshot_command(command)
+                .await
+                .is_ok_and(|output| output.status.success())
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1487,9 +1491,8 @@ pub(crate) async fn capture_snapshot(
     #[cfg(target_os = "macos")]
     {
         let window = active_window_metadata(include_accessibility).await;
-        let command = tokio::process::Command::new("screencapture")
-            .args(["-x", "-w", "-t", "png"])
-            .arg(path);
+        let mut command = tokio::process::Command::new("screencapture");
+        command.args(["-x", "-w", "-t", "png"]).arg(path);
         let output = run_snapshot_command(command).await?;
         output
             .status
@@ -1579,7 +1582,9 @@ pub(crate) async fn play_snapshot_sound(
                 "/System/Library/Sounds/Camera Shutter.aiff"
             }
         };
-        let output = run_snapshot_command(tokio::process::Command::new("afplay").arg(file)).await?;
+        let mut command = tokio::process::Command::new("afplay");
+        command.arg(file);
+        let output = run_snapshot_command(command).await?;
         output
             .status
             .success()

@@ -94,7 +94,7 @@ impl Desktop {
 
     /// Refreshes checkout diffs after the window returns to the foreground so
     /// a preview does not remain stale while another process edits the tree.
-    pub(super) fn refresh_diff_on_window_activation(&mut self, cx: &mut Context<Desktop>) {
+    pub(in crate::app) fn refresh_diff_on_window_activation(&mut self, cx: &mut Context<Desktop>) {
         if !self.panel_shows(PanelTab::Diff) {
             return;
         }

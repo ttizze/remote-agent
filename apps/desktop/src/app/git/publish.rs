@@ -60,7 +60,7 @@ impl PublishForm {
         }
     }
 
-    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let repository = self.repository.read(cx).value().trim().to_owned();
         if !valid_repository(&repository) {
             self.error = Some("Enter a GitHub repository as owner/name.".into());

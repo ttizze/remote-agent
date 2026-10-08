@@ -8,7 +8,6 @@ use agent_protocol::models::{
 };
 use gpui_kit::{
     component::{Disableable, Sizable, button::Button, h_flex},
-    prelude::FluentBuilder,
     *,
 };
 

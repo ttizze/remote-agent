@@ -4850,8 +4850,12 @@ mod handoff_service_tests {
         tokio::task::yield_now().await;
 
         let canceled_service = service.clone();
-        let canceled =
-            tokio::spawn(async move { canceled_service.acquire_handoff_gate(false).await });
+        let canceled = tokio::spawn(async move {
+            canceled_service
+                .acquire_handoff_gate(false)
+                .await
+                .map(|_guard| ())
+        });
         tokio::task::yield_now().await;
         canceled.abort();
         assert!(canceled.await.is_err(), "admission task was canceled");

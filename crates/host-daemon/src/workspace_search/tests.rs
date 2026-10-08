@@ -1,4 +1,5 @@
 use super::*;
+use agent_protocol::workspace::{ContentMatchRange, SearchContents};
 
 fn write(root: &Path, path: &str) {
     let path = root.join(path);
