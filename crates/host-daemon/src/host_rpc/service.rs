@@ -10,8 +10,12 @@ use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
     SharedResources, SupervisedSpawner, tools::ModelCatalog,
 };
-use agent_domain::Driver;
+use agent_domain::{Driver, RunStatus};
 use agent_protocol::{
+    models::{
+        AgentActivityPhase, AwarenessActivity, AwarenessRegistration, AwarenessRegistrationResult,
+        AwarenessSnapshot, EnvironmentDescriptor,
+    },
     operations as op,
     protocol::{Body, Call, Response},
     provider::ProviderKind,
@@ -82,7 +86,13 @@ pub struct HostRpcService {
 struct ServiceInner {
     resources: Arc<HostResources>,
     connections: Connections,
+    awareness: AwarenessRegistry,
     started: AtomicBool,
+}
+
+#[derive(Default)]
+struct AwarenessRegistry {
+    registrations: std::sync::Mutex<HashMap<SessionId, AwarenessRegistration>>,
 }
 struct HostResources {
     codex: Arc<CodexResources>,
@@ -160,6 +170,7 @@ impl HostRpcService {
             inner: Arc::new(ServiceInner {
                 resources,
                 connections,
+                awareness: AwarenessRegistry::default(),
                 started: AtomicBool::new(false),
             }),
         })
@@ -337,8 +348,20 @@ impl HostRpcService {
             .connections
             .open_authenticated_session(Some(principal))
     }
+    pub(crate) fn cancellation(
+        &self,
+        session: SessionId,
+    ) -> Result<tokio_util::sync::CancellationToken, String> {
+        self.inner.connections.cancellation(session)
+    }
     pub fn close_session(&self, session: SessionId) {
         self.inner.connections.close_session(session);
+        self.inner
+            .awareness
+            .registrations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&session);
         self.inner.resources.shared.terminals.close_session(session);
         self.inner.resources.shared.files.clear_session(session);
         self.inner.resources.dictation.close_session(session);
@@ -419,6 +442,152 @@ impl HostRpcService {
             return Ok(self.keybindings(cancel).await);
         }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+
+    pub(crate) fn register_awareness(
+        &self,
+        session: SessionId,
+        registration: AwarenessRegistration,
+    ) -> Result<AwarenessRegistrationResult, Failure> {
+        // HostRuntime reaches this method only after iroh authorization. Keep
+        // the session principal check here as well so the registry cannot be
+        // used through an unauthenticated service handle.
+        self.inner
+            .connections
+            .principal(session)
+            .map_err(|error| Failure::new("connection_closed", error))?;
+        if registration.device_id.trim().is_empty() {
+            return Err(Failure::new(
+                "invalid_awareness",
+                "device id must not be empty",
+            ));
+        }
+        if registration.label.trim().is_empty() {
+            return Err(Failure::new(
+                "invalid_awareness",
+                "device label must not be empty",
+            ));
+        }
+        if registration.platform.trim().is_empty() {
+            return Err(Failure::new(
+                "invalid_awareness",
+                "device platform must not be empty",
+            ));
+        }
+        self.inner
+            .awareness
+            .registrations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(session, registration);
+        Ok(AwarenessRegistrationResult {
+            accepted: true,
+            registered_at_ms: epoch_ms(),
+        })
+    }
+
+    pub(crate) fn awareness(
+        &self,
+        descriptor: EnvironmentDescriptor,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> HostReply {
+        let first = self.awareness_snapshot(descriptor.clone());
+        let service = self.clone();
+        let previous = Arc::new(std::sync::Mutex::new(first.clone()));
+        crate::conversation::stream(
+            std::collections::VecDeque::from([first.clone()]),
+            first,
+            move || {
+                let service = service.clone();
+                let descriptor = descriptor.clone();
+                let previous = previous.clone();
+                Box::pin(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let next = service.awareness_snapshot(descriptor.clone());
+                        let changed = {
+                            let mut last =
+                                previous.lock().unwrap_or_else(|error| error.into_inner());
+                            if *last == next {
+                                false
+                            } else {
+                                *last = next.clone();
+                                true
+                            }
+                        };
+                        if changed {
+                            return Some(vec![next]);
+                        }
+                    }
+                })
+            },
+            cancel,
+        )
+    }
+
+    fn awareness_snapshot(&self, descriptor: EnvironmentDescriptor) -> AwarenessSnapshot {
+        let projects = self
+            .inner
+            .resources
+            .shared
+            .projects
+            .list()
+            .into_iter()
+            .map(|project| (project.id, project.name))
+            .collect::<HashMap<_, _>>();
+        let activities = self
+            .inner
+            .resources
+            .conversation
+            .get()
+            .and_then(|conversation| conversation.runtime.store().thread_shells().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|thread| {
+                let summary = thread.row.summary;
+                let status = summary.activity_run_status.or(summary.status);
+                let waiting_request = summary.pending_request.as_ref();
+                let waiting_background = summary.pending_background_work.first();
+                let live = summary.active_run.is_some()
+                    || status.is_some_and(RunStatus::blocking)
+                    || waiting_request.is_some()
+                    || waiting_background.is_some();
+                if !live {
+                    return None;
+                }
+                let phase = activity_phase(status, waiting_request.is_some());
+                let detail = waiting_request
+                    .map(|request| format!("Waiting for {}", request.kind))
+                    .or_else(|| waiting_background.map(|work| work.description.clone()))
+                    .or_else(|| summary.last_error.clone());
+                let updated_at_ms = summary.updated_at.millis();
+                Some(AwarenessActivity {
+                    environment_id: descriptor.environment_id.clone(),
+                    thread_id: summary.id.to_string(),
+                    project_title: projects
+                        .get(&thread.row.project)
+                        .cloned()
+                        .unwrap_or(thread.row.project),
+                    thread_title: summary.title.clone(),
+                    phase,
+                    headline: activity_headline(status, waiting_request.is_some()),
+                    detail,
+                    model_title: (!summary.selection.model.is_empty())
+                        .then_some(summary.selection.model.clone()),
+                    updated_at_ms,
+                })
+            })
+            .collect::<Vec<_>>();
+        let updated_at_ms = activities
+            .iter()
+            .map(|activity| activity.updated_at_ms)
+            .max()
+            .unwrap_or(0);
+        AwarenessSnapshot {
+            environment: descriptor,
+            activities,
+            updated_at_ms,
+        }
     }
     /// The keybindings in effect, then each change; a subscriber that fell
     /// behind gets the latest.
@@ -1073,6 +1242,48 @@ impl HostRpcService {
             .await
             .map_err(|error| Failure::new("worktree_remove_failed", error))
     }
+}
+
+fn activity_phase(status: Option<RunStatus>, waiting_request: bool) -> AgentActivityPhase {
+    if waiting_request {
+        return AgentActivityPhase::WaitingInput;
+    }
+    match status {
+        Some(RunStatus::Preparing | RunStatus::Starting | RunStatus::Queued) => {
+            AgentActivityPhase::Starting
+        }
+        Some(RunStatus::Running) => AgentActivityPhase::Running,
+        Some(RunStatus::Waiting) => AgentActivityPhase::WaitingApproval,
+        Some(RunStatus::Completed) => AgentActivityPhase::Completed,
+        Some(RunStatus::Failed) => AgentActivityPhase::Failed,
+        Some(RunStatus::Interrupted | RunStatus::Cancelled | RunStatus::RolledBack) => {
+            AgentActivityPhase::Stale
+        }
+        None => AgentActivityPhase::Running,
+    }
+}
+
+fn activity_headline(status: Option<RunStatus>, waiting_request: bool) -> String {
+    if waiting_request {
+        return "Waiting for input".into();
+    }
+    match activity_phase(status, false) {
+        AgentActivityPhase::Starting => "Starting".into(),
+        AgentActivityPhase::Running => "Working".into(),
+        AgentActivityPhase::WaitingApproval => "Waiting for approval".into(),
+        AgentActivityPhase::WaitingInput => "Waiting for input".into(),
+        AgentActivityPhase::Completed => "Completed".into(),
+        AgentActivityPhase::Failed => "Failed".into(),
+        AgentActivityPhase::Stale => "Stopped".into(),
+    }
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn provider_key(provider: ProviderKind) -> String {

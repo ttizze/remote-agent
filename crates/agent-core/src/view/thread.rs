@@ -258,7 +258,7 @@ pub fn thread_view(
                 ConnectionStatus::Reconnecting
             },
             connection_error: None,
-            environment_label: snapshot.host_name.clone(),
+            environment_label: snapshot.environment_display_label().map(str::to_owned),
             sync_label: thread_sync_label(sync.status, content),
             content,
             creation: snapshot

@@ -109,6 +109,9 @@ results! {
     DiffPreview(crate::workspace::DiffPreviewResult),
     Files(crate::models::FileList), File(crate::models::FileContent), Grant(crate::models::TransferGrant),
     Transcription(crate::operations::Transcription),
+    Environment(crate::models::EnvironmentDescriptor),
+    AwarenessRegistration(crate::models::AwarenessRegistrationResult),
+    AwarenessSnapshot(crate::models::AwarenessSnapshot),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
     Unit(()), Text(String)

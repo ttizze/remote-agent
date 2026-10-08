@@ -366,6 +366,10 @@ pub struct Snapshot {
     pub revision: u64,
     pub connected: bool,
     pub host_name: Option<String>,
+    /// Identity, platform and capabilities of the connected Host.
+    pub environment: Option<crate::models::EnvironmentDescriptor>,
+    /// Live activity published by the authenticated Host.
+    pub awareness: Option<crate::models::AwarenessSnapshot>,
     pub error: Option<String>,
     pub shell: Arc<ShellCache>,
     /// Open only while the archive is shown.
@@ -430,6 +434,18 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn accepts_after(&self, previous: &Snapshot) -> bool {
         self.store_id != previous.store_id || self.revision >= previous.revision
+    }
+    pub fn environment_display_label(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|environment| environment.label.as_str())
+            .or(self.host_name.as_deref())
+    }
+    pub fn context_environment_id(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|environment| environment.environment_id.as_str())
+            .or(self.host_name.as_deref())
     }
     pub fn terminal_available(&self) -> bool {
         self.connected && !self.cwd().is_empty()

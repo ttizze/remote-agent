@@ -74,7 +74,7 @@ impl Desktop {
                 project,
                 workspace: None,
                 is_server_thread: false,
-                environment_label: self.snapshot.host_name.as_deref(),
+                environment_label: self.snapshot.environment_display_label(),
                 environment_unavailable: !self.snapshot.connected,
                 merge_back_available: false,
             },

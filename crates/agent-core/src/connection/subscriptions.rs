@@ -49,6 +49,7 @@ impl Owner {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
+            StreamKey::Awareness => tokio::spawn(follow(target, call, Payload::Awareness)),
         };
         let failures = network
             .streams
@@ -140,6 +141,17 @@ impl Owner {
         self.open_stream(
             StreamKey::Keybindings,
             Call::Keybindings(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The authenticated Host's live activity for threads running there.
+    pub(super) fn subscribe_awareness(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Awareness,
+            Call::Awareness(agent_protocol::models::Empty {}),
         );
     }
 
@@ -322,6 +334,7 @@ impl Owner {
             }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
+            StreamKey::Awareness => self.subscribe_awareness(),
         }
     }
 
@@ -364,6 +377,10 @@ impl Owner {
                 self.healthy(&StreamKey::Keybindings);
                 self.state.keybindings = Some(Arc::new(config));
             }
+            (StreamKey::Awareness, Payload::Awareness(snapshot)) => {
+                self.healthy(&StreamKey::Awareness);
+                self.state.awareness = Some(snapshot);
+            }
             _ => {}
         }
     }
@@ -389,7 +406,10 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
+                StreamKey::Setup(_)
+                | StreamKey::TerminalMetadata
+                | StreamKey::Keybindings
+                | StreamKey::Awareness => {}
             }
             self.schedule_resubscribe(key);
             return;
