@@ -489,11 +489,28 @@ impl Desktop {
         let client_preferences = ClientPreferences::from_disk();
         let raw_client_preferences = client_preferences.current();
         let initial_snapshot = Arc::new(Snapshot::with_client_preferences(&raw_client_preferences));
-        if !raw_client_preferences.is_empty() {
-            client_preferences.replace(agent_core::persistence::canonical_model_preferences(
-                &raw_client_preferences,
-            ));
-        }
+        let canonical_save_error = if raw_client_preferences.is_empty() {
+            None
+        } else {
+            let canonical =
+                agent_core::persistence::canonical_model_preferences(&raw_client_preferences);
+            if canonical == raw_client_preferences {
+                None
+            } else {
+                client_preferences.replace(canonical.clone());
+                platform::state_dir()
+                    .map_err(anyhow::Error::msg)
+                    .and_then(|directory| {
+                        host_daemon::platform::save_private_bytes(
+                            &directory.join("model-preferences.json"),
+                            &canonical,
+                        )
+                        .map_err(anyhow::Error::from)
+                    })
+                    .err()
+                    .map(|error| format!("Could not save model preferences: {error:#}"))
+            }
+        };
         let recovery_error = initial_snapshot.error.clone();
         let mut view = Self {
             session: None,
@@ -569,6 +586,9 @@ impl Desktop {
             view.show_error(&error, window, cx);
         }
         if let Some(error) = recovery_error {
+            view.show_error(&error, window, cx);
+        }
+        if let Some(error) = canonical_save_error {
             view.show_error(&error, window, cx);
         }
         view.connect(None, window, cx);
@@ -658,7 +678,7 @@ impl Desktop {
                         .as_ref()
                         .map(|connected| connected.local_host_supervised)
                         .unwrap_or(false);
-                    StoreSession::publish_with_preferences(
+                    StoreSession::publish(
                         connected.map(|connected| connected.store),
                         runtime.clone(),
                         tx,
@@ -819,7 +839,7 @@ impl Desktop {
             let connected = connections
                 .connect(Some(&remote.ticket), snapshot, options)
                 .await;
-            StoreSession::publish_with_preferences(
+            StoreSession::publish(
                 connected.map(|connected| connected.store),
                 runtime,
                 tx,
@@ -1454,7 +1474,7 @@ impl Desktop {
                     return;
                 }
                 match result {
-                    Ok(mut session) => {
+                    Ok(session) => {
                         if !self.store_has_current_client_preferences(&session.store) {
                             let updates = self.updates.clone();
                             let client_preferences = self.client_preferences.clone();
@@ -1480,16 +1500,6 @@ impl Desktop {
                         }
                         self.background_connecting.remove(&profile_id);
                         self.background_retry_at.remove(&profile_id);
-                        let updates = self.updates.clone();
-                        let (tx, rx) = async_channel::bounded(4);
-                        let epoch = self.epoch;
-                        self.runtime.handle.spawn(async move {
-                            while let Ok(event) = rx.recv().await {
-                                if updates.send((epoch, event)).await.is_err() {
-                                    break;
-                                }
-                            }
-                        });
                         let snapshot = session.store.snapshot();
                         if let Some(environment_id) = snapshot
                             .environment
@@ -1775,20 +1785,6 @@ impl Desktop {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let power = self
-            .last_host_power
-            .clone()
-            .or_else(|| {
-                self.snapshot
-                    .background_policy
-                    .as_ref()
-                    .map(|snapshot| snapshot.host_power.clone())
-            })
-            .unwrap_or_else(|| {
-                agent_domain::HostPowerSnapshot::unknown(
-                    agent_domain::Timestamp::from_millis(now_ms).expect("current timestamp"),
-                )
-            });
         let interval_ms = self
             .snapshot
             .background_policy

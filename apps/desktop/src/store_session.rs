@@ -463,7 +463,10 @@ mod tests {
                     agent_core::persistence::encode_model_preferences(&Snapshot::default())
                         .unwrap(),
                 )),
-                pending_selected: Arc::new(Mutex::new(None)),
+                pending_selected: Arc::new(Mutex::new(PendingSelectedSync {
+                    next_token: 0,
+                    pending: None,
+                })),
             };
             let runtime = runtime();
             let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));

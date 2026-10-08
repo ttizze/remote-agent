@@ -225,7 +225,7 @@ extension BexAppViewModel {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                throw ClientPreferencesSyncError(underlying: error)
+                throw ClientPreferencesSyncError()
             }
             try Task.checkCancellation()
             if generation == clientPreferencesGeneration {

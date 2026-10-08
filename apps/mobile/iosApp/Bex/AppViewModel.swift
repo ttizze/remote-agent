@@ -5,9 +5,7 @@ import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
-    struct ClientPreferencesSyncError: Error {
-        let underlying: Error
-    }
+    struct ClientPreferencesSyncError: Error {}
 
     struct PendingClientPreferencesHandoff {
         let owner: AgentStore

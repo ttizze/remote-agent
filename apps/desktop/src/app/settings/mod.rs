@@ -379,7 +379,7 @@ impl Desktop {
                     |reason| format!("{connection} · {reason}"),
                 );
                 let selected = self.environment_registry.selected() == Some(id.as_str());
-                h_flex()
+                let row = h_flex()
                     .w_full()
                     .gap_3()
                     .px_3()
@@ -412,17 +412,20 @@ impl Desktop {
                                         .len()
                                     )),
                             ),
-                    )
-                    .when(!selected, |row| {
-                        row.id(SharedString::from(format!("environment-row-{id}")))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                if view.promote_environment(&id) {
-                                    view.environment_registry.select(&id);
-                                    cx.notify();
-                                }
-                            }))
-                    })
+                    );
+                if selected {
+                    row.into_any_element()
+                } else {
+                    row.id(SharedString::from(format!("environment-row-{id}")))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            if view.promote_environment(&id) {
+                                view.environment_registry.select(&id);
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element()
+                }
             }))
             .into_any_element()
     }

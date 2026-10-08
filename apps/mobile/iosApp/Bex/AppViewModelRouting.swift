@@ -231,7 +231,6 @@ extension BexAppViewModel {
     func removeProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         browserProfileRemovalGeneration &+= 1
-        let removalGeneration = browserProfileRemovalGeneration
         do {
             let environmentId = environmentSnapshots[id]?.environmentId() ?? id
             LocalNotifications.removeEnvironment(environmentId)
@@ -239,6 +238,7 @@ extension BexAppViewModel {
             let unregistration = unregisterPush(id)
             let background = backgroundOwners.removeValue(forKey: id)
             backgroundTaskGenerations[id, default: 0] &+= 1
+            let shutdownGeneration = backgroundTaskGenerations[id] ?? 0
             backgroundTasks.removeValue(forKey: id)?.cancel()
             environments.removeAll { $0.profileId == id }
             environmentSnapshots.removeValue(forKey: id)
@@ -254,30 +254,20 @@ extension BexAppViewModel {
                     AgentCore.Snapshot.empty(clientPreferences: clientPreferencesData),
                     syncClientPreferences: false
                 )
-                Task { [weak self] in
-                    await unregistration?.value
-                    do {
-                        try await old?.shutdown()
-                    } catch {
-                        guard let self,
-                              backgroundTaskGenerations[id] == removalGeneration,
-                              !profiles.contains(where: { $0.id == id }),
-                              selectedProfileId == nil else { return }
-                        notice = error.localizedDescription
-                    }
-                }
+                shutdownRemovedProfile(
+                    id: id,
+                    owner: old,
+                    unregistration: unregistration,
+                    generation: shutdownGeneration,
+                    requiresNoSelection: true
+                )
             }
-            Task { [weak self] in
-                do {
-                    await unregistration?.value
-                    try await background?.shutdown()
-                } catch {
-                    guard let self,
-                          backgroundTaskGenerations[id] == removalGeneration,
-                          !profiles.contains(where: { $0.id == id }) else { return }
-                    notice = error.localizedDescription
-                }
-            }
+            shutdownRemovedProfile(
+                id: id,
+                owner: background,
+                unregistration: unregistration,
+                generation: shutdownGeneration
+            )
             profiles = remaining
             // Removing a Host also removes its ActivityKit card and token
             // association; the controller ends it before the Host store is
@@ -288,5 +278,26 @@ extension BexAppViewModel {
             startBackgroundProfiles(selectedProfileId)
             screen = .profiles
         } catch { notice = error.localizedDescription }
+    }
+
+    private func shutdownRemovedProfile(
+        id: String,
+        owner: AgentStore?,
+        unregistration: Task<Void, Never>?,
+        generation: UInt64,
+        requiresNoSelection: Bool = false
+    ) {
+        Task { [weak self] in
+            do {
+                await unregistration?.value
+                try await owner?.shutdown()
+            } catch {
+                guard let self,
+                      backgroundTaskGenerations[id] == generation,
+                      !profiles.contains(where: { $0.id == id }),
+                      !requiresNoSelection || selectedProfileId == nil else { return }
+                notice = error.localizedDescription
+            }
+        }
     }
 }
