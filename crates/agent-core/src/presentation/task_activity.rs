@@ -129,25 +129,29 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn freshness_depends_on_the_update_channel_and_completion_remains_visible_for_a_minute() {
-        for foreground in [false, true] {
-            let remote = task_activity_timing(foreground, true);
-            assert_eq!(remote.stale_after_seconds, Some(600));
-            assert_eq!(remote.dismiss_after_seconds, 60);
-        }
-        assert_eq!(task_activity_timing(true, false).stale_after_seconds, None);
-        assert_eq!(
-            task_activity_timing(false, false).stale_after_seconds,
-            Some(30)
-        );
-        assert_eq!(task_activity_timing(false, false).dismiss_after_seconds, 60);
-    }
     use crate::{
         models::Thread,
         protocol::Notification,
         state::{Event, reduce},
     };
+
+    #[test]
+    fn freshness_depends_on_the_update_channel_and_completion_remains_visible_for_a_minute() {
+        for (foreground, remote_updates, stale_after_seconds) in [
+            (false, true, Some(600)),
+            (true, true, Some(600)),
+            (true, false, None),
+            (false, false, Some(30)),
+        ] {
+            assert_eq!(
+                task_activity_timing(foreground, remote_updates),
+                TaskActivityTiming {
+                    stale_after_seconds,
+                    dismiss_after_seconds: 60,
+                }
+            );
+        }
+    }
     use serde_json::json;
     use std::sync::Arc;
 
