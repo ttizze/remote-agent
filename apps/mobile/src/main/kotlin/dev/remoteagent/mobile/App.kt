@@ -776,6 +776,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         )
         environments = (environments.filterNot { it.profileId == profile.id } + row)
             .sortedBy { it.label.lowercase() }
+        if (pushPreferencesChanged) {
+            renderActivityAggregate(
+                context,
+                setActivityDeliveryEnabled(context, profile.id, next.preferences().liveActivitiesEnabled),
+            )
+        }
         if (pushPreferencesChanged || pushRegistrations[profile.id] == null) {
             registerPushForHost(profile.id, force = pushPreferencesChanged)
         }
@@ -956,8 +962,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
-        val pushPreferencesChanged = snapshot.preferences().liveActivitiesEnabled !=
-            next.preferences().liveActivitiesEnabled
         val becameUnavailable = snapshot.error() == null && next.error() != null
         if (
             becameUnavailable &&
@@ -980,7 +984,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         profileId?.let { id ->
             profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
         }
-        if (pushPreferencesChanged) refreshPushRegistration()
 
         val selected = next.selectedThreadId()
         val from = followingFrom
@@ -1119,26 +1122,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         profiles.forEach { profile ->
             if (!liveActivitiesEnabled(profile.id)) {
                 changed = true
-                aggregate = removeActivityState(context, profile.id)
+                aggregate = setActivityDeliveryEnabled(context, profile.id, enabled = false)
             }
         }
-        if (!changed) return
-        renderActivityAggregate(aggregate)
-    }
-
-    private fun renderActivityAggregate(aggregate: String?) {
-        val presentation = aggregate?.let(::parseActivityPresentation)
-        if (presentation == null) {
-            PushNotificationCenter.cancelActivity(context)
-        } else {
-            PushNotificationCenter.showActivity(
-                context,
-                presentation.title,
-                presentation.body,
-                presentation.deepLink,
-                presentation.active,
-            )
+        if (!changed) {
+            renderActivityAggregate(context, currentActivityAggregate(context))
+            return
         }
+        renderActivityAggregate(context, aggregate)
     }
 
     private fun pushOwner(hostId: String): AgentStore? =
@@ -1186,18 +1177,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             ) {
                 registeredPushOwners[hostId] = store
                 registeredPushConfigurations[hostId] = registration
-                setPushActive(
-                    hostId,
-                    registration.deviceId,
-                    registration.isActive(liveActivitiesEnabled(hostId)),
-                )
             }
         }
     }
-
-    private fun PushDeviceRegistration.isActive(liveActivitiesEnabled: Boolean): Boolean =
-        pushAvailable &&
-            (notificationsAuthorized || (liveActivitiesAvailable && liveActivitiesEnabled))
 
     private fun dispatchPush(
         hostId: String,

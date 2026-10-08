@@ -1,5 +1,8 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -8,6 +11,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentPushMessagingServiceTest {
+    private fun activityState(updatedAt: String): JsonObject =
+        Json.parseToJsonElement(
+            """
+            {
+              "title":"Project",
+              "subtitle":"Agent work",
+              "activeCount":1,
+              "updatedAt":"$updatedAt",
+              "activities":[]
+            }
+            """.trimIndent(),
+        ).jsonObject
+
     @Test
     fun activityPresentationPrioritizesAttentionAndKeepsTheOngoingState() {
         val presentation = parseActivityPresentation(
@@ -88,5 +104,46 @@ class AgentPushMessagingServiceTest {
         assertFalse(notificationsAllowed(permissionGranted = false, packageEnabled = true, channelBlocked = false))
         assertFalse(notificationsAllowed(permissionGranted = true, packageEnabled = false, channelBlocked = false))
         assertFalse(notificationsAllowed(permissionGranted = true, packageEnabled = true, channelBlocked = true))
+    }
+
+    @Test
+    fun staleActivityPayloadCannotReplaceNewerHostState() {
+        val now = 1_800_000_000_000L
+        val newer = activityState("2027-01-15T08:00:02Z")
+        val older = activityState("2027-01-15T08:00:01Z")
+        val accepted = mergeActivityStates(emptyMap(), "host-a", newer, now, deliveryAllowed = true)
+        val ignored = mergeActivityStates(accepted.states, "host-a", older, now, deliveryAllowed = true)
+
+        assertEquals(ActivityStateMergeDisposition.Accepted, accepted.disposition)
+        assertEquals(ActivityStateMergeDisposition.Ignored, ignored.disposition)
+        assertEquals(newer, ignored.states.getValue("host-a"))
+    }
+
+    @Test
+    fun expiredActivityStateIsDroppedFromAggregateAndIncomingPayload() {
+        val now = 1_800_000_000_000L
+        val expired = activityState("2027-01-15T07:49:59Z")
+
+        assertFalse(activityStateIsFresh(expired, now))
+        assertTrue(retainedActivityStates(mapOf("host-a" to expired), now).isEmpty())
+        val result = mergeActivityStates(emptyMap(), "host-a", expired, now, deliveryAllowed = true)
+        assertEquals(ActivityStateMergeDisposition.Ignored, result.disposition)
+        assertTrue(result.states.isEmpty())
+    }
+
+    @Test
+    fun removalGateWinsOverLateActivityPayload() {
+        val now = 1_800_000_000_000L
+        val state = activityState("2027-01-15T08:00:00Z")
+        val result = mergeActivityStates(
+            mapOf("host-a" to state),
+            "host-a",
+            state,
+            now,
+            deliveryAllowed = false,
+        )
+
+        assertEquals(ActivityStateMergeDisposition.Blocked, result.disposition)
+        assertTrue(result.states.isEmpty())
     }
 }

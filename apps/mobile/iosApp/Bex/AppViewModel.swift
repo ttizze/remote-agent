@@ -738,13 +738,6 @@ final class BexAppViewModel: ObservableObject {
                   case .success = result else { return }
             self.registeredPushOwners[hostId] = owner
             self.registeredPushConfigurations[hostId] = native
-            self.setPushActive(
-                hostId: hostId,
-                deviceId: registration.deviceId,
-                active: native.pushAvailable &&
-                    (native.notificationsAuthorized ||
-                        (native.liveActivitiesAvailable && liveActivitiesEnabled(hostId: hostId)))
-            )
         }
     }
 

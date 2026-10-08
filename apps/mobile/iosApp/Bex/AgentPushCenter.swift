@@ -110,7 +110,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
             guard let self else { return }
             self.deviceToken = value
             self.submitRegistrations()
-            self.setActiveForKnownHosts()
         }
     }
 
@@ -132,7 +131,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         if !wantsAlerts && !wantsLiveActivities {
             notificationEnabled = false
             submitRegistrations()
-            setActiveForKnownHosts()
             return
         }
         let current = await notificationCenter.notificationSettings()
@@ -147,7 +145,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         // token does not show an alert when only Live Activities are enabled.
         if notificationEnabled || wantsLiveActivities { UIApplication.shared.registerForRemoteNotifications() }
         submitRegistrations()
-        setActiveForKnownHosts()
     }
 
     private func knownHostIds() -> [String] {
@@ -169,14 +166,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
 
     private func setActiveForKnownHosts(_ active: Bool) {
         for hostId in knownHostIds() {
-            activeHandler?(hostId, deviceId(for: hostId), active)
-        }
-    }
-
-    private func setActiveForKnownHosts() {
-        for hostId in knownHostIds() {
-            let active = deviceToken != nil &&
-                (liveActivitiesAllowed(for: hostId) || notificationEnabled)
             activeHandler?(hostId, deviceId(for: hostId), active)
         }
     }
