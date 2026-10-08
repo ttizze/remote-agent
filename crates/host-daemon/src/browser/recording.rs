@@ -508,6 +508,7 @@ impl Encoder {
             .unwrap_or_else(|| PathBuf::from("ffmpeg"));
         let encoders = Command::new(&executable)
             .args(["-hide_banner", "-loglevel", "error", "-encoders"])
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|error| {
@@ -633,6 +634,7 @@ impl Encoder {
             .args(["-hide_banner", "-loglevel", "info", "-i"])
             .arg(&self.output)
             .args(["-map", "0:v:0", "-f", "null", "-"])
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|error| format!("recording save-artifact validation failed: {error}"))?;
