@@ -170,11 +170,24 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
         std::fs::create_dir_all(root.path().join("claude-native")).unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        assert!(store.snapshot().models.iter().any(|model| model.model
-            == agent_protocol::models::ModelRef {
-                provider: ProviderKind::Claude,
-                id: "default".into()
-            }));
+        let snapshot = store.snapshot();
+        for (model, display) in [
+            ("default", "Default (recommended)"),
+            ("opus[1m]", "Opus (1M context)"),
+            ("claude-fable-5-1[1m]", "Fable"),
+            ("sonnet", "Sonnet"),
+            ("haiku", "Haiku"),
+            ("custom", "Custom model"),
+        ] {
+            let entry = snapshot
+                .models
+                .iter()
+                .find(|entry| {
+                    entry.model.provider == ProviderKind::Claude && entry.model.id == model
+                })
+                .unwrap();
+            assert_eq!(entry.display_name, display);
+        }
         let catalog = root.path().join("claude-native/fixture-models.json");
         std::fs::write(
             &catalog,
@@ -196,7 +209,8 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
             .filter(|model| model.model.provider == ProviderKind::Claude)
             .collect::<Vec<_>>();
         assert_eq!(claude.len(), 2, "removed models must disappear");
-        assert_eq!(claude[0].display_name, "Claude · Updated default");
+        assert_eq!(claude[0].display_name, "Updated default");
+        assert_eq!(claude[1].display_name, "New model");
         assert_eq!(
             claude[1].model,
             agent_protocol::models::ModelRef {
@@ -621,24 +635,6 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
         let root = tempfile::tempdir().unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        for (model, display) in [
-            ("default", "Default (recommended) · Opus 5 with 1M context"),
-            ("opus[1m]", "Opus 5 with 1M context"),
-            ("claude-fable-5-1[1m]", "Fable 5.1"),
-            ("sonnet", "Sonnet 5"),
-            ("haiku", "Haiku 4.5"),
-            ("custom", "Custom model"),
-        ] {
-            let snapshot = store.snapshot();
-            let entry = snapshot
-                .models
-                .iter()
-                .find(|entry| {
-                    entry.model.provider == ProviderKind::Claude && entry.model.id == model
-                })
-                .unwrap();
-            assert_eq!(entry.display_name, format!("Claude · {display}"));
-        }
         let codex_model = store
             .snapshot()
             .models
@@ -1440,8 +1436,12 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         std::fs::remove_file(native.join("usage-paused")).unwrap();
         until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.accounts[0].usage.is_some())).await;
         let usage = store.snapshot().account.accounts.as_ref().unwrap().accounts[0].usage.clone().unwrap();
+        assert_eq!(usage.windows.len(), 3);
         assert_eq!(usage.windows[0].remaining_percent, 28);
         assert_eq!(usage.windows[1].remaining_percent, 61);
+        assert_eq!(usage.windows[2].label, "Fable · 週間枠");
+        assert_eq!(usage.windows[2].remaining_percent, 66);
+        assert_eq!(usage.windows[2].resets_at, Some(2000518400));
 
         assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&agent_protocol::session::ProviderKind::Claude).map(String::as_str), Some("claude:desktop"));
         store.dispatch(Intent::NewChat { cwd: root.to_string_lossy().into() }).await.unwrap();

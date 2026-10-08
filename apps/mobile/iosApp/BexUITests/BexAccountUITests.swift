@@ -61,6 +61,9 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         app.buttons["model.settings"].tap()
         _ = addFixtureClaudeAccount(app)
+        XCTAssertTrue(app.staticTexts["5時間枠"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Fable · 週間枠"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["残り 66%"].exists)
         openModelChoices(app)
         XCTAssertTrue(app.buttons["model.choice.default"].waitForExistence(timeout: 15))
         selectFixtureProvider(app, "Codex")
@@ -142,6 +145,12 @@ extension BexLaunchUITests {
         XCTAssertTrue(manage.waitForExistence(timeout: 10)); manage.tap()
     }
 
+    func assertAccountQuota(_ app: XCUIApplication, label: String, remaining: Int) {
+        XCTAssertTrue(app.staticTexts[label].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts[label].isHittable)
+        XCTAssertTrue(app.staticTexts["残り \(remaining)%"].exists)
+    }
+
     func addFixtureClaudeAccount(_ app: XCUIApplication) -> String {
         selectFixtureProvider(app, "Claude")
         openAccountManagement(app)
@@ -175,8 +184,8 @@ extension BexLaunchUITests {
         app.buttons["settings.agents"].tap()
         XCTAssertTrue(app.buttons["account.actions.desktop"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["すべてのプロジェクト"].exists)
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "週間残量 86%"))
-            .firstMatch.waitForExistence(timeout: 10))
+        assertAccountQuota(app, label: "5時間枠", remaining: 72)
+        assertAccountQuota(app, label: "週間枠", remaining: 86)
         XCTAssertTrue(app.buttons["model.account.add"].isHittable)
         app.segmentedControls["account.provider"].buttons["Claude Code"].tap()
         XCTAssertFalse(app.buttons["model.account.desktop"].exists)
