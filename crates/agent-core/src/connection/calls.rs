@@ -43,6 +43,8 @@ pub(super) enum Reply {
     Invitation(m::Invitation),
     PreviewList(agent_protocol::preview::PreviewListResult),
     PreviewSession(agent_protocol::preview::PreviewSessionSnapshot),
+    PreviewRecordingStatus(agent_protocol::preview::PreviewRecordingStatus),
+    PreviewRecordingArtifact(agent_protocol::preview::PreviewRecordingArtifact),
     ContentSearch(agent_protocol::workspace::ContentSearch),
     Environment(m::EnvironmentDescriptor),
     AwarenessRegistration(m::AwarenessRegistrationResult),
@@ -160,6 +162,12 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         | Call::PreviewResize(_)
         | Call::PreviewSetAppearance(_)
         | Call::PreviewSetZoom(_) => Reply::PreviewSession(peer.request(call).await?),
+        Call::PreviewRecordingStart(_) => {
+            Reply::PreviewRecordingStatus(peer.request(call).await?)
+        }
+        Call::PreviewRecordingStop(_) => {
+            Reply::PreviewRecordingArtifact(peer.request(call).await?)
+        }
         Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -260,6 +268,7 @@ impl Owner {
         let network = match self.network() {
             Ok(network) => network,
             Err(error) => {
+                self.preview_recording_failed(&call);
                 if account_request {
                     self.accounts_refresh_in_flight_epoch = None;
                     self.usage_refresh_last_attempt_ms = previous_attempt;
@@ -521,6 +530,7 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
+                self.preview_recording_failed(&call);
                 if !cancelled
                     && (complete.is_some()
                         || matches!(
@@ -594,6 +604,25 @@ impl Owner {
         }
         if matches!(&call, Call::ListAccounts(_)) {
             self.account_refresh_finished();
+        }
+    }
+
+    fn preview_recording_failed(&mut self, call: &Call) {
+        let (tab_id, clear_artifact) = match call {
+            Call::PreviewRecordingStart(request) => (&request.tab_id, true),
+            Call::PreviewRecordingStop(request) => (&request.tab_id, false),
+            _ => return,
+        };
+        self.state.preview.recordings.insert(
+            tab_id.clone(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: tab_id.clone(),
+                recording: false,
+                started_at: None,
+            },
+        );
+        if clear_artifact {
+            self.state.preview.last_recordings.remove(tab_id);
         }
     }
 
@@ -732,6 +761,30 @@ impl Owner {
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
+            Reply::PreviewRecordingStatus(status) => {
+                self.state
+                    .preview
+                    .last_recordings
+                    .remove(&status.tab_id);
+                self.state
+                    .preview
+                    .recordings
+                    .insert(status.tab_id.clone(), status);
+            }
+            Reply::PreviewRecordingArtifact(artifact) => {
+                self.state.preview.recordings.insert(
+                    artifact.tab_id.clone(),
+                    agent_protocol::preview::PreviewRecordingStatus {
+                        tab_id: artifact.tab_id.clone(),
+                        recording: false,
+                        started_at: None,
+                    },
+                );
+                self.state
+                    .preview
+                    .last_recordings
+                    .insert(artifact.tab_id.clone(), artifact);
+            }
             Reply::Environment(environment) => {
                 self.state.host_name = Some(environment.label.clone());
                 self.state.environment = Some(environment);

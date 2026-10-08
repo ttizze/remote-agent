@@ -1,5 +1,6 @@
 //! Owns the persistent BEX profile and conversation-scoped shared pages.
 mod cdp;
+mod recording;
 pub mod mcp;
 
 use agent_protocol::browser::{
@@ -13,8 +14,10 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 struct Page {
     tabs: Vec<String>,
@@ -63,10 +66,21 @@ struct State {
     pages: HashMap<String, Page>,
 }
 
+struct ActiveRecording {
+    cancel: CancellationToken,
+    abort: tokio::task::AbortHandle,
+    done: tokio::sync::watch::Sender<
+        Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+    >,
+    started_at: String,
+    stopping: bool,
+}
+
 pub struct Browser {
     profile: PathBuf,
     executable: PathBuf,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
+    recordings: Arc<Mutex<HashMap<(String, String), ActiveRecording>>>,
     stop: tokio_util::sync::CancellationToken,
     bridge_directory: tempfile::TempDir,
     preview: OnceLock<Arc<crate::preview::PreviewManager>>,
@@ -102,7 +116,8 @@ impl Browser {
             profile,
             executable,
             bridge_directory,
-            state: Mutex::new(State::default()),
+            state: Arc::new(Mutex::new(State::default())),
+            recordings: Arc::new(Mutex::new(HashMap::new())),
             stop: Default::default(),
             preview: OnceLock::new(),
             preview_ports: OnceLock::new(),
@@ -127,6 +142,214 @@ impl Browser {
             .set(terminals)
             .map_err(|_| "terminal metadata already configured".to_owned())
     }
+
+    pub async fn start_preview_recording(
+        &self,
+        thread: &str,
+        tab_id: &str,
+    ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
+        let (endpoint, width, height) = {
+            let mut state = self.state.lock().await;
+            self.ensure(&mut state, thread).await?;
+            let page = state
+                .pages
+                .get(thread)
+                .ok_or_else(|| "preview thread was not found".to_owned())?;
+            if !page.preview_tabs.contains(tab_id) {
+                return Err("preview tab was not found".into());
+            }
+            let dimensions = page.viewport_for(tab_id);
+            let endpoint = state
+                .chrome
+                .as_ref()
+                .ok_or_else(|| "browser is unavailable".to_owned())?
+                .endpoint()
+                .to_owned();
+            (endpoint, dimensions.0, dimensions.1)
+        };
+        let key = (thread.to_owned(), tab_id.to_owned());
+        let mut recordings = self.recordings.lock().await;
+        if recordings.contains_key(&key) {
+            return Err(format!(
+                "recording is already active for preview tab {tab_id}"
+            ));
+        }
+        let cancel = CancellationToken::new();
+        let started = recording::start(
+            endpoint,
+            tab_id.to_owned(),
+            self.bridge_directory.path().join("recordings"),
+            width,
+            height,
+            cancel.clone(),
+            self.stop.clone(),
+        )?;
+        let recording::StartResult {
+            started_at,
+            startup,
+            task,
+        } = started;
+        let abort = task.abort_handle();
+        let (done, _) = tokio::sync::watch::channel::<
+            Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+        >(None);
+        let mut done_receiver = done.subscribe();
+        recordings.insert(
+            key.clone(),
+            ActiveRecording {
+                cancel,
+                abort,
+                done: done.clone(),
+                started_at: started_at.clone(),
+                stopping: false,
+            },
+        );
+        drop(recordings);
+        let recordings = self.recordings.clone();
+        let preview = self.preview.get().cloned();
+        let monitor_key = key.clone();
+        let monitor_tab_id = tab_id.to_owned();
+        let monitor_thread = thread.to_owned();
+        tokio::spawn(async move {
+            let result = match task.await {
+                Ok(result) => result,
+                Err(error) => Err(format!("recording task terminated: {error}")),
+            };
+            done.send_replace(Some(result));
+            if let Some(preview) = preview
+                && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread)
+            {
+                preview.recording_finished(&thread_id, &monitor_tab_id);
+            }
+            recordings.lock().await.remove(&monitor_key);
+        });
+        if let Err(error) = recording::await_startup(startup).await {
+            self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
+                .await;
+            return Err(format!("recording failed for tab {tab_id}: {error}"));
+        }
+        let status = agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: tab_id.to_owned(),
+            recording: true,
+            started_at: Some(started_at),
+        };
+        if !self.recordings.lock().await.contains_key(&key) {
+            return Err(format!("recording stopped during startup for tab {tab_id}"));
+        }
+        if let Some(preview) = self.preview.get()
+            && let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned())
+        {
+            if let Err(error) = preview.recording_started(thread_id, status.clone()) {
+                self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
+                    .await;
+                return Err(error);
+            }
+            if !self.recordings.lock().await.contains_key(&key) {
+                if let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned()) {
+                    preview.recording_finished(&thread_id, tab_id);
+                }
+                return Err(format!("recording stopped during startup for tab {tab_id}"));
+            }
+        }
+        Ok(status)
+    }
+
+    pub async fn stop_preview_recording(
+        &self,
+        thread: &str,
+        tab_id: &str,
+    ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
+        let key = (thread.to_owned(), tab_id.to_owned());
+        let (cancel, abort, mut done) = {
+            let mut recordings = self.recordings.lock().await;
+            let active = recordings
+                .get_mut(&key)
+                .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"))?;
+            if active.stopping {
+                return Err(format!("recording is already stopping for preview tab {tab_id}"));
+            }
+            active.stopping = true;
+            (active.cancel.clone(), active.abort.clone(), active.done.subscribe())
+        };
+        cancel.cancel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(
+                agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
+            ),
+            wait_for_recording_completion(&mut done),
+        )
+        .await
+        .map_err(|_| format!("recording stop timeout for tab {tab_id} after 120000ms"));
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) | Err(error) => {
+                abort.abort();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    wait_for_recording_completion(&mut done),
+                )
+                .await;
+                return Err(error);
+            }
+        }?;
+        result
+    }
+
+    async fn cancel_recording(
+        &self,
+        key: &(String, String),
+        done: &mut tokio::sync::watch::Receiver<
+            Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+        >,
+        timeout: Duration,
+    ) {
+        let (cancel, abort) = {
+            let mut recordings = self.recordings.lock().await;
+            let Some(active) = recordings.get_mut(key) else { return; };
+            active.stopping = true;
+            (active.cancel.clone(), active.abort.clone())
+        };
+        cancel.cancel();
+        match tokio::time::timeout(timeout, wait_for_recording_completion(done)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {
+                abort.abort();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    wait_for_recording_completion(done),
+                )
+                .await;
+            }
+        }
+    }
+
+    pub async fn active_recording_tab(&self, thread: &str) -> Result<String, String> {
+        let recordings = self.recordings.lock().await;
+        let mut tabs = recordings
+            .keys()
+            .filter(|(scope, _)| scope == thread)
+            .map(|(_, tab)| tab.clone());
+        match (tabs.next(), tabs.next()) {
+            (Some(tab), None) => Ok(tab),
+            (None, _) => Err("no Preview recording is active for this conversation".into()),
+            (Some(_), Some(_)) => Err("multiple Preview recordings are active; specify tab_id".into()),
+        }
+    }
+
+    pub async fn preview_active_tab(&self, thread: &str) -> Result<String, String> {
+        let mut state = self.state.lock().await;
+        self.ensure(&mut state, thread).await?;
+        let page = state
+            .pages
+            .get(thread)
+            .ok_or_else(|| "preview thread was not found".to_owned())?;
+        if page.preview_tabs.contains(&page.active) {
+            Ok(page.active.clone())
+        } else {
+            Err("preview tab is not open".to_owned())
+        }
+    }
+
     pub fn provider_config(&self, thread: &str) -> Result<serde_json::Value, String> {
         Ok(
             serde_json::json!({"command":std::env::current_exe().map_err(|e| e.to_string())?,
@@ -141,6 +364,34 @@ impl Browser {
     }
     pub async fn shutdown(&self) {
         self.stop.cancel();
+        let keys = self.recordings.lock().await.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            let mut done = {
+                let mut recordings = self.recordings.lock().await;
+                let Some(active) = recordings.get_mut(&key) else { continue; };
+                active.stopping = true;
+                active.cancel.cancel();
+                active.done.subscribe()
+            };
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_recording_completion(&mut done),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => {
+                    if let Some(active) = self.recordings.lock().await.get(&key) {
+                        active.abort.abort();
+                    }
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        wait_for_recording_completion(&mut done),
+                    )
+                    .await;
+                }
+            }
+        }
         if let Some(chrome) = self.state.lock().await.chrome.take() {
             chrome.shutdown().await;
         }
@@ -426,6 +677,7 @@ impl Browser {
     }
 
     pub async fn close_preview_tab(&self, thread: &str, tab_id: &str) -> Result<(), String> {
+        let _ = self.stop_preview_recording(thread, tab_id).await;
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
         {
@@ -462,7 +714,7 @@ impl Browser {
     ) -> Result<agent_protocol::preview::PreviewListResult, String> {
         let thread_id = agent_domain::ThreadId::new(thread.to_owned())
             .map_err(|_| "browser scope is invalid".to_owned())?;
-        let browser_result = {
+        let mut browser_result = {
             let mut state = self.state.lock().await;
             self.ensure(&mut state, thread).await?;
             let (tabs, viewports, settings) = {
@@ -515,6 +767,7 @@ impl Browser {
                 .collect();
             agent_protocol::preview::PreviewListResult {
                 sessions,
+                recordings: Vec::new(),
                 local_servers: Vec::new(),
                 scanned_at: String::new(),
                 server_epoch: String::new(),
@@ -523,6 +776,18 @@ impl Browser {
                 scanner_revision: 0,
             }
         };
+        browser_result.recordings = self
+            .recordings
+            .lock()
+            .await
+            .iter()
+            .filter(|((scope, _), _)| scope == thread)
+            .map(|((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: tab_id.clone(),
+                recording: true,
+                started_at: Some(active.started_at.clone()),
+            })
+            .collect();
         let (Some(preview), Some(preview_ports), Some(terminals)) = (
             self.preview.get(),
             self.preview_ports.get(),
@@ -634,6 +899,22 @@ impl Browser {
             image_id,
             dialog: chrome.dialog(&session),
         })
+    }
+}
+
+async fn wait_for_recording_completion(
+    done: &mut tokio::sync::watch::Receiver<
+        Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+    >,
+) -> Result<Result<agent_protocol::preview::PreviewRecordingArtifact, String>, String> {
+    loop {
+        let completed = done.borrow().clone();
+        if let Some(result) = completed {
+            return Ok(result);
+        }
+        done.changed()
+            .await
+            .map_err(|_| "recording completion channel closed".to_owned())?;
     }
 }
 

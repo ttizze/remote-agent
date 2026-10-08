@@ -2121,6 +2121,22 @@ impl Owner {
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewClose(request), None)
             }
+            Intent::PreviewRecordingStart { tab_id } => {
+                let request = agent_protocol::preview::PreviewRecordingStart {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewRecordingStart(request), None)
+            }
+            Intent::PreviewRecordingStop { tab_id } => {
+                let request = agent_protocol::preview::PreviewRecordingStop {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewRecordingStop(request), None)
+            }
             _ => unreachable!("conversation intents are prepared above"),
         })
     }

@@ -22,6 +22,7 @@
     {
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
+        ffmpeg = pkgs.ffmpeg;
         kani = pkgs.callPackage ./tools/kani/package.nix { };
         kache = pkgs.callPackage ./tools/kache/package.nix { };
       });
@@ -95,7 +96,7 @@
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
             NEXTEST_VERSION = pkgs.cargo-nextest.version;
-            packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ]
+            packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ffmpeg ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
@@ -125,6 +126,7 @@
               kache
               cargo-mutants
               cargo-nextest
+              ffmpeg
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               lsof
               gradle

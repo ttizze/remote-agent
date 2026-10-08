@@ -3,7 +3,7 @@ pub(crate) mod ports;
 
 use agent_protocol::preview::{
     normalize_preview_url, PreviewAppearance, PreviewEvent, PreviewListResult, PreviewNavStatus,
-    PreviewSessionSnapshot, PreviewViewportSetting, PreviewZoom,
+    PreviewRecordingStatus, PreviewSessionSnapshot, PreviewViewportSetting, PreviewZoom,
 };
 use agent_domain::ThreadId;
 use std::{collections::BTreeMap, sync::Mutex};
@@ -13,6 +13,7 @@ pub(crate) use ports::PortScanner;
 #[derive(Default)]
 struct State {
     sessions: BTreeMap<(ThreadId, String), PreviewSessionSnapshot>,
+    recordings: BTreeMap<(ThreadId, String), PreviewRecordingStatus>,
     revision: u64,
 }
 
@@ -99,6 +100,12 @@ impl PreviewManager {
         sessions.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
         PreviewListResult {
             sessions,
+            recordings: state
+                .recordings
+                .iter()
+                .filter(|((thread, _), _)| thread == thread_id)
+                .map(|(_, status)| status.clone())
+                .collect(),
             local_servers: Vec::new(),
             scanned_at: now(),
             server_epoch: self.server_epoch.clone(),
@@ -212,6 +219,50 @@ impl PreviewManager {
         self.update(thread_id, tab_id, false, |snapshot| snapshot.zoom = zoom)
     }
 
+    pub fn recording_started(
+        &self,
+        thread_id: ThreadId,
+        status: PreviewRecordingStatus,
+    ) -> Result<(), String> {
+        if status.tab_id.trim().is_empty() {
+            return Err("preview recording tab id is invalid".into());
+        }
+        let tab_id = status.tab_id.clone();
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .recordings
+            .insert((thread_id.clone(), tab_id.clone()), status.clone());
+        state.revision = state.revision.saturating_add(1);
+        let _ = self.events.send(PreviewEvent::RecordingChanged {
+            thread_id,
+            tab_id,
+            revision: state.revision,
+            server_epoch: self.server_epoch.clone(),
+            created_at: now(),
+            status,
+        });
+        Ok(())
+    }
+
+    pub fn recording_finished(&self, thread_id: &ThreadId, tab_id: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.recordings.remove(&(thread_id.clone(), tab_id.to_owned()));
+        state.revision = state.revision.saturating_add(1);
+        let status = PreviewRecordingStatus {
+            tab_id: tab_id.to_owned(),
+            recording: false,
+            started_at: None,
+        };
+        let _ = self.events.send(PreviewEvent::RecordingChanged {
+            thread_id: thread_id.clone(),
+            tab_id: tab_id.to_owned(),
+            revision: state.revision,
+            server_epoch: self.server_epoch.clone(),
+            created_at: now(),
+            status,
+        });
+    }
+
     pub fn close(&self, thread_id: &ThreadId, tab_id: Option<&str>) -> Vec<String> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let ids: Vec<String> = state
@@ -222,6 +273,7 @@ impl PreviewManager {
             .collect();
         for id in &ids {
             state.sessions.remove(&(thread_id.clone(), id.clone()));
+            state.recordings.remove(&(thread_id.clone(), id.clone()));
             state.revision = state.revision.saturating_add(1);
             let _ = self.events.send(PreviewEvent::Closed {
                 thread_id: thread_id.clone(),
@@ -373,5 +425,28 @@ mod tests {
             .report_status(&id, "tab", status, false, false)
             .unwrap();
         assert_eq!(manager.list(&id).revision, before);
+    }
+
+    #[test]
+    fn recording_statuses_are_thread_scoped_and_publish_revision_changes() {
+        let manager = PreviewManager::new();
+        let id = thread("one");
+        let other = thread("two");
+        let before = manager.list(&id).revision;
+        manager
+            .recording_started(
+                id.clone(),
+                PreviewRecordingStatus {
+                    tab_id: "tab".into(),
+                    recording: true,
+                    started_at: Some("2026-01-01T00:00:00Z".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(manager.list(&id).recordings.len(), 1);
+        assert!(manager.list(&other).recordings.is_empty());
+        assert!(manager.list(&id).revision > before);
+        manager.recording_finished(&id, "tab");
+        assert!(manager.list(&id).recordings.is_empty());
     }
 }

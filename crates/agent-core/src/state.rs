@@ -599,10 +599,19 @@ pub struct PreviewState {
     pub scanner_revision: u64,
     pub configured_urls: Vec<String>,
     #[serde(skip)]
+    pub recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingStatus>,
+    #[serde(skip)]
+    pub last_recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingArtifact>,
+    #[serde(skip)]
     closed_tabs: BTreeSet<String>,
 }
 impl PreviewState {
     pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
+        let server_epoch_changed = !result.server_epoch.is_empty()
+            && self
+                .server_epoch
+                .as_deref()
+                .is_some_and(|epoch| epoch != result.server_epoch.as_str());
         let same_server_epoch = self
             .server_epoch
             .as_deref()
@@ -623,6 +632,17 @@ impl PreviewState {
             .into_iter()
             .map(|session| (session.tab_id.clone(), session))
             .collect();
+        self.recordings = result
+            .recordings
+            .into_iter()
+            .map(|status| (status.tab_id.clone(), status))
+            .collect();
+        if server_epoch_changed {
+            self.last_recordings.clear();
+        } else {
+            self.last_recordings
+                .retain(|tab_id, _| self.sessions.contains_key(tab_id));
+        }
         self.closed_tabs
             .retain(|tab_id| !self.sessions.contains_key(tab_id));
         for session in self.sessions.values() {
@@ -686,14 +706,26 @@ impl PreviewState {
             if self.active_tab.as_deref() == Some(tab_id) {
                 self.active_tab = self.sessions.keys().next().cloned();
             }
+            self.recordings.remove(tab_id);
+            self.last_recordings.remove(tab_id);
         } else {
             self.closed_tabs.extend(self.sessions.keys().cloned());
             self.sessions.clear();
             self.active_tab = None;
+            self.recordings.clear();
+            self.last_recordings.clear();
         }
     }
     pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
         self.sessions.get(tab_id)
+    }
+
+    pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
+        self.recordings.get(tab_id)
+    }
+
+    pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
+        self.last_recordings.get(tab_id)
     }
 }
 
@@ -716,6 +748,7 @@ mod preview_state_tests {
                 appearance: agent_protocol::preview::PreviewAppearance::System,
                 updated_at: String::new(),
             }],
+            recordings: vec![],
             local_servers: vec![],
             scanned_at: String::new(),
             server_epoch: epoch.into(),
@@ -740,10 +773,22 @@ mod preview_state_tests {
     fn accepts_a_new_host_epoch_even_when_its_revision_is_lower() {
         let mut state = PreviewState::default();
         state.apply_list(list("old", 18, "old-tab"));
+        state.last_recordings.insert(
+            "old-tab".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "browser-recording-old".into(),
+                tab_id: "old-tab".into(),
+                path: "/tmp/browser-recording-old.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+        );
         state.apply_list(list("new", 1, "new-tab"));
         assert_eq!(state.server_epoch.as_deref(), Some("new"));
         assert!(state.sessions.contains_key("new-tab"));
         assert!(!state.sessions.contains_key("old-tab"));
+        assert!(state.last_recordings.is_empty());
     }
 
     #[test]
@@ -773,6 +818,38 @@ mod preview_state_tests {
     }
 
     #[test]
+    fn applies_independent_recording_slots_for_each_preview_tab() {
+        let mut state = PreviewState::default();
+        let mut result = list("epoch", 1, "tab-a");
+        result.sessions.push(agent_protocol::preview::PreviewSessionSnapshot {
+            thread_id: ThreadId::new("thread").unwrap(),
+            tab_id: "tab-b".into(),
+            nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+            can_go_back: false,
+            can_go_forward: false,
+            viewport: PreviewViewportSetting::Fill,
+            zoom: agent_protocol::preview::PreviewZoom::X100,
+            appearance: agent_protocol::preview::PreviewAppearance::System,
+            updated_at: String::new(),
+        });
+        result.recordings = vec![
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-a".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-b".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:01Z".into()),
+            },
+        ];
+        state.apply_list(result);
+        assert!(state.recording_for("tab-a").is_some_and(|status| status.recording));
+        assert!(state.recording_for("tab-b").is_some_and(|status| status.recording));
+    }
+
+    #[test]
     fn ignores_a_late_session_reply_after_a_local_close() {
         let mut state = PreviewState::default();
         state.apply_list(list("epoch", 1, "tab"));
@@ -780,6 +857,27 @@ mod preview_state_tests {
         state.close(Some("tab"));
         state.upsert(session);
         assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
+        let mut state = PreviewState::default();
+        state.recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording: true,
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+        });
+        state.last_recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingArtifact {
+            id: "browser-recording-test".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/browser-recording-test.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "2026-01-01T00:00:01Z".into(),
+        });
+        state.close(Some("tab"));
+        assert!(state.recordings.is_empty());
+        assert!(state.last_recordings.is_empty());
     }
 }
 
@@ -1584,6 +1682,12 @@ pub enum Intent {
         tab_id: Option<String>,
     },
     PreviewSelectTab {
+        tab_id: String,
+    },
+    PreviewRecordingStart {
+        tab_id: String,
+    },
+    PreviewRecordingStop {
         tab_id: String,
     },
 

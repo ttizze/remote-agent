@@ -26,6 +26,7 @@ pub(super) struct Target {
 pub(super) struct Chrome {
     child: Child,
     socket: WebSocketStream<ConnectStream>,
+    endpoint: String,
     next_id: u64,
     sessions: HashMap<String, String>,
     dialogs: HashMap<String, BrowserDialog>,
@@ -78,10 +79,10 @@ impl Chrome {
                         let url = format!("ws://127.0.0.1:{port}{path}");
                         tracing::info!(target: "bex", operation = "browser.launch",
                             message = %format_args!("DevTools endpoint published after {} ms", started.elapsed().as_millis()));
-                        let (socket, _) = async_tungstenite::tokio::connect_async(url)
+                        let (socket, _) = async_tungstenite::tokio::connect_async(url.clone())
                             .await
                             .map_err(|_| "BEXブラウザに接続できません。".to_owned())?;
-                        return Ok(socket);
+                        return Ok((socket, url));
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -90,12 +91,13 @@ impl Chrome {
         .await
         .unwrap_or_else(|_| Err("BEXブラウザの起動がタイムアウトしました。".into()));
         match result {
-            Ok(socket) => {
+            Ok((socket, endpoint)) => {
                 tracing::info!(target: "bex", operation = "browser.launch",
                     message = %format_args!("Chrome connected after {} ms", started.elapsed().as_millis()));
                 Ok(Self {
                     child,
                     socket,
+                    endpoint,
                     next_id: 0,
                     sessions: HashMap::new(),
                     dialogs: HashMap::new(),
@@ -110,6 +112,10 @@ impl Chrome {
                 Err(error)
             }
         }
+    }
+
+    pub(super) fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     pub async fn shutdown(mut self) {

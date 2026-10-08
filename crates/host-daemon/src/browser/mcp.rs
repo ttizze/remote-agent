@@ -64,12 +64,16 @@ enum BridgeRequest {
     Browser { thread: String, action: BrowserAction },
     PreviewList { thread: String },
     PreviewClose { thread: String, tab_id: Option<String> },
+    PreviewRecordingStart { thread: String, tab_id: Option<String> },
+    PreviewRecordingStop { thread: String, tab_id: Option<String> },
 }
 
 #[derive(Serialize, Deserialize)]
 enum BridgeResponse {
     Frame(BrowserFrame),
     PreviewList(agent_protocol::preview::PreviewListResult),
+    PreviewRecordingStatus(agent_protocol::preview::PreviewRecordingStatus),
+    PreviewRecordingArtifact(agent_protocol::preview::PreviewRecordingArtifact),
     Empty,
 }
 
@@ -100,6 +104,26 @@ async fn bridge_request(browser: &Browser, request: BridgeRequest) -> Result<Bri
             }
             Ok(BridgeResponse::Empty)
         }
+        BridgeRequest::PreviewRecordingStart { thread, tab_id } => {
+            let tab_id = match tab_id {
+                Some(tab_id) => tab_id,
+                None => browser.preview_active_tab(&thread).await?,
+            };
+            browser
+                .start_preview_recording(&thread, &tab_id)
+            .await
+            .map(BridgeResponse::PreviewRecordingStatus)
+        }
+        BridgeRequest::PreviewRecordingStop { thread, tab_id } => {
+            let tab_id = match tab_id {
+                Some(tab_id) => tab_id,
+                None => browser.active_recording_tab(&thread).await?,
+            };
+            browser
+                .stop_preview_recording(&thread, &tab_id)
+            .await
+            .map(BridgeResponse::PreviewRecordingArtifact)
+        }
     }
 }
 
@@ -120,6 +144,16 @@ fn preview_list_tool() -> Value {
 
 fn preview_close_tool() -> Value {
     json!({"name":"preview_close", "description":"Close one Preview tab, or all Preview tabs when tab_id is omitted.",
+        "inputSchema":{"type":"object","properties":{"tab_id":{"type":"string"}},"additionalProperties":false}})
+}
+
+fn preview_recording_start_tool() -> Value {
+    json!({"name":"preview_recording_start", "description":"Start bounded Host-side recording of a Preview tab. The returned status includes the start timestamp; use preview_recording_stop to finalize the WebM artifact.",
+        "inputSchema":{"type":"object","properties":{"tab_id":{"type":"string"}},"additionalProperties":false}})
+}
+
+fn preview_recording_stop_tool() -> Value {
+    json!({"name":"preview_recording_stop", "description":"Stop the active Preview recording and return its bounded WebM artifact metadata and Host path.",
         "inputSchema":{"type":"object","properties":{"tab_id":{"type":"string"}},"additionalProperties":false}})
 }
 
@@ -176,6 +210,8 @@ fn content(result: Result<BridgeResponse, String>) -> Value {
             {"type":"text","text":json!({"tabs":frame.tabs,"active_tab":frame.tab_id,"width":frame.width,"height":frame.height,"dialog":frame.dialog}).to_string()},
             {"type":"image","mimeType":"image/jpeg","data":STANDARD.encode(frame.image)}],"isError":false}),
         Ok(BridgeResponse::PreviewList(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
+        Ok(BridgeResponse::PreviewRecordingStatus(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
+        Ok(BridgeResponse::PreviewRecordingArtifact(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
         Ok(BridgeResponse::Empty) => json!({"content":[{"type":"text","text":"Preview tab closed"}],"isError":false}),
         Err(error) => json!({"content":[{"type":"text","text":error}],"isError":true}),
     }
@@ -185,15 +221,22 @@ enum ToolCall {
     Browser(BrowserAction),
     PreviewList,
     PreviewClose(Option<String>),
+    PreviewRecordingStart(Option<String>),
+    PreviewRecordingStop(Option<String>),
 }
 
 fn parse_tool_call(name: &str, value: &Value) -> Result<ToolCall, String> {
+    let optional_tab_id = || match value.get("tab_id") {
+        None => Ok(None),
+        Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
+        Some(_) => Err("tab_id must be a string when provided".into()),
+    };
     match name {
         "bex_browser" => parse_action(value).map(ToolCall::Browser),
         "preview_list" => Ok(ToolCall::PreviewList),
-        "preview_close" => Ok(ToolCall::PreviewClose(
-            value.get("tab_id").and_then(Value::as_str).map(str::to_owned),
-        )),
+        "preview_close" => Ok(ToolCall::PreviewClose(optional_tab_id()?)),
+        "preview_recording_start" => Ok(ToolCall::PreviewRecordingStart(optional_tab_id()?)),
+        "preview_recording_stop" => Ok(ToolCall::PreviewRecordingStop(optional_tab_id()?)),
         _ => Err("unknown browser tool".into()),
     }
 }
@@ -225,7 +268,7 @@ pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
                 };
                 let response = match request["method"].as_str() {
                     Some("initialize") => json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"bex-browser","version":env!("CARGO_PKG_VERSION")}}),
-                    Some("tools/list") => json!({"tools":[tool(), preview_list_tool(), preview_close_tool()]}),
+                    Some("tools/list") => json!({"tools":[tool(), preview_list_tool(), preview_close_tool(), preview_recording_start_tool(), preview_recording_stop_tool()]}),
                     Some("ping") => json!({}),
                     Some("tools/call") => {
                         let parsed = parse_tool_call(
@@ -243,6 +286,8 @@ pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
                                         ToolCall::Browser(action) => BridgeRequest::Browser { thread, action },
                                         ToolCall::PreviewList => BridgeRequest::PreviewList { thread },
                                         ToolCall::PreviewClose(tab_id) => BridgeRequest::PreviewClose { thread, tab_id },
+                                        ToolCall::PreviewRecordingStart(tab_id) => BridgeRequest::PreviewRecordingStart { thread, tab_id },
+                                        ToolCall::PreviewRecordingStop(tab_id) => BridgeRequest::PreviewRecordingStop { thread, tab_id },
                                     };
                                     (id, content(bridge(&socket, request).await))
                                 });
@@ -292,5 +337,31 @@ async fn bridge(socket: &Path, request: BridgeRequest) -> Result<BridgeResponse,
     {
         let _ = (socket, request);
         Err("Shared BEX browser currently requires a Unix Host.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_tool_rejects_non_string_tab_ids() {
+        let error = match parse_tool_call("preview_recording_stop", &json!({"tab_id": 7})) {
+            Ok(_) => panic!("numeric tab ids must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("tab_id must be a string"));
+    }
+
+    #[test]
+    fn recording_tool_omits_tab_id_only_when_requested() {
+        assert!(matches!(
+            parse_tool_call("preview_recording_stop", &json!({})).unwrap(),
+            ToolCall::PreviewRecordingStop(None)
+        ));
+        assert!(matches!(
+            parse_tool_call("preview_recording_stop", &json!({"tab_id": "tab"})).unwrap(),
+            ToolCall::PreviewRecordingStop(Some(tab)) if tab == "tab"
+        ));
     }
 }
