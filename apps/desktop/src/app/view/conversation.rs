@@ -722,7 +722,11 @@ impl Desktop {
             .gap_3()
             .p_4()
             .rounded_lg()
-            .bg(rgb(if is_question { 0x303030 } else { 0x30312a }))
+            .bg(rgb(if is_question {
+                appearance::SURFACE
+            } else {
+                0x30312a
+            }))
             .child(request.title.clone())
             .when(
                 !is_question || inputs.sent || !request.can_respond,
@@ -783,9 +787,9 @@ impl Desktop {
                                                 .h_6()
                                                 .px_1()
                                                 .rounded_sm()
-                                                .bg(rgb(0x404040))
+                                                .bg(rgb(appearance::RAISED))
                                                 .text_sm()
-                                                .text_color(rgb(0xaaaaaa))
+                                                .text_color(rgb(appearance::MUTED))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -803,7 +807,7 @@ impl Desktop {
                                                     column.child(
                                                         div()
                                                             .text_xs()
-                                                            .text_color(rgb(0xaaaaaa))
+                                                            .text_color(rgb(appearance::MUTED))
                                                             .child(option.description.clone()),
                                                     )
                                                 }),

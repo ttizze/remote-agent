@@ -128,6 +128,7 @@ private fun ChoiceButtons(choices: List<Choice>, permission: Boolean, disabled: 
 
 @Composable
 private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Boolean, respond: (Answer) -> Unit) {
+    val colorScheme = MaterialTheme.colorScheme
     var answers by remember(key) { mutableStateOf(emptyMap<String, String>()) }
     var selections by remember(key) { mutableStateOf(emptyMap<String, List<String>>()) }
     questions.forEach { question ->
@@ -153,9 +154,8 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
                 colors =
                     ButtonDefaults.textButtonColors(
                         containerColor =
-                            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                            else Color.Transparent,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
+                            if (isSelected) colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent,
+                        contentColor = colorScheme.onSurface,
                     ),
             ) {
                 QuestionChoiceLabel(index + 1, choice.label, choice.description, isSelected)
@@ -173,13 +173,8 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
     Button(
         onClick = {
             val values =
-                questions.associate { question ->
-                    question.id to
-                        buildQuestionAnswer(
-                            question.multiple,
-                            answers[question.id].orEmpty(),
-                            selections[question.id].orEmpty(),
-                        )
+                questions.associate {
+                    it.id to buildQuestionAnswer(it.multiple, answers[it.id].orEmpty(), selections[it.id].orEmpty())
                 }
             respond(Answer.Questions(values))
         },

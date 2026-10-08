@@ -100,7 +100,7 @@ struct ThreadRequestRow: View {
         if !question.header.isEmpty {
             Text(question.header).font(.subheadline.weight(.semibold))
         }
-        Text(question.prompt)
+        Text(question.prompt).textSelection(.enabled)
         ForEach(Array(question.choices.enumerated()), id: \.element.id) { index, choice in
             let selected = (selections[id] ?? []).contains(choice.id)
             Button {
