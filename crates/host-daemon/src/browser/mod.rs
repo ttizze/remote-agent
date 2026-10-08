@@ -695,6 +695,11 @@ impl Browser {
     /// not be torn down underneath it.
     pub(crate) fn has_active_tasks(&self) -> bool {
         self.state.try_lock().is_err()
+            || self
+                .recordings
+                .try_lock()
+                .map(|recordings| !recordings.is_empty())
+                .unwrap_or(true)
     }
 
     async fn ensure(&self, state: &mut State, thread: &str) -> Result<(), String> {
