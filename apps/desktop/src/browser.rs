@@ -528,17 +528,13 @@ impl HostBrowser {
     }
 
     fn save_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(artifact) = self
-            .frame
-            .as_ref()
-            .and_then(|frame| {
-                self.store
-                    .snapshot()
-                    .preview
-                    .last_recording_for(&frame.tab_id)
-            })
-            .cloned()
-        else {
+        let Some(artifact) = self.frame.as_ref().and_then(|frame| {
+            self.store
+                .snapshot()
+                .preview
+                .last_recording_for(&frame.tab_id)
+                .cloned()
+        }) else {
             self.error = "No finished Preview recording is available.".into();
             cx.notify();
             return;
@@ -574,17 +570,13 @@ impl HostBrowser {
     }
 
     fn attach_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(artifact) = self
-            .frame
-            .as_ref()
-            .and_then(|frame| {
-                self.store
-                    .snapshot()
-                    .preview
-                    .last_recording_for(&frame.tab_id)
-            })
-            .cloned()
-        else {
+        let Some(artifact) = self.frame.as_ref().and_then(|frame| {
+            self.store
+                .snapshot()
+                .preview
+                .last_recording_for(&frame.tab_id)
+                .cloned()
+        }) else {
             self.error = "No finished Preview recording is available.".into();
             cx.notify();
             return;
@@ -1182,19 +1174,26 @@ impl Render for HostBrowser {
             .child(
                 div()
                     .id("preview-frame")
-                    .on_prepaint(move |bounds, _, cx| {
-                        let _ = frame_owner.update(cx, |view, cx| {
-                            if view.frame_bounds != bounds {
-                                view.frame_bounds = bounds;
-                                cx.notify();
-                            }
-                        });
-                    })
                     .track_focus(&self.focus)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .bg(rgb(0x181818))
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                let _ = frame_owner.update(cx, |view, cx| {
+                                    if view.frame_bounds != bounds {
+                                        view.frame_bounds = bounds;
+                                        cx.notify();
+                                    }
+                                });
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .when(empty, |body| {
                         body.child(
                             v_flex()

@@ -402,7 +402,7 @@ impl Desktop {
         )
     }
 
-    fn render_thread_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_thread_list(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
         let views = self.views.clone();
         if (views.environment_sidebar.sections.len() > 1
             || !views.environment_sidebar.activities.is_empty())
@@ -488,7 +488,7 @@ impl Desktop {
         &mut self,
         view: EnvironmentSidebarView,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let mut list = v_flex().min_h_full().p_2().gap_2();
         let inbox_count = self.views.environment_inbox.items.len();
         if inbox_count > 0 {
@@ -625,7 +625,7 @@ impl Desktop {
         environment_id: &str,
         draft: agent_core::view::sidebar::SidebarDraftRow,
         cx: &mut Context<Desktop>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let project = draft.project_name.clone().unwrap_or_default();
         let preview = draft.preview.clone();
         let environment_id = environment_id.to_owned();
@@ -675,7 +675,7 @@ impl Desktop {
         &mut self,
         item: EnvironmentThreadRow,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let id = item.row.id.clone();
         let project = item.row.project_name.clone().unwrap_or_default();
         let title = item.row.title.clone();

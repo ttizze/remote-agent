@@ -107,7 +107,8 @@ impl Hosts {
             StoreSession::publish(
                 connections
                     .connect(None, Snapshot::default(), StoreOptions::default())
-                    .await,
+                    .await
+                    .map(|connected| connected.store),
                 runtime,
                 updates,
                 Update::Connected,

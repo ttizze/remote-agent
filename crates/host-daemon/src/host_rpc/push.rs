@@ -2355,7 +2355,7 @@ mod tests {
         registration.platform = PushPlatform::Android;
         registration.bundle_id = None;
         registration.apns_environment = None;
-        registration.live_activities_enabled = false;
+        registration.preferences.live_activities_enabled = false;
         let request = fcm_notification_request(
             "project-id",
             &registration,
@@ -2421,7 +2421,7 @@ mod tests {
         registration.platform = PushPlatform::Android;
         registration.bundle_id = None;
         registration.apns_environment = None;
-        registration.live_activities_enabled = true;
+        registration.preferences.live_activities_enabled = true;
         let request = fcm_notification_request(
             "project-id",
             &registration,
@@ -2650,7 +2650,7 @@ mod tests {
             deep_link: thread_deep_link("host", "active"),
             ..event.clone()
         };
-        let state = content_state(&event, &[event, active]);
+        let state = content_state(&event, &[event.clone(), active]);
         assert_eq!(state.active_count, 1);
         assert_eq!(state.subtitle, "1 active agent activities");
     }

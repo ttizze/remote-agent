@@ -63,8 +63,8 @@ pub struct PortScanSnapshot {
     pub revision: u64,
 }
 
-/// A reference-counted scanner.  Polling owners retain a lease; the count is
-/// exposed for the Host's subscription lifecycle and tests.
+/// A reference-counted scanner. Polling owners retain a lease for the
+/// lifetime of their subscription.
 pub struct PortScanner {
     state: Mutex<State>,
     retained: AtomicUsize,
@@ -106,7 +106,8 @@ impl PortScanner {
         }
     }
 
-    pub fn retain_count(&self) -> usize {
+    #[cfg(test)]
+    fn retain_count(&self) -> usize {
         self.retained.load(Ordering::Acquire)
     }
 

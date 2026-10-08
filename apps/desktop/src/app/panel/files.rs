@@ -333,7 +333,8 @@ impl Desktop {
                 column.child(
                     v_flex()
                         .max_h(relative(0.35))
-                        .overflow_y_scroll()
+                        .overflow_y_scrollbar()
+                        .id("project-content-search-results")
                         .border_b_1()
                         .border_color(tint("border", 0.6))
                         .children(content_matches.into_iter().map(|item| {

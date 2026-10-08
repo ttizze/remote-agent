@@ -11,13 +11,12 @@ use agent_protocol::usage::PriceOverride;
 use chrono::{Local, TimeZone};
 use gpui_kit::{
     component::{
-        Sizable, StyledExt,
+        Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
         v_flex,
     },
-    prelude::FluentBuilder,
     *,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -248,7 +247,7 @@ impl Desktop {
             .child(refresh_rates)
             .into_any_element();
         let summary = section(
-            Some("Usage"),
+            Some("Usage".into()),
             None,
             Some(actions),
             vec![
@@ -276,7 +275,7 @@ impl Desktop {
                     .render(),
             );
         }
-        let details = section(Some("By day and model"), None, None, rows);
+        let details = section(Some("By day and model".into()), None, None, rows);
         let chart_rows = view
             .chart
             .iter()
@@ -290,7 +289,7 @@ impl Desktop {
                     .render()
             })
             .collect();
-        let chart = section(Some("Daily trend"), None, None, chart_rows);
+        let chart = section(Some("Daily trend".into()), None, None, chart_rows);
         let preference_error = self
             .settings
             .usage
@@ -324,7 +323,7 @@ impl Desktop {
                 .render(),
         ]);
         let preferences_section = section(
-            Some("Pricing and model mapping"),
+            Some("Pricing and model mapping".into()),
             None,
             None,
             preference_rows,
@@ -447,7 +446,7 @@ impl Desktop {
             }
             limit_rows.push(row.render());
         }
-        let limits = section(Some("Limits"), None, None, limit_rows);
+        let limits = section(Some("Limits".into()), None, None, limit_rows);
         let notice = view.error.map(|error| {
             v_flex()
                 .gap_1()

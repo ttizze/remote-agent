@@ -439,7 +439,7 @@ impl Desktop {
     /// panel is closed. The same entity remains the source of frames and input.
     pub(crate) fn render_preview_mini_player(
         &self,
-        cx: &mut Context<Desktop>,
+        _cx: &mut Context<Desktop>,
     ) -> Option<AnyElement> {
         let right = self.right();
         if right.open {

@@ -577,6 +577,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use serde_json::json;
+    use std::io::Write;
     use tempfile::tempdir;
 
     fn claude_line(id: &str, output_tokens: u64) -> String {
