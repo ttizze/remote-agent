@@ -497,7 +497,7 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut bytes = Vec::with_capacity(limit.min(OUTPUT_READ_CHUNK_BYTES));
-    let mut buffer = [0_u8; OUTPUT_READ_CHUNK_BYTES];
+    let mut buffer = vec![0_u8; OUTPUT_READ_CHUNK_BYTES];
     let mut truncated = false;
     loop {
         let read = reader.read(&mut buffer).await?;

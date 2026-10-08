@@ -1631,7 +1631,7 @@ async fn verify_staged_artifact(staged: &StagedArtifact) -> Result<()> {
     );
     let mut file = fs::File::open(&staged.path).await?;
     let mut digest = DigestContext::new(&SHA256);
-    let mut buffer = [0u8; COPY_BUFFER_SIZE];
+    let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
     let mut size = 0u64;
     loop {
         let read = file.read(&mut buffer).await?;
