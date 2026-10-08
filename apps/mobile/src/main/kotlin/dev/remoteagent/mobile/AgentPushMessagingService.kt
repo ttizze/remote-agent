@@ -77,7 +77,13 @@ internal fun parseActivityPresentation(value: String): ActivityPresentation? =
                 }
                 .getOrNull()
         val display = projected?.let { runCatching { Json.parseToJsonElement(it).jsonObject }.getOrNull() }
-        val title = (display?.get("headline") as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty)
+        val headline = (display?.get("headline") as? JsonPrimitive)?.content?.trim().orEmpty()
+        val attention = (display?.get("attention") as? JsonPrimitive)?.content?.trim().orEmpty()
+        val title =
+            listOf(headline, attention)
+                .filter(String::isNotEmpty)
+                .joinToString(" · ")
+                .takeIf(String::isNotEmpty)
         if (activeCount == null || display == null || title == null) {
             null
         } else {
@@ -88,7 +94,7 @@ internal fun parseActivityPresentation(value: String): ActivityPresentation? =
                             val project = (rowObject["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
                             val thread = (rowObject["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
                             val status = (rowObject["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
-                            listOf(project, thread, status)
+                            listOf(status, thread, project)
                                 .filter(String::isNotEmpty)
                                 .joinToString(" · ")
                                 .takeIf(String::isNotEmpty)

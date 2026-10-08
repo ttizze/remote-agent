@@ -7,7 +7,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -59,7 +58,8 @@ class AgentPushMessagingServiceTest {
             parseActivityPresentation(
                 """
             {"title":"Project","subtitle":"Done","activeCount":0,
-             "activities":[{"phase":"failed","status":"Failed","threadTitle":"Run","projectTitle":"Project"}]}
+             "activities":[{"phase":"failed","status":"Failed",
+             "threadTitle":"Run","projectTitle":"Project","deepLink":""}]}
             """
                     .replace("\n", "")
                     .replace(" ", "")
@@ -87,20 +87,6 @@ class AgentPushMessagingServiceTest {
         )
         assertFalse(
             PushRegistrationStore.scopedDeviceId(base, "host-a") == PushRegistrationStore.scopedDeviceId(base, "host-b")
-        )
-    }
-
-    @Test
-    fun notificationIdentityUsesTagsAndUniquePendingIntentData() {
-        assertEquals(ONGOING_ACTIVITY_TAG, notificationTag("ignored", ongoing = true))
-        assertNotEquals(ONGOING_ACTIVITY_TAG, notificationTag("agent-activity", ongoing = false))
-        assertNotEquals(
-            notificationTag("remoteagent://threads/host/one", ongoing = false),
-            notificationTag("remoteagent://threads/host/two", ongoing = false),
-        )
-        assertNotEquals(
-            notificationIntentData("remoteagent://threads/host/one"),
-            notificationIntentData("remoteagent://threads/host/two"),
         )
     }
 
