@@ -1,12 +1,13 @@
+import AgentCore
 import Foundation
 
 extension AgentPushCenter {
-    static func deepLink(from userInfo: [AnyHashable: Any]) -> String? {
+    nonisolated static func deepLink(from userInfo: [AnyHashable: Any]) -> String? {
         if let value = userInfo["deepLink"] as? String {
             if isActivityOverviewDeepLink(value) {
                 return value
             }
-            if validThreadDeepLink(value) {
+            if threadTarget(from: value) != nil {
                 return value
             }
         }
@@ -20,13 +21,13 @@ extension AgentPushCenter {
         return "remoteagent://threads/\(environment)/\(thread)"
     }
 
-    static func threadDeepLink(hostId: String, threadId: String) -> String {
+    nonisolated static func threadDeepLink(hostId: String, threadId: String) -> String {
         let host = hostId.addingPercentEncoding(withAllowedCharacters: pathComponentCharacters) ?? hostId
         let thread = threadId.addingPercentEncoding(withAllowedCharacters: pathComponentCharacters) ?? threadId
         return "remoteagent://threads/\(host)/\(thread)"
     }
 
-    static func isUsageDeepLink(_ value: String) -> Bool {
+    nonisolated static func isUsageDeepLink(_ value: String) -> Bool {
         guard let components = URLComponents(string: value),
               components.scheme == "remoteagent",
               components.host == "settings",
@@ -40,15 +41,11 @@ extension AgentPushCenter {
         return queryItems.count == 1 && queryItems[0].name == "tab" && queryItems[0].value == "limits"
     }
 
-    static func isActivityOverviewDeepLink(_ value: String) -> Bool {
+    nonisolated static func isActivityOverviewDeepLink(_ value: String) -> Bool {
         value == AgentCore.agentActivityOverviewDeepLink()
     }
 
-    private static func validThreadDeepLink(_ value: String) -> Bool {
-        threadTarget(from: value) != nil
-    }
-
-    static func threadTarget(from value: String) -> (hostId: String, threadId: String)? {
+    nonisolated static func threadTarget(from value: String) -> (hostId: String, threadId: String)? {
         guard value.utf16.count <= 512,
               let url = URL(string: value),
               url.scheme == "remoteagent",
@@ -57,28 +54,25 @@ extension AgentPushCenter {
               url.password == nil,
               url.port == nil,
               url.query == nil,
-              url.fragment == nil else { return nil }
-        let components = url.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count == 3,
-              components[0].isEmpty,
-              !components[1].isEmpty,
-              !components[2].isEmpty,
-              let hostId = components[1].removingPercentEncoding,
-              let threadId = components[2].removingPercentEncoding,
-              !hostId.isEmpty,
-              !threadId.isEmpty,
+              url.fragment == nil,
+              let urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        let pathComponents = urlComponents.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
+        guard pathComponents.count == 3,
+              pathComponents[0].isEmpty,
+              let hostId = pathComponents[1].removingPercentEncoding,
+              let threadId = pathComponents[2].removingPercentEncoding,
               validRouteSegment(hostId),
               validRouteSegment(threadId) else { return nil }
         return (hostId, threadId)
     }
 
-    private static func validRouteSegment(_ value: String) -> Bool {
+    private nonisolated static func validRouteSegment(_ value: String) -> Bool {
         !value.isEmpty && value != "." && value != ".." && value.unicodeScalars.allSatisfy { scalar in
             scalar.value != 0x5C && !CharacterSet.controlCharacters.contains(scalar)
         }
     }
 
-    private static var pathComponentCharacters: CharacterSet {
+    private nonisolated static var pathComponentCharacters: CharacterSet {
         var characters = CharacterSet.alphanumerics
         characters.insert(charactersIn: "-._~")
         return characters
