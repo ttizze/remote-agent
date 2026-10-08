@@ -509,14 +509,16 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::NewChat { cwd } => {
             next.epoch += 1;
             let key = DraftKey::Local { key: format!("new:{cwd}") };
-            if previous.drafts.get(&key).is_none_or(|draft| draft.model.is_none()) {
+            let existing = previous.drafts.get(&key);
+            if existing.is_none_or(|draft| draft.model.is_none()) {
                 let preferences = previous.model_defaults_for_cwd(&cwd);
-                let provider = preferences.new_chat_model.as_ref().map(|model| model.provider)
+                let selected_model = existing.is_none().then_some(preferences.new_chat_model).flatten();
+                let provider = selected_model.as_ref().map(|model| model.provider)
                     .or_else(|| previous.model_provider_for_draft(key.clone()));
                 let defaults = provider.and_then(|provider| preferences.providers.get(&provider))
                     .cloned().unwrap_or_default();
-                let mut draft = previous.drafts.get(&key).map(|draft| (**draft).clone()).unwrap_or_default();
-                draft.model = preferences.new_chat_model.or(defaults.model);
+                let mut draft = existing.map(|draft| (**draft).clone()).unwrap_or_default();
+                draft.model = selected_model.or(defaults.model);
                 draft.effort = draft.effort.or(defaults.effort);
                 draft.service_tier = draft.service_tier.or(defaults.service_tier);
                 if provider.is_some() && !previous.models.is_empty() {
