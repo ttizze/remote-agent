@@ -201,6 +201,7 @@ impl Desktop {
                             .child(refresh),
                     )
                     .child(card)
+                    .child(self.render_provider_instances(window, cx))
                     .child(self.render_routing_settings(cx))
                     .into_any_element(),
             ],
