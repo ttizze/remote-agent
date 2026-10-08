@@ -1,7 +1,7 @@
 import AgentCore
 import SwiftUI
 
-private struct NativeUpdatePage: View {
+struct NativeUpdatePage: View {
     @ObservedObject var model: BexAppViewModel
 
     private func buildSetting(_ key: String) -> String? {
@@ -61,7 +61,7 @@ private struct NativeUpdatePage: View {
     }
 }
 
-private struct BackgroundDiagnosticsPage: View {
+struct BackgroundDiagnosticsPage: View {
     @ObservedObject var model: BexAppViewModel
 
     private let profiles = ["balanced", "performance", "battery-saver"]
