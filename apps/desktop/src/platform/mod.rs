@@ -2,6 +2,7 @@ use agent_core::{
     connection::{Store, StoreOptions},
     state::Snapshot,
 };
+use agent_protocol::models::UpdateTarget;
 use agent_transport::transport::{Endpoint, Relays, Ticket};
 use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
@@ -9,7 +10,8 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     sync::Arc,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -160,11 +162,28 @@ impl Connections {
     ) -> anyhow::Result<Store> {
         let isolated = isolated_host()?;
         let mut child = None;
+        let mut host_handoff_attempted = false;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut last_error = anyhow::anyhow!("Host startup timed out");
         let ready = async {
             loop {
                 let location = discover_local_host().await?;
+                if !host_handoff_attempted
+                    && !matches!(&location.state, LocalHostState::Stopped)
+                    && resolve_installed_host_executable(&location.directory)?.is_some()
+                {
+                    host_handoff_attempted = true;
+                    let directory = location.directory.clone();
+                    let stopped = tokio::task::spawn_blocking(move || {
+                        handoff_installed_host(&directory, false, isolated)
+                    })
+                    .await??;
+                    if !stopped {
+                        last_error =
+                            anyhow::anyhow!("Installed Host is waiting for active work to settle");
+                    }
+                    continue;
+                }
                 match &location.state {
                     LocalHostState::Ready(ticket) => {
                         let endpoint = self.endpoint_for(&location.directory, true).await?;
@@ -194,7 +213,7 @@ impl Connections {
                 }
                 if let Some(child) = child.as_mut()
                     && let Some(status) = child.try_wait()?
-                    && matches!(location.state, LocalHostState::Stopped)
+                    && matches!(&location.state, LocalHostState::Stopped)
                 {
                     break Err(anyhow::anyhow!("Host exited during startup ({status})"));
                 }
@@ -257,6 +276,64 @@ impl Connections {
             }
         }
     }
+}
+
+const UPDATE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait for the existing shared Host to release its lease. Only the Host can
+/// decide that provider work is settled; Desktop requests a drain and never
+/// kills or replaces the running process itself.
+fn wait_for_host_stop(
+    directory: &std::path::Path,
+    initially_stopped: bool,
+    registry: &LocalHostRegistry,
+    preferred: &std::path::Path,
+    target: UpdateTarget,
+) -> anyhow::Result<bool> {
+    if initially_stopped {
+        return Ok(true);
+    }
+    let created = host_daemon::request_update_handoff(directory, target)?;
+    let deadline = Instant::now() + UPDATE_HANDOFF_TIMEOUT;
+    loop {
+        let current = registry.resolve(preferred)?;
+        if current.directory != directory {
+            if created {
+                let _ = host_daemon::clear_update_handoff(directory);
+            }
+            return Ok(false);
+        }
+        if matches!(current.state, LocalHostState::Stopped) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            if created {
+                host_daemon::clear_update_handoff(directory)?;
+            }
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn handoff_installed_host(
+    directory: &std::path::Path,
+    initially_stopped: bool,
+    isolated: bool,
+) -> anyhow::Result<bool> {
+    let preferred = state_dir().map_err(anyhow::Error::msg)?;
+    let registry = if isolated {
+        LocalHostRegistry::new(preferred.clone())
+    } else {
+        LocalHostRegistry::for_user()?
+    };
+    wait_for_host_stop(
+        directory,
+        initially_stopped,
+        &registry,
+        &preferred,
+        UpdateTarget::Host,
+    )
 }
 
 fn isolated_host() -> anyhow::Result<bool> {
@@ -531,6 +608,17 @@ fn acknowledge_desktop_handoff_at(
     directory: &std::path::Path,
     current_executable: &std::path::Path,
 ) -> anyhow::Result<bool> {
+    if !desktop_handoff_attempt_matches(directory, current_executable)? {
+        return Ok(false);
+    }
+    std::fs::remove_file(desktop_handoff_attempt_path(directory))?;
+    Ok(true)
+}
+
+fn desktop_handoff_attempt_matches(
+    directory: &std::path::Path,
+    current_executable: &std::path::Path,
+) -> anyhow::Result<bool> {
     let path = desktop_handoff_attempt_path(directory);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -556,7 +644,6 @@ fn acknowledge_desktop_handoff_at(
     if current != expected {
         return Ok(false);
     }
-    std::fs::remove_file(path)?;
     Ok(true)
 }
 
@@ -569,7 +656,33 @@ pub(crate) fn acknowledge_installed_desktop_handoff() -> anyhow::Result<bool> {
         LocalHostRegistry::for_user()?
     };
     let location = registry.resolve(&preferred)?;
-    acknowledge_desktop_handoff_at(&location.directory, &std::env::current_exe()?)
+    let current = std::env::current_exe()?;
+    if !desktop_handoff_attempt_matches(&location.directory, &current)? {
+        return Ok(false);
+    }
+    let cleared = host_daemon::acknowledge_update_target(
+        &location.directory,
+        UpdateTarget::Desktop,
+        &host_daemon::current_update_version(),
+    )?;
+    if !cleared && desktop_update_still_requires_ack(&location.directory) {
+        // Keep the target-owned marker until the paired build can prove its
+        // version. This prevents a mismatched binary from consuming the
+        // restart requirement merely by sharing the executable path.
+        return Ok(false);
+    }
+    std::fs::remove_file(desktop_handoff_attempt_path(&location.directory))?;
+    Ok(true)
+}
+
+fn desktop_update_still_requires_ack(directory: &std::path::Path) -> bool {
+    std::fs::read(directory.join("transactions/desktop.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|document| document.get("state").cloned())
+        .and_then(|state| state.get("restartRequired").cloned())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 /// Hand off to an installed Desktop update before the old application starts.
@@ -589,9 +702,6 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
         LocalHostRegistry::for_user()?
     };
     let location = registry.resolve(&preferred)?;
-    if !matches!(location.state, LocalHostState::Stopped) {
-        return Ok(false);
-    }
     let handoff_attempt = desktop_handoff_attempt_path(&location.directory);
     if handoff_attempt.exists() {
         let pending = std::fs::read(&handoff_attempt)
@@ -611,6 +721,16 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
         return Ok(false);
     }
     if !write_desktop_handoff_attempt(&location.directory, &installed)? {
+        return Ok(false);
+    }
+    if !wait_for_host_stop(
+        &location.directory,
+        matches!(&location.state, LocalHostState::Stopped),
+        &registry,
+        &preferred,
+        UpdateTarget::Desktop,
+    )? {
+        let _ = std::fs::remove_file(desktop_handoff_attempt_path(&location.directory));
         return Ok(false);
     }
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();

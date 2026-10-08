@@ -65,6 +65,8 @@ impl HostRuntime {
         let maintenance = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut handoff = tokio::time::interval(Duration::from_millis(250));
+            handoff.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next_cleanup = Instant::now();
             let mut next_fetch = Instant::now();
             let mut next_health = Instant::now();
@@ -72,6 +74,24 @@ impl HostRuntime {
                 tokio::select! {
                     biased;
                     _ = maintenance_stop.cancelled() => break,
+                    _ = handoff.tick() => {
+                        match service.accept_handoff_if_idle().await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    target: "bex",
+                                    operation = "host.update.handoff",
+                                    message = "accepted update handoff after active work settled"
+                                );
+                                maintenance_stop.cancel();
+                            }
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                target: "bex",
+                                operation = "host.update.handoff",
+                                message = %format_args!("{error:#}")
+                            ),
+                        }
+                    }
                     _ = interval.tick() => {
                         let now = Instant::now();
                         let activity = service.background_activity();
