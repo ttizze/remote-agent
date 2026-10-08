@@ -721,6 +721,9 @@ fn bounded_context_text(value: &str) -> String {
 /// The pull-request record carried with a composer selection. Review context
 /// uses the same record schema as a selected review range, with an empty range
 /// because the selection represents the request itself.
+// These independent PR facts are the public context-record schema; grouping
+// them into a mutable wrapper would hide the protocol boundary from callers.
+#[allow(clippy::too_many_arguments)]
 pub fn pull_request_context_record(
     host: &str,
     repository: &str,

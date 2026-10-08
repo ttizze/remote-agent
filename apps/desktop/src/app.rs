@@ -319,11 +319,11 @@ impl PanelAnimationState {
             self.started = Some(now);
             self.duration = duration;
             self.run = self.run.wrapping_add(1);
-        } else if let Some(started) = self.started {
-            if now.duration_since(started) >= self.duration {
-                self.from = self.target;
-                self.started = None;
-            }
+        } else if let Some(started) = self.started
+            && now.duration_since(started) >= self.duration
+        {
+            self.from = self.target;
+            self.started = None;
         }
 
         self.started.map(|_| PanelAnimation {
@@ -504,7 +504,6 @@ impl Desktop {
                             &directory.join("model-preferences.json"),
                             &canonical,
                         )
-                        .map_err(anyhow::Error::from)
                     })
                     .err()
                     .map(|error| format!("Could not save model preferences: {error:#}"))
@@ -918,10 +917,10 @@ impl Desktop {
         let Some((environment_id, thread_id)) = self.pending_open.clone() else {
             return;
         };
-        if self.environment_registry.selected() != Some(environment_id.as_str()) {
-            if !self.promote_environment(&environment_id) {
-                return;
-            }
+        if self.environment_registry.selected() != Some(environment_id.as_str())
+            && !self.promote_environment(&environment_id)
+        {
+            return;
         }
         if self.environment_registry.selected() == Some(environment_id.as_str()) {
             self.pending_open = None;
@@ -1529,10 +1528,8 @@ impl Desktop {
                                             .get(&profile_id)
                                             .is_some_and(|mapped| mapped.as_str() == environment_id)
                                 });
-                        if should_promote {
-                            if let Some(environment_id) = pending_environment {
-                                self.promote_environment(&environment_id);
-                            }
+                        if should_promote && let Some(environment_id) = pending_environment {
+                            self.promote_environment(&environment_id);
                         }
                         self.generation += 1;
                         self.schedule_views(cx);
@@ -1892,16 +1889,12 @@ impl Desktop {
                 return;
             }
         }
-        if !include_selected {
-            if let Some(selected) = &current_selected {
-                if !allow_pending_selected {
-                    self.client_preferences.observe_selected_sync(
-                        selected,
-                        source.revision,
-                        &bytes,
-                    );
-                }
-            }
+        if !include_selected
+            && let Some(selected) = &current_selected
+            && !allow_pending_selected
+        {
+            self.client_preferences
+                .observe_selected_sync(selected, source.revision, &bytes);
         }
         let changed = self.client_preferences.replace(bytes.clone());
         let selected = include_selected
@@ -2175,14 +2168,18 @@ impl Desktop {
     /// for an unresolved automatic draft; idle environments do not poll.
     fn refresh_load_balancing_resources(&self) {
         if let Some(session) = &self.session {
-            let _ = session
-                .store
-                .dispatch(Intent::RefreshLoadBalancingResources);
+            drop(
+                session
+                    .store
+                    .dispatch(Intent::RefreshLoadBalancingResources),
+            );
         }
         for session in self.background_sessions.values() {
-            let _ = session
-                .store
-                .dispatch(Intent::RefreshLoadBalancingResources);
+            drop(
+                session
+                    .store
+                    .dispatch(Intent::RefreshLoadBalancingResources),
+            );
         }
     }
 
@@ -2649,19 +2646,6 @@ impl Desktop {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::local_host_power_publish_allowed;
-
-    #[test]
-    fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
-        assert!(local_host_power_publish_allowed(true, false, false));
-        assert!(!local_host_power_publish_allowed(false, false, false));
-        assert!(!local_host_power_publish_allowed(true, true, false));
-        assert!(!local_host_power_publish_allowed(true, false, true));
-    }
-}
-
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_browser(cx);
@@ -2755,5 +2739,18 @@ impl Render for Desktop {
             .children(gpui_kit::component::Root::render_notification_layer(
                 window, cx,
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_host_power_publish_allowed;
+
+    #[test]
+    fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
+        assert!(local_host_power_publish_allowed(true, false, false));
+        assert!(!local_host_power_publish_allowed(false, false, false));
+        assert!(!local_host_power_publish_allowed(true, true, false));
+        assert!(!local_host_power_publish_allowed(true, false, true));
     }
 }

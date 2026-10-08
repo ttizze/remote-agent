@@ -406,10 +406,10 @@ impl Snapshot {
         on: bool,
     ) -> ScheduledTaskDraft {
         let composer = scheduled_task_draft_as_composer(&draft);
-        if let Some(change) = toggle_trait(&catalog(self), &composer, &descriptor_id, on) {
-            if let Some(options) = change.options {
-                draft.options = options;
-            }
+        if let Some(change) = toggle_trait(&catalog(self), &composer, &descriptor_id, on)
+            && let Some(options) = change.options
+        {
+            draft.options = options;
         }
         draft
     }

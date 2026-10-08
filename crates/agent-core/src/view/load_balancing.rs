@@ -89,7 +89,7 @@ pub struct Candidate {
 /// saturated samples are ignored; ties retain the caller's deterministic
 /// candidate order. The domain-owned `usable_for_load_balancing` predicate is
 /// the first capacity gate so clients do not duplicate probe validation.
-pub fn select_environment<'a>(candidates: &'a [Candidate], now_ms: i64) -> Option<&'a str> {
+pub fn select_environment(candidates: &[Candidate], now_ms: i64) -> Option<&str> {
     let mut selected = None;
     let mut best_score = 0.0_f64;
     for candidate in candidates {

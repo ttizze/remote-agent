@@ -223,10 +223,8 @@ impl Desktop {
                     self.snapshot_feedback(flash, animations, cx);
                 }
                 if let Some(id) = snapshot_id {
-                    if succeeded {
-                        if let Err(error) = crate::platform::acknowledge_snapshot(&id) {
-                            self.show_error(&error, window, cx);
-                        }
+                    if succeeded && let Err(error) = crate::platform::acknowledge_snapshot(&id) {
+                        self.show_error(&error, window, cx);
                     }
                     self.external_snapshot_ids.remove(&id);
                 }
