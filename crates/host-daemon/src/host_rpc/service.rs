@@ -1577,7 +1577,10 @@ mod tests {
         };
         let directory = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
-            Err("provider is offline".into()),
+            [Backend::unavailable(
+                ProviderKind::Codex,
+                "provider is offline",
+            )],
             ProjectStore::new(directory.path().join("projects.json")),
         );
         let connection = service.open_session();
@@ -2095,15 +2098,20 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
         let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
         projects.register(&workspace).await.unwrap();
-        let service = HostRpcService::new(Err("unavailable".into()), projects);
-        service
-            .enable_claude(
-                root.path().join("does-not-exist"),
-                root.path().join("state"),
-                Some(native),
-            )
-            .await
-            .unwrap();
+        let claude = crate::adapters::Claude::load(
+            root.path().join("does-not-exist"),
+            root.path().join("state"),
+            Some(native),
+        )
+        .await
+        .unwrap();
+        let service = HostRpcService::new(
+            [
+                Backend::unavailable(ProviderKind::Codex, "unavailable"),
+                claude.into(),
+            ],
+            projects,
+        );
         let session = service.open_session();
         let call = agent_protocol::protocol::Call::ListSessions(
             agent_protocol::operations::ListSessions {
