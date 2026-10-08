@@ -7,6 +7,9 @@
 
 /* Begin PBXBuildFile section */
         D10000000000000000000001 /* AgentPushCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* AgentPushCenter.swift */; };
+        D10000000000000000000004 /* AgentPushCenter+ActivityLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000005 /* AgentPushCenter+ActivityLifecycle.swift */; };
+        D10000000000000000000006 /* AgentPushCenter+Routing.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000007 /* AgentPushCenter+Routing.swift */; };
+        D10000000000000000000008 /* AgentPushCenter+Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000009 /* AgentPushCenter+Notifications.swift */; };
         B55D00000000000000000001 /* DraftRevision.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55D00000000000000000002; };
         D55D00000000000000000001 /* DeviceVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = D55D00000000000000000002 /* DeviceVideoDecoder.swift */; };
         D55D00000000000000000004 /* DeviceVideoDecoderSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D55D00000000000000000003 /* DeviceVideoDecoderSupport.swift */; };
@@ -111,6 +114,9 @@
 /* Begin PBXFileReference section */
         D10000000000000000000003 /* RemoteAgent.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RemoteAgent.entitlements; sourceTree = "<group>"; };
         D10000000000000000000002 /* AgentPushCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPushCenter.swift; sourceTree = "<group>"; };
+        D10000000000000000000005 /* AgentPushCenter+ActivityLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentPushCenter+ActivityLifecycle.swift"; sourceTree = "<group>"; };
+        D10000000000000000000007 /* AgentPushCenter+Routing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentPushCenter+Routing.swift"; sourceTree = "<group>"; };
+        D10000000000000000000009 /* AgentPushCenter+Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentPushCenter+Notifications.swift"; sourceTree = "<group>"; };
         B55D00000000000000000002 /* DraftRevision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRevision.swift; sourceTree = "<group>"; };
         D55D00000000000000000002 /* DeviceVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceVideoDecoder.swift; sourceTree = "<group>"; };
         D55D00000000000000000003 /* DeviceVideoDecoderSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceVideoDecoderSupport.swift; sourceTree = "<group>"; };
@@ -441,6 +447,9 @@
                 D55D0000000000000000000E /* DeviceRecordingViews.swift in Sources */,
                 D55D00000000000000000010 /* DeviceScreenSupport.swift in Sources */,
                 D10000000000000000000001 /* AgentPushCenter.swift in Sources */,
+                D10000000000000000000004 /* AgentPushCenter+ActivityLifecycle.swift in Sources */,
+                D10000000000000000000006 /* AgentPushCenter+Routing.swift in Sources */,
+                D10000000000000000000008 /* AgentPushCenter+Notifications.swift in Sources */,
 				A71000000000000000000015, A71000000000000000000016, A71000000000000000000017,
                 A10000000000000000000001 /* BexIOSApp.swift in Sources */,
 				B00000000000000000000021 /* PlatformNotifications.swift in Sources */,

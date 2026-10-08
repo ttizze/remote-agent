@@ -76,10 +76,10 @@ internal fun parseActivityPresentation(value: String): ActivityPresentation? {
     val title = (display["headline"] as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty) ?: return null
     val rows = display["rows"]?.let { element ->
         (element as? JsonArray)?.mapNotNull { row ->
-            val object = row as? JsonObject ?: return@mapNotNull null
-            val project = (object["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
-            val thread = (object["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
-            val status = (object["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val rowObject = row as? JsonObject ?: return@mapNotNull null
+            val project = (rowObject["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val thread = (rowObject["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val status = (rowObject["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
             listOf(project, thread, status).filter(String::isNotEmpty).joinToString(" · ").takeIf(String::isNotEmpty)
         }
     }.orEmpty()

@@ -32,25 +32,25 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     private static let deviceIdKey = "push.device-id"
 
     private let notificationCenter = UNUserNotificationCenter.current()
-    private var registerHandler: ((String, AgentPushRegistration) -> Void)?
+    var registerHandler: ((String, AgentPushRegistration) -> Void)?
     private var activeHandler: ((String, String, Bool) -> Void)?
-    private var visibleThread: (() -> String?)?
+    var visibleThread: (() -> String?)?
     private var hostIdsProvider: (() -> [String])?
     private var liveActivitiesProvider: ((String) -> Bool)?
-    private var deviceToken: String?
-    private var pushToStartToken: String?
-    private var pendingDeepLink: String?
+    var deviceToken: String?
+    var pushToStartToken: String?
+    var pendingDeepLink: String?
     private var notificationEnabled = false
-    private var activityUpdatesTask: Task<Void, Never>?
-    private var pushToStartUpdatesTask: Task<Void, Never>?
-    private var activityTokenTasks: [String: Task<Void, Never>] = [:]
-    private var activityStateTasks: [String: Task<Void, Never>] = [:]
-    private var activityIds: [String: String] = [:]
-    private var activityHosts: [String: String] = [:]
-    private var activityTokens: [String: String] = [:]
-    private var startingHosts = Set<String>()
-    private var pendingActivityStates: [String: AgentActivityAttributes.ContentState]?
-    private var activityReconciliationRunning = false
+    var activityUpdatesTask: Task<Void, Never>?
+    var pushToStartUpdatesTask: Task<Void, Never>?
+    var activityTokenTasks: [String: Task<Void, Never>] = [:]
+    var activityStateTasks: [String: Task<Void, Never>] = [:]
+    var activityIds: [String: String] = [:]
+    var activityHosts: [String: String] = [:]
+    var activityTokens: [String: String] = [:]
+    var startingHosts = Set<String>()
+    var pendingActivityStates: [String: AgentActivityAttributes.ContentState]?
+    var activityReconciliationRunning = false
     private static var pendingShortcutType: String?
 
     private var defaults: UserDefaults {
@@ -62,7 +62,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         setActive: @escaping (String, String, Bool) -> Void,
         hostIds: @escaping () -> [String],
         visibleThread: @escaping () -> String?,
-        liveActivitiesEnabled: @escaping (String) -> Bool,
+        liveActivitiesEnabled: @escaping (String) -> Bool
     ) {
         registerHandler = register
         activeHandler = setActive
@@ -73,7 +73,9 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         // Activity.activities during UIApplication launch would otherwise
         // classify every restored card as unknown and end it before profile
         // restoration finishes.
-        if #available(iOS 16.1, *) { observeActivityTokens() }
+        if #available(iOS 16.1, *) {
+            observeActivityTokens()
+        }
         submitRegistrations()
         if let pendingDeepLink {
             self.pendingDeepLink = nil
@@ -85,7 +87,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     /// Re-reads the core Live Activities setting and OS authorization after a
     /// settings or foreground transition.
     func refreshPreferences(
-        activityStates: [String: AgentActivityAttributes.ContentState]? = nil,
+        activityStates: [String: AgentActivityAttributes.ContentState]? = nil
     ) {
         submitRegistrations()
         Task {
@@ -98,7 +100,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
 
     func application(
         _: UIApplication,
-        didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil,
+        didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         notificationCenter.delegate = self
         return true
@@ -109,17 +111,17 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.deviceToken = value
-            self.submitRegistrations()
+            submitRegistrations()
         }
     }
 
     nonisolated func application(_: UIApplication, didFailToRegisterForRemoteNotificationsWithError _: Error) {
         Task { @MainActor [weak self] in
             guard let self else { return }
-            self.notificationEnabled = false
-            self.deviceToken = nil
-            self.setActiveForKnownHosts(false)
-            self.submitRegistrations()
+            notificationEnabled = false
+            deviceToken = nil
+            setActiveForKnownHosts(false)
+            submitRegistrations()
         }
     }
 
@@ -135,7 +137,11 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         }
         let current = await notificationCenter.notificationSettings()
         if wantsAlerts && current.authorizationStatus == .notDetermined {
-            notificationEnabled = await (try? notificationCenter.requestAuthorization(options: [.alert, .sound, .badge])) == true
+            notificationEnabled = await (try? notificationCenter.requestAuthorization(options: [
+                .alert,
+                .sound,
+                .badge
+            ])) == true
         } else {
             notificationEnabled = current.authorizationStatus == .authorized
                 || current.authorizationStatus == .provisional
@@ -143,11 +149,13 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         }
         // ActivityKit push tokens also use APNs registration. Requesting this
         // token does not show an alert when only Live Activities are enabled.
-        if notificationEnabled || wantsLiveActivities { UIApplication.shared.registerForRemoteNotifications() }
+        if notificationEnabled || wantsLiveActivities {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
         submitRegistrations()
     }
 
-    private func knownHostIds() -> [String] {
+    func knownHostIds() -> [String] {
         Array(Set(hostIdsProvider?() ?? [])).sorted()
     }
 
@@ -155,12 +163,12 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         liveActivitiesProvider?(hostId) ?? true
     }
 
-    private func activityKitAvailable() -> Bool {
+    func activityKitAvailable() -> Bool {
         guard #available(iOS 16.1, *) else { return false }
         return ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
-    private func liveActivitiesAllowed(for hostId: String) -> Bool {
+    func liveActivitiesAllowed(for hostId: String) -> Bool {
         liveActivitiesEnabled(for: hostId) && activityKitAvailable()
     }
 
@@ -170,12 +178,14 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         }
     }
 
-    private func submitRegistrations() {
+    func submitRegistrations() {
         guard let deviceToken, !deviceToken.isEmpty else { return }
-        for hostId in knownHostIds() { submitRegistration(hostId: hostId, token: deviceToken) }
+        for hostId in knownHostIds() {
+            submitRegistration(hostId: hostId, token: deviceToken)
+        }
     }
 
-    private func submitRegistration(hostId: String, token: String) {
+    func submitRegistration(hostId: String, token: String) {
         guard !token.isEmpty else { return }
         registerHandler?(
             hostId,
@@ -193,13 +203,15 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
                 apnsEnvironment: Self.apnsEnvironment,
                 pushAvailable: true,
                 notificationsAuthorized: notificationEnabled,
-                liveActivitiesAvailable: activityKitAvailable(),
+                liveActivitiesAvailable: activityKitAvailable()
             )
         )
     }
 
     private var baseDeviceId: String {
-        if let value = defaults.string(forKey: Self.deviceIdKey), !value.isEmpty { return value }
+        if let value = defaults.string(forKey: Self.deviceIdKey), !value.isEmpty {
+            return value
+        }
         let value = UUID().uuidString.lowercased()
         defaults.set(value, forKey: Self.deviceIdKey)
         return value
@@ -223,8 +235,12 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         pushToStartUpdatesTask?.cancel()
         activityUpdatesTask = nil
         pushToStartUpdatesTask = nil
-        for task in activityTokenTasks.values { task.cancel() }
-        for task in activityStateTasks.values { task.cancel() }
+        for task in activityTokenTasks.values {
+            task.cancel()
+        }
+        for task in activityStateTasks.values {
+            task.cancel()
+        }
         activityTokenTasks.removeAll()
         activityStateTasks.removeAll()
         setActiveForKnownHosts(false)
@@ -236,230 +252,22 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     }
 
     private static var apnsEnvironment: String {
-#if DEBUG
-        return "sandbox"
-#else
-        return "production"
-#endif
-    }
-
-    /// Starts one local ActivityKit card for a specific Host and listens for
-    /// its push token. The Host can continue that card while the app is closed.
-    @available(iOS 16.1, *)
-    func startActivity(hostId: String, contentState: AgentActivityAttributes.ContentState) async throws -> String {
-        let activity = try Activity<AgentActivityAttributes>.request(
-            attributes: AgentActivityAttributes(),
-            content: ActivityContent(
-                state: contentState,
-                staleDate: Date().addingTimeInterval(600),
-            ),
-            pushType: .token,
-        )
-        activityIds[hostId] = activity.id
-        activityHosts[activity.id] = hostId
-        startingHosts.remove(hostId)
-        observeActivityToken(activity, hostId: hostId)
-        return activity.id
-    }
-
-    @available(iOS 16.1, *)
-    private func updateActivity(hostId: String, contentState: AgentActivityAttributes.ContentState) async {
-        guard let id = activityIds[hostId] else { return }
-        guard let activity = Activity<AgentActivityAttributes>.activities.first(where: { $0.id == id }) else {
-            removeActivity(hostId: hostId, id: id)
-            return
-        }
-        await activity.update(ActivityContent(state: contentState, staleDate: Date().addingTimeInterval(600)))
-    }
-
-    @available(iOS 16.1, *)
-    private func endActivity(hostId: String, contentState: AgentActivityAttributes.ContentState) async {
-        guard let id = activityIds[hostId] else { return }
-        guard let activity = Activity<AgentActivityAttributes>.activities.first(where: { $0.id == id }) else {
-            removeActivity(hostId: hostId, id: id)
-            return
-        }
-        await activity.end(
-            ActivityContent(state: contentState, staleDate: nil),
-            dismissalPolicy: .after(Date().addingTimeInterval(300)),
-        )
-        removeActivity(hostId: hostId, id: id)
-    }
-
-    /// Reconciles every retained Host's foreground card. A completed Host
-    /// ends only its own card; active Hosts continue to receive updates.
-    @available(iOS 16.1, *)
-    func reconcileActivities(states: [String: AgentActivityAttributes.ContentState]) async {
-        pendingActivityStates = states
-        guard !activityReconciliationRunning else { return }
-        activityReconciliationRunning = true
-        defer { activityReconciliationRunning = false }
-        while let next = pendingActivityStates {
-            pendingActivityStates = nil
-            await reconcileActivitiesNow(states: next)
-        }
-    }
-
-    @available(iOS 16.1, *)
-    private func reconcileActivitiesNow(states: [String: AgentActivityAttributes.ContentState]) async {
-        let known = Set(knownHostIds())
-        let enabled = Set(known.filter { liveActivitiesAllowed(for: $0) })
-        for (hostId, id) in activityIds where !enabled.contains(hostId) {
-            await endActivity(
-                hostId: hostId,
-                contentState: states[hostId] ?? emptyContentState(),
-            )
-        }
-        for hostId in enabled {
-            let state = states[hostId]
-            if let state, state.activeCount > 0 {
-                if activityIds[hostId] != nil {
-                    await updateActivity(hostId: hostId, contentState: state)
-                } else if UIApplication.shared.applicationState == .active,
-                          !startingHosts.contains(hostId) {
-                    startingHosts.insert(hostId)
-                    do { _ = try await startActivity(hostId: hostId, contentState: state) }
-                    catch { startingHosts.remove(hostId) }
-                }
-            } else if let state {
-                await endActivity(hostId: hostId, contentState: state)
-            } else if activityIds[hostId] != nil {
-                await endActivity(hostId: hostId, contentState: emptyContentState())
-            }
-        }
-        submitRegistrations()
-    }
-
-    @available(iOS 16.1, *)
-    private func observeActivityTokens() {
-        guard activityUpdatesTask == nil else { return }
-        activityUpdatesTask = Task { @MainActor [weak self] in
-            for await activity in Activity<AgentActivityAttributes>.activityUpdates {
-                guard let self else { return }
-                let hostId = self.hostId(for: activity)
-                guard self.knownHostIds().contains(hostId) else {
-                    Task { @MainActor in
-                        await activity.end(
-                            ActivityContent(state: activity.content.state, staleDate: nil),
-                            dismissalPolicy: .immediate,
-                        )
-                    }
-                    continue
-                }
-                self.activityIds[hostId] = activity.id
-                self.activityHosts[activity.id] = hostId
-                self.observeActivityToken(activity, hostId: hostId)
-            }
-        }
-        if #available(iOS 17.2, *), pushToStartUpdatesTask == nil {
-            pushToStartUpdatesTask = Task { @MainActor [weak self] in
-                for await token in Activity<AgentActivityAttributes>.pushToStartTokenUpdates {
-                    guard let self else { return }
-                    self.pushToStartToken = token.map { String(format: "%02x", $0) }.joined()
-                    self.submitRegistrations()
-                }
-            }
-        }
-        for activity in Activity<AgentActivityAttributes>.activities {
-            let hostId = hostId(for: activity)
-            guard knownHostIds().contains(hostId) else {
-                Task { @MainActor in
-                    await activity.end(
-                        ActivityContent(state: activity.content.state, staleDate: nil),
-                        dismissalPolicy: .immediate,
-                    )
-                }
-                continue
-            }
-            activityIds[hostId] = activity.id
-            activityHosts[activity.id] = hostId
-            observeActivityToken(activity, hostId: hostId)
-        }
-    }
-
-    @available(iOS 16.1, *)
-    private func hostId(for activity: Activity<AgentActivityAttributes>) -> String {
-        if let known = activityHosts[activity.id] { return known }
-        return activity.content.state.activities.first?.environmentId ?? "unknown"
-    }
-
-    @available(iOS 16.1, *)
-    private func observeActivityToken(_ activity: Activity<AgentActivityAttributes>, hostId: String) {
-        activityTokenTasks[hostId]?.cancel()
-        activityStateTasks[hostId]?.cancel()
-        activityTokenTasks[hostId] = Task { @MainActor [weak self] in
-            for await token in activity.pushTokenUpdates {
-                guard let self else { return }
-                guard self.activityIds[hostId] == activity.id else { return }
-                self.activityTokens[hostId] = token.map { String(format: "%02x", $0) }.joined()
-                self.submitRegistration(hostId: hostId, token: self.deviceToken ?? "")
-            }
-        }
-        activityStateTasks[hostId] = Task { @MainActor [weak self] in
-            for await state in activity.activityStateUpdates {
-                guard let self else { return }
-                guard state == .ended || state == .dismissed || state == .stale else { continue }
-                self.removeActivity(hostId: hostId, id: activity.id)
-                return
-            }
-        }
-    }
-
-    @available(iOS 16.1, *)
-    private func removeActivity(hostId: String, id: String) {
-        guard activityIds[hostId] == id else { return }
-        activityIds.removeValue(forKey: hostId)
-        activityHosts.removeValue(forKey: id)
-        activityTokens.removeValue(forKey: hostId)
-        activityTokenTasks.removeValue(forKey: hostId)?.cancel()
-        activityStateTasks.removeValue(forKey: hostId)?.cancel()
-        submitRegistrations()
-    }
-
-    nonisolated func userNotificationCenter(
-        _: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void,
-    ) {
-        let data = notification.request.content.userInfo
-        let deepLink = Self.deepLink(from: data)
-        Task { @MainActor [weak self] in
-            if deepLink != nil, deepLink == self?.visibleThread?() {
-                completionHandler([])
-            } else {
-                completionHandler([.banner, .list, .sound])
-            }
-        }
-    }
-
-    nonisolated func userNotificationCenter(
-        _: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void,
-    ) {
-        let deepLink = Self.deepLink(from: response.notification.request.content.userInfo)
-        if let deepLink {
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.pendingDeepLink = deepLink
-                if self.registerHandler != nil {
-                    self.pendingDeepLink = nil
-                    NotificationCenter.default.post(name: .agentPushDeepLink, object: deepLink)
-                }
-            }
-        }
-        completionHandler()
+        #if DEBUG
+            return "sandbox"
+        #else
+            return "production"
+        #endif
     }
 
     func application(
         _: UIApplication,
         performActionFor shortcutItem: UIApplicationShortcutItem,
-        completionHandler: @escaping (Bool) -> Void,
+        completionHandler: @escaping (Bool) -> Void
     ) {
         NotificationCenter.default.post(
             name: .remoteAgentShortcut,
             object: nil,
-            userInfo: ["type": shortcutItem.type],
+            userInfo: ["type": shortcutItem.type]
         )
         completionHandler(true)
     }
@@ -467,16 +275,18 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     func application(
         _: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
-        options: UIScene.ConnectionOptions,
+        options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
-        if let shortcut = options.shortcutItem { Self.pendingShortcutType = shortcut.type }
+        if let shortcut = options.shortcutItem {
+            Self.pendingShortcutType = shortcut.type
+        }
         UIApplication.shared.shortcutItems = [
             UIApplicationShortcutItem(
                 type: "new-thread",
                 localizedTitle: "New thread",
                 localizedSubtitle: nil,
                 icon: UIApplicationShortcutIcon(type: .add),
-                userInfo: nil,
+                userInfo: nil
             )
         ]
         return UISceneConfiguration(name: "Default Configuration", sessionRole: connectingSceneSession.role)
@@ -485,93 +295,5 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     static func takePendingShortcut() -> String? {
         defer { pendingShortcutType = nil }
         return pendingShortcutType
-    }
-
-    static func deepLink(from userInfo: [AnyHashable: Any]) -> String? {
-        if let value = userInfo["deepLink"] as? String {
-            if isActivityOverviewDeepLink(value) { return value }
-            if validThreadDeepLink(value) { return value }
-        }
-        guard let environment = userInfo["environmentId"] as? String,
-              let thread = userInfo["threadId"] as? String,
-              !environment.isEmpty,
-              !thread.isEmpty,
-              let environment = environment.addingPercentEncoding(withAllowedCharacters: pathComponentCharacters),
-              let thread = thread.addingPercentEncoding(withAllowedCharacters: pathComponentCharacters)
-        else { return nil }
-        return "remoteagent://threads/\(environment)/\(thread)"
-    }
-
-    static func threadDeepLink(hostId: String, threadId: String) -> String {
-        let host = hostId.addingPercentEncoding(withAllowedCharacters: pathComponentCharacters) ?? hostId
-        let thread = threadId.addingPercentEncoding(withAllowedCharacters: pathComponentCharacters) ?? threadId
-        return "remoteagent://threads/\(host)/\(thread)"
-    }
-
-    static func isUsageDeepLink(_ value: String) -> Bool {
-        guard let components = URLComponents(string: value),
-              components.scheme == "remoteagent",
-              components.host == "settings",
-              components.percentEncodedPath == "/usage",
-              components.user == nil,
-              components.password == nil,
-              components.port == nil,
-              components.fragment == nil
-        else { return false }
-        let queryItems = components.queryItems ?? []
-        return queryItems.count == 1 && queryItems[0].name == "tab" && queryItems[0].value == "limits"
-    }
-
-    static func isActivityOverviewDeepLink(_ value: String) -> Bool {
-        value == AgentCore.agentActivityOverviewDeepLink()
-    }
-
-    private static func validThreadDeepLink(_ value: String) -> Bool { threadTarget(from: value) != nil }
-
-    static func threadTarget(from value: String) -> (hostId: String, threadId: String)? {
-        guard value.utf16.count <= 512,
-              let url = URL(string: value),
-              url.scheme == "remoteagent",
-              url.host == "threads",
-              url.user == nil,
-              url.password == nil,
-              url.port == nil,
-              url.query == nil,
-              url.fragment == nil else { return nil }
-        let components = url.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.count == 3,
-              components[0].isEmpty,
-              !components[1].isEmpty,
-              !components[2].isEmpty,
-              let hostId = components[1].removingPercentEncoding,
-              let threadId = components[2].removingPercentEncoding,
-              !hostId.isEmpty,
-              !threadId.isEmpty,
-              validRouteSegment(hostId),
-              validRouteSegment(threadId) else { return nil }
-        return (hostId, threadId)
-    }
-
-    private static func validRouteSegment(_ value: String) -> Bool {
-        !value.isEmpty && value != "." && value != ".." && value.unicodeScalars.allSatisfy { scalar in
-            scalar.value != 0x5c && !CharacterSet.controlCharacters.contains(scalar)
-        }
-    }
-
-    private static var pathComponentCharacters: CharacterSet {
-        var characters = CharacterSet.alphanumerics
-        characters.insert(charactersIn: "-._~")
-        return characters
-    }
-
-    @available(iOS 16.1, *)
-    private func emptyContentState() -> AgentActivityAttributes.ContentState {
-        AgentActivityAttributes.ContentState(
-            title: "Agent activity",
-            subtitle: "Agent work completed",
-            activeCount: 0,
-            updatedAt: ISO8601DateFormatter().string(from: Date()),
-            activities: [],
-        )
     }
 }
