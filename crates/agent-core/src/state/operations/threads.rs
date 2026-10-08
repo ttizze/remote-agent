@@ -817,12 +817,13 @@ mod tests {
             let store = crate::store::Store::new(peer, initial);
             let page =
                 json!({"data":[],"projects":[{"id":"old","name":"Old","roots":[]}],"hasMore":true});
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let request = read(&mut reader).await;
                 let result = match request["method"].as_str().unwrap() {
                     "host/session/list" => page.clone(),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
+                    "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                     method => panic!("unexpected {method}"),
                 };
                 writer
