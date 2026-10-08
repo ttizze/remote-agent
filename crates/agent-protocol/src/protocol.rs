@@ -97,6 +97,7 @@ results! {
     PreviewSession(crate::preview::PreviewSessionSnapshot),
     PreviewRecordingStatus(crate::preview::PreviewRecordingStatus),
     PreviewRecordingArtifact(crate::preview::PreviewRecordingArtifact),
+    Device(crate::device::DeviceEvent),
     PermissionSettings(crate::permissions::PermissionSettings),
     Providers(Vec<crate::models::ProviderInstance>), WorktreeSettings(crate::models::WorktreeSettings),
     HostSettings(crate::models::HostSettings),

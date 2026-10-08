@@ -6,8 +6,8 @@ use super::{
 };
 use crate::{peer::PeerError, protocol::Call, state::*};
 use agent_protocol::{
-    background as bg, conversation as c, models as m, operations as op, pull_requests as pr,
-    scheduled_tasks as st, workspace as w,
+    background as bg, conversation as c, device as d, models as m, operations as op,
+    pull_requests as pr, scheduled_tasks as st, workspace as w,
 };
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -70,6 +70,10 @@ pub(super) enum Reply {
     PullRequestOperation(pr::PullRequestOperation),
     PullRequestAuth(pr::SourceControlAuth),
     PullRequestDiscovery(pr::SourceControlDiscovery),
+    DeviceState(d::DeviceServiceState),
+    DeviceSession(d::DeviceSession),
+    DeviceDetail(d::DeviceDetail),
+    DeviceScreenshot(d::DeviceScreenshot),
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
@@ -137,6 +141,19 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         | Call::SubmitPullRequestReview(_) => Reply::PullRequestOperation(peer.request(call).await?),
         Call::SourceControlAuth(_) => Reply::PullRequestAuth(peer.request(call).await?),
         Call::SourceControlDiscovery(_) => Reply::PullRequestDiscovery(peer.request(call).await?),
+        Call::DeviceList(_) | Call::DeviceConfigure(_) | Call::DeviceHosts(_) => {
+            Reply::DeviceState(peer.request(call).await?)
+        }
+        Call::DeviceOpen(_) => Reply::DeviceSession(peer.request(call).await?),
+        Call::DeviceDetail(_) | Call::DeviceAction(_) => {
+            Reply::DeviceDetail(peer.request(call).await?)
+        }
+        Call::DeviceScreenshot(_) => Reply::DeviceScreenshot(peer.request(call).await?),
+        Call::DeviceClose(_) | Call::DeviceShutdown(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::DeviceSubscribe(_) => unreachable!("device subscriptions use the stream owner"),
         Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
         Call::SwitchRef(_) | Call::CreateRef(_) => Reply::SwitchedRef(peer.request(call).await?),
         Call::UpsertKeybinding(_) | Call::RemoveKeybinding(_) => {
@@ -545,6 +562,22 @@ impl Owner {
                 if matches!(call, Call::ReadUsageSummary(_) | Call::RefreshUsageRates(_)) {
                     self.state.usage_loading = false;
                     self.state.usage_error = Some(error.to_string());
+                }
+                if matches!(
+                    call,
+                    Call::DeviceList(_)
+                        | Call::DeviceConfigure(_)
+                        | Call::DeviceHosts(_)
+                        | Call::DeviceOpen(_)
+                        | Call::DeviceClose(_)
+                        | Call::DeviceShutdown(_)
+                        | Call::DeviceDetail(_)
+                        | Call::DeviceAction(_)
+                        | Call::DeviceScreenshot(_)
+                ) {
+                    self.state.device.error = Some(
+                        crate::presentation::error::error_message(&error.to_string()),
+                    );
                 }
                 match &call {
                     Call::ProviderCommands(request) => {
@@ -973,6 +1006,24 @@ impl Owner {
             Reply::PullRequestAuth(auth) => self.state.pull_requests.auth = Some(auth),
             Reply::PullRequestDiscovery(discovery) => {
                 self.state.pull_requests.discovery = Some(discovery)
+            }
+            Reply::DeviceState(service) => self.state.device.apply_event(d::DeviceEvent::State(service)),
+            Reply::DeviceSession(session) => {
+                self.state.device.sessions.retain(|existing| {
+                    !(existing.thread_id == session.thread_id
+                        && existing.host_id == session.host_id
+                        && existing.device_id == session.device_id)
+                });
+                self.state.device.sessions.push(session);
+            }
+            Reply::DeviceDetail(detail) => {
+                self.state
+                    .device
+                    .details
+                    .insert((detail.host_id.clone(), detail.device_id.clone()), detail);
+            }
+            Reply::DeviceScreenshot(screenshot) => {
+                self.state.device.last_screenshot = Some(screenshot);
             }
             Reply::SwitchedRef(switched) => match call {
                 Call::SwitchRef(request) => {

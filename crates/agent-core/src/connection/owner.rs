@@ -81,6 +81,7 @@ pub(super) enum StreamKey {
     ScheduledTasks,
     Awareness,
     Background,
+    Device(ThreadId),
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {

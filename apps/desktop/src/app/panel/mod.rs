@@ -1,6 +1,7 @@
 //! The right panel's surfaces (browsers, terminals, Files, Diff), the thread
 //! terminal drawer and the thread details card.
 mod details;
+mod device;
 mod diff;
 mod files;
 mod pull_requests;
@@ -10,7 +11,7 @@ use super::{
     Desktop, Route,
     ui::{color, icon, shortcut, tint},
 };
-use agent_core::view::header::HeaderPanelState;
+use agent_core::{state::Intent, view::header::HeaderPanelState};
 use gpui_kit::{
     component::{
         Sizable,
@@ -37,15 +38,17 @@ pub(crate) enum PanelTab {
     Files,
     Browser,
     PullRequests,
+    Device,
 }
 impl PanelTab {
     /// The order the surface menus list them in.
-    const ALL: [PanelTab; 5] = [
+    const ALL: [PanelTab; 6] = [
         PanelTab::Browser,
         PanelTab::Terminal,
         PanelTab::Files,
         PanelTab::Diff,
         PanelTab::PullRequests,
+        PanelTab::Device,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -54,6 +57,7 @@ impl PanelTab {
             PanelTab::Files => "Files",
             PanelTab::Diff => "Diff",
             PanelTab::PullRequests => "Pull requests",
+            PanelTab::Device => "Device",
         }
     }
     fn icon(self) -> &'static str {
@@ -63,6 +67,7 @@ impl PanelTab {
             PanelTab::Files => "files",
             PanelTab::Diff => "file-diff",
             PanelTab::PullRequests => "git-pull-request",
+            PanelTab::Device => "smartphone",
         }
     }
     fn key(self) -> &'static str {
@@ -72,6 +77,7 @@ impl PanelTab {
             PanelTab::Files => "f",
             PanelTab::Diff => "d",
             PanelTab::PullRequests => "p",
+            PanelTab::Device => "e",
         }
     }
     fn unavailable_hint(self) -> &'static str {
@@ -80,6 +86,7 @@ impl PanelTab {
             PanelTab::Terminal | PanelTab::Files => "Available when a project is open.",
             PanelTab::Diff => "Available for Git repositories.",
             PanelTab::PullRequests => "Available for GitHub repositories.",
+            PanelTab::Device => "Available when a thread is open.",
         }
     }
 }
@@ -101,6 +108,7 @@ pub(crate) enum Surface {
         active: String,
         stacked: bool,
     },
+    Device,
 }
 impl Surface {
     fn id(&self) -> String {
@@ -110,6 +118,7 @@ impl Surface {
             Surface::Files => "files".into(),
             Surface::Browser { id } => format!("browser:{id}"),
             Surface::Terminal { key, .. } => format!("terminal:{key}"),
+            Surface::Device => "device".into(),
         }
     }
     fn kind(&self) -> PanelTab {
@@ -119,6 +128,7 @@ impl Surface {
             Surface::Files => PanelTab::Files,
             Surface::Browser { .. } => PanelTab::Browser,
             Surface::Terminal { .. } => PanelTab::Terminal,
+            Surface::Device => PanelTab::Device,
         }
     }
     fn terminal(terminal_id: String) -> Self {
@@ -244,6 +254,7 @@ pub(crate) struct PanelState {
     diff: diff::DiffState,
     files: files::FilesState,
     terminals: terminal_drawer::TerminalState,
+    device: device::DeviceState,
     details: details::DetailsState,
     pull_requests: pull_requests::PullRequestsState,
     _subscriptions: Vec<Subscription>,
@@ -261,6 +272,7 @@ impl PanelState {
             diff: diff::DiffState::new(window, cx, &mut subscriptions),
             files: files::FilesState::new(window, cx, &mut subscriptions),
             terminals: terminal_drawer::TerminalState::default(),
+            device: device::DeviceState::new(window, cx),
             details: details::DetailsState::default(),
             pull_requests: pull_requests::PullRequestsState::default(),
             _subscriptions: subscriptions,
@@ -269,6 +281,7 @@ impl PanelState {
     /// Closes what belonged to the previous connection.
     pub(crate) fn reset(&mut self, _: &mut Window, cx: &mut Context<Desktop>) {
         self.terminals = terminal_drawer::TerminalState::default();
+        self.device.reset();
         self.diff.reset();
         self.files.reset();
         self.details = details::DetailsState::default();
@@ -364,6 +377,7 @@ impl Desktop {
             Some(Surface::Files) => self.render_files(window, cx),
             Some(Surface::Diff) => self.render_diff(window, cx),
             Some(Surface::PullRequests) => self.render_pull_requests(window, cx),
+            Some(Surface::Device) => self.render_device(cx),
         };
         let panel = v_flex()
             .id("right-panel")
@@ -632,6 +646,7 @@ impl Desktop {
             PanelTab::Files => has_folder,
             PanelTab::Diff => thread,
             PanelTab::PullRequests => pull_requests,
+            PanelTab::Device => thread,
         }
     }
 
@@ -765,6 +780,7 @@ impl Desktop {
         self.sync_files(window, cx);
         self.sync_pull_requests();
         self.sync_browser(cx);
+        self.sync_device(cx);
     }
 
     /// Shows a browser's native view only while its tab is on screen.
@@ -831,6 +847,7 @@ impl Desktop {
                     return;
                 }
             }
+            PanelTab::Device => self.right_mut().upsert(Surface::Device),
         }
         self.panels_changed(window, cx);
     }
@@ -934,6 +951,12 @@ impl Desktop {
     }
 
     fn close_surface(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let closing_device = self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == id)
+            .is_some_and(|surface| matches!(surface, Surface::Device));
         if let Some(Surface::Browser { id: browser }) = self
             .right()
             .surfaces
@@ -957,9 +980,15 @@ impl Desktop {
                 browser.set_visible(false, cx);
             });
         }
-        let right = self.right_mut();
-        right.close(id);
-        let empty = right.surfaces.is_empty();
+        let empty = {
+            let right = self.right_mut();
+            right.close(id);
+            right.surfaces.is_empty()
+        };
+        if closing_device {
+            self.panels.device.subscribed = false;
+            self.perform(Intent::UnsubscribeDevice);
+        }
         if empty {
             self.panels.launcher_focus.focus(window, cx);
         }

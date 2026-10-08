@@ -1679,9 +1679,12 @@ truncated diff の file ごとの遅延読み込みは core の `review_files` �
 - mobile の setup card には T3 mobile と同じく「Open terminal」を出さない（desktop は T3 web と同じく出す）。
 - desktop は T3 web と同じく右の panel に browser と terminal の tab をいくつでも置き、drawer と panel の terminal は別々に持ち、終わった terminal は閉じ、thread details は浮いた card（狭いときは popover）にし、既存 session の取り込みは初回の onboarding だけで出し、設定に Appearance と Keybindings を足した（2026-10-08 に desktop の未承認の差を T3 に戻した）。
 
-未接続（2026-10-08 の時点）:
-
-- diff の window focus での再読み込み、環境 cwd での再試行。
+desktop の branch picker の「Create new ref」は `view::new_thread::workspace_view` の
+`CreateRefChoice` と `apps/desktop/src/app/composer/controls.rs` の
+`Intent::CreateNewThreadBranch` に接続済みで、`host/vcs/createRef` と
+`vcs::create_ref` が作成・checkout を担当する。core の
+`a_searched_name_no_ref_has_is_offered_as_a_new_ref` と desktop の click handler が
+原本の表示・操作を対応する。
 
 Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced typography は `settings/appearance.rs` と `app/ui.rs`、Keybindings の Host への保存と keybindings.json は `settings/keybindings.rs` へ接続した。terminal の「Add to chat」と thread details の Workspace も接続した。iOS の file 種別 icon は `ComposerMenu.swift`、icon の無い project の folder は `ThreadListRows.swift` で描画する。
 
