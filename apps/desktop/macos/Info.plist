@@ -3,21 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Bex</string>
+	<string>bex</string>
 	<key>CFBundleExecutable</key>
-	<string>Bex</string>
+	<string>bex</string>
 	<key>CFBundleIconFile</key>
-	<string>Bex.icns</string>
+	<string>bex.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>app.bex.desktop</string>
 	<key>CFBundleName</key>
-	<string>Bex</string>
+	<string>bex</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>74</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>NSHighResolutionCapable</key>

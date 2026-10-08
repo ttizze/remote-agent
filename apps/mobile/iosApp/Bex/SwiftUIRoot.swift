@@ -230,7 +230,7 @@ private struct PairingScreen: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
-        .navigationTitle("Bex")
+        .navigationTitle("bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 if canCancel {
@@ -307,7 +307,7 @@ private struct ProfilesScreen: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             SettingsScopeBar { Text("すべてのプロジェクト") } environment: { Text("このiPhone") }
         }
-        .navigationTitle("Bex")
+        .navigationTitle("bex")
         .alert("このPCとの接続を解除しますか？", isPresented: Binding(
             get: { removing != nil }, set: {
                 if !$0 {

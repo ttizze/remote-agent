@@ -8,7 +8,7 @@
     <application
         android:allowBackup="false"
         android:icon="@drawable/bex_icon"
-        android:label="Remote Agent"
+        android:label="bex"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
         <activity
