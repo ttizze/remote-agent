@@ -412,7 +412,8 @@ fn prune_directory(directory: &Path) -> Result<(), String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
-            metadata.is_file().then_some((entry.path(), metadata))
+            let path = entry.path();
+            (metadata.is_file() && !is_partial_artifact(&path)).then_some((path, metadata))
         })
         .collect::<Vec<_>>();
     files.sort_by_key(|(_, metadata)| metadata.modified().ok());
@@ -425,6 +426,12 @@ fn prune_directory(directory: &Path) -> Result<(), String> {
         let _ = std::fs::remove_file(path);
     }
     Ok(())
+}
+
+fn is_partial_artifact(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".part.webm"))
 }
 
 async fn command(
@@ -730,5 +737,22 @@ mod tests {
             cleanup.disarm();
         }
         assert!(path.exists());
+    }
+
+    #[test]
+    fn storage_pruning_keeps_in_progress_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let completed = directory.path().join("old.webm");
+        std::fs::File::create(&completed)
+            .unwrap()
+            .set_len(PREVIEW_RECORDING_MAX_BYTES * 4 + 1)
+            .unwrap();
+        let partial = directory.path().join("active.part.webm");
+        std::fs::write(&partial, b"partial").unwrap();
+
+        prune_directory(directory.path()).unwrap();
+
+        assert!(!completed.exists());
+        assert!(partial.exists());
     }
 }
