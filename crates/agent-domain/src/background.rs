@@ -57,6 +57,7 @@ pub enum HostPowerSource {
     NodeMacosNative,
     NodeLinux,
     NodeWindows,
+    DesktopMain,
     ElectronMain,
 }
 impl Default for HostPowerSource {
@@ -76,6 +77,9 @@ pub struct HostPowerSnapshot {
     pub on_battery: BackgroundBooleanState,
     pub low_power_mode: BackgroundBooleanState,
     pub thermal_state: HostPowerThermalState,
+    /// The desktop power publisher supplies the OS thermal speed limit when
+    /// it exposes one.  A missing value is different from a 100% limit.
+    pub speed_limit_percent: Option<u8>,
     pub stale: bool,
     pub updated_at: Timestamp,
 }
@@ -90,6 +94,7 @@ impl HostPowerSnapshot {
             on_battery: BackgroundBooleanState::Unknown,
             low_power_mode: BackgroundBooleanState::Unknown,
             thermal_state: HostPowerThermalState::Unknown,
+            speed_limit_percent: None,
             stale: true,
             updated_at,
         }
@@ -105,6 +110,7 @@ impl HostPowerSnapshot {
             && self.on_battery == other.on_battery
             && self.low_power_mode == other.low_power_mode
             && self.thermal_state == other.thermal_state
+            && self.speed_limit_percent == other.speed_limit_percent
             && self.stale == other.stale
     }
 }
@@ -524,7 +530,7 @@ pub enum ResourceProcessCategory {
     ElectronGpu,
     ElectronUtility,
     ResourceMonitor,
-    #[serde(rename = "unknown-t3")]
+    #[serde(rename = "unknown-application")]
     Unknown,
 }
 
@@ -641,6 +647,17 @@ pub struct HostResourcesSnapshot {
     pub available_memory_bytes: u64,
     pub total_memory_bytes: u64,
 }
+impl HostResourcesSnapshot {
+    /// A zero capacity means the native probe failed.  Callers that use host
+    /// capacity for scheduling must wait for this predicate instead of
+    /// interpreting an unavailable probe as an empty machine.
+    pub fn usable_for_load_balancing(&self) -> bool {
+        self.cpu_count > 0
+            && self.total_memory_bytes > 0
+            && self.available_memory_bytes <= self.total_memory_bytes
+            && self.cpu_utilization.is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -740,7 +757,6 @@ pub struct ResourceGroups {
     pub backend: ResourceAggregate,
     pub electron: ResourceAggregate,
     pub monitor: ResourceAggregate,
-    #[serde(rename = "allT3")]
     pub all_processes: ResourceAggregate,
 }
 
@@ -1400,6 +1416,22 @@ mod tests {
         let changed = HostPowerSnapshot { locked: BackgroundBooleanState::True, updated_at: at(3_000), ..initial.clone() };
         assert!(initial.same_state(&heartbeat));
         assert!(!initial.same_state(&changed));
+    }
+
+    #[test]
+    fn resource_wire_keys_use_application_names() {
+        let groups = ResourceGroups {
+            backend: ResourceAggregate::default(),
+            electron: ResourceAggregate::default(),
+            monitor: ResourceAggregate::default(),
+            all_processes: ResourceAggregate::default(),
+        };
+        let encoded = serde_json::to_value(&groups).unwrap();
+        assert!(encoded.get("allProcesses").is_some());
+        assert_eq!(
+            serde_json::to_value(ResourceProcessCategory::Unknown).unwrap(),
+            serde_json::json!("unknown-application")
+        );
     }
 
     #[test]

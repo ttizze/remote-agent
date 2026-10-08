@@ -193,6 +193,8 @@ pub(crate) struct Desktop {
     snapshot_shift_presses: u8,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
+    last_host_power_report_ms: Option<i64>,
+    last_host_power: Option<agent_protocol::background::HostPowerSnapshot>,
     /// Decoded project icons, by content hash.
     pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
@@ -455,6 +457,8 @@ impl Desktop {
             snapshot_shift_presses: 0,
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
+            last_host_power_report_ms: None,
+            last_host_power: None,
             project_icons: Default::default(),
             tick: None,
             _subscriptions: subscriptions,
@@ -477,6 +481,8 @@ impl Desktop {
         self.attachments.clear();
         self.dictation = None;
         self.selected_retry_at = None;
+        self.last_host_power_report_ms = None;
+        self.last_host_power = None;
         self.epoch += 1;
         self.views_running = false;
         self.connecting = true;
@@ -872,6 +878,7 @@ impl Desktop {
                 self.apply_pending_open(window, cx);
                 self.reconnect_selected_if_due(window, cx);
                 self.start_background_connections();
+                self.publish_host_power();
                 self.schedule_views(cx);
                 cx.notify();
                 return;
@@ -889,6 +896,12 @@ impl Desktop {
                 });
                 session.persist(path, tx, Update::PersistenceError);
                 self.snapshot = session.store.snapshot();
+                self.last_host_power_report_ms = None;
+                self.last_host_power = self
+                    .snapshot
+                    .background_policy
+                    .as_ref()
+                    .map(|snapshot| snapshot.host_power.clone());
                 self.session = Some(session);
                 let profile_id = self
                     .remote
@@ -1050,6 +1063,13 @@ impl Desktop {
                 if !snapshot.accepts_after(&self.snapshot) {
                     return;
                 }
+                if let Some(power) = snapshot
+                    .background_policy
+                    .as_ref()
+                    .map(|background| background.host_power.clone())
+                {
+                    self.last_host_power = Some(power);
+                }
                 self.snapshot = snapshot;
                 if let Some(session) = &self.session {
                     session.save(self.snapshot.clone());
@@ -1102,6 +1122,61 @@ impl Desktop {
             }
         }
         cx.notify();
+    }
+
+    /// GPUI owns the desktop lifecycle, so its one-second app tick is the
+    /// publisher for local power state. The Host remains the receiver and
+    /// policy owner; this only supplies sampled observations at the policy
+    /// cadence and keeps heartbeat timestamps fresh.
+    fn publish_host_power(&mut self) {
+        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let power = self
+            .last_host_power
+            .clone()
+            .or_else(|| {
+                self.snapshot
+                    .background_policy
+                    .as_ref()
+                    .map(|snapshot| snapshot.host_power.clone())
+            })
+            .unwrap_or_else(|| {
+                agent_domain::HostPowerSnapshot::unknown(
+                    agent_domain::Timestamp::from_millis(now_ms).expect("current timestamp"),
+                )
+            });
+        let interval_ms = self
+            .snapshot
+            .background_policy
+            .as_ref()
+            .map(|snapshot| {
+                if snapshot.host_power.idle.is_true() {
+                    snapshot.policy.host_power_monitor_idle_interval_ms
+                } else {
+                    snapshot.policy.host_power_monitor_active_interval_ms
+                }
+            })
+            .unwrap_or(30_000)
+            .max(1)
+            .min(i64::MAX as u64) as i64;
+        if self
+            .last_host_power_report_ms
+            .is_some_and(|last| now_ms >= last && now_ms.saturating_sub(last) < interval_ms)
+        {
+            return;
+        }
+        let next = host_daemon::sample_desktop_power(&power);
+        self.last_host_power_report_ms = Some(now_ms);
+        self.last_host_power = Some(next.clone());
+        let receipt = store.report_host_power(next);
+        self.runtime.handle.spawn(async move {
+            let _ = receipt.await;
+        });
     }
 
     fn outcome(&mut self, outcome: &Outcome, window: &mut Window, cx: &mut Context<Self>) {

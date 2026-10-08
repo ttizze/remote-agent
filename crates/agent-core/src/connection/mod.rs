@@ -138,6 +138,25 @@ impl Store {
         receiver
     }
 
+    /// Publishes the desktop's locally sampled host power state through the
+    /// same ordered owner queue as user initiated Host calls.
+    pub fn report_host_power(
+        &self,
+        snapshot: agent_protocol::background::HostPowerSnapshot,
+    ) -> Receipt {
+        let (sender, receiver) = oneshot::channel();
+        if let Err(error) = self
+            .inner
+            .intents
+            .send(Event::ReportHostPower(snapshot, sender))
+        {
+            if let Event::ReportHostPower(_, complete) = error.0 {
+                let _ = complete.send(Err(invalid("Host connection is unavailable")));
+            }
+        }
+        receiver
+    }
+
     /// The app returned to the foreground: resume the subscriptions from their
     /// cursors.
     pub fn app_became_active(&self) {
