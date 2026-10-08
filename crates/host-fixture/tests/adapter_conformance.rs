@@ -682,24 +682,6 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(listing.has_more_chats);
     assert!(listing.provider_errors.is_none());
     assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
-    let mut descendant_roots = list_reads()
-        .iter()
-        .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    descendant_roots.sort();
-    let mut visible_roots = listing
-        .data
-        .iter()
-        .filter_map(|thread| thread.id.as_ref())
-        .filter(|id| id.provider == ProviderKind::Codex)
-        .map(|id| id.id.clone())
-        .collect::<Vec<_>>();
-    visible_roots.sort();
-    assert_eq!(
-        descendant_roots, visible_roots,
-        "descendant reads must be scoped to the visible Codex roots"
-    );
-
     let expanded = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
@@ -811,6 +793,12 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         page_reads(),
         15,
         "expand only the requested project before stopping"
+    );
+    assert!(
+        list_reads()
+            .iter()
+            .all(|entry| entry["ancestorThreadId"].is_null()),
+        "root lists and searches must not read native descendants"
     );
     local.close().await;
     host.close().await.unwrap();

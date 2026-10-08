@@ -965,7 +965,7 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
 }
 
 #[test]
-fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
+fn completed_commands_preserve_running_turn_without_reloading_titles() {
     for connected in [false, true] {
         let mut snapshot = initial(
             serde_json::from_value(json!({"id":{"provider":"codex","id":"task"},"status":"running","turns":[{"id":"turn","status":"running","items":[]}]}))
@@ -976,7 +976,10 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
             &snapshot,
             json!({"session":{"provider":"codex","id":"task"},"change":{"item":{"turnId":"turn","item":{"id":"merge","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"git merge task","cwd":null,"output":"","exitCode":0}}}}}}}}),
         );
-        assert_eq!(effects.len(), usize::from(connected));
+        assert!(
+            effects.is_empty(),
+            "command updates do not reload root titles"
+        );
         assert_eq!(
             next.conversations[&SessionRef {
                 provider: ProviderKind::Codex,
