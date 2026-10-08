@@ -1822,6 +1822,23 @@ impl DeviceService {
         self.inner.state.read().await.clone()
     }
 
+    /// Reports live device work that must settle before the Host hands its
+    /// process to an update. Discovery may remain available, but an open
+    /// session, boot transition, or host lifecycle transition owns device
+    /// state that cannot be interrupted by the handoff.
+    pub fn has_active_tasks(&self) -> bool {
+        let state = match self.inner.state.try_read() {
+            Ok(state) => state,
+            Err(_) => return true,
+        };
+        !state.sessions.is_empty()
+            || !state.booting_devices.is_empty()
+            || matches!(
+                state.host_status,
+                DeviceHostStatus::Installing | DeviceHostStatus::Starting
+            )
+    }
+
     /// Starts the pinned agent-device daemon for a host and returns a local
     /// launcher plus a private endpoint config. SSH endpoints are forwarded
     /// through a supervised tunnel, so the provider never receives a remote
@@ -5043,5 +5060,22 @@ mod tests {
             device_host_owner(root, "one"),
             device_host_owner(Path::new("/other"), "one")
         );
+    }
+
+    #[tokio::test]
+    async fn active_device_session_blocks_handoff_probe_without_starting_a_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_owned());
+        assert!(!service.has_active_tasks());
+
+        service.inner.state.write().await.sessions.push(DeviceSession {
+            thread_id: ThreadId::new("thread").unwrap(),
+            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            device_id: "simulator".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "now".into(),
+        });
+
+        assert!(service.has_active_tasks());
     }
 }

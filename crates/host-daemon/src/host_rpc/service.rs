@@ -943,6 +943,9 @@ impl HostRpcService {
         if self.inner.resources.vcs.has_active_actions() {
             return true;
         }
+        if self.inner.resources.devices.has_active_tasks() {
+            return true;
+        }
         if self.inner.resources.dictation.has_active_tasks() {
             return true;
         }
@@ -991,29 +994,21 @@ impl HostRpcService {
         {
             return Ok(false);
         }
+        let drain = HandoffDrainGuard::new(&self.inner.handoff_draining);
         // Publish the drain before waiting on active readers. This closes
         // new admissions immediately and gives callers/tests an observable
         // barrier while the handoff writer waits for the current owners.
         let gate = self.inner.handoff_gate.write().await;
         if self.has_active_tasks() {
-            self.inner.handoff_draining.store(false, Ordering::Release);
             return Ok(false);
         }
         let accepted = match self.inner.updater.accept_handoff_if_ready().await {
-            Ok(accepted) => {
-                if !accepted {
-                    self.inner.handoff_draining.store(false, Ordering::Release);
-                }
-                accepted
-            }
-            Err(error) => {
-                self.inner.handoff_draining.store(false, Ordering::Release);
-                drop(gate);
-                return Err(error);
-            }
+            Ok(accepted) => accepted,
+            Err(error) => return Err(error),
         };
         drop(gate);
         if accepted {
+            drain.keep();
             self.stop_background_tasks().await;
         }
         Ok(accepted)
@@ -4068,6 +4063,32 @@ fn handoff_admission_allowed(draining: bool, allow_during_drain: bool) -> bool {
     allow_during_drain || !draining
 }
 
+struct HandoffDrainGuard<'a> {
+    draining: &'a AtomicBool,
+    keep: bool,
+}
+
+impl<'a> HandoffDrainGuard<'a> {
+    fn new(draining: &'a AtomicBool) -> Self {
+        Self {
+            draining,
+            keep: false,
+        }
+    }
+
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for HandoffDrainGuard<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.draining.store(false, Ordering::Release);
+        }
+    }
+}
+
 #[cfg(test)]
 mod provider_settings_tests {
     use super::{merge_custom_models, provider_executable_available};
@@ -4296,6 +4317,32 @@ mod handoff_service_tests {
             .expect("handoff task")
             .expect("handoff inspection");
         assert!(!accepted);
+        assert!(service.acquire_handoff_gate(false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn canceled_handoff_admission_rolls_back_the_drain_flag() {
+        let (_directory, service) = test_service();
+        let held = service
+            .acquire_handoff_gate(false)
+            .await
+            .expect("held operation admission");
+        let handoff_service = service.clone();
+        let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
+        for _ in 0..100 {
+            if service.handoff_is_draining() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.handoff_is_draining(), "handoff must publish its drain flag");
+        handoff.abort();
+        assert!(handoff.await.is_err(), "handoff task was canceled");
+        assert!(
+            !service.handoff_is_draining(),
+            "canceling a pending handoff must restore admissions"
+        );
+        drop(held);
         assert!(service.acquire_handoff_gate(false).await.is_ok());
     }
 
