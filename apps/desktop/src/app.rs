@@ -538,8 +538,6 @@ impl Desktop {
         self.views_running = false;
         self.connecting = true;
         self.invalidate_load_balancing_attempt();
-        self.pending_load_balanced_new_thread = None;
-        self.load_balancing_refresh_requested = false;
         self.remote = remote;
         self.session.take();
         if let Some(remote) = &remote {
@@ -1454,12 +1452,13 @@ impl Desktop {
         let Some(route) = evaluation.route else {
             return AutomaticNewThreadResult::Unavailable;
         };
-        if self.environment_registry.selected() != Some(route.environment_id.as_str())
-            && !self.promote_environment(&route.environment_id)
-        {
-            return AutomaticNewThreadResult::Unavailable;
+        if self.environment_registry.selected() != Some(route.environment_id.as_str()) {
+            if !self.promote_environment(&route.environment_id) {
+                return AutomaticNewThreadResult::Unavailable;
+            }
+        } else {
+            self.invalidate_load_balancing_attempt();
         }
-        self.invalidate_load_balancing_attempt();
         let selection = (
             route.provider_instance,
             route.driver,
@@ -1469,8 +1468,6 @@ impl Desktop {
             route.interaction_mode,
         );
         let target_environment_id = route.environment_id;
-        self.pending_load_balanced_new_thread = None;
-        self.load_balancing_refresh_requested = false;
         let target_project = route.project_id;
         let source_environment_id_for_fallback = source_environment_id.clone();
         let fallback_project = project_id.to_owned();

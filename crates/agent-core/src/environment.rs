@@ -1207,8 +1207,8 @@ impl EnvironmentRegistry {
             };
         }
         let pending_resources = route_candidates.iter().any(|candidate| {
-            load_balancing::resource_sample_needs_refresh(
-                candidate.capacity.resources.as_ref(),
+            !load_balancing::resource_sample_is_fresh(
+                candidate.capacity.resources.is_some(),
                 candidate.capacity.received_at_ms,
                 now_ms,
             )

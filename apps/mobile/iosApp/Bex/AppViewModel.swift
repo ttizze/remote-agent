@@ -78,11 +78,14 @@ final class BexAppViewModel: ObservableObject {
 
     func selectProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
-        if automaticRouteProfileId != id {
+        if automaticRouteProfileId != nil, automaticRouteProfileId != id {
             invalidatePendingLoadBalancedNewThread()
         }
         screen = .threads
         if selectedProfileId == id, store != nil {
+            if automaticRouteProfileId == nil {
+                invalidatePendingLoadBalancedNewThread()
+            }
             connect(); return
         }
         connection?.cancel()
@@ -194,22 +197,33 @@ final class BexAppViewModel: ObservableObject {
     private func retryPendingLoadBalancedNewThread(generation: UInt64? = nil) {
         guard let pending = pendingLoadBalancedNewThread else { return }
         guard generation == nil || generation == pending.generation else { return }
-        guard snapshot.environmentId() == pending.sourceEnvironmentId else {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+        switch AgentCore.environmentLoadBalancingPendingAction(
+            attemptGeneration: pending.generation,
+            currentGeneration: loadBalancingAttemptGeneration,
+            sourceEnvironmentId: pending.sourceEnvironmentId,
+            selectedEnvironmentId: snapshot.environmentId(),
+            startedAtMs: Int64(pending.startedAt.timeIntervalSince1970 * 1_000),
+            nowMs: nowMs,
+            timeoutMs: 3_000
+        ) {
+        case .cancel:
             invalidatePendingLoadBalancedNewThread()
             return
-        }
-        guard Date().timeIntervalSince(pending.startedAt) < 3 else {
+        case .fallback:
             invalidatePendingLoadBalancedNewThread()
             perform(.newThread(
                 projectId: "\(pending.sourceEnvironmentId):\(pending.projectId)"
             ))
             return
+        case .retry:
+            break
         }
         let evaluation = AgentCore.environmentLoadBalancingRoute(
             snapshots: environmentSnapshotsForCore(),
             sourceEnvironmentId: pending.sourceEnvironmentId,
             projectId: pending.projectId,
-            nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
+            nowMs: nowMs
         )
         if evaluation.pendingResources {
             if let generation {

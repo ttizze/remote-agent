@@ -452,20 +452,32 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun retryPendingLoadBalancedNewThread(generation: Long? = null) {
         val pending = pendingLoadBalancedNewThread ?: return
         if (generation != null && generation != pending.generation) return
-        if (snapshot.environmentId() != pending.sourceEnvironmentId) {
-            invalidatePendingLoadBalancedNewThread()
-            return
-        }
-        if (System.currentTimeMillis() - pending.startedAtMillis >= 3_000L) {
-            invalidatePendingLoadBalancedNewThread()
-            perform(Intent.NewThread("${pending.sourceEnvironmentId}:${pending.projectId}"))
-            return
+        val nowMillis = System.currentTimeMillis()
+        when (dev.remoteagent.core.environmentLoadBalancingPendingAction(
+            pending.generation,
+            loadBalancingAttemptGeneration,
+            pending.sourceEnvironmentId,
+            snapshot.environmentId(),
+            pending.startedAtMillis,
+            nowMillis,
+            3_000L,
+        )) {
+            dev.remoteagent.core.PendingRouteAction.CANCEL -> {
+                invalidatePendingLoadBalancedNewThread()
+                return
+            }
+            dev.remoteagent.core.PendingRouteAction.FALLBACK -> {
+                invalidatePendingLoadBalancedNewThread()
+                perform(Intent.NewThread("${pending.sourceEnvironmentId}:${pending.projectId}"))
+                return
+            }
+            dev.remoteagent.core.PendingRouteAction.RETRY -> Unit
         }
         val evaluation = dev.remoteagent.core.environmentLoadBalancingRoute(
             environmentSnapshotsForCore(),
             pending.sourceEnvironmentId,
             pending.projectId,
-            System.currentTimeMillis(),
+            nowMillis,
         )
         if (evaluation.pendingResources) {
             if (generation != null) {
@@ -616,9 +628,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun selectProfile(id: String) {
         if (profiles.none { it.id == id }) return
-        if (automaticRouteProfileId != id) invalidatePendingLoadBalancedNewThread()
+        if (automaticRouteProfileId != null && automaticRouteProfileId != id) {
+            invalidatePendingLoadBalancedNewThread()
+        }
         stack = listOf(Route.Home)
         if (profileId == id && owner != null) {
+            if (automaticRouteProfileId == null) invalidatePendingLoadBalancedNewThread()
             startBackgroundProfiles(id)
             connect()
             return

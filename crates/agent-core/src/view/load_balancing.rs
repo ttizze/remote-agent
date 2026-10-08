@@ -11,31 +11,23 @@ pub const RESOURCE_SAMPLE_MAX_FUTURE_MS: i64 = 5_000;
 
 /// Returns whether a client-received capacity sample can be used for a new
 /// draft. The receipt clock is authoritative; a Host's sampled-at clock may
-/// differ between machines and is therefore never used here.
+/// differ between machines and is therefore never used here. The presence
+/// flag is kept separate from capacity usability so saturated replies do not
+/// trigger another probe.
 pub fn resource_sample_is_fresh(
-    resources: Option<&HostResourcesSnapshot>,
+    resources_present: bool,
     received_at_ms: Option<i64>,
     now_ms: i64,
 ) -> bool {
-    let (Some(_), Some(received_at_ms)) = (resources, received_at_ms) else {
+    let Some(received_at_ms) = received_at_ms.filter(|_| resources_present) else {
         return false;
     };
     let age_ms = now_ms.saturating_sub(received_at_ms);
     (-RESOURCE_SAMPLE_MAX_FUTURE_MS..=RESOURCE_SAMPLE_MAX_AGE_MS).contains(&age_ms)
 }
 
-/// Missing and expired receipts require a new sample before automatic
-/// routing. A present but unusable sample is deliberately not pending: the
-/// Host has answered and capacity selection should resolve it as unavailable.
-pub fn resource_sample_needs_refresh(
-    resources: Option<&HostResourcesSnapshot>,
-    received_at_ms: Option<i64>,
-    now_ms: i64,
-) -> bool {
-    !resource_sample_is_fresh(resources, received_at_ms, now_ms)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum PendingRouteAction {
     Retry,
     Cancel,
@@ -104,7 +96,11 @@ pub fn select_environment<'a>(candidates: &'a [Candidate], now_ms: i64) -> Optio
         let Some(resources) = candidate.resources.as_ref() else {
             continue;
         };
-        if !resource_sample_is_fresh(Some(resources), candidate.received_at_ms, now_ms) {
+        if !resource_sample_is_fresh(
+            candidate.resources.is_some(),
+            candidate.received_at_ms,
+            now_ms,
+        ) {
             continue;
         }
         if candidate.weight == 0 || !resources.usable_for_load_balancing() {
@@ -226,28 +222,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_expired_receipts_need_refresh_but_invalid_capacity_does_not() {
+    fn missing_and_expired_receipts_are_not_fresh() {
         let now = 100_000;
-        let resources = resources(now);
-        assert!(resource_sample_needs_refresh(None, Some(now), now));
-        assert!(resource_sample_needs_refresh(
-            Some(&resources),
+        assert!(!resource_sample_is_fresh(false, Some(now), now));
+        assert!(!resource_sample_is_fresh(
+            true,
             Some(now - RESOURCE_SAMPLE_MAX_AGE_MS - 1),
             now,
         ));
-        assert!(!resource_sample_needs_refresh(
-            Some(&resources),
-            Some(now),
-            now
-        ));
-
-        let mut unusable = resources;
-        unusable.cpu_utilization = Some(0.99);
-        assert!(!resource_sample_needs_refresh(
-            Some(&unusable),
-            Some(now),
-            now
-        ));
+        assert!(resource_sample_is_fresh(true, Some(now), now));
     }
 
     #[test]

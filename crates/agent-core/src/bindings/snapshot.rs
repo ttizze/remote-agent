@@ -216,6 +216,30 @@ pub fn environment_load_balancing_route(
     }
 }
 
+/// Resolves an automatic-draft retry against the current native selection.
+/// Native owners retain timer and cancellation effects while core owns the
+/// generation, source-selection, and timeout decision.
+#[uniffi::export]
+pub fn environment_load_balancing_pending_action(
+    attempt_generation: u64,
+    current_generation: u64,
+    source_environment_id: String,
+    selected_environment_id: Option<String>,
+    started_at_ms: i64,
+    now_ms: i64,
+    timeout_ms: i64,
+) -> load_balancing::PendingRouteAction {
+    load_balancing::pending_route_action(
+        attempt_generation,
+        current_generation,
+        &source_environment_id,
+        selected_environment_id.as_deref(),
+        started_at_ms,
+        now_ms,
+        timeout_ms,
+    )
+}
+
 #[uniffi::export]
 impl Snapshot {
     #[uniffi::constructor]
