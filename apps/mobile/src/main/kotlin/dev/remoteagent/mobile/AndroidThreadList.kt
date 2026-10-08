@@ -80,7 +80,12 @@ internal fun ThreadListScreen(
             OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
         }
         list?.notice?.let { notice -> item { Text(notice) } }
-        item { Text("最近のタスク", style = MaterialTheme.typography.titleMedium) }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("最近のタスク", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = { openConversation(Intent.NewChat("")) }) { Text("新規") }
+            }
+        }
         items(threads, key = { "recent:${it.id.listKey}" }) { SummaryRow(it, openConversation) }
         if (list?.hasMore == true)
             item { TextButton(onClick = { perform(Intent.ExpandThreadList(null)) }) { Text("もっと見る") } }

@@ -86,15 +86,11 @@ pub struct ThreadList {
 impl Snapshot {
     /// The selected folder is separate from the provider's execution directory.
     pub fn selected_directory(&self) -> String {
-        let thread = self.navigation.thread_id.as_ref().and_then(|id| {
-            self.conversations.get(id).map(AsRef::as_ref).or_else(|| {
-                self.threads
-                    .as_ref()?
-                    .data
-                    .iter()
-                    .find(|thread| thread.id.as_ref() == Some(id))
-            })
-        });
+        let thread = self
+            .navigation
+            .thread_id
+            .as_ref()
+            .and_then(|id| self.thread_metadata(id));
         if thread.is_some_and(|thread| {
             thread.project_id == (crate::models::ProjectMembership::Unassigned {})
         }) {

@@ -51,21 +51,19 @@ impl Snapshot {
 impl Snapshot {
     /// Include observed sessions even when search or pagination hides their list row.
     fn task_activities(&self) -> Vec<TaskActivity> {
-        let summaries = self
-            .threads
-            .as_ref()
-            .map(|list| list.data.as_slice())
-            .unwrap_or_default();
         let ids: BTreeSet<_> = self
             .conversations
             .keys()
             .chain(self.activity.active.keys())
-            .chain(summaries.iter().filter_map(|thread| thread.id.as_ref()))
+            .chain(
+                self.listed_threads()
+                    .filter_map(|thread| thread.id.as_ref()),
+            )
             .collect();
         ids.into_iter()
             .map(|id| {
-                let summary = summaries
-                    .iter()
+                let summary = self
+                    .listed_threads()
                     .find(|thread| thread.id.as_ref() == Some(id));
                 let conversation = self.conversations.get(id).map(AsRef::as_ref);
                 let live = conversation.filter(|_| self.subscriptions.contains_key(id));

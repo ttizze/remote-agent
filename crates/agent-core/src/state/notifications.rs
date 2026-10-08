@@ -28,14 +28,8 @@ pub(super) fn notification(
             }
         }
         let listed = previous
-            .threads
-            .iter()
-            .chain(previous.project_threads.values())
-            .any(|list| {
-                list.data
-                    .iter()
-                    .any(|thread| thread.id.as_ref() == Some(&session))
-            });
+            .listed_threads()
+            .any(|thread| thread.id.as_ref() == Some(&session));
         let child = previous
             .conversations
             .get(&session)

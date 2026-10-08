@@ -497,19 +497,8 @@ impl Operation for ReadThread {
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if self.open {
             let cwd = snapshot
-                .conversations
-                .get(&self.thread_id)
+                .thread_metadata(&self.thread_id)
                 .and_then(|thread| thread.cwd.as_ref())
-                .or_else(|| {
-                    snapshot
-                        .threads
-                        .as_ref()?
-                        .data
-                        .iter()
-                        .find(|thread| thread.id.as_ref() == Some(&self.thread_id))?
-                        .cwd
-                        .as_ref()
-                })
                 .cloned()
                 .unwrap_or_default();
             select_thread(snapshot, self.thread_id.clone(), cwd);
@@ -1165,6 +1154,52 @@ mod tests {
     }
 
     #[test]
+    fn opening_an_old_project_task_uses_its_metadata_before_history_and_clears_running_on_disconnect()
+     {
+        let id = SessionRef::new(ProviderKind::Codex, "old".into()).unwrap();
+        let page: crate::models::ThreadList = serde_json::from_value(serde_json::json!({
+            "data":[{"id":id,"projectId":"p","cwd":"/old-project","status":"running","canAcceptDirectInput":false}],
+            "projects":[{"id":"p","name":"P","roots":[]}],"hasMore":false,
+        })).unwrap();
+        let mut snapshot = Snapshot {
+            connected: true,
+            expanded_projects: Arc::new([("p".into(), 5)].into()),
+            project_threads: Arc::new([("p".into(), Arc::new(page))].into()),
+            ..Default::default()
+        };
+        ReadThread::open(id.clone()).prepare(&mut snapshot).unwrap();
+        assert_eq!(snapshot.navigation.thread_id.as_ref(), Some(&id));
+        assert_eq!(snapshot.navigation.cwd, "/old-project");
+        assert_eq!(snapshot.selected_directory(), "/old-project");
+        assert_eq!(
+            snapshot.task_activity_overview(Vec::new()).sessions,
+            vec![id.clone()]
+        );
+        assert_eq!(
+            snapshot
+                .thread_metadata(&id)
+                .unwrap()
+                .can_accept_direct_input,
+            Some(false)
+        );
+        let (disconnected, _) = reduce(&snapshot, Event::Disconnected("offline".into()));
+        assert!(
+            disconnected
+                .task_activity_overview(Vec::new())
+                .sessions
+                .is_empty()
+        );
+        assert_eq!(
+            disconnected.thread_metadata(&id).unwrap().status,
+            crate::models::SessionStatus::Unknown
+        );
+        assert_eq!(
+            snapshot.thread_metadata(&id).unwrap().status,
+            crate::models::SessionStatus::Running
+        );
+    }
+
+    #[test]
     fn recent_rows_prove_project_page_only_with_lookahead_or_global_end() {
         let mut recent: crate::models::ThreadList=serde_json::from_value(serde_json::json!({"data":[{"id":{"provider":"codex","id":"1"},"projectId":"p"},{"id":{"provider":"codex","id":"2"},"projectId":"p"}],"projects":[{"id":"p","name":"P","roots":[]}],"hasMore":true})).unwrap();
         assert!(project_page(&recent, "p", 2).is_none());
@@ -1175,6 +1210,7 @@ mod tests {
         let page = project_page(&recent, "p", 2).unwrap();
         assert_eq!(page.data.len(), 2);
         assert!(!page.has_more);
+        assert_eq!(page.projects[0].id, "p");
         assert_eq!(project_page(&recent, "empty", 5).unwrap().data.len(), 0);
     }
 

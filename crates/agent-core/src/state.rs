@@ -266,6 +266,20 @@ pub struct Snapshot {
     pub error: Option<String>,
 }
 impl Snapshot {
+    pub(crate) fn listed_threads(&self) -> impl Iterator<Item = &Thread> {
+        self.threads
+            .iter()
+            .chain(self.project_threads.values())
+            .flat_map(|page| &page.data)
+    }
+
+    pub fn thread_metadata(&self, id: &crate::session::SessionRef) -> Option<&Thread> {
+        self.conversations.get(id).map(AsRef::as_ref).or_else(|| {
+            self.listed_threads()
+                .find(|thread| thread.id.as_ref() == Some(id))
+        })
+    }
+
     pub fn requests(&self) -> impl Iterator<Item = &Arc<Request>> {
         self.conversations
             .values()
@@ -984,11 +998,17 @@ fn reset_session(snapshot: &mut Snapshot) {
             }
         }
     }
-    if let Some(list) = &mut snapshot.threads
-        && list.data.iter().any(has_session_status)
-    {
-        for thread in &mut Arc::make_mut(list).data {
-            clear_session_status(thread);
+    if snapshot.listed_threads().any(has_session_status) {
+        for list in snapshot
+            .threads
+            .iter_mut()
+            .chain(Arc::make_mut(&mut snapshot.project_threads).values_mut())
+        {
+            if list.data.iter().any(has_session_status) {
+                for thread in &mut Arc::make_mut(list).data {
+                    clear_session_status(thread);
+                }
+            }
         }
     }
 }
@@ -1208,18 +1228,8 @@ fn submission(
         .as_ref()
         .and_then(|id| {
             previous
-                .conversations
-                .get(id)
+                .thread_metadata(id)
                 .map(|thread| thread.can_accept_direct_input)
-                .or_else(|| {
-                    previous
-                        .threads
-                        .as_ref()?
-                        .data
-                        .iter()
-                        .find(|thread| thread.id.as_ref() == Some(id))
-                        .map(|thread| thread.can_accept_direct_input)
-                })
         })
         .and_then(crate::session::direct_input_unavailable_reason)
     {

@@ -915,11 +915,8 @@ impl Desktop {
         let navigated = previous.navigation.draft_key != self.snapshot.navigation.draft_key;
         let project_for_selected = |snapshot: &Snapshot| {
             snapshot
-                .threads
-                .as_ref()?
-                .data
-                .iter()
-                .find(|thread| thread.id == snapshot.navigation.thread_id)?
+                .thread_metadata(snapshot.navigation.thread_id.as_ref()?)
+                .filter(|thread| thread.parent_id.is_none())?
                 .project_id
                 .as_ref()
                 .cloned()
