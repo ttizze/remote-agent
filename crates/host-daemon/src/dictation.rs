@@ -971,14 +971,15 @@ mod tests {
             let token = format!("local.{}.signature", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
                 br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"isolated-test-account"}}"#));
             let provider = async {
-                for streaming in [true, false].into_iter().filter(|stream| !api_key || !stream) {
+                'requests: for streaming in [true, false].into_iter().filter(|stream| !api_key || !stream) {
+                  loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     if streaming && secure_stream {
                         // Reject TLS after ClientHello, before any credentials
                         // can reach the isolated provider.
                         assert_eq!(socket.read_u8().await.unwrap(), 0x16);
                         socket.shutdown().await.unwrap();
-                        continue;
+                        continue 'requests;
                     }
                     let mut request = Vec::new();
                     let mut buffer = [0_u8; 1024];
@@ -990,6 +991,13 @@ mod tests {
                         if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") { break end + 4; }
                     };
                     let headers = String::from_utf8(request[..header_end].to_vec()).unwrap().to_ascii_lowercase();
+                    // Desktop port discovery can probe loopback listeners before
+                    // the delayed dictation handshake. Keep those requests out
+                    // of the provider protocol assertions.
+                    if headers.starts_with("get / ") || headers.starts_with("head / ") {
+                        socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        continue;
+                    }
                     assert_eq!(headers.contains("user-agent: isolated-codex/1.0"), !api_key);
                     if streaming {
                         assert!(headers.starts_with("get /stream "));
@@ -1001,7 +1009,7 @@ mod tests {
                         } else {
                             socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
                         }
-                        continue;
+                        continue 'requests;
                     }
                     assert!(headers.starts_with("post /transcribe "));
                     assert!(headers.contains(&format!("authorization: bearer {}", token.to_ascii_lowercase())));
@@ -1026,6 +1034,8 @@ mod tests {
                     assert_eq!(&wav[44..], &[1, 0, 255, 127]);
                     let response = format!("HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}", response_body.len());
                     socket.write_all(response.as_bytes()).await.unwrap();
+                    break;
+                  }
                 }
             };
             let scheme = if secure_stream { "wss" } else { "ws" };
@@ -1035,7 +1045,16 @@ mod tests {
                 if api_key {
                     transcribe_recording(&token, RecordingService::OpenAi, &[1, 0, 255, 127], &recording_url).await
                 } else {
-                    let prepared = pending_preparation.then(|| Prepared::new("delayed".into(), std::future::pending()));
+                    let prepared = pending_preparation.then(|| Prepared::new("delayed".into(), async move {
+                        // Exercise the unrelated HTTP probe deterministically,
+                        // then leave preparation pending for its normal budget.
+                        let mut probe = tokio::net::TcpStream::connect(address).await.unwrap();
+                        probe.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+                        let mut response = Vec::new();
+                        probe.read_to_end(&mut response).await.unwrap();
+                        assert!(response.starts_with(b"HTTP/1.1 404 "));
+                        std::future::pending().await
+                    }));
                     transcribe_authenticated(&token, "isolated-codex/1.0", &[1, 0, 255, 127], &stream_url, &recording_url, prepared).await
                 }
             };
