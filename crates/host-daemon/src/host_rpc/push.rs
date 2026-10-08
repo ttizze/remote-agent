@@ -485,7 +485,7 @@ impl PushService {
     async fn deliver(
         &self,
         sequence: u64,
-        event: PushActivityEvent,
+        event: Option<PushActivityEvent>,
         active: Vec<PushActivityEvent>,
         previous: Vec<PushActivityEvent>,
         previous_available: bool,
@@ -498,8 +498,19 @@ impl PushService {
             return;
         }
         *last_sequence = sequence;
-        let content_state = content_state(&event, &active);
-        let activity_expires_at_ms = content_state_expiry_at_ms(&content_state, &event);
+        let metadata_event = event.as_ref().or_else(|| previous.first());
+        let Some(metadata_event) = metadata_event else {
+            return;
+        };
+        let content_state = event
+            .as_ref()
+            .map_or_else(empty_content_state, |event| content_state(event, &active));
+        let activity_expires_at_ms = event
+            .as_ref()
+            .map_or(0, |event| content_state_expiry_at_ms(&content_state, event));
+        let clear_source_at_ms = event
+            .is_none()
+            .then(|| clear_source_timestamp(&previous).unwrap_or(metadata_event.occurred_at_ms));
         let delivery_at_ms = current_millis();
         let previous_records = previous
             .iter()
@@ -509,7 +520,9 @@ impl PushService {
             .iter()
             .map(PushActivityEvent::activity_record)
             .collect::<Vec<_>>();
-        *self.latest_state.write().await = Some(content_state.clone());
+        *self.latest_state.write().await = (!content_state.activities.is_empty()
+            || content_state.active_count > 0)
+            .then_some(content_state.clone());
         let records = {
             let state = self.devices.lock().await;
             state
@@ -547,10 +560,12 @@ impl PushService {
                     .send_notification(
                         &config,
                         &device.registration,
-                        &event,
+                        event.as_ref(),
+                        &metadata_event.host_id,
                         &content_state,
                         activity_expires_at_ms,
                         delivery_at_ms,
+                        clear_source_at_ms,
                         alert.as_ref(),
                     )
                     .await
@@ -563,8 +578,13 @@ impl PushService {
             }
             if device.registration.preferences.live_activities_enabled
                 && device.registration.platform == PushPlatform::Ios
-                && let Some((activity_token, activity_event)) =
-                    live_activity_target_for_device(&device, &content_state, event.phase)
+                && let Some((activity_token, activity_event)) = live_activity_target_for_device(
+                    &device,
+                    &content_state,
+                    event
+                        .as_ref()
+                        .map_or(PushActivityPhase::Completed, |event| event.phase),
+                )
             {
                 let had_activity_token = device.registration.live_activity_token.is_some();
                 match self
@@ -757,10 +777,12 @@ impl PushService {
         &self,
         config: &ProviderConfig,
         registration: &RegisterPushDevice,
-        event: &PushActivityEvent,
+        event: Option<&PushActivityEvent>,
+        host_id: &str,
         state: &PushContentState,
         activity_expires_at_ms: i64,
         delivery_at_ms: i64,
+        clear_source_at_ms: Option<i64>,
         alert: Option<&ActivityAlert>,
     ) -> Result<(), DeliveryError> {
         let request = match registration.platform {
@@ -770,7 +792,7 @@ impl PushService {
                     .await?;
                 apns_notification_request(
                     registration,
-                    event,
+                    event.ok_or(DeliveryError::Unavailable)?,
                     alert.ok_or(DeliveryError::Unavailable)?,
                     jwt,
                 )?
@@ -789,10 +811,12 @@ impl PushService {
                     &project_id,
                     registration,
                     event,
+                    host_id,
                     state,
                     activity_expires_at_ms,
                     access_token,
                     delivery_at_ms,
+                    clear_source_at_ms,
                     alert,
                 )
             }
@@ -1075,7 +1099,8 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                     }
                     if terminal_pruned {
                         let current = current_activity_events(&active, &terminal);
-                        if let Some(event) = current.first().cloned() {
+                        let event = current.first().cloned();
+                        if event.is_some() || !previous.is_empty() {
                             delivery_sequence = delivery_sequence.saturating_add(1);
                             let sequence = delivery_sequence;
                             let service = service.clone();
@@ -1214,7 +1239,7 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                     let service = service.clone();
                     tokio::spawn(async move {
                         service
-                            .deliver(sequence, event, current, previous, true)
+                            .deliver(sequence, Some(event), current, previous, true)
                             .await
                     });
                 }
@@ -1378,7 +1403,7 @@ fn stale_removed_thread(
     let service = Arc::clone(service);
     tokio::spawn(async move {
         service
-            .deliver(sequence, event, current, previous_events, true)
+            .deliver(sequence, Some(event), current, previous_events, true)
             .await
     });
 }
@@ -1417,6 +1442,20 @@ fn content_state(event: &PushActivityEvent, active: &[PushActivityEvent]) -> Pus
         records.push(event.activity_record());
     }
     agent_domain::activity_content_state(&records).into()
+}
+
+fn empty_content_state() -> PushContentState {
+    PushContentState {
+        title: "Agent activity".into(),
+        subtitle: String::new(),
+        active_count: 0,
+        updated_at: String::new(),
+        activities: Vec::new(),
+    }
+}
+
+fn clear_source_timestamp(previous: &[PushActivityEvent]) -> Option<i64> {
+    previous.iter().map(|event| event.occurred_at_ms).max()
 }
 
 fn content_state_expiry_at_ms(state: &PushContentState, event: &PushActivityEvent) -> i64 {
@@ -1651,61 +1690,73 @@ fn apns_jwt(config: &ApnsConfig) -> Result<String, DeliveryError> {
 fn fcm_notification_request(
     project_id: &str,
     registration: &RegisterPushDevice,
-    event: &PushActivityEvent,
+    event: Option<&PushActivityEvent>,
+    host_id: &str,
     state: &PushContentState,
     activity_expires_at_ms: i64,
     access_token: String,
     delivery_at_ms: i64,
+    clear_source_at_ms: Option<i64>,
     alert: Option<&ActivityAlert>,
 ) -> Result<HttpRequest, DeliveryError> {
-    let phase = serde_json::to_string(&event.phase)
-        .map_err(|_| DeliveryError::Provider)?
-        .trim_matches('"')
-        .to_owned();
-    let detail = bounded_activity_text(
-        event.detail.as_deref().unwrap_or(&event.thread_title),
-        ACTIVITY_SUMMARY_LIMIT,
-    );
-    let (alert_title, alert_body) = alert
-        .map(|alert| (alert.title.clone(), alert.body.clone()))
-        .unwrap_or_else(|| notification_alert(event));
     let alert_enabled = alert.is_some();
-    let mut data = BTreeMap::from([
-        ("environmentId", event.host_id.clone()),
-        ("projectId", event.project_id.clone()),
-        (
-            "projectTitle",
-            bounded_activity_text(&event.project_title, ACTIVITY_SUMMARY_LIMIT),
-        ),
-        ("threadId", event.thread_id.clone()),
-        (
-            "threadTitle",
-            bounded_activity_text(&event.thread_title, ACTIVITY_SUMMARY_LIMIT),
-        ),
-        (
-            "modelTitle",
-            bounded_activity_text(&event.model_title, ACTIVITY_SUMMARY_LIMIT),
-        ),
-        ("phase", phase),
-        (
-            "headline",
-            bounded_activity_text(&event.headline, ACTIVITY_SUMMARY_LIMIT),
-        ),
-        ("detail", detail),
-        ("alertTitle", alert_title),
-        ("alertBody", alert_body),
-        (
-            "alert",
-            if alert_enabled {
-                "1".into()
-            } else {
-                "0".into()
-            },
-        ),
-        ("updatedAt", timestamp(event.occurred_at_ms)),
-        ("updated_at", delivery_at_ms.to_string()),
-        ("deepLink", bounded_activity_link(&event.deep_link)),
-    ]);
+    let mut data = BTreeMap::from([("environmentId", host_id.to_owned())]);
+    if let Some(event) = event {
+        let phase = serde_json::to_string(&event.phase)
+            .map_err(|_| DeliveryError::Provider)?
+            .trim_matches('"')
+            .to_owned();
+        let detail = bounded_activity_text(
+            event.detail.as_deref().unwrap_or(&event.thread_title),
+            ACTIVITY_SUMMARY_LIMIT,
+        );
+        let (alert_title, alert_body) = alert
+            .map(|alert| (alert.title.clone(), alert.body.clone()))
+            .unwrap_or_else(|| notification_alert(event));
+        data.extend([
+            ("projectId", event.project_id.clone()),
+            (
+                "projectTitle",
+                bounded_activity_text(&event.project_title, ACTIVITY_SUMMARY_LIMIT),
+            ),
+            ("threadId", event.thread_id.clone()),
+            (
+                "threadTitle",
+                bounded_activity_text(&event.thread_title, ACTIVITY_SUMMARY_LIMIT),
+            ),
+            (
+                "modelTitle",
+                bounded_activity_text(&event.model_title, ACTIVITY_SUMMARY_LIMIT),
+            ),
+            ("phase", phase),
+            (
+                "headline",
+                bounded_activity_text(&event.headline, ACTIVITY_SUMMARY_LIMIT),
+            ),
+            ("detail", detail),
+            ("alertTitle", alert_title),
+            ("alertBody", alert_body),
+            (
+                "alert",
+                if alert_enabled {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+            ),
+            ("updatedAt", timestamp(event.occurred_at_ms)),
+            ("deepLink", bounded_activity_link(&event.deep_link)),
+        ]);
+    } else {
+        data.insert("activity_clear", "1".into());
+        data.insert(
+            "activity_clear_source_at",
+            clear_source_at_ms
+                .ok_or(DeliveryError::Provider)?
+                .to_string(),
+        );
+    }
+    data.insert("updated_at", delivery_at_ms.to_string());
     if let Some(alert) = alert {
         data.insert("alertId", alert_identity(alert));
         data.insert("alertDeepLink", bounded_activity_link(&alert.deep_link));
@@ -2306,11 +2357,13 @@ mod tests {
         let request = fcm_notification_request(
             "project-id",
             &registration,
-            &event,
+            Some(&event),
+            "host",
             &state,
             900_000,
             "access-token".into(),
             1_800_000_000_000,
+            None,
             None,
         )
         .unwrap();
@@ -2346,16 +2399,141 @@ mod tests {
         let request = fcm_notification_request(
             "project-id",
             &registration,
-            &event,
+            Some(&event),
+            "host",
             &state,
             7_200_001,
             "access-token".into(),
             1_800_000_000_000,
             None,
+            None,
         )
         .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(body["message"]["data"]["activity_expires_at"], "7200001");
+    }
+
+    #[test]
+    fn android_empty_activity_delivery_clears_the_host_without_a_fake_row() {
+        let mut registration = registration();
+        registration.platform = PushPlatform::Android;
+        registration.bundle_id = None;
+        registration.apns_environment = None;
+        registration.live_activities_enabled = true;
+        let request = fcm_notification_request(
+            "project-id",
+            &registration,
+            None,
+            "host",
+            &empty_content_state(),
+            0,
+            "access-token".into(),
+            1_800_000_000_000,
+            Some(1_799_999_999_000),
+            None,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["message"]["data"]["activity_clear"], "1");
+        assert_eq!(
+            body["message"]["data"]["activity_clear_source_at"],
+            "1799999999000"
+        );
+        assert_eq!(body["message"]["data"]["activity_expires_at"], "0");
+        let activity: serde_json::Value =
+            serde_json::from_str(body["message"]["data"]["activity"].as_str().unwrap()).unwrap();
+        assert_eq!(activity["activeCount"], 0);
+        assert_eq!(activity["updatedAt"], "");
+        assert!(activity["activities"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grouped_alert_targets_the_shared_activity_overview() {
+        let event = PushActivityEvent {
+            host_id: "host".into(),
+            thread_id: "thread".into(),
+            project_id: "project".into(),
+            project_title: "Project".into(),
+            thread_title: "Thread".into(),
+            model_title: "Model".into(),
+            phase: PushActivityPhase::WaitingForInput,
+            headline: "Input needed".into(),
+            detail: None,
+            deep_link: thread_deep_link("host", "thread"),
+            occurred_at_ms: 1_800_000_000_000,
+        };
+        let alert = ActivityAlert {
+            title: "2 agents need attention".into(),
+            body: "One, Two".into(),
+            identity: r#"[["host","one","waiting_for_input","2026-01-01T00:00:00.000Z"],["host","two","waiting_for_input","2026-01-01T00:00:01.000Z"]]"#.into(),
+            deep_link: agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK.into(),
+        };
+        let mut registration = registration();
+        registration.platform = PushPlatform::Android;
+        registration.bundle_id = None;
+        registration.apns_environment = None;
+        let request = fcm_notification_request(
+            "project-id",
+            &registration,
+            Some(&event),
+            "host",
+            &content_state(&event, &[event.clone()]),
+            7_200_001,
+            "access-token".into(),
+            1_800_000_000_000,
+            None,
+            Some(&alert),
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            body["message"]["data"]["alertDeepLink"],
+            agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK
+        );
+        assert!(
+            !body["message"]["data"]["alertId"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_delivery_clears_latest_state_without_fabricating_event_data() {
+        let root = std::env::temp_dir().join(format!("push-test-{}", uuid::Uuid::new_v4()));
+        let fake = Arc::new(FakeTransport {
+            calls: AtomicUsize::new(0),
+            statuses: Mutex::new(vec![]),
+        });
+        let service = PushService::with_transport(root.clone(), fake).unwrap();
+        let event = PushActivityEvent {
+            host_id: "host".into(),
+            thread_id: "thread".into(),
+            project_id: "project".into(),
+            project_title: "Project".into(),
+            thread_title: "Thread".into(),
+            model_title: "Model".into(),
+            phase: PushActivityPhase::Completed,
+            headline: "Finished".into(),
+            detail: None,
+            deep_link: thread_deep_link("host", "thread"),
+            occurred_at_ms: 1_800_000_000_000,
+        };
+        let newer = PushActivityEvent {
+            thread_id: "newer-thread".into(),
+            occurred_at_ms: 1_800_000_001_000,
+            ..event.clone()
+        };
+        assert_eq!(
+            clear_source_timestamp(&[event.clone(), newer.clone()]),
+            Some(newer.occurred_at_ms)
+        );
+        *service.latest_state.write().await = Some(content_state(&event, &[event.clone()]));
+        service
+            .deliver(1, None, Vec::new(), vec![event, newer], true)
+            .await;
+        assert!(service.latest_state.read().await.is_none());
+        let _ = std::fs::remove_file(root);
     }
 
     #[test]

@@ -691,6 +691,11 @@ final class BexAppViewModel: ObservableObject {
         usageDeepLinkRequests += 1
     }
 
+    func openActivityOverviewDeepLink() {
+        pendingPushThread = nil
+        if !profiles.isEmpty { screen = .threads }
+    }
+
     /// The Usage root calls this after presenting the requested limits tab.
     func consumeUsageDeepLinkRequest() {
         guard usageDeepLinkRequests > 0 else { return }

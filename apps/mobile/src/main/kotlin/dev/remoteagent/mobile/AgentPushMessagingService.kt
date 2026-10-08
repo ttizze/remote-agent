@@ -6,6 +6,7 @@ import com.google.firebase.messaging.RemoteMessage
 import dev.remoteagent.core.aggregateAgentActivityContentStatesJson
 import dev.remoteagent.core.agentActivityDeliveryDecision
 import dev.remoteagent.core.agentActivityExpiryIsDue
+import dev.remoteagent.core.agentActivityMessageIsFresh
 import dev.remoteagent.core.agentActivityTimestampMillis
 import dev.remoteagent.core.agentActivityWidgetJson
 import kotlinx.serialization.json.Json
@@ -385,6 +386,43 @@ private fun mergeActivityState(
     }
 }
 
+/** Removes one Host's typed empty aggregate without fabricating a source row. */
+private fun clearActivityState(
+    context: android.content.Context,
+    hostId: String,
+    deliveryAtMillis: Long,
+    sourceUpdatedAtMillis: Long,
+): ActivityDeliveryResult? {
+    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
+    synchronized(ACTIVITY_STATE_LOCK) {
+        val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
+        val nowMillis = System.currentTimeMillis()
+        if (!agentActivityMessageIsFresh(deliveryAtMillis, nowMillis)) return null
+        val states = storedActivityStates(preferences)
+        val previous = states[hostId]
+        if (previous != null && (activityUpdatedAtMillis(previous) ?: Long.MIN_VALUE) > sourceUpdatedAtMillis) {
+            return null
+        }
+        val expiries = storedActivityExpiries(preferences)
+        val nextStates = states.toMutableMap().also { it.remove(hostId) }
+        val nextExpiries = expiries.toMutableMap().also { it.remove(hostId) }
+        writeActivityStates(preferences, nextStates, nextExpiries, nowMillis)
+        val snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
+        if (activityLifecycleNeedsReset(true, snapshot.active)) {
+            preferences.edit()
+                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+                .apply()
+        }
+        ActivityDeliveryResult(
+            decision = "cleared",
+            aggregate = snapshot.aggregate,
+            expiresAtMillis = snapshot.expiresAtMillis,
+            active = snapshot.active,
+        )
+    }
+}
+
 /** Enables or disables activity delivery for one Host and returns the aggregate. */
 internal fun setActivityDeliveryEnabled(
     context: android.content.Context,
@@ -525,11 +563,27 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
         val activityJson = data["activity"]
         val activityExpiryAtMillis = data["activity_expires_at"]?.toLongOrNull()
         val activityDeliveryAtMillis = data["updated_at"]?.toLongOrNull()
+        val activityClearSourceAtMillis = data["activity_clear_source_at"]?.toLongOrNull()
+        val activityClear = data["activity_clear"] == "1"
         val merge = if (hostId != null && activityJson != null) {
-            if (activityDeliveryAtMillis == null) null
+            if (activityClear) {
+                if (activityDeliveryAtMillis == null || activityClearSourceAtMillis == null) null
+                else clearActivityState(
+                    this,
+                    hostId,
+                    activityDeliveryAtMillis,
+                    activityClearSourceAtMillis,
+                )
+            } else if (activityDeliveryAtMillis == null) null
             else activityExpiryAtMillis?.let { expiry ->
                 mergeActivityState(this, hostId, activityJson, expiry, activityDeliveryAtMillis)
             }
+        } else if (activityClear &&
+            hostId != null &&
+            activityDeliveryAtMillis != null &&
+            activityClearSourceAtMillis != null
+        ) {
+            clearActivityState(this, hostId, activityDeliveryAtMillis, activityClearSourceAtMillis)
         } else null
         if (merge != null) {
             if (merge.decision != "dismissed") {

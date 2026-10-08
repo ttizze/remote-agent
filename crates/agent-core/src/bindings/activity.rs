@@ -1,9 +1,14 @@
 //! Provider-neutral awareness projection exposed to native clients.
 use agent_domain::{
-    activity_content_state_json, activity_delivery_decision, activity_display_expiry_at_ms,
-    activity_expiry_is_due, activity_message_is_fresh, activity_timestamp_millis,
-    aggregate_activity_content_states_json,
+    ACTIVITY_OVERVIEW_DEEP_LINK, activity_content_state_json, activity_delivery_decision,
+    activity_display_expiry_at_ms, activity_expiry_is_due, activity_message_is_fresh,
+    activity_timestamp_millis, aggregate_activity_content_states_json,
 };
+
+#[uniffi::export]
+pub fn agent_activity_overview_deep_link() -> String {
+    ACTIVITY_OVERVIEW_DEEP_LINK.into()
+}
 
 /// Projects source awareness records into the exact ActivityKit/ongoing
 /// notification ContentState JSON shape. The domain crate owns ordering,

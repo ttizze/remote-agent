@@ -43,7 +43,9 @@ struct BexSwiftUIRoot: View {
         }
         .onOpenURL {
             let value = $0.absoluteString
-            if AgentPushCenter.isUsageDeepLink(value) {
+            if AgentPushCenter.isActivityOverviewDeepLink(value) {
+                model.openActivityOverviewDeepLink()
+            } else if AgentPushCenter.isUsageDeepLink(value) {
                 model.openUsageDeepLink()
             } else if let target = AgentPushCenter.threadTarget(from: value) {
                 model.openPushThread(hostId: target.hostId, threadId: target.threadId)
@@ -81,6 +83,10 @@ struct BexSwiftUIRoot: View {
     }
 
     private func openPushDeepLink(_ value: String) {
+        if AgentPushCenter.isActivityOverviewDeepLink(value) {
+            model.openActivityOverviewDeepLink()
+            return
+        }
         if AgentPushCenter.isUsageDeepLink(value) {
             model.openUsageDeepLink()
             return

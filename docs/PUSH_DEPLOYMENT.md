@@ -41,12 +41,17 @@ for bounded replay/future rejection and keeps accepted rows until the Host's
 `activity_expires_at`; source timestamps are used for row ordering and display
 expiry. Alert payloads are emitted only for newly entered attention or terminal
 rows using the previous Host aggregate, with grouped rows getting a stable
-transition identity.
+transition identity built from sorted `[environmentId, threadId, phase,
+updatedAt]` tuples. When the last terminal row expires, the Host sends a
+typed empty aggregate with the latest retained source timestamp so native stores
+clear that Host without inventing a replacement event.
 
 Native routing uses `remoteagent://threads/<environmentId>/<threadId>` for a
 thread notification. The usage widget uses
 `remoteagent://settings/usage?tab=limits` on iOS and the `open_usage=true`
-intent extra on Android. The ActivityKit `ContentState` is the shared
+intent extra on Android. Grouped activity alerts use the shared
+`remoteagent://overview` route, which opens the host-aware activity overview.
+The ActivityKit `ContentState` is the shared
 `title`, `subtitle`, `activeCount`, `updatedAt`, and `activities` record; each
 activity row carries `environmentId`, `threadId`, titles, canonical snake-case
 phase, short `status`, `updatedAt`, and its thread deep link.

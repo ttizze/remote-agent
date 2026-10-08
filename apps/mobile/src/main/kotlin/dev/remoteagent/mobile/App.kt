@@ -24,6 +24,7 @@ import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.PushDeviceRegistration
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.agentActivityOverviewDeepLink
 import dev.remoteagent.core.appendArtifactTemplateUsePrompt
 import dev.remoteagent.core.ShareContent
 import dev.remoteagent.core.ThreadListOptions
@@ -1040,6 +1041,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             openUsageDeepLink()
             return
         }
+        if (isActivityOverviewDeepLink(uri)) {
+            openActivityOverviewDeepLink()
+            return
+        }
         if (uri.scheme != "remoteagent" || uri.host != "threads") return
         if (uri.userInfo != null || uri.port != -1 || uri.fragment != null || uri.query != null) return
         val parts = uri.encodedPath
@@ -1064,12 +1069,21 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             uri.queryParameterNames == setOf("tab") &&
             uri.getQueryParameter("tab") == "limits"
 
+    private fun isActivityOverviewDeepLink(uri: android.net.Uri): Boolean =
+        uri.toString() == agentActivityOverviewDeepLink()
+
     private fun validPushRouteSegment(value: String): Boolean =
         value.isNotEmpty() && value != "." && value != ".." &&
             value.none { it == '/' || it == '\\' || it.isISOControl() }
 
     private fun openUsageDeepLink() {
         usageDeepLinkRequests += 1
+    }
+
+    /** Opens the host-aware activity overview used by grouped alerts. */
+    internal fun openActivityOverviewDeepLink() {
+        pendingPushThread = null
+        stack = if (profiles.isEmpty()) listOf(Route.Pairing) else listOf(Route.Home)
     }
 
     /** Widget/notification launches enter the real Usage screen before consumption. */

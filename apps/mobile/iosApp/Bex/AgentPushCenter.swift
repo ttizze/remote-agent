@@ -488,7 +488,10 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     }
 
     static func deepLink(from userInfo: [AnyHashable: Any]) -> String? {
-        if let value = userInfo["deepLink"] as? String, validThreadDeepLink(value) { return value }
+        if let value = userInfo["deepLink"] as? String {
+            if isActivityOverviewDeepLink(value) { return value }
+            if validThreadDeepLink(value) { return value }
+        }
         guard let environment = userInfo["environmentId"] as? String,
               let thread = userInfo["threadId"] as? String,
               !environment.isEmpty,
@@ -517,6 +520,10 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         else { return false }
         let queryItems = components.queryItems ?? []
         return queryItems.count == 1 && queryItems[0].name == "tab" && queryItems[0].value == "limits"
+    }
+
+    static func isActivityOverviewDeepLink(_ value: String) -> Bool {
+        value == AgentCore.agentActivityOverviewDeepLink()
     }
 
     private static func validThreadDeepLink(_ value: String) -> Bool { threadTarget(from: value) != nil }

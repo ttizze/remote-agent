@@ -4,6 +4,8 @@ pub const ACTIVITY_SUMMARY_LIMIT: usize = 120;
 pub const ACTIVITY_STATUS_LIMIT: usize = 40;
 pub const ACTIVITY_LINK_LIMIT: usize = 512;
 pub const ACTIVITY_ROWS_LIMIT: usize = 5;
+/// Host-independent route used when one alert represents several rows.
+pub const ACTIVITY_OVERVIEW_DEEP_LINK: &str = "remoteagent://overview";
 pub const ACTIVITY_MESSAGE_MAX_AGE_MS: i64 = 10 * 60 * 1_000;
 pub const RUNNING_ACTIVITY_TTL_MS: i64 = 2 * 60 * 60 * 1_000;
 pub const WAITING_ACTIVITY_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -226,18 +228,7 @@ pub fn activity_alert_for_transition(
             ),
         )
     };
-    let identity = rows
-        .iter()
-        .map(|row| {
-            format!(
-                "{}/{}/{}",
-                row.environment_id,
-                row.thread_id,
-                canonical_activity_phase(&row.phase),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("|");
+    let identity = activity_alert_identity(&rows);
     Some(ActivityAlert {
         title,
         body,
@@ -245,13 +236,33 @@ pub fn activity_alert_for_transition(
         deep_link: if rows.len() == 1 {
             first.deep_link.clone()
         } else {
-            String::new()
+            ACTIVITY_OVERVIEW_DEEP_LINK.into()
         },
     })
 }
 
-fn activity_row_key(record: &ActivityRecord) -> String {
-    format!("{}/{}", record.environment_id, record.thread_id)
+fn activity_alert_identity(rows: &[ActivityRecord]) -> String {
+    let mut tuples = rows
+        .iter()
+        .map(|row| {
+            [
+                row.environment_id.clone(),
+                row.thread_id.clone(),
+                canonical_activity_phase(&row.phase).into(),
+                activity_timestamp(row.updated_at_ms),
+            ]
+        })
+        .collect::<Vec<[String; 4]>>();
+    tuples.sort();
+    if tuples.len() == 1 {
+        serde_json::to_string(&tuples[0]).expect("activity alert identity serializes")
+    } else {
+        serde_json::to_string(&tuples).expect("activity alert identities serialize")
+    }
+}
+
+fn activity_row_key(record: &ActivityRecord) -> (String, String) {
+    (record.environment_id.clone(), record.thread_id.clone())
 }
 
 fn is_attention_phase(phase: &str) -> bool {
@@ -532,17 +543,19 @@ pub fn bounded_activity_link(value: &str) -> String {
     let Ok(url) = url::Url::parse(value) else {
         return String::new();
     };
-    let valid = url.scheme() == "remoteagent"
-        && url.host_str() == Some("threads")
+    let common = url.scheme() == "remoteagent"
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
         && url.query().is_none()
-        && url.fragment().is_none()
-        && url.path_segments().is_some_and(|segments| {
-            let segments = segments.collect::<Vec<_>>();
-            segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
-        });
+        && url.fragment().is_none();
+    let valid = common
+        && ((url.host_str() == Some("overview") && (url.path().is_empty() || url.path() == "/"))
+            || (url.host_str() == Some("threads")
+                && url.path_segments().is_some_and(|segments| {
+                    let segments = segments.collect::<Vec<_>>();
+                    segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
+                })));
     valid.then(|| value.to_owned()).unwrap_or_default()
 }
 
@@ -746,9 +759,11 @@ mod tests {
         )
         .expect("new attention rows should group");
         assert_eq!(alert.title, "2 agents need attention");
-        assert!(alert.deep_link.is_empty());
-        assert!(alert.identity.contains("host/one/waiting_for_approval"));
-        assert!(alert.identity.contains("host/two/waiting_for_input"));
+        assert_eq!(alert.deep_link, ACTIVITY_OVERVIEW_DEEP_LINK);
+        let identity: Vec<[String; 4]> = serde_json::from_str(&alert.identity).unwrap();
+        assert_eq!(identity.len(), 2);
+        assert_eq!(identity[0][0], "host");
+        assert_eq!(identity[0][3], "1970-01-01T00:00:00.200Z");
         assert_eq!(
             activity_alert_for_transition(&next, &next, true, 202, true, true, true, true, true,),
             None
@@ -757,6 +772,86 @@ mod tests {
             activity_alert_for_transition(&[], &next, false, 201, true, true, true, true, true,)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn alert_identity_is_structured_for_new_runs_and_slash_collisions() {
+        let previous = vec![record("thread", "running", 100)];
+        let first = vec![record("thread", "completed", 200)];
+        let second = vec![record("thread", "completed", 300)];
+        let first_alert = activity_alert_for_transition(
+            &previous, &first, true, 200, true, true, true, true, true,
+        )
+        .unwrap();
+        let second_alert = activity_alert_for_transition(
+            &previous, &second, true, 300, true, true, true, true, true,
+        )
+        .unwrap();
+        assert_ne!(first_alert.identity, second_alert.identity);
+
+        let mut left = record("b/c", "running", 100);
+        left.environment_id = "a".into();
+        let mut right = record("c", "running", 100);
+        right.environment_id = "a/b".into();
+        let left_alert = activity_alert_for_transition(
+            &[left.clone()],
+            &[ActivityRecord {
+                phase: "waiting_for_input".into(),
+                updated_at_ms: 200,
+                ..left
+            }],
+            true,
+            200,
+            true,
+            true,
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let right_alert = activity_alert_for_transition(
+            &[right.clone()],
+            &[ActivityRecord {
+                phase: "waiting_for_input".into(),
+                updated_at_ms: 200,
+                ..right
+            }],
+            true,
+            200,
+            true,
+            true,
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_ne!(left_alert.identity, right_alert.identity);
+
+        let grouped = activity_alert_for_transition(
+            &[left.clone(), right.clone()],
+            &[
+                ActivityRecord {
+                    phase: "waiting_for_input".into(),
+                    updated_at_ms: 200,
+                    ..left
+                },
+                ActivityRecord {
+                    phase: "waiting_for_approval".into(),
+                    updated_at_ms: 200,
+                    ..right
+                },
+            ],
+            true,
+            200,
+            true,
+            true,
+            true,
+            true,
+            true,
+        )
+        .expect("slash-distinct rows should both transition");
+        let grouped_identity: Vec<[String; 4]> = serde_json::from_str(&grouped.identity).unwrap();
+        assert_eq!(grouped_identity.len(), 2);
     }
 
     #[test]
@@ -775,6 +870,10 @@ mod tests {
         let state = activity_content_state(&[value]);
         assert_eq!(state.activities[0].thread_id, "thread");
         assert!(state.activities[0].deep_link.is_empty());
+        assert_eq!(
+            bounded_activity_link(ACTIVITY_OVERVIEW_DEEP_LINK),
+            ACTIVITY_OVERVIEW_DEEP_LINK
+        );
     }
 
     #[test]
