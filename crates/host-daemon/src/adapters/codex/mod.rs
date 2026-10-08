@@ -41,10 +41,10 @@ struct ThreadListParams<'a> {
 
 use crate::host_rpc::agent::{
     Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionPage, SessionSummary,
-    SubmissionState, emit, session_pages,
+    SubmissionState, emit,
 };
 use agent_transport::peer::PeerEvent;
-use futures_util::{FutureExt, TryStreamExt};
+use futures_util::FutureExt;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
 
@@ -875,29 +875,6 @@ impl Agent for Codex {
 
     async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
         self.composer_catalog(cwd).await
-    }
-    async fn active_sessions_in(&self, dir: &std::path::Path) -> Result<Vec<SessionRef>, Failure> {
-        let mut active = Vec::new();
-        let pages = session_pages(self, "", None);
-        futures_util::pin_mut!(pages);
-        while let Some(page) = pages.try_next().await? {
-            for summary in page {
-                let thread = summary.thread;
-                if thread.status == agent_protocol::models::SessionStatus::Running
-                    && let Some(cwd) = &thread.cwd
-                {
-                    let cwd = tokio::fs::canonicalize(cwd)
-                        .await
-                        .unwrap_or_else(|_| cwd.into());
-                    if dunce::simplified(&cwd).starts_with(dir)
-                        && let Some(id) = thread.id
-                    {
-                        active.push(id);
-                    }
-                }
-            }
-        }
-        Ok(active)
     }
     async fn discard_workspace_processes(&self, _dir: &std::path::Path) -> Result<(), Failure> {
         Ok(())

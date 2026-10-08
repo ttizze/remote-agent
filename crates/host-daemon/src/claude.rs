@@ -1911,40 +1911,14 @@ impl Agent for Claude {
         }
         catalog
     }
-    async fn active_sessions_in(&self, dir: &Path) -> Result<Vec<SessionRef>, Failure> {
-        let threads = Claude::list(self, "")
-            .await
-            .map_err(|e| Failure::new("session_list_failed", e))?;
-        let mut active = Vec::new();
-        for summary in threads {
-            let thread = summary.thread;
-            if let Some(cwd) = &thread.cwd {
-                let cwd = tokio::fs::canonicalize(cwd)
-                    .await
-                    .unwrap_or_else(|_| cwd.into());
-                if dunce::simplified(&cwd).starts_with(dir)
-                    && let Some(id) = thread.id
-                {
-                    if thread.status == SessionStatus::Running {
-                        active.push(id);
-                    } else {
-                        let record = self.records.lock().await.get(&id.id).cloned();
-                        let observed_idle = if let Some(record) = record {
-                            record.lock().await.idle.is_some()
-                        } else {
-                            false
-                        };
-                        if !observed_idle {
-                            return Err(Failure::new(
-                                "activity_unavailable",
-                                "native transcript does not expose external process activity",
-                            ));
-                        }
-                    }
-                }
-            }
+    async fn workspace_idle_warning(&self, id: &str) -> Option<&'static str> {
+        let record = self.records.lock().await.get(id).cloned();
+        if let Some(record) = record
+            && record.lock().await.idle.is_some()
+        {
+            return None;
         }
-        Ok(active)
+        Some("native transcript does not expose external process activity")
     }
     async fn discard_workspace_processes(&self, dir: &Path) -> Result<(), Failure> {
         Claude::discard_workspace_processes(self, dir)

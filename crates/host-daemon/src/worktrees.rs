@@ -33,11 +33,25 @@ impl Worktrees {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let state = read(&path)?;
+            // Many checkouts share a repository. Read its registration once per
+            // request, including deleted paths, rather than once per checkout.
+            let mut listings = HashMap::new();
             let mut entries = state
                 .workspace_roots
                 .into_iter()
                 .map(|(path, project_path)| {
-                    let (branch, blocked_reason) = inspect(&path, &project_path)
+                    let listing = listings.entry(project_path.clone()).or_insert_with(|| {
+                        crate::git::text(
+                            Path::new(&project_path),
+                            &["worktree", "list", "--porcelain", "-z"],
+                        )
+                        .map_err(|error| format!("{error:#}"))
+                    });
+                    let (branch, blocked_reason) = listing
+                        .as_ref()
+                        .map_err(|error| anyhow!(error.clone()))
+                        .and_then(|listing| inspect(&path, &project_path, listing))
+                        .map(|entry| entry.unwrap_or_else(|| ("削除済み".into(), None)))
                         .unwrap_or_else(|error| (String::new(), Some(format!("{error:#}"))));
                     Worktree {
                         path,
@@ -63,8 +77,9 @@ impl Worktrees {
                 .workspace_roots
                 .get(&target)
                 .context("Bexが作成したワークツリーではありません。")?;
-            if !already_removed(&target, root)? {
-                let (_, blocked) = inspect(&target, root)?;
+            let listing =
+                crate::git::text(Path::new(root), &["worktree", "list", "--porcelain", "-z"])?;
+            if let Some((_, blocked)) = inspect(&target, root, &listing)? {
                 if let Some(reason) = blocked {
                     return Err(anyhow!(reason));
                 }
@@ -423,16 +438,15 @@ fn worktree_path(entry: &str) -> Option<&Path> {
         .map(Path::new)
 }
 
-fn inspect(path: &str, project: &str) -> Result<(String, Option<String>)> {
-    if already_removed(path, project)? {
-        return Ok(("削除済み".into(), None));
+fn inspect(path: &str, project: &str, listing: &str) -> Result<Option<(String, Option<String>)>> {
+    if already_removed(path, listing)? {
+        return Ok(None);
     }
     let target = dunce::canonicalize(path).context("ワークツリーを確認できません")?;
     let project = dunce::canonicalize(project).context("元のリポジトリを確認できません")?;
     if target != Path::new(path) || target == project {
         return Err(anyhow!("登録されたワークツリーの場所が変わっています。"));
     }
-    let listing = crate::git::text(&project, &["worktree", "list", "--porcelain", "-z"])?;
     let entry = listing
         .split("\0\0")
         .find(|entry| worktree_path(entry) == Some(target.as_path()))
@@ -466,20 +480,16 @@ fn inspect(path: &str, project: &str) -> Result<(String, Option<String>)> {
     } else {
         None
     };
-    Ok((branch.unwrap_or("detached HEAD").into(), reason))
+    Ok(Some((branch.unwrap_or("detached HEAD").into(), reason)))
 }
 
 // Treat removal as complete only when both the filesystem and Git agree.
-fn already_removed(path: &str, project: &str) -> Result<bool> {
+fn already_removed(path: &str, listing: &str) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => return Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listing = crate::git::text(
-        Path::new(project),
-        &["worktree", "list", "--porcelain", "-z"],
-    )?;
     Ok(!listing
         .split("\0\0")
         .any(|entry| worktree_path(entry) == Some(Path::new(path))))
@@ -999,9 +1009,35 @@ mod tests {
             }
         }
         crate::git::text(&root, &["worktree", "lock", &first_path]).unwrap();
+        let entries = worktrees.list().await.unwrap();
+        assert!(
+            entries
+                .iter()
+                .find(|entry| entry.path == first_path)
+                .unwrap()
+                .blocked_reason
+                .as_ref()
+                .unwrap()
+                .contains("ロック")
+        );
+        assert!(
+            entries
+                .iter()
+                .find(|entry| entry.path == other.to_str().unwrap())
+                .unwrap()
+                .blocked_reason
+                .is_none()
+        );
         assert!(worktrees.remove(first_path.clone(), false).await.is_err());
         crate::git::text(&root, &["worktree", "unlock", &first_path]).unwrap();
         crate::git::text(&first, &["checkout", "--detach", "HEAD"]).unwrap();
+        let entries = worktrees.list().await.unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == first_path)
+            .unwrap();
+        assert_eq!(entry.branch, "detached HEAD");
+        assert!(entry.blocked_reason.is_some());
         assert!(worktrees.remove(first_path.clone(), false).await.is_err());
         crate::git::text(&first, &["checkout", &branch]).unwrap();
         worktrees.remove(first_path.clone(), false).await.unwrap();
@@ -1038,6 +1074,20 @@ mod tests {
         restarted.remove(other_path.into(), false).await.unwrap();
         assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "preserve");
+        let registered = worktrees.prepare(root.to_str()).await.unwrap().unwrap();
+        fs::remove_dir_all(&registered).unwrap();
+        let entries = worktrees.list().await.unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| Path::new(&entry.path) == registered)
+            .unwrap();
+        assert!(
+            entry.blocked_reason.is_some(),
+            "a missing checkout still registered with Git must not be treated as removed"
+        );
+        assert!(worktrees.remove(entry.path.clone(), false).await.is_err());
+        #[cfg(unix)]
+        assert!(already_removed(root.join("tracked.txt/checkout").to_str().unwrap(), "").is_err());
     }
 
     #[tokio::test]
