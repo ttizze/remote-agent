@@ -1,6 +1,6 @@
 //! One thread's folded state, resume cursor, sync status and history window.
 use super::history::{HistoryMeta, merge_history_page};
-use agent_domain::{CommandId, Fact, FactBody, Item, State, ThreadId, TurnItemId, apply};
+use agent_domain::{CommandId, Fact, FactBody, Item, State, Task, ThreadId, TurnItemId, apply};
 use agent_protocol::conversation::{
     ErrorCode, HistoryPage, SequencedFact, SubscribeThread, ThreadSnapshot, ThreadUpdate,
 };
@@ -28,6 +28,11 @@ pub enum ThreadStatus {
 pub enum Detail {
     Loading,
     Loaded(Box<Item>),
+    /// A detail read also carries the bounded task shown by a subagent item.
+    LoadedWithTask {
+        item: Box<Item>,
+        task: Box<Task>,
+    },
     Failed(String),
 }
 
@@ -588,7 +593,7 @@ impl ThreadSync {
     pub fn begin_detail(&mut self, item: &TurnItemId) -> bool {
         if matches!(
             self.details.get(item),
-            Some(Detail::Loading | Detail::Loaded(_))
+            Some(Detail::Loading | Detail::Loaded(_) | Detail::LoadedWithTask { .. })
         ) {
             return false;
         }
@@ -598,15 +603,27 @@ impl ThreadSync {
         true
     }
 
-    /// Stores a detail only while its request is current; a fact that touched
-    /// the item meanwhile invalidated it.
-    pub fn detail_loaded(&mut self, item: &TurnItemId, loaded: Option<Item>) {
+    /// Stores a detail and the bounded subagent task returned with it.
+    pub fn detail_loaded_with_task(
+        &mut self,
+        item: &TurnItemId,
+        loaded: Option<(Item, Option<Task>)>,
+    ) {
         if self.details.get(item) != Some(&Detail::Loading) {
             return;
         }
         let details = Arc::make_mut(&mut self.details);
         match loaded {
-            Some(loaded) => {
+            Some((loaded, Some(task))) => {
+                details.insert(
+                    item.clone(),
+                    Detail::LoadedWithTask {
+                        item: Box::new(loaded),
+                        task: Box::new(task),
+                    },
+                );
+            }
+            Some((loaded, None)) => {
                 details.insert(item.clone(), Detail::Loaded(Box::new(loaded)));
             }
             None => {

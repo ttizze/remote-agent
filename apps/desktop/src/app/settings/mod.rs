@@ -9,8 +9,11 @@ mod general;
 mod import;
 mod keybindings;
 mod projects;
+mod provider_instances;
 mod providers;
+mod scheduled_tasks;
 mod scripts;
+mod usage;
 
 use super::{
     Desktop, Route,
@@ -40,12 +43,16 @@ pub(crate) enum SettingsPage {
     Providers,
     Connections,
     Archived,
+    ScheduledTasks,
+    Usage,
     About,
+    Diagnostics,
+    Licenses,
 }
 
 impl SettingsPage {
     /// The navigation entries in their order.
-    fn sections() -> [SettingsPage; 8] {
+    fn sections() -> [SettingsPage; 12] {
         [
             SettingsPage::Projects { project_id: None },
             SettingsPage::General,
@@ -54,7 +61,11 @@ impl SettingsPage {
             SettingsPage::Providers,
             SettingsPage::Connections,
             SettingsPage::Archived,
+            SettingsPage::ScheduledTasks,
+            SettingsPage::Usage,
             SettingsPage::About,
+            SettingsPage::Diagnostics,
+            SettingsPage::Licenses,
         ]
     }
     fn label(&self) -> &'static str {
@@ -66,7 +77,11 @@ impl SettingsPage {
             SettingsPage::Providers => "Providers",
             SettingsPage::Connections => "Connections",
             SettingsPage::Archived => "Archive",
+            SettingsPage::ScheduledTasks => "Scheduled tasks",
+            SettingsPage::Usage => "Usage",
             SettingsPage::About => "About",
+            SettingsPage::Diagnostics => "Diagnostics",
+            SettingsPage::Licenses => "Licenses",
         }
     }
     fn icon(&self) -> &'static str {
@@ -78,7 +93,11 @@ impl SettingsPage {
             SettingsPage::Providers => "bot",
             SettingsPage::Connections => "link-2",
             SettingsPage::Archived => "archive",
+            SettingsPage::ScheduledTasks => "calendar-clock",
+            SettingsPage::Usage => "chart-no-axes-combined",
             SettingsPage::About => "info",
+            SettingsPage::Diagnostics => "activity",
+            SettingsPage::Licenses => "scroll-text",
         }
     }
     fn same_section(&self, other: &SettingsPage) -> bool {
@@ -97,6 +116,8 @@ pub(crate) struct SettingsState {
     appearance: appearance::AppearanceState,
     keybindings: keybindings::KeybindingsState,
     providers: providers::ProvidersState,
+    scheduled_tasks: scheduled_tasks::ScheduledTasksState,
+    usage: usage::UsageState,
     /// The stores whose onboarding already ran in this app session.
     onboarded: std::collections::HashSet<String>,
 }
@@ -116,6 +137,8 @@ impl SettingsState {
             appearance: appearance::AppearanceState::new(window, cx),
             keybindings: keybindings::KeybindingsState::new(window, cx),
             providers: providers::ProvidersState::new(window, cx),
+            scheduled_tasks: scheduled_tasks::ScheduledTasksState::new(window, cx),
+            usage: usage::UsageState::new(window, cx),
             onboarded: Default::default(),
         }
     }
@@ -250,10 +273,20 @@ impl Desktop {
                 let connected = self.snapshot.connected;
                 self.hosts
                     .update(cx, |hosts, cx| hosts.set_current(current, connected, cx));
-                page_container(1024., vec![self.hosts.clone().into_any_element()])
+                page_container(
+                    1024.,
+                    vec![
+                        self.hosts.clone().into_any_element(),
+                        self.render_environment_overview(cx),
+                    ],
+                )
             }
             SettingsPage::Archived => self.render_archived(window, cx),
+            SettingsPage::ScheduledTasks => self.render_scheduled_tasks(window, cx),
+            SettingsPage::Usage => self.render_usage(window, cx),
             SettingsPage::About => self.render_about(cx),
+            SettingsPage::Diagnostics => self.render_diagnostics(),
+            SettingsPage::Licenses => self.render_licenses(),
         };
         v_flex()
             .id("settings")
@@ -302,6 +335,90 @@ impl Desktop {
                 ),
             )
             .child(body)
+            .into_any_element()
+    }
+
+    fn render_environment_overview(&mut self, cx: &mut Context<Desktop>) -> AnyElement {
+        let entries = self.views.environment_settings.entries.clone();
+        v_flex()
+            .gap_3()
+            .child(
+                h_flex().gap_2().child(icon("layers").size_4()).child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .child("Connected environments"),
+                ),
+            )
+            .children(entries.into_iter().map(|entry| {
+                let id = entry.summary.descriptor.environment_id.clone();
+                let label = entry.summary.descriptor.label.clone();
+                let platform = format!(
+                    "{} / {} · {} · server {}",
+                    entry.summary.descriptor.platform.os,
+                    entry.summary.descriptor.platform.arch,
+                    entry
+                        .summary
+                        .descriptor
+                        .platform
+                        .machine
+                        .as_deref()
+                        .unwrap_or("unknown machine"),
+                    entry.summary.descriptor.server_version,
+                );
+                let connection = match entry.summary.connection {
+                    agent_core::environment::EnvironmentConnectionState::Connected => "Connected",
+                    agent_core::environment::EnvironmentConnectionState::Connecting => {
+                        "Connecting…"
+                    }
+                    agent_core::environment::EnvironmentConnectionState::Disconnected => "Offline",
+                };
+                let connection = entry.summary.reconnect_reason.as_deref().map_or_else(
+                    || connection.to_owned(),
+                    |reason| format!("{connection} · {reason}"),
+                );
+                let selected = self.environment_registry.selected() == Some(id.as_str());
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .when(selected, |row| row.bg(color("sidebarRowSelected")))
+                    .child(icon("monitor").size_4())
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().text_sm().child(label))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(tint("textMuted", 0.8))
+                                    .child(format!("{connection} · {platform}")),
+                            )
+                            .child(div().text_2xs().text_color(tint("textMuted", 0.7)).child(
+                                format!(
+                                        "{} host settings · {} capabilities",
+                                        entry.settings.sections.len(),
+                                        agent_core::environment::capability_names(
+                                            &entry.summary.descriptor.capabilities
+                                        )
+                                        .len()
+                                    ),
+                            )),
+                    )
+                    .when(!selected, |row| {
+                        row.cursor_pointer()
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if view.promote_environment(&id) {
+                                    view.environment_registry.select(&id);
+                                    cx.notify();
+                                }
+                            }))
+                    })
+            }))
             .into_any_element()
     }
 
@@ -384,13 +501,25 @@ impl Desktop {
     fn load_settings_page(&mut self, page: &SettingsPage, cx: &mut Context<Self>) {
         match page {
             SettingsPage::General => {
-                self.perform(Intent::LoadConversationSettings);
+                self.perform(Intent::LoadSettings);
                 self.perform(Intent::LoadWorktreeSettings);
                 self.perform(Intent::ListWorktrees);
+                self.perform(Intent::LoadDiagnostics { trace_file_path: String::new() });
             }
-            SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
-            SettingsPage::Providers => self.perform(Intent::LoadAccounts),
+            SettingsPage::Projects { .. } => self.perform(Intent::LoadSettings),
+            SettingsPage::Providers => {
+                self.perform(Intent::LoadAccounts);
+                self.perform(Intent::LoadProviders);
+                self.perform(Intent::LoadSettings);
+            }
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
+            SettingsPage::Archived
+            | SettingsPage::Appearance
+            | SettingsPage::Keybindings
+            | SettingsPage::ScheduledTasks => {}
+            SettingsPage::Usage => self.perform(Intent::LoadUsageSummary {
+                input: usage::summary_input(&self.snapshot),
+            }),
             SettingsPage::About => {
                 self.perform(Intent::LoadUpdateStatus {
                     target: agent_protocol::models::UpdateTarget::Host,
@@ -409,8 +538,59 @@ impl Desktop {
                 );
                 self.perform(Intent::CheckUpdate { request });
             }
-            SettingsPage::Archived | SettingsPage::Appearance | SettingsPage::Keybindings => {}
+            SettingsPage::Diagnostics | SettingsPage::Licenses => {}
         }
+    }
+
+    fn render_diagnostics(&self) -> AnyElement {
+        page_container(
+            896.,
+            vec![
+                section(
+                    Some("Diagnostics".into()),
+                    None,
+                    None,
+                    vec![
+                        Row::new("Connection")
+                            .description(if self.snapshot.connected {
+                                "Connected"
+                            } else {
+                                "Disconnected"
+                            })
+                            .render(),
+                        Row::new("Logs")
+                            .description(
+                                crate::platform::state_dir()
+                                    .map(|path| path.join("logs").display().to_string())
+                                    .unwrap_or_else(|error| format!("Unavailable: {error}")),
+                            )
+                            .render(),
+                    ],
+                )
+                .into_any_element(),
+            ],
+        )
+    }
+
+    fn render_licenses(&self) -> AnyElement {
+        page_container(
+            896.,
+            vec![
+                section(
+                    Some("Licenses and legal".into()),
+                    None,
+                    None,
+                    vec![
+                        Row::new("Open-source notices")
+                            .description(
+                                "Third-party license notices are included with this release.",
+                            )
+                            .render(),
+                    ],
+                )
+                .into_any_element(),
+            ],
+        )
     }
 }
 

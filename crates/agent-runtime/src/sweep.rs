@@ -1,8 +1,10 @@
-//! Host sweeps over the thread list: automatic settlement every minute and
-//! usage-limit recovery on the shared five-second scheduler tick. Both derive
-//! their work from durable rows, so a restart needs no timers.
+//! Host sweeps over the thread list: automatic settlement every minute, and
+//! usage-limit recovery and due scheduled tasks on the shared five-second
+//! scheduler tick. All derive their work from durable rows, so a restart
+//! needs no timers.
 use crate::{
-    ActorRegistry, Clock, CommandOrigin, ConversationSettings, HostOperations, Store, StoreError,
+    ActorRegistry, Clock, CommandOrigin, ConversationSettings, HostOperations, ScheduledTasks,
+    Store, StoreError,
 };
 use agent_domain::{
     Command, CommandId, ThreadId, ThreadShell, auto_settlement_at, limit_recovery_command,
@@ -20,6 +22,7 @@ pub(crate) struct Sweeps {
     pub registry: Arc<ActorRegistry>,
     pub ops: Arc<dyn HostOperations>,
     pub clock: Arc<dyn Clock>,
+    pub scheduled: Arc<ScheduledTasks>,
     /// Settings changed: settle again now.
     pub settings_changed: Arc<Notify>,
 }
@@ -123,23 +126,67 @@ impl Sweeps {
         Ok(())
     }
 
-    /// Runs until aborted.
-    pub(crate) async fn run(self) {
-        let mut settle = tokio::time::interval(SETTLEMENT_INTERVAL);
-        let mut limits = tokio::time::interval(LIMIT_RECOVERY_INTERVAL);
-        for interval in [&mut settle, &mut limits] {
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        }
+    /// Runs settlement on its own parked clock.  A failed or slow source must
+    /// not hold the other durable sweeps behind it.
+    async fn run_settlement_loop(&self) {
+        let mut interval = tokio::time::interval(SETTLEMENT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Tokio intervals tick immediately; consume that tick so startup work
+        // is performed by the explicit recovery pass and the first sweep is
+        // delayed by its normal cadence.
+        interval.tick().await;
         loop {
             let result = tokio::select! {
-                _ = settle.tick() => self.settle().await,
+                _ = interval.tick() => self.settle().await,
                 () = self.settings_changed.notified() => self.settle().await,
-                _ = limits.tick() => self.recover_limits().await,
             };
             if let Err(error) = result {
-                tracing::warn!(%error, "a thread sweep failed");
+                tracing::warn!(%error, "the settlement sweep failed");
             }
         }
+    }
+
+    /// Runs usage-limit recovery independently from scheduling.
+    async fn run_limit_loop(&self) {
+        let mut interval = tokio::time::interval(LIMIT_RECOVERY_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = tokio::time::timeout(
+                LIMIT_RECOVERY_INTERVAL,
+                self.recover_limits(),
+            )
+            .await
+            .map_err(|_| StoreError::Corrupt("usage-limit sweep timed out".into()))
+            .and_then(|result| result)
+            {
+                tracing::warn!(%error, "the usage-limit sweep failed");
+            }
+        }
+    }
+
+    /// Runs due scheduled tasks independently, so an unrelated source defect
+    /// cannot starve automations.
+    async fn run_scheduled_loop(&self) {
+        let mut interval = tokio::time::interval(LIMIT_RECOVERY_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = self.scheduled.run_due().await {
+                tracing::warn!(%error, "the scheduled-task sweep failed");
+            }
+        }
+    }
+
+    /// Runs until aborted.  Each source owns its clock and defect boundary.
+    pub(crate) async fn run(self) {
+        let ((), (), ()) = tokio::join!(
+            self.run_settlement_loop(),
+            self.run_limit_loop(),
+            self.run_scheduled_loop(),
+        );
     }
 }
 

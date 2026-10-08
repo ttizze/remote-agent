@@ -19,7 +19,8 @@ if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt :apps:mobile:testDebugUnitTest :apps:mobile:assembleDebug --console=plain
 fi
 if [[ $language == apple || $language == swift ]]; then
-    swiftformat --lint apps/mobile/iosApp/Bex
+    swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/Shared \
+        apps/mobile/iosApp/ActivityExtension apps/mobile/iosApp/ShareExtension
     swiftlint lint --strict
     /usr/bin/xcrun swift test --package-path apps/mobile/iosApp --scratch-path target/qa/ios-unit
     scripts/build-agent-ios.sh simulator

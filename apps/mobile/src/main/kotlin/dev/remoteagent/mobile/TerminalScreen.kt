@@ -55,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -100,6 +101,10 @@ internal fun TerminalScreen(
     val tabs = model.snapshot.terminals(threadId)
     val selected = tabs.firstOrNull { it.terminalId == terminalId }
     val textSize = model.snapshot.terminalTextSize()
+    val context = LocalContext.current
+    LaunchedEffect(threadId, AppTheme.terminalFontSize) {
+        model.perform(Intent.SetTerminalFontSize(AppTheme.terminalFontSize))
+    }
     // An exited or closed shell closes, and the screen moves to the thread's other terminal.
     LaunchedEffect(terminalId, selected?.exited, selected == null) {
         if (terminalId !in opened || (selected != null && !selected.exited)) return@LaunchedEffect
@@ -135,7 +140,10 @@ internal fun TerminalScreen(
                 selected,
                 cwd,
                 textSize,
-                onTextSize = { model.perform(Intent.SetTerminalFontSize(it)) },
+                onTextSize = {
+                    model.perform(Intent.SetTerminalFontSize(it))
+                    AppTheme.update(context, AppTheme.appearance.copy(terminalFontSize = it.toDouble()))
+                },
                 onSelect = { terminalId = it },
                 onNew = { terminalId = "" },
             )
@@ -147,7 +155,7 @@ internal fun TerminalScreen(
                     model,
                     threadId,
                     terminalId,
-                    textSize.size.toFloat(),
+                    AppTheme.terminalFontSize.toFloat(),
                     onNative = { native = it },
                     onOpened = { id ->
                         opened.add(id)

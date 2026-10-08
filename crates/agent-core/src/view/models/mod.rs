@@ -59,7 +59,10 @@ pub struct ProviderInstance {
 impl ProviderInstance {
     /// Can contribute models to an interactive picker.
     pub fn picker_ready(&self) -> bool {
-        self.enabled && self.available && self.status == ProviderStatus::Ready
+        self.enabled
+            && self.installed
+            && self.available
+            && self.status == ProviderStatus::Ready
     }
 }
 
@@ -203,7 +206,10 @@ pub fn default_model(providers: &[HostInstance]) -> Option<(&HostInstance, &crat
     use crate::models::ProviderStatus as Host;
     let candidates = || {
         providers.iter().filter(|instance| {
-            instance.enabled && instance.unavailable_reason.is_none() && !instance.models.is_empty()
+            instance.enabled
+                && instance.installed
+                && instance.unavailable_reason.is_none()
+                && !instance.models.is_empty()
         })
     };
     let instance = candidates()

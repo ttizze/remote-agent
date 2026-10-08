@@ -4,6 +4,7 @@ use super::citations::DirectiveAttributes;
 use crate::js_text::{is_js_space, js_trim};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ArtifactTemplateKind {
     Document,
     Presentation,
@@ -36,12 +37,14 @@ impl ArtifactTemplateKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ArtifactTemplateGalleryKind {
     Imagegen,
     ProductDesign,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ArtifactTemplate {
     pub artifact_kind: ArtifactTemplateKind,
     pub display_name: String,
@@ -121,7 +124,8 @@ pub fn artifact_template_use_prompt(template: &ArtifactTemplate) -> String {
     }
 }
 
-pub fn artifact_template_presentation_label(kind: ArtifactTemplateKind) -> &'static str {
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn artifact_template_presentation_label(kind: ArtifactTemplateKind) -> String {
     match kind {
         ArtifactTemplateKind::Document => "Document template",
         ArtifactTemplateKind::Presentation => "Presentation template",
@@ -134,16 +138,48 @@ pub fn artifact_template_presentation_label(kind: ArtifactTemplateKind) -> &'sta
         ArtifactTemplateKind::Email => "Email template",
         ArtifactTemplateKind::Slack => "Slack template",
     }
+    .to_owned()
+}
+
+/// The glyph a card shows for the kind of artifact; each client draws it with
+/// its platform icon set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ArtifactTemplateSymbol {
+    Document,
+    Chart,
+    Browser,
+    Camera,
+    Message,
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn artifact_template_symbol(kind: ArtifactTemplateKind) -> ArtifactTemplateSymbol {
+    match kind {
+        ArtifactTemplateKind::Document | ArtifactTemplateKind::GoogleDocs => {
+            ArtifactTemplateSymbol::Document
+        }
+        ArtifactTemplateKind::Presentation
+        | ArtifactTemplateKind::Spreadsheet
+        | ArtifactTemplateKind::GoogleSlides
+        | ArtifactTemplateKind::GoogleSheets => ArtifactTemplateSymbol::Chart,
+        ArtifactTemplateKind::Site => ArtifactTemplateSymbol::Browser,
+        ArtifactTemplateKind::Image => ArtifactTemplateSymbol::Camera,
+        ArtifactTemplateKind::Email | ArtifactTemplateKind::Slack => {
+            ArtifactTemplateSymbol::Message
+        }
+    }
 }
 
 /// Adds the template's prompt to the draft unless the draft already ends with it.
-pub fn append_artifact_template_use_prompt(draft: &str, template: &ArtifactTemplate) -> String {
-    let prompt = artifact_template_use_prompt(template);
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn append_artifact_template_use_prompt(draft: String, template: ArtifactTemplate) -> String {
+    let prompt = artifact_template_use_prompt(&template);
     let trimmed_draft = draft.trim_end_matches(is_js_space);
     if let Some(before) = trimmed_draft.strip_suffix(prompt.as_str())
         && before.chars().next_back().is_none_or(is_js_space)
     {
-        return draft.to_owned();
+        return draft;
     }
     let needs_leading_space = draft.chars().next_back().is_some_and(|c| !is_js_space(c));
     format!(

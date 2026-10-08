@@ -374,6 +374,7 @@ impl EntryBuilder for WorkLogEntry {
 
 pub(crate) fn message(id: &str, role: Role, text: &str) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: None,

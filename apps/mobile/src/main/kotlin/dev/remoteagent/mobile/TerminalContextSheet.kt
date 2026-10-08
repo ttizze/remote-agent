@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.visibleOutputLines
 import dev.remoteagent.core.visibleOutputSelection
 
@@ -74,9 +75,10 @@ internal fun TerminalContextSheet(output: String, onClose: () -> Unit, onAttach:
                                     anchor = null
                                 }
                             }
-                            .padding(vertical = 4.dp),
+                        .padding(vertical = 4.dp),
                         style = AppTheme.footnote,
                         fontFamily = AppTheme.mono,
+                        fontSize = AppTheme.terminalFontSize.sp,
                         color = colors.foreground,
                     )
                 }

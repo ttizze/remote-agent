@@ -107,6 +107,7 @@ impl Script {
     fn send(&mut self, mode: DispatchMode) {
         let id = MessageId::new(format!("message-{}", self.step)).unwrap();
         self.command(Command::Send(SendMessage {
+            scheduled_task: None,
             context: None,
             title_seed: None,
             created_by: MessageAuthor::User,

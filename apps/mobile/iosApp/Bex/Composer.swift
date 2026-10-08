@@ -62,6 +62,10 @@ struct Composer: View {
         }
         .onChange(of: model.selectedThreadId) { _, _ in cancelDictation() }
         .onChange(of: model.composerText) { _, _ in updateMenu() }
+        .onChange(of: model.composerFocusRequests) { _, _ in
+            focused = true
+            selection = TextSelection(insertionPoint: model.composerText.endIndex)
+        }
         .onChange(of: selection) { _, _ in updateMenu() }
         .onAppear(perform: updateMenu)
         .onDisappear(perform: cancelDictation)
@@ -148,6 +152,16 @@ struct Composer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Model and reasoning settings")
+                if let limits = composerUsageLimits {
+                    Button(action: openSettings) {
+                        Text(limits.windows.first.map { "\($0.remainingPercent)% left" } ?? "Limits")
+                            .font(AppTheme.font(12, weight: .medium))
+                            .foregroundStyle(AppTheme.muted)
+                            .padding(.horizontal, 5)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(limits.label)
+                }
                 if let toggle = composer.controls.interactionToggle, alwaysExpanded {
                     Button { model.perform(.setInteractionMode(mode: toggle.toggled)) } label: {
                         Label(toggle.label, systemImage: toggle.mode == .plan ? "list.bullet.clipboard" : "hammer")
@@ -163,6 +177,12 @@ struct Composer: View {
         }
         .padding(.top, 14).padding(.bottom, 6)
         .frame(minHeight: 140)
+    }
+
+    private var composerUsageLimits: ComposerUsageLimits? {
+        guard let driver = composer.controls.model?.driver else { return nil }
+        let provider: ProviderKind = driver == .codex ? .codex : .claude
+        return model.snapshot.composerUsageLimits(provider: provider)
     }
 
     @ViewBuilder
@@ -250,8 +270,11 @@ struct Composer: View {
     private func updateMenu() {
         model.perform(.updateComposerMenu(text: model.composerText, cursor: cursor, layout: .mobile))
     }
+}
 
-    private func startDictation() {
+/// Recording a dictation and handing its audio to the Host.
+private extension Composer {
+    func startDictation() {
         let key = composer.draftKey
         let host = model.selectedProfileId
         dictation.start(started: { preparation = model.store?.prepareDictation() }, completion: { result in
@@ -269,7 +292,7 @@ struct Composer: View {
         })
     }
 
-    private func cancelDictation() {
+    func cancelDictation() {
         dictation.cancel()
         preparation = nil
     }

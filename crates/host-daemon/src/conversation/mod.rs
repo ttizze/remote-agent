@@ -21,7 +21,8 @@ use crate::{
     checkpoints::Checkpoints, terminals::Terminals, workspace_files::WorkspaceFiles,
     worktrees::Worktrees,
 };
-use agent_runtime::{Runtime, RuntimeConfig};
+use agent_domain::{Command, CommandId, ThreadId};
+use agent_runtime::{Committed, Runtime, RuntimeConfig};
 use futures_util::future::BoxFuture;
 use std::{
     path::PathBuf,
@@ -55,6 +56,7 @@ pub(crate) struct SharedResources {
     pub(crate) worktrees: Arc<Worktrees>,
     pub(crate) files: WorkspaceFiles,
     pub(crate) terminals: Arc<Terminals>,
+    pub(crate) devices: Arc<crate::device::DeviceService>,
 }
 
 pub(crate) struct ConversationConfig {
@@ -63,6 +65,7 @@ pub(crate) struct ConversationConfig {
     pub(crate) spawner: Arc<dyn Spawner>,
     pub(crate) browser: BrowserConfig,
     pub(crate) models: Arc<dyn ModelCatalog>,
+    pub(crate) background: Arc<crate::background::BackgroundOwner>,
 }
 
 pub(crate) struct Conversation {
@@ -101,6 +104,7 @@ impl Conversation {
                 codex: config.programs.codex.clone(),
                 codex_home: config.programs.codex_home.clone(),
                 claude: config.programs.claude.clone(),
+                worktrees: Some(resources.worktrees.clone()),
             },
         });
         let runtime = Arc::new(Runtime::open(config.runtime, io, host.clone()).await?);
@@ -109,8 +113,10 @@ impl Conversation {
             runtime: runtime.clone(),
             projects: resources.projects.clone(),
             files: resources.files.clone(),
+            resources: resources.clone(),
             models: config.models,
-        })));
+            background: config.background,
+        })).with_devices(resources.devices.clone()));
         Ok(Arc::new(Self {
             runtime,
             resources,
@@ -124,7 +130,7 @@ impl Conversation {
     /// Recovers unfinished threads, then starts effects, import and the agent tools.
     pub(crate) async fn start(&self) -> anyhow::Result<()> {
         self.resources.projects.refresh().await?;
-        self.resources.worktrees.conversation_settings(None).await?;
+        self.resources.worktrees.host_settings(None).await?;
         self.runtime.start().await?;
         let _ = self
             .settled_terminals
@@ -174,6 +180,19 @@ impl Conversation {
     /// are imported.
     pub(crate) async fn project_added(&self, project: &str) {
         project_added(&self.runtime, &self.resources.projects, project).await;
+    }
+
+    /// Applies a Host-owned projection command through the same runtime actor
+    /// as conversation dispatches, so shell subscribers and replayed facts stay
+    /// consistent with native pull-request operations.
+    pub(crate) async fn dispatch_host_command(
+        &self,
+        thread: ThreadId,
+        command: Command,
+    ) -> Result<Committed, agent_runtime::RuntimeError> {
+        let id = CommandId::new(format!("host-pull-request-{}", uuid::Uuid::new_v4()))
+            .expect("generated command ids are nonempty");
+        self.runtime.dispatch_host(thread, id, command).await
     }
 }
 
@@ -245,6 +264,21 @@ pub(crate) async fn project_added(
             tracing::warn!(operation = "conversation.import", message = %error);
         }
     });
+}
+
+/// Runs a project's configured setup script for a checkout prepared outside
+/// the normal conversation launch path, such as a pull request thread.
+pub(crate) async fn run_project_setup(
+    resources: &SharedResources,
+    request: agent_runtime::SetupRequest,
+) -> Result<agent_runtime::SetupRun, String> {
+    let scripts = resources.projects.scripts(&request.project);
+    let Some(script) = setup::setup_script(&scripts) else {
+        return Ok(agent_runtime::SetupRun::NoScript);
+    };
+    setup::run(&resources.terminals, &request, script)
+        .await
+        .map(agent_runtime::SetupRun::Started)
 }
 
 /// Shell subscribers see each project whose repository identity changed.

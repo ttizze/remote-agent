@@ -7,7 +7,7 @@ struct ThreadListScreen: View {
     @ObservedObject var model: BexAppViewModel
     /// Shown as the split view's sidebar.
     var sidebar = false
-    let openSettings: () -> Void
+    let openSettings: (String?) -> Void
     let newTask: () -> Void
     /// Shows the new task on the draft core already opened.
     let showNewTaskDraft: () -> Void
@@ -29,7 +29,22 @@ struct ThreadListScreen: View {
         TimelineView(.everyMinute) { clock in
             let now = Int64(max(clock.date, wokeAt).timeIntervalSince1970 * 1000)
             let list = model.snapshot.threadList(nowMs: now, options: options)
-            content(list, now: now)
+            let aggregate = model.environmentThreadList(
+                nowMs: now,
+                options: options,
+                query: query,
+                selectedProject: model.snapshot.selectedProjectId().flatMap {
+                    model.snapshot.scopedProjectId(projectId: $0)
+                },
+                selectedThread: model.snapshot.selectedThreadId().flatMap {
+                    model.snapshot.scopedThreadId(threadId: $0)
+                }
+            )
+            if model.environmentSnapshots.count > 1 {
+                aggregateContent(aggregate)
+            } else {
+                content(list, now: now)
+            }
                 .task(id: list.nextSnoozeWakeAtMs) {
                     guard let wake = list.nextSnoozeWakeAtMs else { return }
                     let delay = max(0, Double(wake - Int64(Date().timeIntervalSince1970 * 1000)) / 1000)
@@ -125,6 +140,50 @@ struct ThreadListScreen: View {
     }
 
     @ViewBuilder
+    private func aggregateContent(_ list: EnvironmentThreadListView) -> some View {
+        if !list.hasThreads, list.rows.isEmpty, list.pendingTasks.isEmpty {
+            ThreadListEmptyState(
+                empty: ThreadListEmpty(title: "No threads yet",
+                                       detail: "Choose an environment or create a new task.", loading: false),
+                addEnvironment: nil
+            )
+        } else {
+            List {
+                ForEach(list.rows, id: \.row.key) { item in
+                    ThreadListRowView(row: item.row, icon: nil, sidebar: sidebar) {
+                        model.openThread(item.row.id)
+                    }
+                    .contextMenu { ThreadMenuItems(items: item.row.menu) { run($0, row: item.row) } }
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+                ForEach(list.pendingTasks, id: \.task.key) { item in
+                    let actions = pendingTaskActions(kind: item.task.kind, projectId: item.task.projectId)
+                    PendingTaskRowView(task: item.task, icon: nil, sidebar: sidebar,
+                                       status: actions.status, isDraft: actions.isDraft)
+                        .onTapGesture {
+                            model.perform(actions.open)
+                            if case .newThread = actions.open { showNewTaskDraft() }
+                        }
+                        .contextMenu {
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                model.perform(actions.discard)
+                            }
+                        }
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+        }
+    }
+
+    @ViewBuilder
     private func itemView(_ item: ThreadListItem, now _: Int64) -> some View {
         switch item {
         case let .thread(row):
@@ -143,13 +202,16 @@ struct ThreadListScreen: View {
             // A row that changes shelf or action starts closed.
             .id("\(row.key):\(row.variant):\(row.swipePrimary.label)")
         case let .pendingTask(task):
-            let actions = pendingTaskActions(kind: task.kind, projectId: task.projectId)
+            let actions = pendingTaskActions(kind: task.kind)
             PendingTaskRowView(task: task, icon: ProjectIconImages.image(model.snapshot, task.projectId),
                                sidebar: sidebar, status: actions.status, isDraft: actions.isDraft)
                 .onTapGesture {
                     switch actions.open {
                     case let .openThread(threadId): model.openThread(threadId)
                     case .newThread:
+                        model.perform(actions.open)
+                        showNewTaskDraft()
+                    case .openDraft:
                         model.perform(actions.open)
                         showNewTaskDraft()
                     default: break
@@ -210,7 +272,7 @@ struct ThreadListScreen: View {
         case .startRename:
             title = row.title
             renaming = row
-        case .openProjectSettings: openSettings()
+        case let .openProjectSettings(projectId): openSettings(projectId)
         case .arrange: arranging = true
         case let .move(direction):
             Haptics.light()
@@ -234,10 +296,10 @@ struct ThreadListScreen: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            ConnectionTitle(model: model, open: openSettings)
+            ConnectionTitle(model: model, open: { openSettings(nil) })
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Button(action: openSettings) {
+            Button(action: { openSettings(nil) }) {
                 Image(systemName: sidebar ? "gearshape" : "ellipsis")
             }
             .accessibilityLabel("Open settings")

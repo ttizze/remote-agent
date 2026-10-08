@@ -327,3 +327,82 @@ fn the_prompt_follows_the_interface_font_until_it_has_its_own() {
     appearance.prompt_font = "Menlo".into();
     assert_eq!(appearance.prompt_font(), "Menlo");
 }
+
+#[test]
+fn mobile_appearance_normalizes_every_native_range() {
+    let normalized = normalize_mobile_appearance(MobileAppearance {
+        color_scheme: MobileColorScheme::Dark,
+        theme: Some("missing".into()),
+        light_theme: Some("chat".into()),
+        dark_theme: Some("material-you".into()),
+        base_font_size: 99,
+        code_font_size: Some(1),
+        terminal_font_size: Some(99.0),
+        code_word_wrap: false,
+    });
+    assert_eq!(normalized.theme, None);
+    assert_eq!(normalized.light_theme.as_deref(), Some("chat"));
+    assert_eq!(normalized.dark_theme.as_deref(), Some("material-you"));
+    assert_eq!(normalized.base_font_size, MOBILE_BASE_FONT_SIZES.1);
+    assert_eq!(normalized.code_font_size, Some(MOBILE_CODE_FONT_SIZES.0));
+    assert_eq!(normalized.terminal_font_size, Some(MAX_TERMINAL_FONT_SIZE));
+    assert!(!normalized.code_word_wrap);
+}
+
+#[test]
+fn mobile_theme_selection_can_make_stock_one_side_of_a_shared_theme() {
+    let appearance = MobileAppearance {
+        theme: Some("chat".into()),
+        ..MobileAppearance::default()
+    };
+    let light_stock = mobile_assign_theme(appearance.clone(), false, None);
+    assert_eq!(light_stock.theme, None);
+    assert_eq!(light_stock.light_theme, None);
+    assert_eq!(light_stock.dark_theme.as_deref(), Some("chat"));
+
+    let dark_stock = mobile_assign_theme(appearance, true, None);
+    assert_eq!(dark_stock.theme, None);
+    assert_eq!(dark_stock.light_theme.as_deref(), Some("chat"));
+    assert_eq!(dark_stock.dark_theme, None);
+}
+
+#[test]
+fn mobile_typography_scales_body_and_uses_independent_code_and_terminal_choices() {
+    let default = mobile_typography(MobileAppearance::default());
+    assert_eq!(default.base_font_size, 16.0);
+    assert_eq!(default.body_line_height, 23.0);
+    assert_eq!(default.markdown_code_font_size, 13.0);
+    assert_eq!(default.markdown_code_line_height, 19.0);
+    assert_eq!(default.code_font_size, 12.0);
+    assert_eq!(default.code_line_number_font_size, 11.0);
+    assert_eq!(default.code_line_height, 22.0);
+    assert_eq!(default.terminal_font_size, 10.5);
+
+    let custom = mobile_typography(MobileAppearance {
+        base_font_size: 20,
+        code_font_size: Some(18),
+        terminal_font_size: Some(6.5),
+        ..MobileAppearance::default()
+    });
+    assert_eq!(custom.base_font_size, 20.0);
+    assert_eq!(custom.body_line_height, 29.0);
+    assert_eq!(custom.code_font_size, 18.0);
+    assert_eq!(custom.code_line_number_font_size, 17.0);
+    assert_eq!(custom.code_line_height, 33.0);
+    assert_eq!(custom.terminal_font_size, 6.5);
+
+    let scaled_default = mobile_typography(MobileAppearance {
+        base_font_size: 22,
+        ..MobileAppearance::default()
+    });
+    assert_eq!(scaled_default.markdown_body_font_size, 22.0);
+    assert_eq!(scaled_default.markdown_body_line_height, 32.0);
+    assert_eq!(scaled_default.markdown_h1_font_size, 29.0);
+    assert_eq!(scaled_default.markdown_h2_font_size, 26.0);
+    assert_eq!(scaled_default.markdown_h3_font_size, 23.0);
+    assert_eq!(scaled_default.markdown_h4_font_size, 21.0);
+    assert_eq!(scaled_default.markdown_code_font_size, 18.0);
+    assert_eq!(scaled_default.code_font_size, 17.0);
+    assert_eq!(scaled_default.code_line_height, 31.0);
+    assert_eq!(scaled_default.terminal_font_size, MAX_TERMINAL_FONT_SIZE);
+}

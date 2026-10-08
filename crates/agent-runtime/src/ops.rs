@@ -1,6 +1,7 @@
 //! Host I/O the runtime's effect executors, recovery and launch depend on.
 use agent_domain::{
-    Attachment, CheckpointFile, RunId, ThreadId, WorktreeSetupStageId, WorktreeSetupStageStatus,
+    Attachment, CheckpointFile, ModelSelection, RunId, ThreadId, WorktreeSetupStageId,
+    WorktreeSetupStageStatus,
 };
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,8 @@ pub enum SetupRun {
 pub struct ConversationSettings {
     /// Settle a thread this many days after its last activity; `None` never.
     pub auto_settle_after_days: Option<u64>,
+    /// Settle a thread when its linked pull request is merged.
+    pub auto_settle_on_merge: bool,
     /// Continue a turn a Host restart cut.
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
@@ -122,11 +125,21 @@ impl Default for ConversationSettings {
     fn default() -> Self {
         Self {
             auto_settle_after_days: Some(3),
+            auto_settle_on_merge: true,
             continue_after_restart: false,
             snooze_limited_threads: false,
             auto_resume_limited_threads: false,
         }
     }
+}
+
+/// The explicit values a Host supplies to a one-shot text generation call.
+/// Keeping these on the request lets the runtime apply the resolved project
+/// settings without handing a mutable settings document to an executor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextGenerationSettings {
+    pub model: Option<ModelSelection>,
+    pub instructions: Option<String>,
 }
 
 /// One structured text generation call (thread titles).
@@ -137,6 +150,8 @@ pub struct TextGenerationRequest {
     pub cwd: String,
     pub prompt: String,
     pub attachments: Vec<Attachment>,
+    pub model: Option<ModelSelection>,
+    pub instructions: Option<String>,
     /// JSON Schema of the expected output object.
     pub output_schema: serde_json::Value,
 }
@@ -162,9 +177,19 @@ pub trait HostOperations: Send + Sync {
     fn settings(&self, _project: &str) -> ConversationSettings {
         ConversationSettings::default()
     }
+    /// Whether a newly observed merged pull request should settle `thread`.
+    /// The Host owns the settings and any provider-backed link state; the
+    /// runtime calls this only after a durable open-to-merged transition.
+    fn pull_request_merged(&self, _thread: &ThreadId, project: &str) -> Result<bool, String> {
+        Ok(self.settings(project).auto_settle_on_merge)
+    }
     /// How launches into `project` name the worktree branches they generate.
     fn branch_naming(&self, _project: &str) -> agent_domain::BranchNaming {
         agent_domain::BranchNaming::default()
+    }
+    /// The resolved model and extra instructions for a one-shot text call.
+    fn text_generation_settings(&self, _project: &str, _operation: &str) -> TextGenerationSettings {
+        TextGenerationSettings::default()
     }
     /// Renames the branch checked out at `cwd` from `old` to `new`, or, unless
     /// `exact`, to the first of `new`, `new-1` … `new-100` no branch has.

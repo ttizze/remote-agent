@@ -63,10 +63,11 @@ export async function runBridge(sdk, program, input, output) {
         break;
       case "initialize": {
         if (query) throw new Error("Claude SDK is already initialized");
-        const { installPermissionCallback, ...options } = body.options ?? {};
+        const { installPermissionCallback, mcpServers, ...options } = body.options ?? {};
         query = sdk.query({ prompt: messages(), options: {
           ...options,
           pathToClaudeCodeExecutable: program,
+          executableArgs: process.argv.slice(3),
           cwd: process.cwd(),
           systemPrompt: { type: "preset", preset: "claude_code", append: body.appendSystemPrompt ?? "" },
           stderr: (text) => process.stderr.write(text),
@@ -84,6 +85,9 @@ export async function runBridge(sdk, program, input, output) {
         // Initialization and callbacks are SDK-owned; replaying the pending arrays
         // here would open the same approval twice under different correlation keys.
         const { pending_permission_requests, pending_user_dialog_requests, ...initialized } = await query.initializationResult();
+        // Configurations may include per-session credentials. Register them through
+        // the SDK control channel after startup so they never enter the CLI argv.
+        if (mcpServers && Object.keys(mcpServers).length) await query.setMcpServers(mcpServers);
         result = initialized;
         void (async () => {
           try { for await (const message of query) await send(message); }

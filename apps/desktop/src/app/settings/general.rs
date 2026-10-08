@@ -36,6 +36,12 @@ pub(super) struct GeneralState {
     days: Entity<InputState>,
     /// The scope and value the days field last showed.
     days_value: Option<(SettingsScope, u32)>,
+    storage_days: Entity<InputState>,
+    storage_days_value: Option<(SettingsScope, u32)>,
+    browser_days: Entity<InputState>,
+    browser_days_value: Option<(SettingsScope, u32)>,
+    logs_days: Entity<InputState>,
+    logs_days_value: Option<(SettingsScope, u32)>,
     folder: Entity<InputState>,
     folder_value: Option<String>,
     copy_paths: Entity<InputState>,
@@ -46,6 +52,9 @@ pub(super) struct GeneralState {
 impl GeneralState {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let days = cx.new(|cx| InputState::new(window, cx));
+        let storage_days = cx.new(|cx| InputState::new(window, cx));
+        let browser_days = cx.new(|cx| InputState::new(window, cx));
+        let logs_days = cx.new(|cx| InputState::new(window, cx));
         let folder = cx.new(|cx| InputState::new(window, cx));
         let copy_paths = cx.new(|cx| InputState::new(window, cx).placeholder(".env, .env.local"));
         let subscriptions = vec![
@@ -85,6 +94,105 @@ impl GeneralState {
                     }
                 },
             ),
+            cx.subscribe_in(
+                &storage_days,
+                window,
+                |view, input, event: &InputEvent, window, cx| {
+                    let Some(scope) = view.settings_scope() else {
+                        return;
+                    };
+                    match event {
+                        InputEvent::Change => {
+                            let text = input.read(cx).value();
+                            if let Ok(days) = text.trim().parse::<u32>()
+                                && (agent_protocol::models::MIN_RETENTION_DAYS
+                                    ..=agent_protocol::models::MAX_RETENTION_DAYS)
+                                    .contains(&days)
+                            {
+                                view.apply_setting(
+                                    &scope,
+                                    SettingId::StorageWorktreeAfterDays,
+                                    SettingValue::Number { value: days },
+                                );
+                            }
+                        }
+                        InputEvent::Blur => {
+                            if let Some((_, days)) = &view.settings.general.storage_days_value {
+                                input.update(cx, |input, cx| {
+                                    input.set_value(days.to_string(), window, cx)
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &browser_days,
+                window,
+                |view, input, event: &InputEvent, window, cx| {
+                    let Some(scope) = view.settings_scope() else {
+                        return;
+                    };
+                    match event {
+                        InputEvent::Change => {
+                            let text = input.read(cx).value();
+                            if let Ok(days) = text.trim().parse::<u32>()
+                                && (agent_protocol::models::MIN_RETENTION_DAYS
+                                    ..=agent_protocol::models::MAX_RETENTION_DAYS)
+                                    .contains(&days)
+                            {
+                                view.apply_setting(
+                                    &scope,
+                                    SettingId::StorageBrowserArtifactsAfterDays,
+                                    SettingValue::Number { value: days },
+                                );
+                            }
+                        }
+                        InputEvent::Blur => {
+                            if let Some((_, days)) = &view.settings.general.browser_days_value {
+                                input.update(cx, |input, cx| {
+                                    input.set_value(days.to_string(), window, cx)
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &logs_days,
+                window,
+                |view, input, event: &InputEvent, window, cx| {
+                    let Some(scope) = view.settings_scope() else {
+                        return;
+                    };
+                    match event {
+                        InputEvent::Change => {
+                            let text = input.read(cx).value();
+                            if let Ok(days) = text.trim().parse::<u32>()
+                                && (agent_protocol::models::MIN_RETENTION_DAYS
+                                    ..=agent_protocol::models::MAX_RETENTION_DAYS)
+                                    .contains(&days)
+                            {
+                                view.apply_setting(
+                                    &scope,
+                                    SettingId::StorageLogsAfterDays,
+                                    SettingValue::Number { value: days },
+                                );
+                            }
+                        }
+                        InputEvent::Blur => {
+                            if let Some((_, days)) = &view.settings.general.logs_days_value {
+                                input.update(cx, |input, cx| {
+                                    input.set_value(days.to_string(), window, cx)
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+            ),
             cx.subscribe_in(&folder, window, |view, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                     let directory = input.read(cx).value().trim().to_owned();
@@ -112,6 +220,12 @@ impl GeneralState {
         Self {
             days,
             days_value: None,
+            storage_days,
+            storage_days_value: None,
+            browser_days,
+            browser_days_value: None,
+            logs_days,
+            logs_days_value: None,
             folder,
             folder_value: None,
             copy_paths,
@@ -168,7 +282,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if !self.snapshot.conversation_settings_loaded() {
+        if !self.snapshot.host_settings_loaded() {
             return page_container(
                 896.,
                 vec![notice(if self.snapshot.connected {
@@ -184,7 +298,112 @@ impl Desktop {
         if let Some(worktrees) = self.render_worktrees(window, cx) {
             sections.push(worktrees);
         }
+        sections.push(self.render_background_diagnostics(cx));
         page_container(896., sections)
+    }
+
+    fn render_background_diagnostics(&mut self, cx: &mut Context<Desktop>) -> AnyElement {
+        let background_rows = self.snapshot.background_rows();
+        let selected_profile = background_rows
+            .iter()
+            .find(|row| row.key == "profile")
+            .map(|row| row.value.to_ascii_lowercase());
+        let git_fetch_seconds = background_interval_seconds(
+            &background_rows,
+            "automaticGitFetchIntervalMs",
+        );
+        let provider_health_seconds = background_interval_seconds(
+            &background_rows,
+            "providerHealthRefreshIntervalMs",
+        );
+        let choices = ["balanced", "performance", "battery-saver"]
+            .into_iter()
+            .map(|id| Choice {
+                id: id.into(),
+                label: id.replace('-', " "),
+                description: None,
+                icon: None,
+                selected: selected_profile.as_deref() == Some(id),
+            })
+            .collect();
+        let profile = select(
+            "background-profile",
+            selected_profile
+                .clone()
+                .unwrap_or_else(|| "balanced".into()),
+            choices,
+            |view, profile, _, _| view.perform(Intent::SetBackgroundProfile { profile }),
+            cx,
+        );
+        let mut rows = vec![
+            Row::new("Profile")
+                .description("Controls whether Host background work follows foreground demand or keeps running.")
+                .control(profile)
+                .render(),
+            Row::new("Git fetch interval")
+                .description("Refreshes remote branch status for active VCS leases.")
+                .control(background_interval_select(
+                    "background-git-fetch-interval",
+                    git_fetch_seconds,
+                    &[0, 15, 30, 60, 300, 900],
+                    |view, seconds, _, _| {
+                        view.perform(Intent::SetAutomaticGitFetchInterval { seconds })
+                    },
+                    cx,
+                ))
+                .render(),
+            Row::new("Provider health interval")
+                .description("Refreshes provider availability and model metadata for active provider leases.")
+                .control(background_interval_select(
+                    "background-provider-health-interval",
+                    provider_health_seconds,
+                    &[0, 60, 300, 900, 1800],
+                    |view, seconds, _, _| {
+                        view.perform(Intent::SetProviderHealthRefreshInterval { seconds })
+                    },
+                    cx,
+                ))
+                .render(),
+        ];
+        rows.extend(
+            background_rows
+                .into_iter()
+                .filter(|row| {
+                    !matches!(
+                        row.key.as_str(),
+                        "profile"
+                            | "automaticGitFetchIntervalMs"
+                            | "providerHealthRefreshIntervalMs"
+                    )
+                })
+                .map(|row| Row::new(row.key).description(row.value).render()),
+        );
+        rows.extend(
+            self.snapshot
+                .host_resource_rows()
+                .into_iter()
+                .chain(self.snapshot.process_rows())
+                .chain(self.snapshot.process_history_rows())
+                .chain(self.snapshot.trace_rows())
+                .map(|row| Row::new(row.key).description(row.value).render()),
+        );
+        let refresh = Button::new("refresh-background-diagnostics")
+            .outline()
+            .small()
+            .label("Refresh")
+            .on_click(cx.listener(|view, _, _, _| {
+                view.perform(Intent::LoadDiagnostics {
+                    trace_file_path: String::new(),
+                })
+            }))
+            .into_any_element();
+        section(
+            Some("Background activity & diagnostics".into()),
+            None,
+            Some(refresh),
+            rows,
+        )
+        .into_any_element()
     }
 
     /// The sections of a settings view, for the Host or one project.
@@ -196,6 +415,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         self.sync_days_field(scope, sections, window, cx);
+        self.sync_storage_days_field(scope, sections, window, cx);
+        self.sync_browser_days_field(scope, sections, window, cx);
+        self.sync_logs_days_field(scope, sections, window, cx);
         sections
             .iter()
             .map(|settings_section| {
@@ -248,6 +470,99 @@ impl Desktop {
         if self.settings.general.days_value != shown {
             self.settings.general.days_value = shown;
             self.settings.general.days.update(cx, |input, cx| {
+                input.set_value(days.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn sync_storage_days_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(days) =
+            sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .find_map(|row| match row.control {
+                    SettingControl::Number { value, .. }
+                        if row.id == SettingId::StorageWorktreeAfterDays =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), days));
+        if self.settings.general.storage_days_value != shown {
+            self.settings.general.storage_days_value = shown;
+            self.settings.general.storage_days.update(cx, |input, cx| {
+                input.set_value(days.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn sync_browser_days_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        let Some(days) =
+            sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .find_map(|row| match row.control {
+                    SettingControl::Number { value, .. }
+                        if row.id == SettingId::StorageBrowserArtifactsAfterDays =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), days));
+        if self.settings.general.browser_days_value != shown {
+            self.settings.general.browser_days_value = shown;
+            self.settings.general.browser_days.update(cx, |input, cx| {
+                input.set_value(days.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn sync_logs_days_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        let Some(days) =
+            sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .find_map(|row| match row.control {
+                    SettingControl::Number { value, .. }
+                        if row.id == SettingId::StorageLogsAfterDays =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), days));
+        if self.settings.general.logs_days_value != shown {
+            self.settings.general.logs_days_value = shown;
+            self.settings.general.logs_days.update(cx, |input, cx| {
                 input.set_value(days.to_string(), window, cx)
             });
         }
@@ -313,11 +628,22 @@ impl Desktop {
                 )
                 .into_any_element()
             }
-            SettingControl::Number { .. } => Input::new(&self.settings.general.days)
-                .small()
-                .w(px(96.))
-                .aria_label(row.title.clone())
-                .into_any_element(),
+            SettingControl::Number { .. } => {
+                let input = match id {
+                    SettingId::AutoSettleDays => &self.settings.general.days,
+                    SettingId::StorageWorktreeAfterDays => &self.settings.general.storage_days,
+                    SettingId::StorageBrowserArtifactsAfterDays => {
+                        &self.settings.general.browser_days
+                    }
+                    SettingId::StorageLogsAfterDays => &self.settings.general.logs_days,
+                    _ => &self.settings.general.days,
+                };
+                Input::new(input)
+                    .small()
+                    .w(px(96.))
+                    .aria_label(row.title.clone())
+                    .into_any_element()
+            }
             SettingControl::Model {
                 model_label,
                 traits_label,
@@ -564,4 +890,52 @@ impl Desktop {
         )
         .render()
     }
+}
+
+fn background_interval_seconds(rows: &[agent_core::view::diagnostics::DiagnosticRow], key: &str) -> u32 {
+    rows.iter()
+        .find(|row| row.key == key)
+        .and_then(|row| row.value.parse::<u64>().ok())
+        .map(|milliseconds| (milliseconds / 1_000).min(u32::MAX as u64) as u32)
+        .unwrap_or_default()
+}
+
+fn background_interval_select(
+    id: &'static str,
+    selected_seconds: u32,
+    options: &'static [u32],
+    pick: impl Fn(&mut Desktop, u32, &mut Window, &mut Context<Desktop>) + 'static,
+    cx: &mut Context<Desktop>,
+) -> AnyElement {
+    let choices = options
+        .iter()
+        .copied()
+        .map(|seconds| Choice {
+            id: seconds.to_string(),
+            label: if seconds == 0 {
+                "Disabled".into()
+            } else {
+                format!("{seconds} seconds")
+            },
+            description: None,
+            icon: None,
+            selected: seconds == selected_seconds,
+        })
+        .collect();
+    select(
+        id,
+        if selected_seconds == 0 {
+            "Disabled".into()
+        } else {
+            format!("{selected_seconds} seconds")
+        },
+        choices,
+        move |view, value, window, cx| {
+            if let Ok(seconds) = value.parse::<u32>() {
+                pick(view, seconds, window, cx);
+            }
+        },
+        cx,
+    )
+    .into_any_element()
 }

@@ -669,3 +669,19 @@ fn a_tapped_link_opens_workspace_files_host_files_or_the_web() {
         MarkdownLinkAction::Nothing
     );
 }
+
+#[test]
+fn rejects_oversized_markdown_line_targets_before_native_conversion() {
+    assert_eq!(markdown_line_target(1, 1), Some(1));
+    assert_eq!(markdown_line_target(2, 1), None);
+    assert_eq!(markdown_line_target(u64::MAX, 1_000_000), None);
+    assert_eq!(markdown_line_target(u64::MAX, u64::MAX), Some(u64::MAX));
+}
+
+#[test]
+fn classifies_pdf_resources_without_treating_similar_names_as_pdfs() {
+    assert!(is_pdf_file("/workspace/report.PDF"));
+    assert!(is_pdf_file("/workspace/report.pdf?download=1#page=2"));
+    assert!(!is_pdf_file("/workspace/report.pdf.txt"));
+    assert!(!is_pdf_file("/workspace/pdf-report"));
+}

@@ -94,7 +94,7 @@ fn primary_remote(remotes: &BTreeMap<String, String>) -> Option<(&str, &str)> {
 
 /// The host a remote URL points at: SCP-style and SSH remotes give the host
 /// name, other URLs keep an explicit port.
-fn remote_host(remote: &str) -> Option<String> {
+pub(crate) fn remote_host(remote: &str) -> Option<String> {
     let trimmed = remote.trim();
     if let Some((user, rest)) = trimmed.split_once('@')
         && !user.is_empty()
@@ -116,7 +116,7 @@ fn remote_host(remote: &str) -> Option<String> {
 }
 
 /// The provider kind.
-fn provider_kind(remote: &str) -> Option<&'static str> {
+pub(crate) fn provider_kind(remote: &str) -> Option<&'static str> {
     let host = remote_host(remote)?;
     let name = host
         .rsplit_once(':')

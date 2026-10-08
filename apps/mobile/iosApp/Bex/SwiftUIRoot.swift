@@ -4,14 +4,16 @@ import UIKit
 
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
+    @State private var appearanceRevision = 0
 
     var body: some View {
+        _ = appearanceRevision
         Group {
             if model.profiles.isEmpty || model.screen == .pairing && model.profiles.isEmpty {
                 NavigationStack { pairingScreen }
             } else if model.screen == .profiles || model.screen == .pairing {
                 NavigationStack {
-                    ProfilesScreen(profiles: model.profiles, notice: model.notice,
+                    ProfilesScreen(profiles: model.profiles, environments: model.environments, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
                 }
                 .sheet(isPresented: Binding(
@@ -30,6 +32,10 @@ struct BexSwiftUIRoot: View {
         }
         .tint(AppTheme.color("mobilePrimaryText"))
         .font(AppTheme.font())
+        .preferredColorScheme(AppTheme.preferredColorScheme)
+        .onReceive(NotificationCenter.default.publisher(for: .mobileAppearanceDidChange)) { _ in
+            appearanceRevision += 1
+        }
         .sheet(isPresented: $model.isScanning) {
             QRScannerSheet { model.scanned($0) }
                 .interactiveDismissDisabled()
@@ -51,6 +57,7 @@ struct BexSwiftUIRoot: View {
 /// Screens pushed over a thread.
 enum ThreadRoute: Hashable {
     case thread
+    case device
     case terminal(String?, UUID)
     case files
     case review
@@ -100,7 +107,10 @@ private struct WorkspaceRoot: View {
     }
 
     private func list(sidebar: Bool) -> some View {
-        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { showingSettings = true }, newTask: newTask,
+        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { projectId in
+            _ = model.selectScopedValue(projectId)
+            showingSettings = true
+        }, newTask: newTask,
                          showNewTaskDraft: showNewTaskDraft)
     }
 
@@ -124,7 +134,8 @@ private struct WorkspaceRoot: View {
         ThreadScreen(model: model, routes: ThreadRoutes(
             terminal: { routes.append(.terminal($0, UUID())) },
             files: { routes.append(.files) },
-            review: { routes.append(.review) }
+            review: { routes.append(.review) },
+            device: { routes.append(.device) }
         ))
     }
 
@@ -147,6 +158,10 @@ private struct WorkspaceRoot: View {
         switch route {
         case .thread:
             threadScreen
+        case .device:
+            if let threadId = model.selectedThreadId {
+                DeviceScreen(model: model, threadId: threadId)
+            }
         case let .terminal(terminal, _):
             if let thread = model.selectedThreadId {
                 TerminalScreen(model: model, threadId: thread, terminalId: terminal)

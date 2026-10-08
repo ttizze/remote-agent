@@ -5,6 +5,12 @@ import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
+    private struct PendingLoadBalancedNewThread {
+        let projectId: String
+        let sourceEnvironmentId: String
+        let startedAt: Date
+    }
+
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
     @Published var screen: AppScreen = .profiles
     @Published var isScanning = false
@@ -13,8 +19,13 @@ final class BexAppViewModel: ObservableObject {
     @Published var pairingInvitation: Invitation?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
+    @Published private(set) var environments: [EnvironmentRow] = []
+    /// Latest immutable core snapshot for each saved environment.
+    @Published private(set) var environmentSnapshots: [String: AgentCore.Snapshot] = [:]
     @Published private(set) var selectedProfileId: String?
     @Published var composerText = ""
+    /// Counts requests to focus the composer with the cursor at the end of the draft.
+    @Published var composerFocusRequests = 0
     var draftEdits = DraftRevision()
     private var composerKey = ""
     @Published var timelineRows: [TimelineRow] = []
@@ -39,6 +50,8 @@ final class BexAppViewModel: ObservableObject {
     var presentationTick: Task<Void, Never>?
 
     private(set) var store: AgentStore?
+    private var backgroundOwners: [String: AgentStore] = [:]
+    private var backgroundTasks: [String: Task<Void, Never>] = [:]
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
     private var persistence: Task<Void, Never>?
@@ -46,23 +59,32 @@ final class BexAppViewModel: ObservableObject {
     var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
+    private var incomingShareHandoffsInFlight: Set<URL> = []
+    private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread?
+    private let usageWidget = UsageWidgetPublisher()
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
         if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
             selectProfile(id)
+        } else {
+            startBackgroundProfiles(nil)
         }
     }
 
     func selectProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
+        pendingLoadBalancedNewThread = nil
         screen = .threads
         if selectedProfileId == id, store != nil {
             connect(); return
         }
         connection?.cancel()
         isConnecting = false
+        let background = backgroundOwners.removeValue(forKey: id)
+        backgroundTasks.removeValue(forKey: id)?.cancel()
+        Task { try? await background?.shutdown() }
         let old = detachStore()
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
@@ -74,10 +96,155 @@ final class BexAppViewModel: ObservableObject {
         }
     }
 
+    func handleShortcut() {
+        screen = .threads
+        openNewThread(projectId: snapshot.selectedProjectId())
+    }
+
+    /// Opens a new draft on the selected repository's least-loaded connected
+    /// environment. Core owns candidate matching and capacity scoring; this
+    /// owner only promotes the Store and reapplies the source draft's
+    /// user-selected model options and modes.
+    func openNewThread(projectId: String?) {
+        guard let projectId,
+              let sourceEnvironmentId = snapshot.environmentId()
+        else {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: projectId))
+            return
+        }
+        // A project chosen from the aggregate picker is already an explicit
+        // environment route. Automatic balancing only applies to the source
+        // Host's local project selection.
+        if scopedValue(projectId).1 != nil {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: projectId))
+            return
+        }
+        let evaluation = AgentCore.environmentLoadBalancingRoute(
+            snapshots: environmentSnapshotsForCore(),
+            sourceEnvironmentId: sourceEnvironmentId,
+            projectId: projectId,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+        if evaluation.pendingResources {
+            pendingLoadBalancedNewThread = PendingLoadBalancedNewThread(
+                projectId: projectId,
+                sourceEnvironmentId: sourceEnvironmentId,
+                startedAt: Date()
+            )
+            requestLoadBalancingResources()
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                self?.retryPendingLoadBalancedNewThread()
+            }
+            return
+        }
+        pendingLoadBalancedNewThread = nil
+        guard let route = evaluation.route else {
+            perform(.newThread(projectId: projectId))
+            return
+        }
+        let sourceDraft = snapshot.newThreadDefaultsForProject(projectId: projectId)
+        startRoutedNewThread(route, sourceDraft: sourceDraft, fallbackProjectId: projectId)
+    }
+
+    private func startRoutedNewThread(
+        _ route: AgentCore.EnvironmentLoadBalancedRouteView,
+        sourceDraft: AgentCore.Draft,
+        fallbackProjectId: String
+    ) {
+        perform(.newThread(projectId: "\(route.environmentId):\(route.projectId)")) { [weak self] result in
+            guard case .success = result else {
+                self?.perform(.newThread(projectId: fallbackProjectId))
+                return
+            }
+            self?.perform(.setModel(
+                instanceId: route.providerInstance,
+                driver: route.driver,
+                model: route.model,
+                options: sourceDraft.options
+            ))
+            self?.perform(.setRuntimeMode(mode: sourceDraft.runtimeMode))
+            self?.perform(.setInteractionMode(mode: sourceDraft.interactionMode))
+        }
+    }
+
+    private func retryPendingLoadBalancedNewThread() {
+        guard let pending = pendingLoadBalancedNewThread else { return }
+        guard snapshot.environmentId() == pending.sourceEnvironmentId else {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: pending.projectId))
+            return
+        }
+        guard Date().timeIntervalSince(pending.startedAt) <= 3 else {
+            pendingLoadBalancedNewThread = nil
+            perform(.newThread(projectId: pending.projectId))
+            return
+        }
+        let evaluation = AgentCore.environmentLoadBalancingRoute(
+            snapshots: environmentSnapshotsForCore(),
+            sourceEnvironmentId: pending.sourceEnvironmentId,
+            projectId: pending.projectId,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
+        )
+        guard !evaluation.pendingResources else { return }
+        pendingLoadBalancedNewThread = nil
+        guard let route = evaluation.route else {
+            perform(.newThread(projectId: pending.projectId))
+            return
+        }
+        startRoutedNewThread(
+            route,
+            sourceDraft: snapshot.newThreadDefaultsForProject(projectId: pending.projectId),
+            fallbackProjectId: pending.projectId
+        )
+    }
+
+    private func requestLoadBalancingResources() {
+        perform(.refreshLoadBalancingResources)
+        for owner in backgroundOwners.values {
+            try? owner.dispatch(intent: .refreshLoadBalancingResources)
+        }
+    }
+
+    func handleSurfaceURL(_ url: URL) {
+        guard url.scheme == "remote-agent" else { return }
+        if url.host == "new" {
+            handleShortcut()
+            return
+        }
+        guard url.host == "share" else { return }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let text = query.filter { $0.name == "text" }.compactMap(\.value).joined(separator: "\n")
+        let urls = query.filter { $0.name == "url" }.compactMap(\.value)
+        perform(.importShare(content: ShareContent(text: text, urls: urls)))
+        screen = .threads
+    }
+
+    func ingestIncomingShareHandoffs() {
+        let pending = RemoteAgentShareInbox.pending()
+        guard !pending.isEmpty else { return }
+        screen = .threads
+        for handoff in pending {
+            guard incomingShareHandoffsInFlight.insert(handoff.file).inserted else { continue }
+            perform(.importShare(content: handoff.content)) { [weak self] result in
+                self?.incomingShareHandoffsInFlight.remove(handoff.file)
+                if case .success = result {
+                    RemoteAgentShareInbox.remove(handoff.file)
+                }
+            }
+        }
+    }
+
     func removeProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do {
             let remaining = profiles.filter { $0.id != id }
+            let background = backgroundOwners.removeValue(forKey: id)
+            backgroundTasks.removeValue(forKey: id)?.cancel()
+            environments.removeAll { $0.profileId == id }
+            environmentSnapshots.removeValue(forKey: id)
             try DeviceIdentity.remove(id)
             if selectedProfileId == id {
                 connection?.cancel()
@@ -91,13 +258,19 @@ final class BexAppViewModel: ObservableObject {
                     do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
                 }
             }
+            Task { [weak self] in
+                do { try await background?.shutdown() } catch { self?.notice = error.localizedDescription }
+            }
             profiles = remaining
+            publishUsageWidget()
             try HostProfile.save(profiles)
+            startBackgroundProfiles(selectedProfileId)
             screen = .profiles
         } catch { notice = error.localizedDescription }
     }
 
     private func detachStore() -> AgentStore? {
+        pendingLoadBalancedNewThread = nil
         persist()
         draftEdits.reset()
         presentation?.cancel()
@@ -151,6 +324,8 @@ final class BexAppViewModel: ObservableObject {
             }
             observe(owner, host: id)
             connect()
+            startBackgroundProfiles(id)
+            ingestIncomingShareHandoffs()
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
@@ -162,6 +337,114 @@ final class BexAppViewModel: ObservableObject {
             }
         }
         _ = await previousClosed
+    }
+
+    /// Keeps each saved Host's cached snapshot and transport supervised while
+    /// another environment is selected in the foreground.
+    private func startBackgroundProfiles(_ selected: String?) {
+        for profile in profiles where profile.id != selected && backgroundTasks[profile.id] == nil {
+            superviseBackground(profile)
+        }
+    }
+
+    private func superviseBackground(_ profile: HostProfile) {
+        let task = Task { [weak self] in
+            var delayNanoseconds: UInt64 = 250_000_000
+            defer { self?.backgroundTasks[profile.id] = nil }
+            while !Task.isCancelled {
+                guard let self,
+                      profiles.contains(where: { $0.id == profile.id }),
+                      selectedProfileId != profile.id
+                else { return }
+                do {
+                    let owner: AgentStore
+                    if let existing = backgroundOwners[profile.id] {
+                        owner = existing
+                    } else {
+                        let created = try await AgentStore.offline(
+                            stateFile: SnapshotFiles.stateFile(profile.id),
+                            modelDefaults: SnapshotFiles.modelDefaults(),
+                            cacheDirectory: SnapshotFiles.cacheDirectory(profile.id),
+                            diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(profile.id)
+                        )
+                        guard !Task.isCancelled else {
+                            try? await created.shutdown()
+                            return
+                        }
+                        backgroundOwners[profile.id] = created
+                        owner = created
+                    }
+                    publishEnvironment(profile, owner.snapshot())
+                    let identity = try DeviceIdentity.loadOrGenerate(profile.id)
+                    try await owner.resume(connection: Connection(
+                        ticket: profile.ticket,
+                        identity: identity,
+                        invitation: nil,
+                        useRelays: true
+                    ))
+                    publishEnvironment(profile, owner.snapshot())
+                    var previous = owner.snapshot()
+                    while !Task.isCancelled, selectedProfileId != profile.id {
+                        _ = try await owner.nextSnapshot(previous: previous)
+                        let latest = owner.snapshot()
+                        publishEnvironment(profile, latest)
+                        if !latest.connected() {
+                            break
+                        }
+                        previous = latest
+                    }
+                    delayNanoseconds = 250_000_000
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if notice == nil {
+                        notice = "\(profile.name): \(error.localizedDescription)"
+                    }
+                }
+                guard !Task.isCancelled, selectedProfileId != profile.id else { return }
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+                delayNanoseconds = delayNanoseconds >= 150_000_000_000
+                    ? 300_000_000_000
+                    : delayNanoseconds * 2
+            }
+        }
+        backgroundTasks[profile.id] = task
+    }
+
+    private func publishEnvironment(_ profile: HostProfile, _ next: AgentCore.Snapshot) {
+        environmentSnapshots[profile.id] = next
+        let row = EnvironmentRow(
+            profileId: profile.id,
+            environmentId: next.environmentId() ?? profile.id,
+            label: next.environmentLabel() ?? profile.name,
+            state: next.environmentConnectionState() ?? "connecting",
+            platform: next.environmentPlatform(),
+            machine: next.environmentMachine(),
+            capabilities: next.environmentCapabilities(),
+            reconnectReason: next.environmentReconnectReason(),
+            activities: next.awarenessActivities().map { activity in
+                EnvironmentActivityRow(
+                    environmentId: activity.environmentId,
+                    threadId: next.scopedThreadId(threadId: activity.threadId) ?? activity.threadId,
+                    title: activity.threadTitle,
+                    headline: activity.headline,
+                    detail: activity.detail,
+                    phase: activity.phase,
+                    updatedAtMs: activity.updatedAtMs
+                )
+            }
+        )
+        environments = (environments.filter { $0.profileId != profile.id } + [row])
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        publishUsageWidget()
+        retryPendingLoadBalancedNewThread()
+    }
+
+    private func publishUsageWidget() {
+        do { try usageWidget.publish(subscriptionUsageWidgetsJson(
+            snapshots: environmentSnapshotsForCore(),
+            maxWindows: 6
+        )) } catch { notice = error.localizedDescription }
     }
 
     func preparePairing(_ contents: String) {
@@ -213,6 +496,8 @@ final class BexAppViewModel: ObservableObject {
                     pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
+                    startBackgroundProfiles(id)
+                    ingestIncomingShareHandoffs()
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -223,6 +508,17 @@ final class BexAppViewModel: ObservableObject {
     }
 
     func perform(_ intent: Intent, completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
+        let (routed, profile) = routeIntent(intent)
+        if let profile, profile != selectedProfileId {
+            selectProfile(profile)
+            pending.append((routed, completion))
+            return
+        }
+        performOnCurrent(routed, completion: completion)
+    }
+
+    private func performOnCurrent(_ intent: Intent,
+                                  completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
         guard let owner = store else {
             if initialization != nil {
                 pending.append((intent, completion))
@@ -253,6 +549,118 @@ final class BexAppViewModel: ObservableObject {
             }
         } catch { completion(.failure(error)) }
     }
+
+    private func scopedValue(_ value: String?) -> (String?, String?) {
+        guard let value, let separator = value.firstIndex(of: ":"), separator != value.startIndex else {
+            return (value, nil)
+        }
+        let environmentId = String(value[..<separator])
+        guard let profile = environments.first(where: { $0.environmentId == environmentId })?.profileId else {
+            return (value, nil)
+        }
+        let local = String(value[value.index(after: separator)...])
+        guard !local.isEmpty else { return (value, nil) }
+        return (local, profile)
+    }
+
+    private func routeIntent(_ intent: Intent) -> (Intent, String?) {
+        switch intent {
+        case let .openThread(threadId):
+            let (local, profile) = scopedValue(threadId)
+            return (.openThread(threadId: local ?? threadId), profile)
+        case let .newThread(projectId):
+            let (local, profile) = scopedValue(projectId)
+            return (.newThread(projectId: local), profile)
+        case let .thread(threadId, action):
+            let (local, profile) = scopedValue(threadId)
+            return (.thread(threadId: local ?? threadId, action: action), profile)
+        case let .moveThread(threadId, section, destination):
+            let (local, profile) = scopedValue(threadId)
+            return (.moveThread(threadId: local ?? threadId, section: section, destination: destination), profile)
+        case let .filterProject(projectId):
+            let (local, profile) = scopedValue(projectId)
+            return (.filterProject(projectId: local), profile)
+        case let .newThreadOnBranch(projectId, branch, worktreePath):
+            let (local, profile) = scopedValue(projectId)
+            return (.newThreadOnBranch(projectId: local ?? projectId, branch: branch,
+                                       worktreePath: worktreePath), profile)
+        case let .resetProjectSettings(projectId):
+            let (local, profile) = scopedValue(projectId)
+            return (.resetProjectSettings(projectId: local ?? projectId), profile)
+        default:
+            return (intent, nil)
+        }
+    }
+
+    /// Selects the profile that owns a scoped project before opening settings.
+    @discardableResult
+    func selectScopedValue(_ value: String?) -> String? {
+        let (local, profile) = scopedValue(value)
+        if let profile, profile != selectedProfileId {
+            selectProfile(profile)
+        }
+        return local
+    }
+
+    func environmentSnapshotsForCore() -> [AgentCore.Snapshot] {
+        Array(environmentSnapshots.values)
+    }
+
+    func environmentProjects(_ query: String) -> [EnvironmentProjectRow] {
+        AgentCore.environmentProjectRows(snapshots: environmentSnapshotsForCore(), query: query)
+    }
+
+    func environmentSettings() -> [EnvironmentSettingsEntryView] {
+        AgentCore.environmentSettings(snapshots: environmentSnapshotsForCore())
+    }
+
+    func loadBalancingPreferences() -> [EnvironmentLoadBalancingPreferenceView] {
+        AgentCore.environmentLoadBalancingPreferences(snapshots: environmentSnapshotsForCore())
+    }
+
+    func setLoadBalancingEnabled(_ enabled: Bool) {
+        perform(.setLoadBalancingEnabled(enabled: enabled))
+        for (profile, owner) in backgroundOwners {
+            guard let receipt = try? owner.dispatch(intent: .setLoadBalancingEnabled(enabled: enabled)) else {
+                continue
+            }
+            Task { [weak self, owner] in
+                _ = try? await receipt.wait()
+                guard let self, let host = self.profiles.first(where: { $0.id == profile }) else {
+                    return
+                }
+                self.publishEnvironment(host, owner.snapshot())
+            }
+        }
+    }
+
+    func setLoadBalancingWeight(environmentId: String, weight: UInt8) {
+        let intent = Intent.setLoadBalancingWeight(environmentId: environmentId, weight: weight)
+        guard let profile = environments.first(where: { $0.environmentId == environmentId })?.profileId else {
+            return
+        }
+        if profile == selectedProfileId {
+            perform(intent)
+        } else if let owner = backgroundOwners[profile] {
+            guard let receipt = try? owner.dispatch(intent: intent) else { return }
+            Task { [weak self, owner] in
+                _ = try? await receipt.wait()
+                guard let self, let host = self.profiles.first(where: { $0.id == profile }) else {
+                    return
+                }
+                self.publishEnvironment(host, owner.snapshot())
+            }
+        } else {
+            perform(intent)
+        }
+    }
+
+    func environmentThreadList(nowMs: Int64, options: ThreadListOptions, query: String,
+                               selectedProject: String?, selectedThread: String?) -> EnvironmentThreadListView {
+        AgentCore.environmentThreadList(snapshots: environmentSnapshotsForCore(), nowMs: nowMs, options: options,
+                                        query: query, selectedProject: selectedProject,
+                                        selectedThread: selectedThread)
+    }
 }
 
 extension BexAppViewModel {
@@ -263,6 +671,7 @@ extension BexAppViewModel {
         if afterForeground {
             owner.appBecameActive()
         }
+        startBackgroundProfiles(selectedProfileId)
         connection?.cancel()
         isConnecting = true
         notice = nil
@@ -330,11 +739,27 @@ extension BexAppViewModel {
             profiles[index].name = name
             do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
         }
+        let becameUnavailable = snapshot.error() == nil && next.error() != nil
         if snapshot.error() != next.error() {
             notice = next.error()
         }
+        if becameUnavailable && UIApplication.shared.applicationState != .active {
+            let mode = next.preferences().notificationMode
+            let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
+            let soundEnabled = mode == .sound || mode == .notificationsAndSound
+            if notificationsEnabled || soundEnabled {
+                LocalNotifications.deliver(
+                    title: "Bex needs your attention",
+                    body: next.error() ?? "The Host reported an error.",
+                    sound: soundEnabled
+                )
+            }
+        }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
+        if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
+            publishEnvironment(profile, next)
+        }
         if threadChanged {
             threadView = nil
             showScrollToEnd = false

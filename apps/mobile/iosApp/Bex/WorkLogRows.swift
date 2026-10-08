@@ -67,7 +67,8 @@ private struct ActivityRow: View {
                     .padding(.leading, 24.5)
             }
             if activity.expanded {
-                ActivityDetailView(activity: activity).padding(.leading, 24.5)
+                ActivityDetailView(activity: activity, useArtifactTemplate: actions.useArtifactTemplate)
+                    .padding(.leading, 24.5)
                     .transition(.opacity)
             }
         }
@@ -94,26 +95,27 @@ private struct ActivityRow: View {
 
 private struct ActivityDetailView: View {
     let activity: WorkActivityRow
+    let useArtifactTemplate: (ArtifactTemplate) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
                 if let detail = activity.detail {
                     if let reasoning = detail.reasoning {
-                        ConversationMarkdown(source: reasoning)
+                        ConversationMarkdown(source: reasoning, useArtifactTemplate: useArtifactTemplate)
                     }
                     if let call = detail.call?.command ?? detail.call?.argsText {
-                        Text(call).font(AppTheme.mono(12)).foregroundStyle(AppTheme.text).textSelection(.enabled)
+                        Text(call).font(AppTheme.mono(13)).foregroundStyle(AppTheme.text).textSelection(.enabled)
                     }
                     if let output = detail.output ?? detail.fullDetail {
-                        Text(output).font(AppTheme.mono(12)).foregroundStyle(AppTheme.muted).textSelection(.enabled)
+                        Text(output).font(AppTheme.mono(13)).foregroundStyle(AppTheme.muted).textSelection(.enabled)
                     } else if activity.loadDetail {
                         Text("Loading output…").font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
                     } else if detail.reasoning == nil {
                         Text("No output.").font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
                     }
                     if let code = detail.failedExitCode {
-                        Text("exit \(code)").font(AppTheme.mono(12)).foregroundStyle(AppTheme.dangerForeground)
+                        Text("exit \(code)").font(AppTheme.mono(13)).foregroundStyle(AppTheme.dangerForeground)
                     }
                 } else if activity.loadDetail {
                     Text("Loading output…").font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
@@ -370,7 +372,7 @@ struct SubagentLinkRow: View {
                     }
                 }
                 if let detail = link.detail {
-                    Text(detail).font(link.detailIsPath ? AppTheme.mono(12) : AppTheme.font(13))
+                    Text(detail).font(link.detailIsPath ? AppTheme.mono(13) : AppTheme.font(13))
                         .foregroundStyle(link.failed ? AppTheme.rose : AppTheme.muted).lineLimit(3)
                 }
             }

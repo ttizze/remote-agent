@@ -9,6 +9,11 @@ use ::markdown::{
     ParseOptions,
     mdast::{AlignKind, Node},
 };
+use artifact_templates::ArtifactTemplate;
+use directives::{
+    ArtifactTemplateMarkdownSegment, render_file_citations_as_markdown,
+    split_artifact_template_markdown,
+};
 use std::{borrow::Cow, collections::HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +21,10 @@ use std::{borrow::Cow, collections::HashMap};
 pub enum MarkdownBlock {
     Visualization {
         path: String,
+    },
+    /// A `::artifact-template{…}` directive: a card offering the template.
+    ArtifactTemplate {
+        template: ArtifactTemplate,
     },
     Paragraph {
         runs: Vec<MarkdownRun>,
@@ -182,18 +191,29 @@ pub fn markdown_without_images(source: &str) -> (Cow<'_, str>, Vec<String>) {
     }
 }
 
+/// The blocks of an assistant message: artifact-template directives become
+/// cards, and the Markdown around them reads file citations as links.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
-    let source = directives::render_file_citations_as_markdown(&source);
-    let root = parse(&source);
     let mut blocks = Vec::new();
-    block(
-        &root,
-        &source,
-        &definitions(&root),
-        MarkdownStyle::default(),
-        &mut blocks,
-    );
+    for segment in split_artifact_template_markdown(&source) {
+        match segment {
+            ArtifactTemplateMarkdownSegment::Markdown { markdown, .. } => {
+                let source = render_file_citations_as_markdown(&markdown);
+                let root = parse(&source);
+                block(
+                    &root,
+                    &source,
+                    &definitions(&root),
+                    MarkdownStyle::default(),
+                    &mut blocks,
+                );
+            }
+            ArtifactTemplateMarkdownSegment::ArtifactTemplate { template, .. } => {
+                blocks.push(MarkdownBlock::ArtifactTemplate { template });
+            }
+        }
+    }
     blocks
 }
 
@@ -388,6 +408,53 @@ mod tests {
                 markdown_blocks(source.into())[0],
                 MarkdownBlock::Paragraph { .. }
             ));
+        }
+    }
+
+    const ARTIFACT_TEMPLATE: &str = r#"::artifact-template{skill_name="artifact-template-hello-world" skill_directory="/Users/test/.codex/skills/artifact-template-hello-world" display_name="Hello World" artifact_kind="document"}"#;
+
+    #[test]
+    fn artifact_template_directives_become_cards_between_the_prose() {
+        let blocks = markdown_blocks(format!(
+            "Created :codex-file-citation{{path=\"outputs/report.xlsx\" purpose=\"output\"}}.\n\n{ARTIFACT_TEMPLATE}\n\nAfter"
+        ));
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(paragraph_text(&blocks[0]), "Created report.xlsx.");
+        let MarkdownBlock::Paragraph { runs, .. } = &blocks[0] else {
+            panic!("expected prose")
+        };
+        assert_eq!(
+            runs.iter().find_map(|run| run.link.as_deref()),
+            Some("outputs/report.xlsx")
+        );
+        assert_eq!(
+            blocks[1],
+            MarkdownBlock::ArtifactTemplate {
+                template: artifact_templates::ArtifactTemplate {
+                    artifact_kind: artifact_templates::ArtifactTemplateKind::Document,
+                    display_name: "Hello World".into(),
+                    gallery_kind: None,
+                    skill_directory: "/Users/test/.codex/skills/artifact-template-hello-world"
+                        .into(),
+                    skill_name: "artifact-template-hello-world".into(),
+                }
+            }
+        );
+        assert_eq!(paragraph_text(&blocks[2]), "After");
+    }
+
+    #[test]
+    fn malformed_and_quoted_artifact_template_directives_stay_literal_prose() {
+        let malformed = r#"::artifact-template{display_name="Hello World"}"#;
+        let code = format!("`{ARTIFACT_TEMPLATE}`");
+        for source in [malformed, code.as_str()] {
+            let blocks = markdown_blocks(source.into());
+            assert_eq!(blocks.len(), 1, "{source}");
+            assert_eq!(
+                paragraph_text(&blocks[0]),
+                source.trim_matches('`'),
+                "{source}"
+            );
         }
     }
 

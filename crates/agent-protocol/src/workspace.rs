@@ -87,6 +87,67 @@ pub struct EntrySearch {
     pub truncated: bool,
 }
 
+pub const CONTENT_SEARCH_MAX_QUERY: usize = 256;
+pub const CONTENT_SEARCH_MAX_LIMIT: u32 = 500;
+
+/// `host/workspace/searchContents`: searches text files under `cwd` while
+/// preserving the query exactly as entered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchContents {
+    pub cwd: String,
+    pub query: String,
+    pub limit: u32,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub use_regex: bool,
+}
+impl SearchContents {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cwd.trim().is_empty() {
+            return Err("workspace directory is required".into());
+        }
+        if self.query.is_empty() {
+            return Err("content search query is required".into());
+        }
+        if self.query.chars().count() > CONTENT_SEARCH_MAX_QUERY {
+            return Err(format!(
+                "content search query exceeds {CONTENT_SEARCH_MAX_QUERY} characters"
+            ));
+        }
+        if !(1..=CONTENT_SEARCH_MAX_LIMIT).contains(&self.limit) {
+            return Err(format!(
+                "content search limit must be 1 to {CONTENT_SEARCH_MAX_LIMIT}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentMatchRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentMatch {
+    pub path: String,
+    pub line_number: u32,
+    pub line_content: String,
+    pub match_ranges: Vec<ContentMatchRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearch {
+    pub matches: Vec<ContentMatch>,
+    pub truncated: bool,
+    pub regex_fallback_error: Option<String>,
+}
+
 /// `host/vcs/status`: the checkout's branch and its uncommitted and branch
 /// changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,10 +181,13 @@ pub struct BranchChanges {
     pub deletions: u64,
 }
 
+/// The local half (`vcs::VcsStatusLocal`) with the remote half
+/// (`vcs::VcsStatusRemote`) merged in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcsStatus {
     pub is_repo: bool,
+    pub source_control_provider: Option<crate::vcs::SourceControlProviderInfo>,
     pub has_primary_remote: bool,
     pub is_default_ref: bool,
     /// `None` on a detached HEAD.
@@ -131,6 +195,13 @@ pub struct VcsStatus {
     pub has_working_tree_changes: bool,
     pub working_tree: WorkingTreeChanges,
     pub branch_changes: Option<BranchChanges>,
+    pub has_upstream: bool,
+    pub ahead_count: u64,
+    pub behind_count: u64,
+    /// Commits ahead of the default branch; `None` when the remote half was
+    /// not read.
+    pub ahead_of_default_count: Option<u64>,
+    pub pr: Option<crate::vcs::VcsStatusChangeRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,6 +2,13 @@
 //! strings, timestamps as epoch milliseconds and open JSON as its text.
 use agent_domain::*;
 
+#[uniffi::remote(Enum)]
+enum BranchNamingMode {
+    Static,
+    Semantic,
+    Custom,
+}
+
 macro_rules! ids {
     ($($name:ident),+ $(,)?) => {$(
         uniffi::custom_type!($name, String, {

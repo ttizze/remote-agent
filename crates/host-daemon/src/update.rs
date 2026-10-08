@@ -442,7 +442,7 @@ impl UpdateManager {
         Ok(acknowledged)
     }
 
-    async fn accept_handoff_if_ready(&self) -> Result<bool> {
+    pub(crate) async fn accept_handoff_if_ready(&self) -> Result<bool> {
         if self.has_active_operations() {
             return Ok(false);
         }
@@ -1033,7 +1033,7 @@ impl UpdateManager {
     pub(crate) async fn native(&self, request: &NativeUpdateRequest) -> Result<NativeUpdateState> {
         let Some(metadata_url) = self.metadata_url.clone() else {
             return Ok(NativeUpdateState {
-                platform: request.platform,
+                platform: request.platform.clone(),
                 channel: request.channel,
                 current_version: request.current_version.clone(),
                 latest_version: None,
@@ -1048,7 +1048,7 @@ impl UpdateManager {
             Ok(metadata) => metadata,
             Err(error) => {
                 return Ok(NativeUpdateState {
-                    platform: request.platform,
+                    platform: request.platform.clone(),
                     channel: request.channel,
                     current_version: request.current_version.clone(),
                     latest_version: None,
@@ -1072,12 +1072,12 @@ impl UpdateManager {
             compare_versions(&request.current_version, &metadata.version)? == Ordering::Less;
         let (release_notes, _) = bounded_release_notes(&metadata.release_notes);
         Ok(NativeUpdateState {
-            platform: request.platform,
+            platform: request.platform.clone(),
             channel: request.channel,
             current_version: request.current_version.clone(),
             latest_version: Some(metadata.version),
             update_available: available && store_url.is_some(),
-            store_url,
+            store_url: store_url.clone(),
             release_notes,
             checked_at: Some(now()),
             message: (available && store_url.is_none())

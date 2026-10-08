@@ -5,7 +5,10 @@ use crate::app::{
     sidebar::project_mark,
     ui::{color, icon},
 };
-use agent_core::view::composer::hero::{DraftHeroHeadline, DraftHeroHeadlineKind};
+use agent_core::{
+    state::Intent,
+    view::composer::hero::{DraftHeroHeadline, DraftHeroHeadlineKind},
+};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},
@@ -60,8 +63,8 @@ impl Desktop {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(color("textMuted"))
                                 .hover(|link| link.text_color(color("text")).underline())
-                                .on_click(cx.listener(|view, _: &ClickEvent, _, cx| {
-                                    view.new_thread(None, cx)
+                                .on_click(cx.listener(|view, _: &ClickEvent, _, _| {
+                                    view.perform(Intent::SetNewThreadProject { project_id: None });
                                 }))
                                 .child("or start without a project"),
                         )
@@ -139,7 +142,9 @@ impl Desktop {
                     PopupMenuItem::new("No project")
                         .icon(icon("message-square-dashed"))
                         .checked(hero.no_project_selected)
-                        .on_click(on_click(&view, |view, _, cx| view.new_thread(None, cx))),
+                        .on_click(on_click(&view, |view, _, _| {
+                            view.perform(Intent::SetNewThreadProject { project_id: None });
+                        })),
                 );
             }
             for choice in &hero.project_choices {
@@ -156,8 +161,10 @@ impl Desktop {
                             .child(name.clone())
                     })
                     .checked(choice.selected)
-                    .on_click(on_click(&view, move |view, _, cx| {
-                        view.new_thread(Some(project.clone()), cx)
+                    .on_click(on_click(&view, move |view, _, _| {
+                        view.perform(Intent::SetNewThreadProject {
+                            project_id: Some(project.clone()),
+                        });
                     })),
                 );
             }

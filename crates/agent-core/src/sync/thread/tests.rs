@@ -573,13 +573,33 @@ fn a_fact_touching_an_item_invalidates_its_loaded_detail() {
     done.status = ItemStatus::Completed;
     sync.apply(vec![facts(vec![(3, projected(done.clone()))])]);
     assert_eq!(sync.details.get(&item.id), None);
-    sync.detail_loaded(&item.id, Some(done.clone()));
+    sync.detail_loaded_with_task(&item.id, Some((done.clone(), None)));
     assert_eq!(sync.details.get(&item.id), None);
     assert!(sync.begin_detail(&item.id));
-    sync.detail_loaded(&item.id, Some(done.clone()));
+    sync.detail_loaded_with_task(&item.id, Some((done.clone(), None)));
     assert_eq!(
         sync.details.get(&item.id),
         Some(&Detail::Loaded(Box::new(done)))
+    );
+}
+
+#[test]
+fn keeps_the_task_returned_with_item_detail() {
+    let (mut sync, _) = opened(ThreadSync::default());
+    let mut state = thread_state("Thread");
+    let mut item = command_item("command", 1);
+    item.output_omitted = true;
+    state.items.push(item.clone());
+    sync.apply(vec![snapshot(state, 2, None)]);
+    assert!(sync.begin_detail(&item.id));
+    let task = crate::view::work_log::fixtures::task("task", "child", "Inspect the result");
+    sync.detail_loaded_with_task(&item.id, Some((item.clone(), Some(task.clone()))));
+    assert_eq!(
+        sync.details.get(&item.id),
+        Some(&Detail::LoadedWithTask {
+            item: Box::new(item),
+            task: Box::new(task),
+        })
     );
 }
 

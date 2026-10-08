@@ -128,7 +128,8 @@ private struct SetupDetailsSheet: View {
                                  elapsed: stage.elapsed, height: 38.5)
                         if let output = stage.output, !output.lines.isEmpty {
                             Text(output.lines.joined(separator: "\n"))
-                                .font(.custom("Menlo", size: 12)).lineSpacing(3.5)
+                                .font(AppTheme.mono(13))
+                                .lineSpacing(max(0, AppTheme.codeLineHeight - AppTheme.codeFontSize * 1.2))
                                 .lineLimit(4, reservesSpace: true)
                                 .foregroundStyle(output.failed ? AppTheme.dangerForeground : AppTheme.text)
                                 .padding(8)

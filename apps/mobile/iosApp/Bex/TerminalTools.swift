@@ -76,7 +76,7 @@ struct TerminalContextSheet: View {
                 end = index
             }
         } label: {
-            Text("\(index + 1) \(line.isEmpty ? " " : line)").font(AppTheme.mono(14))
+            Text("\(index + 1) \(line.isEmpty ? " " : line)").font(AppTheme.terminalMono())
                 .foregroundStyle(AppTheme.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)

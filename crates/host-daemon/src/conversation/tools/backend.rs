@@ -1,14 +1,27 @@
 //! What the tools read and change: the runtime's threads, the Host's projects and
 //! the live provider catalog.
 use super::ModelCatalog;
+use crate::background::BackgroundOwner;
 use crate::conversation::ProjectCatalog;
+use crate::conversation::SharedResources;
 use crate::projects::NamedProjectError;
 use crate::workspace_files::{Claimed, Copies, WorkspaceFiles};
 use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
-use agent_protocol::models::{ProjectScript, ProviderStatus};
-use agent_runtime::{HostProject, LaunchThread, Runtime, SearchMatch};
+use agent_protocol::{
+    background::{
+        BackgroundPolicySnapshot, HostResourcesSnapshot, ProcessDiagnosticsResult,
+        ProcessResourceHistoryResult, ReadProcessResourceHistory, ReadTraceDiagnostics,
+        TraceDiagnosticsResult,
+    },
+    models::{ProjectScript, ProviderStatus},
+    workspace::{ListRefs, RefList, VcsStatus},
+};
+use agent_runtime::{
+    CreatedWorktree as RuntimeCreatedWorktree, HostProject, LaunchThread, Runtime, ScheduledTask,
+    ScheduledTaskError, ScheduledTaskInput, SearchMatch, SetupRequest, SetupRun, WorktreeRequest,
+};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -119,6 +132,110 @@ pub(crate) trait Orchestration: Send + Sync {
         &self,
         title: String,
     ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>>;
+    /// Branch refs visible to a thread-scoped worktree picker.
+    fn vcs_refs(&self, request: ListRefs) -> BoxFuture<'_, Result<RefList, String>> {
+        let _ = request;
+        Box::pin(async { Err("Git ref inspection is unavailable.".into()) })
+    }
+
+    /// The local status used to resolve the current branch before a handoff.
+    fn vcs_status(&self, cwd: String) -> BoxFuture<'_, Result<VcsStatus, String>> {
+        let _ = cwd;
+        Box::pin(async { Err("Git status is unavailable.".into()) })
+    }
+
+    /// Creates a checkout for a thread-scoped worktree handoff.
+    fn create_thread_worktree(
+        &self,
+        request: WorktreeRequest,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<RuntimeCreatedWorktree, String>> {
+        let _ = (request, path);
+        Box::pin(async { Err("Worktree creation is unavailable.".into()) })
+    }
+
+    /// Removes a checkout created by a handoff, including one at an explicit path.
+    fn remove_thread_worktree(
+        &self,
+        project_root: String,
+        path: String,
+        branch: Option<String>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let _ = (project_root, path, branch);
+        Box::pin(async { Err("Worktree removal is unavailable.".into()) })
+    }
+
+    /// Runs the configured project setup script in a newly handed-off checkout.
+    fn run_thread_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
+        let _ = request;
+        Box::pin(async { Err("Project setup is unavailable.".into()) })
+    }
+
+    /// The configured default for starting new worktrees from the primary remote.
+    fn worktree_start_from_origin(&self, project: &str) -> bool {
+        let _ = project;
+        true
+    }
+
+    /// The durable scheduled-task rows. Backends that do not expose the Host
+    /// scheduler keep the MCP surface unavailable; tests can therefore focus
+    /// on the ordinary orchestration methods without a scheduler fixture.
+    fn scheduled_tasks(&self) -> BoxFuture<'_, Result<Vec<ScheduledTask>, String>> {
+        Box::pin(async { Err("scheduled tasks are unavailable".into()) })
+    }
+    fn upsert_scheduled_task(
+        &self,
+        input: ScheduledTaskInput,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            let _ = input;
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+    fn set_scheduled_task_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            let _ = (id, enabled);
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+    fn delete_scheduled_task(&self, id: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let _ = id;
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+    fn run_scheduled_task_now(&self, id: String) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            let _ = id;
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+
+    fn background_policy(&self) -> BoxFuture<'_, Result<BackgroundPolicySnapshot, String>> {
+        Box::pin(async { Err("background diagnostics unavailable".into()) })
+    }
+    fn host_resources(&self) -> BoxFuture<'_, Result<HostResourcesSnapshot, String>> {
+        Box::pin(async { Err("Host resources unavailable".into()) })
+    }
+    fn process_diagnostics(&self) -> BoxFuture<'_, Result<ProcessDiagnosticsResult, String>> {
+        Box::pin(async { Err("process diagnostics unavailable".into()) })
+    }
+    fn process_history(
+        &self,
+        _request: ReadProcessResourceHistory,
+    ) -> BoxFuture<'_, Result<ProcessResourceHistoryResult, String>> {
+        Box::pin(async { Err("process resource history unavailable".into()) })
+    }
+    fn trace_diagnostics(
+        &self,
+        _request: ReadTraceDiagnostics,
+    ) -> BoxFuture<'_, Result<TraceDiagnosticsResult, String>> {
+        Box::pin(async { Err("trace diagnostics unavailable".into()) })
+    }
 }
 
 /// The runtime, project catalog and model catalog this Host serves.
@@ -126,7 +243,9 @@ pub(crate) struct HostOrchestration {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) projects: Arc<ProjectCatalog>,
     pub(crate) files: WorkspaceFiles,
+    pub(crate) resources: SharedResources,
     pub(crate) models: Arc<dyn ModelCatalog>,
+    pub(crate) background: Arc<BackgroundOwner>,
 }
 
 impl Orchestration for HostOrchestration {
@@ -138,6 +257,69 @@ impl Orchestration for HostOrchestration {
                 .await
                 .map(|view| view.state)
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    fn scheduled_tasks(&self) -> BoxFuture<'_, Result<Vec<ScheduledTask>, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .list()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn upsert_scheduled_task(
+        &self,
+        input: ScheduledTaskInput,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .upsert(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn set_scheduled_task_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .set_enabled(&id, enabled)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn delete_scheduled_task(&self, id: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .delete(&id)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn run_scheduled_task_now(&self, id: String) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .run_now(&id)
+                .await
+                .map_err(|error| match error {
+                    ScheduledTaskError::NotFound(id) => format!("Schedule task {id} not found."),
+                    ScheduledTaskError::AlreadyRunning(id) => {
+                        format!("Schedule task {id} is already running.")
+                    }
+                    ScheduledTaskError::Store(error) => error.to_string(),
+                })
         })
     }
 
@@ -342,6 +524,150 @@ impl Orchestration for HostOrchestration {
                 .ok_or(NamedProjectFailure::Unavailable)?;
             Ok((project, created.commit_error))
         })
+    }
+
+    fn vcs_refs(&self, request: ListRefs) -> BoxFuture<'_, Result<RefList, String>> {
+        Box::pin(async move {
+            crate::vcs::refs(request)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn vcs_status(&self, cwd: String) -> BoxFuture<'_, Result<VcsStatus, String>> {
+        Box::pin(async move {
+            let path = std::path::PathBuf::from(cwd);
+            tokio::task::spawn_blocking(move || crate::vcs::local_status(&path, false))
+                .await
+                .map_err(|error| error.to_string())?
+                .map(|local| VcsStatus::merge(local, None))
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn create_thread_worktree(
+        &self,
+        request: WorktreeRequest,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<RuntimeCreatedWorktree, String>> {
+        let resources = self.resources.clone();
+        Box::pin(async move {
+            if let Some(path) = path {
+                let ref_name = if request.start_from_origin {
+                    crate::vcs::origin_start(
+                        std::path::Path::new(&request.project_root),
+                        &request.base_ref,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                } else {
+                    request.base_ref.clone()
+                };
+                let created = crate::vcs::create_worktree(
+                    &agent_protocol::vcs::CreateWorktree {
+                        cwd: request.project_root.clone(),
+                        ref_name,
+                        new_ref_name: request.branch.clone(),
+                        base_ref_name: Some(request.base_ref.clone()),
+                        path: Some(path),
+                    },
+                    "",
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                return Ok(RuntimeCreatedWorktree {
+                    path: created.worktree.path,
+                    branch: Some(created.worktree.ref_name),
+                });
+            }
+            resources
+                .worktrees
+                .create(
+                    request.thread.as_str(),
+                    &request.project_root,
+                    &request.base_ref,
+                    request.branch,
+                    request.start_from_origin,
+                    request.progress,
+                    request.cancel,
+                )
+                .await
+                .map(|(path, branch)| RuntimeCreatedWorktree {
+                    path: path.to_string_lossy().into_owned(),
+                    branch: Some(branch),
+                })
+                .map_err(|error| format!("{error:#}"))
+        })
+    }
+
+    fn remove_thread_worktree(
+        &self,
+        project_root: String,
+        path: String,
+        branch: Option<String>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let resources = self.resources.clone();
+        Box::pin(async move {
+            let removed = match resources.worktrees.abandon(path.clone()).await {
+                Ok(()) => Ok(()),
+                Err(managed_error) => crate::vcs::remove_worktree(&project_root, &path, true)
+                    .await
+                    .map_err(|error| format!("{error:#}; managed checkout: {managed_error:#}")),
+            };
+            removed?;
+            if let Some(branch) = branch {
+                crate::vcs::delete_local_branch(std::path::Path::new(&project_root), &branch, true)
+                    .map_err(|error| {
+                        format!("Unable to remove created branch '{branch}': {error:#}")
+                    })?;
+            }
+            Ok(())
+        })
+    }
+
+    fn run_thread_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
+        let resources = self.resources.clone();
+        Box::pin(async move { crate::conversation::run_project_setup(&resources, request).await })
+    }
+
+    fn worktree_start_from_origin(&self, project: &str) -> bool {
+        let settings = self.resources.worktrees.latest_host_settings();
+        settings
+            .project_overrides
+            .get(project)
+            .and_then(|override_settings| override_settings.new_worktrees_start_from_origin)
+            .unwrap_or(settings.new_worktrees_start_from_origin)
+    }
+
+    fn background_policy(&self) -> BoxFuture<'_, Result<BackgroundPolicySnapshot, String>> {
+        Box::pin(async move { Ok(self.background.snapshot().await) })
+    }
+
+    fn host_resources(&self) -> BoxFuture<'_, Result<HostResourcesSnapshot, String>> {
+        Box::pin(async move { Ok(self.background.host_resources().await) })
+    }
+
+    fn process_diagnostics(&self) -> BoxFuture<'_, Result<ProcessDiagnosticsResult, String>> {
+        Box::pin(async move { Ok(self.background.process_diagnostics().await) })
+    }
+
+    fn process_history(
+        &self,
+        request: ReadProcessResourceHistory,
+    ) -> BoxFuture<'_, Result<ProcessResourceHistoryResult, String>> {
+        Box::pin(async move {
+            Ok(self
+                .background
+                .process_history(request.window_ms, request.bucket_ms)
+                .await)
+        })
+    }
+
+    fn trace_diagnostics(
+        &self,
+        request: ReadTraceDiagnostics,
+    ) -> BoxFuture<'_, Result<TraceDiagnosticsResult, String>> {
+        Box::pin(async move { self.background.trace_diagnostics(&request).await })
     }
 }
 

@@ -1,7 +1,9 @@
 //! Shared wire contracts and deterministic value operations. No client state or I/O.
 pub mod browser;
+pub mod background;
 pub mod conversation;
 pub mod diagnostics;
+pub mod device;
 pub mod error;
 pub mod keybindings;
 pub mod message;
@@ -9,5 +11,10 @@ pub mod models;
 pub mod operations;
 pub mod permissions;
 pub mod protocol;
+pub mod preview;
 pub mod provider;
+pub mod vcs;
+pub mod scheduled_tasks;
+pub mod usage;
+pub mod pull_requests;
 pub mod workspace;

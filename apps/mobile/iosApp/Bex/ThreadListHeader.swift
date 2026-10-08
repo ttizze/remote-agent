@@ -63,19 +63,19 @@ struct ThreadFilterMenu: View {
                     }
                 }
             }
-            let projects = model.snapshot.projects()
+            let projects = model.environmentProjects("")
             if !projects.isEmpty {
                 Menu("Project") {
                     Button { model.perform(.filterProject(projectId: nil)) } label: {
                         Label("All projects", systemImage: selectedProject == nil ? "checkmark" : "")
                         Text("Show threads from every project")
                     }
-                    ForEach(projects, id: \.id) { project in
-                        Button { model.perform(.filterProject(projectId: project.id)) } label: {
-                            if project.id == selectedProject {
-                                Label(project.name, systemImage: "checkmark")
+                    ForEach(projects, id: \.projectId) { project in
+                        Button { model.perform(.filterProject(projectId: project.projectId)) } label: {
+                            if project.projectId == model.snapshot.scopedProjectId(projectId: selectedProject ?? "") {
+                                Label("\(project.environmentLabel) · \(project.title)", systemImage: "checkmark")
                             } else {
-                                Text(project.name)
+                                Text("\(project.environmentLabel) · \(project.title)")
                             }
                         }
                     }

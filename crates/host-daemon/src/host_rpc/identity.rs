@@ -41,4 +41,9 @@ pub(crate) trait Identity: Send + Sync {
     async fn list(&self) -> Result<op::Accounts, Failure>;
     async fn account(&self, command: AccountCommand) -> Result<AccountReply, Failure>;
     async fn usage(&self, id: &str) -> Result<op::AccountUsage, Failure>;
+    async fn consume_reset_credit(
+        &self,
+        account_id: &str,
+        credit_id: Option<&str>,
+    ) -> Result<Empty, Failure>;
 }

@@ -6,10 +6,13 @@ use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
 use agent_domain::{AttachmentKind, BranchNaming, CheckpointFile, ThreadId};
-use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript};
+use agent_protocol::models::{
+    AutoSettle, Project, ProjectRoot, ProjectScript, SourceControlWritingStyleMode,
+    WorktreeSubmodules,
+};
 use agent_runtime::{
     ConversationSettings, CreatedWorktree, HostOperations, HostProject, PreparedRestore,
-    SetupRequest, SetupRun, TextGenerationRequest, WorktreeRequest,
+    SetupRequest, SetupRun, TextGenerationRequest, TextGenerationSettings, WorktreeRequest,
 };
 use futures_util::future::BoxFuture;
 use serde_json::Value;
@@ -188,6 +191,9 @@ pub(crate) struct TextGenerator {
     pub(crate) codex: Option<PathBuf>,
     pub(crate) codex_home: Option<PathBuf>,
     pub(crate) claude: Option<(ClaudeProgram, Arc<dyn super::ClaudeCredentials>)>,
+    /// The settings owner is read for every generation so a provider-instance
+    /// executable or home change applies to the next title/Git request.
+    pub(crate) worktrees: Option<Arc<Worktrees>>,
 }
 
 /// The default Codex text-generation model and its reasoning effort.
@@ -198,26 +204,174 @@ const CLAUDE_TEXT_MODEL: &str = "claude-haiku-4-5";
 const TEXT_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl TextGenerator {
-    async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
-        if let Some(codex) = &self.codex {
-            return self.codex(codex, request).await;
+    pub(crate) fn generation_settings(
+        &self,
+        project: &str,
+        operation: &str,
+    ) -> TextGenerationSettings {
+        self.worktrees
+            .as_ref()
+            .map(|worktrees| {
+                resolve_text_generation_settings(
+                    &worktrees.latest_host_settings(),
+                    project,
+                    operation,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
+        let driver = request.model.as_ref().map(|selection| selection.driver);
+        let configured = request.model.as_ref().and_then(|selection| {
+            self.worktrees.as_ref().and_then(|worktrees| {
+                worktrees
+                    .latest_host_settings()
+                    .provider_instances
+                    .get(&selection.instance)
+                    .cloned()
+            })
+        });
+        if let Some(selection) = request.model.as_ref() {
+            if configured.is_none()
+                && selection.instance != "codex"
+                && selection.instance != "claude"
+            {
+                return Err(format!(
+                    "The selected provider instance {} is not configured.",
+                    selection.instance
+                ));
+            }
+            if configured
+                .as_ref()
+                .is_some_and(|config| Some(config.driver) != driver)
+            {
+                return Err(format!(
+                    "The selected provider instance {} uses a different driver.",
+                    selection.instance
+                ));
+            }
         }
-        if let Some((claude, credentials)) = &self.claude {
-            return Self::claude(claude, credentials.as_ref(), request).await;
+        let configured = configured.filter(|config| Some(config.driver) == driver);
+        if configured.as_ref().is_some_and(|config| !config.enabled) {
+            return Err(format!(
+                "The selected provider instance {} is disabled.",
+                request
+                    .model
+                    .as_ref()
+                    .map_or("unknown", |selection| selection.instance.as_str())
+            ));
         }
-        Err("No provider can generate text.".into())
+        if (driver.is_none() || driver == Some(agent_domain::Driver::Codex))
+            && let Some(program) = configured
+                .as_ref()
+                .and_then(|config| config.binary_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| self.codex.clone())
+        {
+            let home = configured
+                .as_ref()
+                .and_then(|config| config.home_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| self.codex_home.clone());
+            let launch_args = configured
+                .as_ref()
+                .map_or(&[][..], |config| config.launch_args.as_slice());
+            let environment = configured
+                .as_ref()
+                .map_or_else(std::collections::BTreeMap::new, |config| {
+                    config.environment.clone()
+                });
+            return Self::codex(
+                &program,
+                home.as_deref(),
+                launch_args,
+                &environment,
+                request,
+            )
+            .await;
+        }
+        if (driver.is_none() || driver == Some(agent_domain::Driver::Claude))
+            && let Some(program) = configured
+                .as_ref()
+                .and_then(|config| config.binary_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| {
+                    self.claude
+                        .as_ref()
+                        .map(|(claude, _)| claude.program.clone())
+                })
+        {
+            let config_home = configured
+                .as_ref()
+                .and_then(|config| config.home_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| {
+                    self.claude
+                        .as_ref()
+                        .map(|(claude, _)| claude.config_home.clone())
+                });
+            let Some(config_home) = config_home else {
+                return Err("Claude needs a configuration directory for text generation.".into());
+            };
+            let use_base_credentials = configured
+                .as_ref()
+                .is_none_or(|config| config.home_path.is_none());
+            let credentials = self
+                .claude
+                .as_ref()
+                .filter(|_| use_base_credentials)
+                .map(|(_, credentials)| credentials.as_ref());
+            return Self::claude(
+                &ClaudeProgram {
+                    program,
+                    config_home,
+                    environment: configured
+                        .as_ref()
+                        .map_or_else(std::collections::BTreeMap::new, |config| {
+                            config.environment.clone()
+                        }),
+                    launch_args: configured
+                        .as_ref()
+                        .map_or_else(Vec::new, |config| config.launch_args.clone()),
+                },
+                credentials,
+                request,
+            )
+            .await;
+        }
+        Err(format!(
+            "The selected text-generation provider is unavailable: {}.",
+            driver.map_or("none", |driver| match driver {
+                agent_domain::Driver::Codex => "Codex",
+                agent_domain::Driver::Claude => "Claude",
+            })
+        ))
     }
 
     /// `codex exec` with an output schema, prompt on stdin.
     async fn codex(
-        &self,
         program: &Path,
+        codex_home: Option<&Path>,
+        launch_args: &[String],
+        environment: &std::collections::BTreeMap<String, String>,
         request: TextGenerationRequest,
     ) -> Result<String, String> {
         let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
         let schema = directory.path().join("schema.json");
         let output = directory.path().join("output.json");
         std::fs::write(&schema, request.output_schema.to_string()).map_err(|e| e.to_string())?;
+        let model = request
+            .model
+            .as_ref()
+            .filter(|selection| selection.driver == agent_domain::Driver::Codex)
+            .map_or(CODEX_TEXT_MODEL, |selection| selection.model.as_str());
+        let effort = request
+            .model
+            .as_ref()
+            .filter(|selection| selection.driver == agent_domain::Driver::Codex)
+            .and_then(|selection| selection.options.get("reasoningEffort"))
+            .map_or(CODEX_TEXT_EFFORT, String::as_str);
         let mut args: Vec<String> = [
             "exec",
             "--ephemeral",
@@ -225,17 +379,18 @@ impl TextGenerator {
             "-s",
             "read-only",
             "--model",
-            CODEX_TEXT_MODEL,
+            model,
             "--config",
         ]
         .map(str::to_owned)
         .to_vec();
-        args.push(format!("model_reasoning_effort=\"{CODEX_TEXT_EFFORT}\""));
+        args.push(format!("model_reasoning_effort=\"{effort}\""));
         args.extend(["--output-schema".into(), schema.to_string_lossy().into()]);
         args.extend([
             "--output-last-message".into(),
             output.to_string_lossy().into(),
         ]);
+        args.extend(launch_args.iter().cloned());
         for attachment in &request.attachments {
             if attachment.kind == AttachmentKind::Image && Path::new(&attachment.path).is_file() {
                 args.extend(["--image".into(), attachment.path.clone()]);
@@ -243,14 +398,15 @@ impl TextGenerator {
         }
         args.push("-".into());
         let mut command = bex_process::command(program).map_err(|e| e.to_string())?;
-        if let Some(home) = &self.codex_home {
+        command.envs(environment);
+        if let Some(home) = codex_home {
             command.env("CODEX_HOME", home);
         }
         let cwd = Some(PathBuf::from(&request.cwd))
             .filter(|cwd| cwd.is_dir())
             .unwrap_or_else(|| directory.path().to_path_buf());
         command.args(&args).current_dir(cwd);
-        run_with_stdin(command, &request.prompt)
+        run_with_stdin(command, &generation_prompt(&request))
             .await
             .map_err(|detail| format!("Codex CLI command failed: {detail}"))?;
         std::fs::read_to_string(&output).map_err(|_| "Failed to read Codex output file.".into())
@@ -259,10 +415,13 @@ impl TextGenerator {
     /// `claude -p` with a JSON schema and no tools.
     async fn claude(
         program: &ClaudeProgram,
-        credentials: &dyn super::ClaudeCredentials,
+        credentials: Option<&dyn super::ClaudeCredentials>,
         request: TextGenerationRequest,
     ) -> Result<String, String> {
-        let home = credentials.claude_home().await?;
+        let home = match credentials {
+            Some(credentials) => credentials.claude_home().await?,
+            None => program.config_home.clone(),
+        };
         let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
         let args: Vec<String> = vec![
             "-p".into(),
@@ -271,7 +430,14 @@ impl TextGenerator {
             "--json-schema".into(),
             request.output_schema.to_string(),
             "--model".into(),
-            CLAUDE_TEXT_MODEL.into(),
+            request
+                .model
+                .as_ref()
+                .filter(|selection| selection.driver == agent_domain::Driver::Claude)
+                .map_or_else(
+                    || CLAUDE_TEXT_MODEL.to_owned(),
+                    |selection| selection.model.clone(),
+                ),
             "--settings".into(),
             r#"{"disableAllHooks":true}"#.into(),
             "--tools".into(),
@@ -284,7 +450,7 @@ impl TextGenerator {
         let command = program
             .command(&args, &home, directory.path())
             .map_err(|e| e.to_string())?;
-        let stdout = run_with_stdin(command, &request.prompt)
+        let stdout = run_with_stdin(command, &generation_prompt(&request))
             .await
             .map_err(|detail| format!("Claude CLI command failed: {detail}"))?;
         let output: Value = serde_json::from_str(&stdout)
@@ -300,6 +466,21 @@ impl TextGenerator {
         };
         Ok(envelope["structured_output"].to_string())
     }
+}
+
+fn generation_prompt(request: &TextGenerationRequest) -> String {
+    let Some(instructions) = request
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|instructions| !instructions.is_empty())
+    else {
+        return request.prompt.clone();
+    };
+    format!(
+        "{}\n\nAdditional source-control instructions:\n{}",
+        request.prompt, instructions
+    )
 }
 
 /// Runs a supervised CLI with `input` on stdin and returns its stdout.
@@ -357,7 +538,7 @@ impl PreparedRestore for Restore {
 
 /// A project's overrides over the Host's values.
 fn resolve_settings(
-    saved: &agent_protocol::models::ConversationSettings,
+    saved: &agent_protocol::models::HostSettings,
     project: &str,
 ) -> ConversationSettings {
     let overrides = saved.project_overrides.get(project);
@@ -372,20 +553,22 @@ fn resolve_settings(
         continue_after_restart: overrides
             .and_then(|project| project.continue_after_restart)
             .unwrap_or(saved.continue_after_restart),
+        auto_settle_on_merge: overrides
+            .and_then(|project| project.auto_settle_on_merge)
+            .unwrap_or(saved.auto_settle_on_merge),
         snooze_limited_threads: saved.snooze_limited_threads,
         auto_resume_limited_threads: saved.auto_resume_limited_threads,
     }
 }
 
 /// The branch naming of `project`: its overrides, then the Host's settings.
-/// Text values are trimmed, as the reference decodes them.
 fn resolve_branch_naming(
-    saved: &agent_protocol::models::ConversationSettings,
+    saved: &agent_protocol::models::HostSettings,
     project: &str,
 ) -> BranchNaming {
     let overrides = saved.project_overrides.get(project);
     let text = |value: Option<&String>, inherited: &str| {
-        value.map_or(inherited, String::as_str).trim().to_owned()
+        value.map_or(inherited, String::as_str).to_owned()
     };
     BranchNaming {
         mode: overrides
@@ -402,15 +585,96 @@ fn resolve_branch_naming(
     }
 }
 
+/// The submodule depth for a new worktree: project override, Host preference,
+/// then recursive initialization.
+fn resolve_worktree_submodules(
+    saved: &agent_protocol::models::HostSettings,
+    project: &str,
+) -> WorktreeSubmodules {
+    saved
+        .project_overrides
+        .get(project)
+        .and_then(|project| project.worktree_submodules)
+        .or(saved.worktree_submodules)
+        .unwrap_or(WorktreeSubmodules::Recursive)
+}
+
+fn resolve_default_auto_pull(saved: &agent_protocol::models::HostSettings, project: &str) -> bool {
+    saved
+        .project_overrides
+        .get(project)
+        .and_then(|project| project.default_auto_pull)
+        .unwrap_or(saved.default_auto_pull)
+}
+
+fn resolve_text_generation_settings(
+    saved: &agent_protocol::models::HostSettings,
+    project: &str,
+    operation: &str,
+) -> TextGenerationSettings {
+    let overrides = saved.project_overrides.get(project);
+    let text_model = overrides
+        .and_then(|project| project.text_generation_model_selection.clone())
+        .or_else(|| saved.text_generation_model_selection.clone());
+    let source_style = overrides
+        .and_then(|project| project.source_control_writing_style.clone())
+        .unwrap_or_else(|| saved.source_control_writing_style.clone());
+    let writer_model =
+        match overrides.and_then(|project| project.source_control_writer_model_selection.clone()) {
+            Some(agent_protocol::models::Nullable::Value(model)) => Some(model),
+            Some(agent_protocol::models::Nullable::Null) => text_model.clone(),
+            None => saved
+                .source_control_writer_model_selection
+                .clone()
+                .or(text_model.clone()),
+        };
+    if operation == "generateThreadTitle" {
+        return TextGenerationSettings {
+            model: text_model,
+            instructions: None,
+        };
+    }
+    if operation == "generateBranchName" {
+        return TextGenerationSettings {
+            model: writer_model,
+            instructions: None,
+        };
+    }
+    let mut instructions = match source_style.mode {
+        SourceControlWritingStyleMode::RepoConventions => {
+            "Follow the repository's established source-control writing conventions.".to_owned()
+        }
+        SourceControlWritingStyleMode::ConventionalCommits => {
+            "Use Conventional Commits style where it fits the generated source-control text."
+                .to_owned()
+        }
+        SourceControlWritingStyleMode::Custom => source_style.custom_instructions,
+    };
+    if source_style.follow_change_request_templates {
+        instructions.push_str(
+            " When source-control text has a change-request template, preserve and fill its sections.",
+        );
+    }
+    let instructions = (!instructions.trim().is_empty()).then_some(instructions);
+    TextGenerationSettings {
+        model: writer_model,
+        instructions,
+    }
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;
-    use agent_domain::BranchNamingMode;
-    use agent_protocol::models::ProjectConversationSettings;
+    use agent_domain::{BranchNamingMode, Driver, ModelSelection};
+    use agent_protocol::models::{
+        Nullable, ProjectSettingsOverrides, SourceControlWritingStyle,
+        SourceControlWritingStyleMode,
+    };
+    use std::collections::BTreeMap;
 
     #[test]
     fn project_overrides_take_precedence_and_absent_values_inherit() {
-        let mut saved = agent_protocol::models::ConversationSettings::default();
+        let mut saved = agent_protocol::models::HostSettings::default();
         assert_eq!(
             resolve_settings(&saved, "any"),
             ConversationSettings::default()
@@ -419,16 +683,15 @@ mod settings_tests {
         saved.auto_resume_limited_threads = true;
         saved.project_overrides.insert(
             "opted-in".into(),
-            ProjectConversationSettings {
+            ProjectSettingsOverrides {
                 auto_settle: Some(AutoSettle::AfterDays(2)),
                 continue_after_restart: Some(true),
                 branch_naming_mode: Some(BranchNamingMode::Custom),
-                branch_name_prefix: None,
-                branch_name_instructions: Some(" Use ABC-123. ".into()),
-                new_worktrees_start_from_origin: None,
+                branch_name_instructions: Some("Use ABC-123.".into()),
+                ..Default::default()
             },
         );
-        saved.branch_name_prefix = " team/ ".into();
+        saved.branch_name_prefix = "team/".into();
         let inherited = resolve_settings(&saved, "other");
         assert_eq!(inherited.auto_settle_after_days, None);
         assert!(!inherited.continue_after_restart && inherited.auto_resume_limited_threads);
@@ -456,6 +719,128 @@ mod settings_tests {
             BranchNaming::default()
         );
     }
+
+    #[test]
+    fn worktree_submodules_resolve_project_then_host_then_recursive() {
+        let mut saved = agent_protocol::models::HostSettings::default();
+        assert_eq!(
+            resolve_worktree_submodules(&saved, "project"),
+            WorktreeSubmodules::Recursive
+        );
+        saved.worktree_submodules = Some(WorktreeSubmodules::TopLevel);
+        assert_eq!(
+            resolve_worktree_submodules(&saved, "project"),
+            WorktreeSubmodules::TopLevel
+        );
+        saved.project_overrides.insert(
+            "project".into(),
+            ProjectSettingsOverrides {
+                worktree_submodules: Some(WorktreeSubmodules::None),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_worktree_submodules(&saved, "project"),
+            WorktreeSubmodules::None
+        );
+    }
+
+    #[test]
+    fn automatic_pull_resolves_a_project_override() {
+        let mut saved = agent_protocol::models::HostSettings::default();
+        saved.default_auto_pull = true;
+        assert!(resolve_default_auto_pull(&saved, "other"));
+        saved.project_overrides.insert(
+            "project".into(),
+            ProjectSettingsOverrides {
+                default_auto_pull: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!resolve_default_auto_pull(&saved, "project"));
+    }
+
+    #[test]
+    fn text_generation_resolves_title_and_source_control_models_separately() {
+        let model = |driver, name| ModelSelection {
+            instance: name.into(),
+            driver,
+            model: name.into(),
+            options: BTreeMap::new(),
+        };
+        let mut saved = agent_protocol::models::HostSettings {
+            text_generation_model_selection: Some(model(Driver::Codex, "title")),
+            source_control_writer_model_selection: Some(model(Driver::Claude, "writer")),
+            source_control_writing_style: SourceControlWritingStyle {
+                mode: SourceControlWritingStyleMode::Custom,
+                custom_instructions: "Use short imperative sentences.".into(),
+                follow_change_request_templates: true,
+            },
+            ..Default::default()
+        };
+        saved.project_overrides.insert(
+            "project".into(),
+            ProjectSettingsOverrides {
+                text_generation_model_selection: Some(model(Driver::Codex, "project-title")),
+                source_control_writer_model_selection: Some(Nullable::Value(model(
+                    Driver::Claude,
+                    "project-writer",
+                ))),
+                ..Default::default()
+            },
+        );
+        let title = resolve_text_generation_settings(&saved, "project", "generateThreadTitle");
+        assert_eq!(
+            title.model.as_ref().map(|model| model.model.as_str()),
+            Some("project-title")
+        );
+        assert_eq!(title.instructions, None);
+        let branch = resolve_text_generation_settings(&saved, "project", "generateBranchName");
+        assert_eq!(
+            branch.model.as_ref().map(|model| model.model.as_str()),
+            Some("project-writer")
+        );
+        assert_eq!(branch.instructions, None);
+        let commit = resolve_text_generation_settings(&saved, "other", "generateCommitMessage");
+        assert_eq!(
+            commit.model.as_ref().map(|model| model.model.as_str()),
+            Some("writer")
+        );
+        let mut inherited = saved.clone();
+        inherited.project_overrides.insert(
+            "project".into(),
+            ProjectSettingsOverrides {
+                text_generation_model_selection: Some(model(Driver::Codex, "project-title")),
+                source_control_writer_model_selection: Some(Nullable::Null),
+                ..Default::default()
+            },
+        );
+        let project_text_writer =
+            resolve_text_generation_settings(&inherited, "project", "generateCommitMessage");
+        assert_eq!(
+            project_text_writer
+                .model
+                .as_ref()
+                .map(|model| model.model.as_str()),
+            Some("project-title")
+        );
+        assert!(
+            project_text_writer.instructions.as_deref().is_some_and(
+                |instructions| instructions.contains("Use short imperative sentences.")
+            )
+        );
+        assert!(
+            generation_prompt(&TextGenerationRequest {
+                model: commit.model,
+                instructions: commit.instructions,
+                cwd: "/tmp/project".into(),
+                prompt: "Write a commit message.".into(),
+                attachments: vec![],
+                output_schema: serde_json::json!({}),
+            })
+            .contains("Use short imperative sentences.")
+        );
+    }
 }
 
 pub(crate) struct HostIo {
@@ -476,10 +861,42 @@ impl HostOperations for HostIo {
         self.projects.list()
     }
     fn settings(&self, project: &str) -> ConversationSettings {
-        resolve_settings(&self.worktrees.conversation(), project)
+        resolve_settings(&self.worktrees.latest_host_settings(), project)
     }
     fn branch_naming(&self, project: &str) -> BranchNaming {
-        resolve_branch_naming(&self.worktrees.conversation(), project)
+        resolve_branch_naming(&self.worktrees.latest_host_settings(), project)
+    }
+    fn text_generation_settings(&self, project: &str, operation: &str) -> TextGenerationSettings {
+        let host = self.worktrees.latest_host_settings();
+        let mut settings = resolve_text_generation_settings(&host, project, operation);
+        if settings.model.as_ref().is_some_and(|selection| {
+            let configured = host.provider_instances.get(&selection.instance);
+            (configured.is_none()
+                && selection.instance != "codex"
+                && selection.instance != "claude")
+                || configured.is_some_and(|config| !config.enabled)
+                || configured.is_some_and(|config| config.driver != selection.driver)
+                || match selection.driver {
+                    agent_domain::Driver::Codex => {
+                        self.text.codex.is_none()
+                            && configured
+                                .and_then(|config| config.binary_path.as_ref())
+                                .is_none()
+                    }
+                    agent_domain::Driver::Claude => {
+                        if self.text.claude.is_some() {
+                            false
+                        } else {
+                            configured.is_none_or(|config| {
+                                config.binary_path.is_none() || config.home_path.is_none()
+                            })
+                        }
+                    }
+                }
+        }) {
+            settings.model = None;
+        }
+        settings
     }
     fn rename_branch(
         &self,
@@ -577,14 +994,19 @@ impl HostOperations for HostIo {
         request: WorktreeRequest,
     ) -> BoxFuture<'_, Result<CreatedWorktree, String>> {
         Box::pin(async move {
+            let saved = self.worktrees.latest_host_settings();
+            let auto_pull = resolve_default_auto_pull(&saved, &request.project);
+            let submodules = resolve_worktree_submodules(&saved, &request.project);
             let (path, branch) = self
                 .worktrees
-                .create(
+                .create_with_submodules(
                     request.thread.as_str(),
                     &request.project_root,
                     &request.base_ref,
                     request.branch,
                     request.start_from_origin,
+                    auto_pull,
+                    submodules,
                     request.progress,
                     request.cancel,
                 )

@@ -1,6 +1,9 @@
 use crate::{HostCredentials, HostRpcService, SessionId};
 use agent_protocol::{
-    models::{HostStatus, Invitation, RemoteHost},
+    models::{
+        EnvironmentCapabilities, EnvironmentDescriptor, EnvironmentFileAttachments,
+        EnvironmentPlatform, HostStatus, Invitation, RemoteHost,
+    },
     protocol::{Body, Call, Response},
 };
 use agent_transport::transport::{
@@ -10,7 +13,7 @@ use anyhow::{Context, Result};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +24,7 @@ pub struct HostRuntime {
     credentials: Arc<HostCredentials>,
     local_node: NodeId,
     name: String,
+    environment: EnvironmentDescriptor,
     invitation_lifetime: Duration,
     active: Mutex<BTreeMap<SessionId, Session>>,
 }
@@ -33,12 +37,17 @@ impl HostRuntime {
         invitation_lifetime: Duration,
     ) -> Self {
         let local_node = credentials.local_identity().await.node_id();
+        let cwd = std::env::current_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let environment = environment_descriptor(endpoint.node_id().to_string(), name.clone(), cwd);
         Self {
             service,
             endpoint,
             credentials,
             local_node,
             name,
+            environment,
             invitation_lifetime,
             active: Mutex::new(BTreeMap::new()),
         }
@@ -46,15 +55,21 @@ impl HostRuntime {
     pub fn ticket(&self) -> Ticket {
         self.endpoint.ticket()
     }
+    pub fn environment(&self) -> &EnvironmentDescriptor {
+        &self.environment
+    }
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<()> {
         self.service.start().await?;
         let service = self.service.clone();
         let maintenance_stop = shutdown.clone();
         let maintenance = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut handoff = tokio::time::interval(Duration::from_millis(250));
             handoff.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut next_cleanup = Instant::now();
+            let mut next_fetch = Instant::now();
+            let mut next_health = Instant::now();
             loop {
                 tokio::select! {
                     biased;
@@ -78,8 +93,28 @@ impl HostRuntime {
                         }
                     }
                     _ = interval.tick() => {
-                        if let Err(error) = service.cleanup_merged_worktrees().await {
-                            tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
+                        let now = Instant::now();
+                        let activity = service.background_activity();
+                        let fetch = activity.automatic_git_fetch_interval_ms > 0
+                            && now >= next_fetch;
+                        let health = activity.provider_health_refresh_interval_ms > 0
+                            && now >= next_health;
+                        if fetch {
+                            next_fetch = now + Duration::from_millis(activity.automatic_git_fetch_interval_ms);
+                        }
+                        if health {
+                            next_health = now + Duration::from_millis(activity.provider_health_refresh_interval_ms);
+                        }
+                        if fetch || health {
+                            if let Err(error) = service.background_activity_tick(fetch, health).await {
+                                tracing::warn!(target: "bex", operation = "host.background_activity", message = %error);
+                            }
+                        }
+                        if now >= next_cleanup {
+                            next_cleanup = now + Duration::from_secs(60);
+                            if let Err(error) = service.cleanup_merged_worktrees().await {
+                                tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
+                            }
                         }
                     }
                 }
@@ -353,6 +388,33 @@ impl HostRuntime {
                 "Host is waiting for its installed update to start"
             ));
         }
+        if matches!(message, Call::Environment(_)) {
+            return Ok(Response::Success {
+                result: Body::from(self.environment.clone()),
+            }
+            .into());
+        }
+        if let Call::RegisterAwareness(registration) = message {
+            let result = self
+                .service
+                .register_awareness(session, registration.clone())
+                .map_err(|error| anyhow::anyhow!(error.to_string()));
+            return Ok(Response::from_result(result.map_err(|error| {
+                agent_protocol::error::RpcFailure {
+                    code: "awareness_registration_failed".into(),
+                    message: format!("{error:#}"),
+                    delivery: agent_protocol::error::Delivery::NotSent,
+                }
+            }))
+            .into());
+        }
+        if matches!(message, Call::Awareness(_)) {
+            let cancel = self
+                .service
+                .cancellation(session)
+                .map_err(anyhow::Error::msg)?;
+            return Ok(self.service.awareness(self.environment.clone(), cancel));
+        }
         let management = matches!(
             message,
             Call::Pair(_)
@@ -389,7 +451,7 @@ impl HostRuntime {
             .into());
         }
         self.service
-            .dispatch(session, message)
+            .dispatch_from_peer(session, message, node == self.local_node)
             .await
             .map_err(anyhow::Error::msg)
     }
@@ -491,6 +553,144 @@ impl HostRuntime {
             _ => Err(anyhow::anyhow!("unknown management method")),
         }
     }
+}
+
+fn environment_descriptor(
+    environment_id: String,
+    label: String,
+    cwd: String,
+) -> EnvironmentDescriptor {
+    let machine = detect_machine_kind();
+    EnvironmentDescriptor {
+        environment_id,
+        label,
+        cwd,
+        platform: EnvironmentPlatform {
+            os: match std::env::consts::OS {
+                "macos" => "darwin",
+                "linux" => "linux",
+                "windows" => "windows",
+                _ => "unknown",
+            }
+            .into(),
+            arch: match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                "x86_64" => "x64",
+                _ => "other",
+            }
+            .into(),
+            machine: machine.clone(),
+        },
+        server_version: env!("CARGO_PKG_VERSION").into(),
+        orchestration_protocol_version: Some(2),
+        capabilities: EnvironmentCapabilities {
+            repository_identity: true,
+            connection_probe: true,
+            attachment_uploads: true,
+            question_attachments: true,
+            file_attachments: Some(EnvironmentFileAttachments {
+                max_upload_bytes: 50 * 1024 * 1024,
+            }),
+            pull_requests: false,
+            pull_request_checks: false,
+            inline_message_context: true,
+            required_worktree_bootstrap: true,
+            thread_settlement: true,
+            thread_auto_settlement: true,
+            thread_snooze: true,
+            storage_cleanup: true,
+            project_worktree_cleanup: true,
+            thread_restart_continuation: true,
+            project_settings_overrides: true,
+            environment_themes: false,
+            usage_limit_sources: false,
+            usage_price_overrides: false,
+            usage_model_aliases: false,
+            thread_pinning: true,
+            thread_pin_reorder: true,
+            thread_active_reorder: true,
+            thread_auto_settle_opt_out: true,
+            thread_title_regeneration: true,
+            thread_visited_tracking: true,
+            thread_pull_request_linking: true,
+            server_resolved_command_context: false,
+            thread_pull_requests: false,
+            thread_pull_request_watch: false,
+            pull_request_stack_actions: false,
+            server_self_update: None,
+            server_installation: None,
+            server_self_update_progress: false,
+            server_update_thread_continuation: false,
+            project_clone_tracking: false,
+            environment_icon: machine.is_some(),
+            desktop_app_update: false,
+            agent_activity_publishing: true,
+        },
+    }
+}
+
+fn detect_machine_kind() -> Option<String> {
+    if let Some(value) = std::env::var_os("AGENT_ENVIRONMENT_MACHINE") {
+        let value = value.to_string_lossy().trim().to_ascii_lowercase();
+        if matches!(
+            value.as_str(),
+            "server" | "cloud" | "linux" | "desktop" | "laptop" | "mac-mini" | "mac-studio"
+        ) {
+            return Some(value);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let model = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        return Some(
+            if model.starts_with("macmini") {
+                "mac-mini"
+            } else if model.starts_with("macstudio") {
+                "mac-studio"
+            } else if model.starts_with("macbook") {
+                "laptop"
+            } else {
+                "desktop"
+            }
+            .into(),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let product = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let chassis = std::fs::read_to_string("/sys/class/dmi/id/chassis_type")
+            .unwrap_or_default()
+            .trim()
+            .parse::<u16>()
+            .ok();
+        if product.contains("virtual") || product.contains("vmware") || product.contains("kvm") {
+            return Some("cloud".into());
+        }
+        return Some(
+            match chassis {
+                Some(8 | 9 | 10 | 14) => "laptop",
+                Some(3 | 4 | 5 | 6 | 7 | 15 | 16 | 17) => "desktop",
+                _ => "linux",
+            }
+            .into(),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Some("desktop".into());
+    }
+    #[allow(unreachable_code)]
+    None
 }
 fn now() -> u64 {
     SystemTime::now()

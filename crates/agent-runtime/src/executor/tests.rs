@@ -483,6 +483,7 @@ pub(crate) fn tid(id: &str) -> ThreadId {
 
 pub(crate) fn message(id: &str, text: &str, mode: DispatchMode) -> SendMessage {
     SendMessage {
+        scheduled_task: None,
         context: None,
         created_by: MessageAuthor::User,
         creation_source: "web".into(),
