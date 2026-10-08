@@ -36,19 +36,15 @@ struct ModelSettingsScreen: View {
         scope != nil
     }
 
-    private var preferences: ModelDefaults {
-        model.snapshot.modelDefaults(scope: scope ?? .global)
+    private var preferences: ProviderModelDefaults {
+        model.snapshot.providerModelDefaults(scope: scope ?? .global, provider: provider)
     }
 
     private var provider: ProviderKind {
         if defaults || model.isNewThread, let providerOverride {
             return providerOverride
         }
-        if defaults {
-            return model.snapshot.defaultModel(scope: scope ?? .global)?.model.provider
-                ?? preferences.model?.provider ?? .codex
-        }
-        return model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
+        return defaults ? .codex : model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
     }
 
     private var selectedModel: ModelRef? {
@@ -60,10 +56,9 @@ struct ModelSettingsScreen: View {
     }
 
     private var selectedAccount: Account? {
-        model.accounts.first { $0.provider == provider && model.snapshot.accountIsSelected(
-            provider: $0.provider,
-            id: $0.id
-        ) }
+        model.accounts.first {
+            $0.provider == provider && model.snapshot.accountIsSelected(provider: $0.provider, id: $0.id)
+        }
     }
 
     var body: some View {
@@ -98,6 +93,10 @@ struct ModelSettingsScreen: View {
                         .padding(.bottom, 12)
                     }
                     Divider()
+                    if defaults {
+                        Text(provider == .codex ? "Codex のデフォルト" : "Claude のデフォルト")
+                            .font(.headline).padding(.horizontal, 12).padding(.vertical, 8)
+                    }
                     modelSection
                     quickControls
                     if let scope, model.snapshot.hasModelDefaultsOverride(scope: scope) {
@@ -116,16 +115,17 @@ struct ModelSettingsScreen: View {
         .background(modelSettingsBackground)
         .safeAreaInset(edge: .top, spacing: 0) {
             if let scope {
-                SettingsScopeBar {
-                    ModelDefaultsScopeMenu(choices: model.snapshot.modelProjectScopeChoices(scope: scope),
-                                           selected: scope, fallback: "すべてのプロジェクト",
-                                           id: "settings.scope.projects", select: selectScope)
-                } environment: {
-                    ModelDefaultsScopeMenu(choices: model.snapshot.modelEnvironmentScopeChoices(scope: scope),
-                                           selected: scope, fallback: "この環境",
-                                           id: "settings.scope.environment", select: selectScope)
+                VStack(spacing: 0) {
+                    ModelDefaultsScopeBar(projects: model.snapshot.modelProjectScopeChoices(scope: scope),
+                                          environments: model.snapshot.modelEnvironmentScopeChoices(scope: scope),
+                                          selected: scope, disabled: model.store == nil || model.sending,
+                                          select: selectScope)
+                    NewChatDefaultModelMenu(selected: model.snapshot.modelDefaults(scope: scope).newChatModel,
+                                            choices: model.snapshot.modelsMatching(provider: nil, query: ""),
+                                            disabled: disabled) { value in
+                        model.perform(.selectNewChatModel(scope: scope, model: value))
+                    }
                 }
-                .disabled(model.store == nil || model.sending)
             }
         }
         .tint(.primary)
@@ -136,9 +136,7 @@ struct ModelSettingsScreen: View {
             model.perform(.loadModels(LoadModels())) { _ in loadingModels = false }
         }
         .onChange(of: model.selectedProfileId) { _ in
-            if defaults {
-                scope = .global
-            }
+            scope = defaults ? .global : nil
             providerOverride = nil
             search = ""
         }
@@ -146,11 +144,9 @@ struct ModelSettingsScreen: View {
 
     @ViewBuilder
     private var quickControls: some View {
-        let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global)
+        let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global, provider: provider)
             : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
-        let controlsProvider = defaults ? model.snapshot.defaultModel(scope: scope ?? .global)?.model.provider
-            : selectedModel?.provider
-        if controlsProvider == provider, !controls.efforts.isEmpty || controls.toggleFastTo != nil {
+        if defaults || selectedModel?.provider == provider, !controls.efforts.isEmpty || controls.toggleFastTo != nil {
             Divider()
             HStack(spacing: 16) {
                 if !controls.efforts.isEmpty {
@@ -160,7 +156,7 @@ struct ModelSettingsScreen: View {
                             defaults ? preferences.effort : controls.effort
                         }, set: { value in
                             if let scope {
-                                model.perform(.selectDefaultEffort(scope: scope, effort: value))
+                                model.perform(.selectDefaultEffort(scope: scope, provider: provider, effort: value))
                             } else if let value {
                                 model.chooseEffort(value)
                             }
@@ -187,7 +183,11 @@ struct ModelSettingsScreen: View {
                             defaults ? preferences.serviceTier : controls.fast ? tier : "default"
                         }, set: { value in
                             if let scope {
-                                model.perform(.selectDefaultServiceTier(scope: scope, serviceTier: value))
+                                model.perform(.selectDefaultServiceTier(
+                                    scope: scope,
+                                    provider: provider,
+                                    serviceTier: value
+                                ))
                             } else if let value {
                                 model.chooseServiceTier(value)
                             }
@@ -229,7 +229,7 @@ struct ModelSettingsScreen: View {
                 if defaults {
                     Button {
                         if let scope {
-                            model.perform(.selectDefaultModel(scope: scope, model: nil))
+                            model.perform(.selectDefaultModel(scope: scope, provider: provider, model: nil))
                         }
                     } label: {
                         ModelChoiceRow(label: "自動", selected: selectedModel == nil)
@@ -245,7 +245,7 @@ struct ModelSettingsScreen: View {
                 ForEach(choices, id: \.model) { choice in
                     Button {
                         if let scope {
-                            model.perform(.selectDefaultModel(scope: scope, model: choice.model))
+                            model.perform(.selectDefaultModel(scope: scope, provider: provider, model: choice.model))
                         } else {
                             model.chooseModel(choice.model)
                         }
@@ -347,34 +347,5 @@ private struct ModelControlLabel<Icon: View>: View {
             Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
         }
         .frame(minHeight: 44).contentShape(Rectangle())
-    }
-}
-
-private struct ModelDefaultsScopeMenu: View {
-    let choices: [ModelScopeChoice]
-    let selected: ModelDefaultsScope
-    let fallback: String
-    let id: String
-    let select: (ModelDefaultsScope) -> Void
-
-    var body: some View {
-        Menu {
-            ForEach(choices, id: \.id) { choice in
-                Button { select(choice.scope) } label: {
-                    if choice.scope == selected {
-                        Label(choice.label, systemImage: "checkmark")
-                    } else {
-                        Text(choice.label)
-                    }
-                }
-                .accessibilityIdentifier(id + "." + choice.id)
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(choices.first { $0.scope == selected }?.label ?? fallback).lineLimit(1)
-                Image(systemName: "chevron.down")
-            }
-        }
-        .accessibilityIdentifier(id)
     }
 }

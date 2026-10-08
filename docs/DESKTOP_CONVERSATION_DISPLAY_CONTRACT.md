@@ -578,6 +578,13 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
   line, with icons and values instead of visible headings; accessible labels
   retain their meaning. iPhone dismisses the sheet by swiping down; desktop
   retains native popover dismissal.
+- Model settings store a separate model, reasoning and speed preset for each
+  provider, plus an independent model for new chats. Changing one selection must
+  not overwrite the others. New chats use the selected model and that provider's
+  supported preset options; automatic uses the Codex preset. Switching the agent
+  in a new draft uses the destination provider's preset. Existing chats and
+  already-created drafts retain their choices when settings change. The existing
+  global, environment and project scope inheritance applies to both preferences.
 - Composer model text uses its natural width; compact spacing retains
   44-point quick-control touch targets.
 - Account choices use provider, email and plan; no invented 個人/仕事 labels.

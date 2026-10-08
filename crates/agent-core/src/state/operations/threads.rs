@@ -603,10 +603,10 @@ impl Operation for LoadModels {
             .unwrap_or_default();
         let drafts = snapshot.drafts.clone();
         for (id, previous_draft) in drafts.iter() {
-            let provider = match id {
-                DraftKey::Session { session } => Some(session.provider),
-                DraftKey::Local { .. } => None,
-            };
+            let provider = Some(crate::presentation::model_settings::draft_provider(
+                id,
+                previous_draft.model.as_ref(),
+            ));
             let settings = supported_settings(
                 previous_draft.model.as_ref(),
                 previous_draft.effort.as_deref(),

@@ -112,16 +112,23 @@ pub enum Intent {
         thread_id: crate::session::SessionRef,
     },
     LoadModels(LoadModels),
+    SelectNewChatModel {
+        scope: super::ModelDefaultsScope,
+        model: Option<crate::models::ModelRef>,
+    },
     SelectDefaultModel {
         scope: super::ModelDefaultsScope,
+        provider: crate::session::ProviderKind,
         model: Option<crate::models::ModelRef>,
     },
     SelectDefaultEffort {
         scope: super::ModelDefaultsScope,
+        provider: crate::session::ProviderKind,
         effort: Option<String>,
     },
     SelectDefaultServiceTier {
         scope: super::ModelDefaultsScope,
+        provider: crate::session::ProviderKind,
         service_tier: Option<String>,
     },
     InheritModelDefaults {

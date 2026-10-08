@@ -151,9 +151,15 @@ impl Operation for SelectAccountForDraft {
                     .any(|model| model.model.provider == provider)
                 {
                     if previous_provider != provider {
-                        draft.model = None;
-                        draft.effort = None;
-                        draft.service_tier = None;
+                        let defaults = snapshot.model_defaults_for_cwd(&snapshot.navigation.cwd);
+                        let settings = defaults
+                            .providers
+                            .get(&provider)
+                            .cloned()
+                            .unwrap_or_default();
+                        draft.model = settings.model;
+                        draft.effort = settings.effort;
+                        draft.service_tier = settings.service_tier;
                     }
                     let (model, effort, tier) = supported_settings(
                         draft.model.as_ref(),

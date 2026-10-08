@@ -60,6 +60,7 @@
 		F70000000000000000000003 /* TaskActivityAttributes.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000012; };
 		F70000000000000000000004 /* TaskActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000013; };
 		F70000000000000000000005 /* BexTaskActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F70000000000000000000010; settings = {ATTRIBUTES = (RemoveHeadersOnCopy,); }; };
+		C0DE00000000000000000501 /* ModelDefaultsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000502 /* ModelDefaultsControls.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -122,6 +123,7 @@
 		F70000000000000000000012 /* TaskActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskActivityAttributes.swift; sourceTree = "<group>"; };
 		F70000000000000000000013 /* TaskActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskActivityWidget.swift; sourceTree = "<group>"; };
 		F70000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C0DE00000000000000000502 /* ModelDefaultsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDefaultsControls.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -187,6 +189,7 @@
 				C0DE00000000000000000004 /* ConversationPresentation.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
+				C0DE00000000000000000502 /* ModelDefaultsControls.swift */,
 				C0DE00000000000000000402 /* AgentSettings.swift */,
 				C0DE00000000000000000203 /* AccountViews.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
@@ -362,6 +365,7 @@
 				C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
+				C0DE00000000000000000501 /* ModelDefaultsControls.swift in Sources */,
 				C0DE00000000000000000401 /* AgentSettings.swift in Sources */,
 				C0DE00000000000000000202 /* AccountViews.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
