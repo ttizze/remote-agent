@@ -12,6 +12,8 @@ import VideoToolbox
 /// It is owned by `DeviceFrameDecoderWorker`, so VideoToolbox and Core Image
 /// work never runs in the SwiftUI main-actor render path.
 final class DeviceVideoDecoder {
+    private static let maxAccessUnitBytes = 8 * 1024 * 1024
+    private static let maxImageBytes = 16 * 1024 * 1024
     private var formatDescription: CMVideoFormatDescription?
     private var session: VTDecompressionSession?
     private var awaitingKeyframe = true
@@ -45,8 +47,13 @@ final class DeviceVideoDecoder {
     func consume(_ frame: DeviceVideoFrameView) -> Data? {
         switch frame.encoding {
         case "jpeg", "mjpeg", "png":
+            guard frame.payload.count <= Self.maxImageBytes else { return nil }
             return Data(frame.payload)
         case "avcc-description":
+            guard frame.payload.count <= Self.maxAccessUnitBytes else {
+                resync()
+                return nil
+            }
             guard configure(description: frame.payload) else {
                 resync()
                 return nil
@@ -66,7 +73,7 @@ final class DeviceVideoDecoder {
             }
             guard session != nil, formatDescription != nil else { return nil }
             let accessUnit = annexBToAvcc(frame.payload)
-            guard !accessUnit.isEmpty, accessUnit.count <= 8 * 1024 * 1024 else {
+            guard !accessUnit.isEmpty, accessUnit.count <= Self.maxAccessUnitBytes else {
                 resync()
                 return nil
             }
@@ -75,7 +82,10 @@ final class DeviceVideoDecoder {
                 return nil
             }
             awaitingKeyframe = false
-            return imageDataFromLatestPixelBuffer()
+            guard let data = imageDataFromLatestPixelBuffer(), data.count <= Self.maxImageBytes else {
+                return nil
+            }
+            return data
         default:
             return nil
         }

@@ -602,16 +602,12 @@ impl DeviceState {
             DeviceEvent::Recording(status) => {
                 let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
                 if status.active {
-                    if self
-                        .sessions
-                        .iter()
-                        .find(|session| {
-                            session.thread_id == status.thread_id
-                                && session.host_id.as_str() == status.host_id.as_str()
-                                && session.device_id.as_str() == status.device_id.as_str()
-                        })
-                        .is_some_and(|session| session.session_epoch != status.session_epoch)
-                    {
+                    if !self.sessions.iter().any(|session| {
+                        session.thread_id == status.thread_id
+                            && session.host_id == status.host_id
+                            && session.device_id == status.device_id
+                            && session.session_epoch == status.session_epoch
+                    }) {
                         return;
                     }
                     if self
@@ -987,6 +983,8 @@ mod tests {
             sessions: vec![current.clone()],
             ..DeviceServiceState::default()
         }));
+        state.apply_event(DeviceEvent::Recording(old_status.clone()));
+        assert!(state.recordings.is_empty());
         let new_status = DeviceRecordingStatus {
             recording_id: 2,
             session_epoch: current.session_epoch.clone(),
