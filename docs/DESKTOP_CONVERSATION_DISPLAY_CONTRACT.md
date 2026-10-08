@@ -126,6 +126,15 @@ complete retrieval and reopening.
 
 ## Conversation navigation
 
+- iPhone new conversations center “何を作りましょうか？” and an underlined
+  project picker in the empty conversation area, with the environment picker
+  below them. Both pickers retain their existing selection actions and are
+  separate from the bottom composer. The prompt stays reachable when the
+  keyboard or larger text reduces the available space.
+  Acceptance: `testSimulatorCanStartAConversationInAProject` checks the prompt,
+  project and environment order and centering;
+  `testSimulatorCanAddASecondPhoto` retains project switching and attachments.
+
 - The left conversation list contains parent conversations and independent forks;
   native subagents do not appear as conversations in desktop or mobile lists.
   Desktop's right panel includes an Agents tab and a conversation-header shortcut.

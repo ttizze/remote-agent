@@ -9,9 +9,6 @@ extension ThreadScreen {
     var composer: some View {
         let attachments = model.snapshot.draft(key: model.coreDraftKey).attachments
         return VStack(spacing: 12) {
-            if model.isNewThread {
-                newThreadContext
-            }
             if !isSideChat, !model.isNewThread, let review = model.snapshot.review(), review.fileCount() > 0 {
                 Button { openTools?(.files, true) } label: {
                     HStack(spacing: 10) {
