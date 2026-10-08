@@ -19,8 +19,20 @@ class DeviceVideoDecoderTest {
         val (sps, pps) = splitCodecDescription(
             byteArrayOf(0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68, 0xEE.toByte()),
         )
-        assertArrayEquals(byteArrayOf(0x67, 0x64), sps)
-        assertArrayEquals(byteArrayOf(0x68, 0xEE.toByte()), pps)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x67, 0x64), sps)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x68, 0xEE.toByte()), pps)
+    }
+
+    @Test
+    fun codecDescriptionSplitsAvccSpsAndPpsWithAnnexBPrefixes() {
+        val (sps, pps) = splitCodecDescription(
+            byteArrayOf(
+                1, 0x64, 0, 0x1f, 0xff.toByte(), 0xe1.toByte(), 0, 2, 0x67, 0x64,
+                1, 0, 2, 0x68, 0xee.toByte(),
+            ),
+        )
+        assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x67, 0x64), sps)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x68, 0xee.toByte()), pps)
     }
 
     @Test
