@@ -83,6 +83,7 @@ pub fn next_index(index: usize, direction: i8, count: usize) -> usize {
     if count == 0 {
         return 0;
     }
+    let index = index % count;
     match direction {
         -1 if index == 0 => count - 1,
         -1 => index - 1,

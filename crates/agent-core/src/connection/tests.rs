@@ -2009,7 +2009,10 @@ fn new_thread_defaults_change_without_touching_the_open_thread() {
             options: vec![],
         })
         .unwrap();
-    assert!(matches!(next, Next::Done));
+    assert!(matches!(
+        next,
+        Next::Call(call, _) if matches!(*call, crate::protocol::Call::UpdateSettings(_))
+    ));
     let next = owner
         .prepare(Intent::SetDefaultRuntimeMode {
             mode: agent_domain::RuntimeMode::ApprovalRequired,
@@ -3056,7 +3059,19 @@ async fn a_command_reaches_the_host_only_once_the_device_state_holds_it() {
         assert_eq!(saved.outbox.entries[0].id, entry.id);
         host.owner.handle(written).await;
         assert_eq!(host.owner.state.outbox.entries[0].phase, Phase::InFlight);
-        let request = host.next_call().await;
+        let mut request = host.next_call().await;
+        if matches!(request.call, Call::ListAccounts(_)) {
+            answer::<crate::protocol::contracts::ListAccounts>(
+                &mut request,
+                op::Accounts {
+                    accounts: vec![],
+                    selected: Default::default(),
+                    error: None,
+                },
+            )
+            .await;
+            request = host.next_call().await;
+        }
         assert!(
             matches!(&request.call, Call::Dispatch(dispatch) if dispatch.command_id == entry.id)
         );

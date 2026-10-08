@@ -1217,12 +1217,15 @@ impl EnvironmentRegistry {
             .iter()
             .map(|candidate| candidate.capacity.clone())
             .collect();
-        let route = load_balancing::select_environment(&capacities, now_ms).and_then(|id| {
-            route_candidates
-                .iter()
-                .find(|candidate| candidate.route.environment_id == id)
-                .map(|candidate| candidate.route.clone())
-        });
+        let route = (!pending_resources)
+            .then(|| load_balancing::select_environment(&capacities, now_ms))
+            .flatten()
+            .and_then(|id| {
+                route_candidates
+                    .iter()
+                    .find(|candidate| candidate.route.environment_id == id)
+                    .map(|candidate| candidate.route.clone())
+            });
         EnvironmentLoadBalancingEvaluation {
             candidate_count: route_candidates.len(),
             pending_resources,
@@ -1643,7 +1646,7 @@ mod tests {
         assert!(split.usage_snapshot().configured_provider_kinds.is_empty());
         assert_eq!(
             registry
-                .sidebar_filtered(0, SidebarOptions::default(), "a")
+                .sidebar_filtered(0, SidebarOptions::default(), "z")
                 .sections
                 .len(),
             1

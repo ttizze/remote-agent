@@ -1008,28 +1008,32 @@ pub fn pending_tasks(snapshot: &Snapshot, listed: &BTreeSet<&str>) -> Vec<Pendin
             }),
             Request::Dispatch(_) => None,
         });
-    let drafts = snapshot.drafts.iter().filter_map(|(key, draft)| {
-        let project = draft.project_id.as_deref()?;
-        (!draft.is_empty()).then(|| PendingTaskRow {
-            key: format!("draft-task:{key}"),
-            kind: PendingTaskKind::Draft {
-                draft_key: key.clone(),
-            },
-            project_id: project.into(),
-            project_title: project_title(project),
-            title: draft_title(draft),
-            branch: draft
-                .workspace
-                .as_ref()
-                .and_then(|workspace| workspace.branch.clone()),
-            created_at_ms: draft
-                .project_selected_at_ms
-                .or(draft.created_at_ms)
-                .unwrap_or_default(),
-            show_pending_divider: false,
-            show_trailing_divider: false,
-        })
-    });
+    let drafts = snapshot
+        .drafts
+        .iter()
+        .filter(|(key, _)| key.starts_with("new:"))
+        .filter_map(|(key, draft)| {
+            let project = draft.project_id.as_deref()?;
+            (!draft.is_empty()).then(|| PendingTaskRow {
+                key: format!("draft-task:{key}"),
+                kind: PendingTaskKind::Draft {
+                    draft_key: key.clone(),
+                },
+                project_id: project.into(),
+                project_title: project_title(project),
+                title: draft_title(draft),
+                branch: draft
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.branch.clone()),
+                created_at_ms: draft
+                    .project_selected_at_ms
+                    .or(draft.created_at_ms)
+                    .unwrap_or_default(),
+                show_pending_divider: false,
+                show_trailing_divider: false,
+            })
+        });
     let mut tasks: Vec<PendingTaskRow> = drafts.chain(queued).collect();
     // Drafts are what the user is writing now, so they lead.
     tasks.sort_by(|left, right| {

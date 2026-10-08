@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn pools_windows_by_kind_and_id_with_stable_columns_and_pace() {
-        let first = account(
+        let mut first = account(
             "a",
             Some("a@example.test"),
             usage(80.0, 10, None, WindowKind::Session, "primary", Some(1_000)),
@@ -698,6 +698,10 @@ mod tests {
             Some("b@example.test"),
             usage(40.0, 10, None, WindowKind::Session, "primary", Some(1_100)),
         );
+        // Keep the fixture's short window explicit so 60% usage is ahead at
+        // the sampled time; the production helper uses provider durations.
+        first.usage.as_mut().unwrap().windows[0].window_duration_mins = Some(10);
+        second.usage.as_mut().unwrap().windows[0].window_duration_mins = Some(10);
         second.usage.as_mut().unwrap().windows.push(UsageWindow {
             id: Some("weekly".into()),
             kind: Some(WindowKind::Weekly),

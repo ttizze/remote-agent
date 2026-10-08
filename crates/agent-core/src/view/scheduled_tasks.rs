@@ -665,6 +665,7 @@ mod tests {
         };
         draft.title = "Morning review".into();
         draft.prompt = "Review".into();
+        draft.project_id = "project".into();
         draft.instance_id = "codex".into();
         draft.model = "model".into();
         let task = upsert(&draft, CommandId::new("command:scheduled").unwrap()).unwrap();

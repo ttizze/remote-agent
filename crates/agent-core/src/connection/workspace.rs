@@ -466,11 +466,13 @@ impl Owner {
             file: None,
         };
         self.state.sources.diff_files = None;
-        let previous = self.state.sources.diff_preview.take();
+        self.state.sources.diff_preview = None;
         self.state.sources.diff_preview = Some(DiffPreviewEntry {
-            result: previous
-                .filter(|entry| entry.request == request)
-                .and_then(|entry| entry.result),
+            // A new request invalidates the prior preview even when its
+            // inputs happen to compare equal. The request generation keeps
+            // late work from restoring a result that belongs to an older
+            // focus operation.
+            result: None,
             active_cwd,
             request: request.clone(),
             error: None,
