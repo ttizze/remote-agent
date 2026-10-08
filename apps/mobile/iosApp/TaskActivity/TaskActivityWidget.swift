@@ -42,9 +42,8 @@ private struct BexTaskActivity: Widget {
             } compactTrailing: {
                 compactIcons(context, leading: false)
             } minimal: {
-                Image(systemName: context.state.summary.waiting > 0
-                      ? "person.crop.circle.badge.questionmark" : "circle.dotted")
-                    .foregroundStyle(context.state.summary.waiting > 0 ? .orange : .primary)
+                TaskIconRow(icons: Array(context.state.summary.icons.prefix(1)),
+                            stale: context.isStale || !context.state.connected)
                     .accessibilityLabel(statusLabel(context))
             }
             .widgetURL(context.attributes.url)
@@ -57,7 +56,7 @@ private struct BexTaskActivity: Widget {
         let half = leading ? Array(icons.prefix(middle)) : Array(icons.dropFirst(middle))
         return HStack(spacing: 2) {
             TaskIconRow(icons: half, stale: context.isStale || !context.state.connected)
-                .frame(width: CGFloat(max(half.count, 1)) * 10, height: 22)
+                .frame(width: CGFloat(half.count) * 10, height: 22)
             if !leading && context.state.summary.total > icons.count {
                 Text("+\(context.state.summary.total - icons.count)").font(.caption2).monospacedDigit()
             }
@@ -82,7 +81,6 @@ private struct TaskIconRow: View {
                     .accessibilityLabel(stale ? "更新待ち" : icons[index] == "person.crop.circle.badge.questionmark" ? "確認待ち" : "実行中")
                     .frame(maxWidth: 22)
             }
-            if icons.isEmpty { Image(systemName: "checkmark.circle.fill") }
         }
     }
 }

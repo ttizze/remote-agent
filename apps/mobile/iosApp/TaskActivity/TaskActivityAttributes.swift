@@ -17,6 +17,7 @@ struct TaskActivityAttributes: ActivityAttributes, Hashable {
 
         // Keep the widget cheap and legible; additional tasks share a count badge.
         var icons: [String] {
+            if total == 0 { return ["checkmark.circle.fill"] }
             var result = [String]()
             for (count, symbol) in [(waiting, "person.crop.circle.badge.questionmark"),
                                     (running, "circle.dotted"), (unknown, "arrow.clockwise.circle")] {
