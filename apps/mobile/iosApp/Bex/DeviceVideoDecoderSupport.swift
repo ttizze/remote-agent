@@ -264,7 +264,7 @@ func annexBToAvcc(_ bytes: Data) -> Data {
         let length = Int(bytes[index]) << 24 | Int(bytes[index + 1]) << 16 | Int(bytes[index + 2]) << 8 |
             Int(bytes[index + 3])
         index += 4
-        guard length > 0, index + length <= bytes.count else { return [] }
+        guard length > 0, index + length <= bytes.count else { return Data() }
         result.append(contentsOf: bytes[index - 4 ..< index + length])
         index += length
     }
