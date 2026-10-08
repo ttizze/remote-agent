@@ -21,6 +21,7 @@ pub(super) enum Payload {
     ActionProgress(agent_protocol::vcs::ActionProgressEvent),
     ScheduledTasks(ScheduledTaskList),
     Preview(agent_protocol::preview::PreviewListResult),
+    Awareness(agent_protocol::models::AwarenessSnapshot),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }

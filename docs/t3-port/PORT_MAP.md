@@ -1378,7 +1378,7 @@ proptest: `sync::thread::tests::the_cursor_never_moves_back_under_duplicate_and_
 - `commands.test.ts` の project mutation 2 件: project は `host/project/*` の RPC で、会話 command ではない（A4 の projects で扱う）。command context を解決しない古い server 向けの 3 件と `reuseExistingThread`: Host は常に解決し、空 thread の再利用は持たない（2026-10-06 の決定）。
 - `threadWorkflows.test.ts` の `threadSupportsProviderHandoff`、`canDetachThreadProviderSession`、capability がない provider の 1 件: projection に provider session の capability と状態がない。Codex と Claude はどちらも queue を受ける。model picker（A4）で扱う。
 - `thread-outbox.test.ts` の保存先・manager の並行性・schema の旧版・`resolveThreadOutboxDispatchStep`・settings-sync の段階: 保存は device state の encode で 1 回に行い、旧形式は持たない。送信前の server config と file 上限の確認、送信前の設定同期は Host への送信の形が違う（選択は発言に含める）。
-- `threadCommands.test.ts` の environment の分離: Store は Host ごとに 1 つ。
+- `threadCommands.test.ts` の environment の分離: Store は Host ごとに 1 つを owner とし、複数 Host の横断表示は `agent-core::environment` の scoped identity を通す。
 
 T3 に合わせた判断:
 
@@ -1474,13 +1474,12 @@ A5 で接続した（2026-10-07、後述の「A5: 端末の状態・intent・Uni
 
 未接続:
 
-- thread の context record に入れる environment id（Host は1つなので持たない）。
 - 「Changes」と Uncommitted、provider の skill と slash command、workspace の path 検索は 2026-10-08 に接続した（後述の「段階 4 の統合」）。
 - 重複していた helper は 1 つにした（2026-10-07）: duration は `view::time::format_duration`、search ranking は `view::search_ranking`、JavaScript の文字列と数値の処理は `js_text`、名前の並びは `view::collation`、質問の回答の下書きは `view::requests`、一覧の行の状態は `thread_summary::thread_list_status`。
 
 ### 一覧・メニュー・検索・model・設定・project の view（2026-10-07）
 
-表示用データは `Snapshot` と時刻（と明示した UI の選択）からの純粋関数にし、一覧は `Snapshot::shell_view()`（楽観的な lifecycle を重ねたもの）を読む。出力の record と enum は後の UniFFI 公開を前提にした形にした（bindings は A5）。期待値は T3 のまま。Host は 1 つなので T3 の environment の次元は持たない。
+表示用データは `Snapshot` と時刻（と明示した UI の選択）からの純粋関数にし、一覧は `Snapshot::shell_view()`（楽観的な lifecycle を重ねたもの）を読む。出力の record と enum は後の UniFFI 公開を前提にした形にした（bindings は A5）。期待値は T3 のまま。Host ごとの Store 所有を保ったまま、`agent-core::environment` が複数 Host の scoped key、capability、並び、絞り込み、activity 集約を共有する。
 
 | T3 の原本 | agent-core の実装と検証 |
 | --- | --- |
@@ -1512,7 +1511,7 @@ A5 で接続した（2026-10-07、後述の「A5: 端末の状態・intent・Uni
 対象外にしたもの（理由）:
 
 - 不正な時刻文字列を扱う test（sort・snooze・settled の malformed / invalid の場合）: `Timestamp` は常に正しい時刻で、壊れた値が届かない。正しい値の部分は移植した。
-- environment をまたぐ並びと絞り込み（id の後の environment での tiebreak、environment の選択）: store は Host ごとに 1 つ。id の部分は移植した。
+- environment をまたぐ並びと絞り込み（id の後の environment での tiebreak、environment の選択）: `packages/client-runtime/src/environment/knownEnvironment.ts`、`scoped.ts`、`registry.ts`、`supervisor.ts`、`packages/contracts/src/environment.ts`、`relay/AgentAwarenessRelay.ts` の Host identity・scoped key・connection state・activity shape を `agent-protocol::models::{EnvironmentDescriptor, EnvironmentCapabilities, AwarenessRegistration, AwarenessSnapshot}`、`agent-core::environment`（scoped keys、capability checks、deterministic environment/activity aggregation）、`Snapshot.environment`/`awareness`、`Snapshot.context_environment_id`、authenticated iroh `host/environment`・`host/awareness/{register,subscribe}`、`host_rpc::service` の Host-local activity projection へ接続した。T3 Connect/web relay transport はこの native Host 境界の外に置き、local Host が authenticated session 上の registration、cleanup、live activity polling を所有する。Tests: scoped-key round trips、first-separator parsing、capability predicates、stable label/id ordering、query filtering、cross-environment activity aggregation。
 - React・DOM・JavaScript の object identity を確かめる test（hook、class 名、pointer と DOM の問い合わせ、recycled list の等価、参照の保持）: 描画は各クライアントが行う。id・順序・内容の比較に置き換えられるものは置き換えた。
 - ソース管理・PR・予定実行・usage・端末プレビュー・アカウント接続の設定と操作: 2026-10-07 の決定で段階 6。
 
@@ -1603,9 +1602,12 @@ UniFFI の公開（`bindings/views.rs`）:
 
 接続済み:
 
-- Host の provider catalog は各 instance の runtime mode capability を返し、core の draft が現在の runtime mode を保持して composer controls に渡す。
-- Snapshot の接続状態は Host 名と再接続理由を thread の floating status に渡す。
-- 新しい task の下書きは独立した key、project id、project 選択時刻を保持する。
+ - Host の provider catalog は各 instance の runtime mode capability を返し、core の draft が現在の runtime mode を保持して composer controls に渡す。
+ - Snapshot の接続状態は Host 名と再接続理由を thread の floating status に渡す。
+ - 新しい task の下書きは独立した key、project id、project 選択時刻を保持する。
+ - provider の catalog が `supported_runtime_modes` を Host から返し、core の `runtime_mode_choices` と現在の draft の mode を共有する（空の catalog も unknown provider の安全な既定値として扱う）。
+ - `EnvironmentSummary` が connected / connecting / disconnected と `Snapshot.error` の reconnect reason を保持し、desktop の settings/sidebar と iOS/Android の Hosts surface が environment label・platform・machine・capabilities・reason を表示する。
+ - `Draft.created_at_ms` は新しい task の project 選択時刻を含み、sidebar/thread-list の unsent draft ordering と native bindings が同じ値を読む。
 
 ### Android クライアント（段階 4、2026-10-07）
 
@@ -1661,8 +1663,9 @@ UniFFI の公開（`bindings/views.rs`）:
 
 接続済み:
 
-- diff の window focus は preview と遅延 file patches を無効化して再読み込みし、環境 cwd が後から届いた場合は pending selection を再試行する。
-- provider ごとの runtime mode capability と draft の現在値。
+ - diff の window focus は preview と遅延 file patches を無効化して再読み込みし、環境 cwd が後から届いた場合は pending selection を再試行する。
+ - provider ごとの runtime mode capability と draft の現在値。
+ - diff の window focus での再読み込み、環境 cwd での再試行。
 
 truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 
@@ -1684,7 +1687,7 @@ Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced
 ## 段階 5: 旧ランタイムの削除（2026-10-08）
 
 - `crates/orchestration` と `crates/provider-adapters` を workspace から削除した。上の生成表の翻訳先の列（すべて旧 crate への予定パスで、翻訳済みの行はなかった）と `PORT_MAP.json` の `rust` の欄、`inventory.py` の翻訳先の生成も消した。
-- `agent-protocol` の `orchestration` module、旧 `orchestration/*` の Call と Body、cwd から作る `terminal_handle` を削除した。会話の Call は `SubscribeThread`・`SubscribeShell`・`GetTurnItem`・`GetTurnDiff` と呼ぶ。ALPN は `remote-agent/streams/13`。
+- `agent-protocol` の `orchestration` module、旧 `orchestration/*` の Call と Body、cwd から作る `terminal_handle` を削除した。会話の Call は `SubscribeThread`・`SubscribeShell`・`GetTurnItem`・`GetTurnDiff` と呼ぶ。ALPN は `remote-agent/streams/14`（environment identity / awareness の wire models を含む現行形式）。
 - `crate_boundaries` は `agent-domain` の依存が純粋な crate だけであること、`agent-core`（bindings の有無とも）と `agent-ffi` が `agent-runtime`・`agent-providers`・`rusqlite` を含まないことを確かめる。
 - 旧ランタイムを記述した文書（`SESSION_RUNTIME.md`、`BEX_PROTOCOL_DESIGN.md`、`BEX_PROTOCOL_NATIVE_CONTRACTS.md`、`CRATE_BOUNDARIES.md`、`IMPLEMENTATION.md`、`PLAN.md` の設計の節）を現在の設計に書き直し、旧コードの地図 `BEX_ARCHITECTURE_MAP.md` と、削除したテストを根拠にした `PR55_REVIEW.md`、この文書の「中断時の12ファイルの採否」を削除した。
 - どこからも参照されない core と runtime の定数・関数を削除した。T3 から移植してテストだけが使う関数（minimap、drag、citation など）は、未接続の T3 の挙動として残す。

@@ -57,6 +57,7 @@ impl Owner {
             StreamKey::ScheduledTasks => {
                 tokio::spawn(follow(target, call, Payload::ScheduledTasks))
             }
+            StreamKey::Awareness => tokio::spawn(follow(target, call, Payload::Awareness)),
         };
         let failures = network
             .streams
@@ -216,6 +217,17 @@ impl Owner {
         self.open_stream(
             StreamKey::ScheduledTasks,
             Call::SubscribeScheduledTasks(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The authenticated Host's live activity for threads running there.
+    pub(super) fn subscribe_awareness(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Awareness,
+            Call::Awareness(agent_protocol::models::Empty {}),
         );
     }
 
@@ -423,6 +435,7 @@ impl Owner {
             StreamKey::VcsStatus(cwd) => self.subscribe_vcs_status(cwd),
             StreamKey::GitAction(_) => {}
             StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
+            StreamKey::Awareness => self.subscribe_awareness(),
         }
     }
 
@@ -485,9 +498,14 @@ impl Owner {
                 if terminal {
                     self.close_stream(&key);
                 }
+            }
             (StreamKey::ScheduledTasks, Payload::ScheduledTasks(list)) => {
                 self.healthy(&StreamKey::ScheduledTasks);
                 self.state.scheduled_tasks = list.tasks;
+            }
+            (StreamKey::Awareness, Payload::Awareness(snapshot)) => {
+                self.healthy(&StreamKey::Awareness);
+                self.state.awareness = Some(snapshot);
             }
             _ => {}
         }
@@ -521,6 +539,7 @@ impl Owner {
                 | StreamKey::GitAction(_)
                 | StreamKey::Preview(_)
                 | StreamKey::ScheduledTasks => {}
+                | StreamKey::Awareness => {}
             }
             self.schedule_resubscribe(key);
             return;

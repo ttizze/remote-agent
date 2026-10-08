@@ -160,13 +160,24 @@ impl Store {
         if let Some(invitation) = invitation {
             peer.call(&op::Pair { invitation }).await?;
         }
+        let environment = peer
+            .request::<m::EnvironmentDescriptor>(&Call::Environment(m::Empty {}))
+            .await?;
         let host_name = peer.request::<String>(&Call::HostName(m::Empty {})).await?;
+        let awareness_registration = m::AwarenessRegistration {
+            device_id: endpoint.node_id().to_string(),
+            label: "agent-client".into(),
+            platform: std::env::consts::OS.into(),
+            app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        };
         let (complete, receiver) = oneshot::channel();
         self.inner
             .sender
             .send(Event::Attach {
                 peer: peer.clone(),
                 host_name,
+                environment,
+                awareness_registration,
                 ticket: ticket.clone(),
                 session,
                 events: Box::new(events),

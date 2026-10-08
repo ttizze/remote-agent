@@ -162,6 +162,7 @@ private fun HostsScreen(model: AndroidAppModel) {
     ) {
         LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(model.profiles, key = { it.id }) { profile ->
+                val environment = model.environments.firstOrNull { it.profileId == profile.id }
                 Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
                     Row(
                         Modifier.fillMaxWidth().clickable { model.selectProfile(profile.id) }.padding(16.dp),
@@ -170,13 +171,55 @@ private fun HostsScreen(model: AndroidAppModel) {
                         Column(Modifier.weight(1f)) {
                             Text(profile.name, style = AppTheme.headline, color = AppTheme.colors.foreground)
                             Text(
-                                if (profile.id == model.profileId) "Connected device" else "Paired",
+                                environment?.let { current ->
+                                    listOfNotNull(
+                                        current.state,
+                                        current.platform,
+                                        current.machine,
+                                        current.capabilities.takeIf { it.isNotEmpty() }?.let { "${it.size} capabilities" },
+                                    ).joinToString(" · ")
+                                } ?: if (profile.id == model.profileId) "Connected device" else "Paired",
                                 style = AppTheme.caption,
                                 color = AppTheme.colors.foregroundSecondary,
                             )
+                            environment?.reconnectReason?.takeIf { it.isNotBlank() }?.let { reason ->
+                                Text(reason, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
+                            }
                         }
                         IconButton(onClick = { model.removeProfile(profile.id) }) {
                             Icon(Icons.Outlined.Delete, "Remove ${profile.name}", tint = AppTheme.colors.iconMuted)
+                        }
+                    }
+                }
+            }
+            val activities = model.environments.flatMap { environment ->
+                environment.activities.map { activity -> environment to activity }
+            }
+            if (activities.isNotEmpty()) {
+                item {
+                    Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("Agent activity", style = AppTheme.headline, color = AppTheme.colors.foreground)
+                            activities.forEach { (environment, activity) ->
+                                Column {
+                                    Text(
+                                        "${environment.label} · ${activity.title}",
+                                        style = AppTheme.body,
+                                        color = AppTheme.colors.foreground,
+                                    )
+                                    Text(
+                                        "${activity.phase}: ${activity.headline}",
+                                        style = AppTheme.caption,
+                                        color = AppTheme.colors.foregroundSecondary,
+                                    )
+                                    activity.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                                        Text(detail, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
+                                    }
+                                }
+                            }
                         }
                     }
                 }

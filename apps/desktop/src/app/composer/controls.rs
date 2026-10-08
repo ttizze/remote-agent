@@ -918,7 +918,7 @@ impl Desktop {
                 });
             }
         }
-        let name = self.snapshot.host_name.as_deref().unwrap_or("Local");
+        let name = self.snapshot.environment_display_label().unwrap_or("Local");
         h_flex()
             .mx(px(22.))
             .pt_1()

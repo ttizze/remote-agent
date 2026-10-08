@@ -42,6 +42,8 @@ pub(super) enum Reply {
     PreviewList(agent_protocol::preview::PreviewListResult),
     PreviewSession(agent_protocol::preview::PreviewSessionSnapshot),
     ContentSearch(agent_protocol::workspace::ContentSearch),
+    Environment(m::EnvironmentDescriptor),
+    AwarenessRegistration(m::AwarenessRegistrationResult),
     Transcription(String),
     ConversationSettings(m::ConversationSettings),
     SessionScan(c::SessionScan),
@@ -150,6 +152,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::Done
         }
         Call::SearchContents(_) => Reply::ContentSearch(peer.request(call).await?),
+        Call::Environment(_) => Reply::Environment(peer.request(call).await?),
+        Call::RegisterAwareness(_) => Reply::AwarenessRegistration(peer.request(call).await?),
         Call::Transcribe(_) => {
             Reply::Transcription(peer.request::<op::Transcription>(call).await?.text)
         }
@@ -675,6 +679,11 @@ impl Owner {
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
+            Reply::Environment(environment) => {
+                self.state.host_name = Some(environment.label.clone());
+                self.state.environment = Some(environment);
+            }
+            Reply::AwarenessRegistration(_) => {}
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)
             }

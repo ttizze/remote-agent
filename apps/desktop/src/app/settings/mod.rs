@@ -259,7 +259,13 @@ impl Desktop {
                 let connected = self.snapshot.connected;
                 self.hosts
                     .update(cx, |hosts, cx| hosts.set_current(current, connected, cx));
-                page_container(1024., vec![self.hosts.clone().into_any_element()])
+                page_container(
+                    1024.,
+                    vec![
+                        self.hosts.clone().into_any_element(),
+                        self.render_environment_overview(cx),
+                    ],
+                )
             }
             SettingsPage::Archived => self.render_archived(window, cx),
             SettingsPage::ScheduledTasks => self.render_scheduled_tasks(window, cx),
@@ -312,6 +318,90 @@ impl Desktop {
                 ),
             )
             .child(body)
+            .into_any_element()
+    }
+
+    fn render_environment_overview(&mut self, cx: &mut Context<Desktop>) -> AnyElement {
+        let entries = self.views.environment_settings.entries.clone();
+        v_flex()
+            .gap_3()
+            .child(
+                h_flex().gap_2().child(icon("layers").size_4()).child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .child("Connected environments"),
+                ),
+            )
+            .children(entries.into_iter().map(|entry| {
+                let id = entry.summary.descriptor.environment_id.clone();
+                let label = entry.summary.descriptor.label.clone();
+                let platform = format!(
+                    "{} / {} · {} · server {}",
+                    entry.summary.descriptor.platform.os,
+                    entry.summary.descriptor.platform.arch,
+                    entry
+                        .summary
+                        .descriptor
+                        .platform
+                        .machine
+                        .as_deref()
+                        .unwrap_or("unknown machine"),
+                    entry.summary.descriptor.server_version,
+                );
+                let connection = match entry.summary.connection {
+                    agent_core::environment::EnvironmentConnectionState::Connected => "Connected",
+                    agent_core::environment::EnvironmentConnectionState::Connecting => {
+                        "Connecting…"
+                    }
+                    agent_core::environment::EnvironmentConnectionState::Disconnected => "Offline",
+                };
+                let connection = entry.summary.reconnect_reason.as_deref().map_or_else(
+                    || connection.to_owned(),
+                    |reason| format!("{connection} · {reason}"),
+                );
+                let selected = self.environment_registry.selected() == Some(id.as_str());
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .when(selected, |row| row.bg(color("sidebarRowSelected")))
+                    .child(icon("monitor").size_4())
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().text_sm().child(label))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(tint("textMuted", 0.8))
+                                    .child(format!("{connection} · {platform}")),
+                            )
+                            .child(div().text_2xs().text_color(tint("textMuted", 0.7)).child(
+                                format!(
+                                        "{} host settings · {} capabilities",
+                                        entry.settings.sections.len(),
+                                        agent_core::environment::capability_names(
+                                            &entry.summary.descriptor.capabilities
+                                        )
+                                        .len()
+                                    ),
+                            )),
+                    )
+                    .when(!selected, |row| {
+                        row.cursor_pointer()
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if view.promote_environment(&id) {
+                                    view.environment_registry.select(&id);
+                                    cx.notify();
+                                }
+                            }))
+                    })
+            }))
             .into_any_element()
     }
 
