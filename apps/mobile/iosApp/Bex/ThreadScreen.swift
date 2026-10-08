@@ -417,6 +417,39 @@ struct DeviceScreen: View {
                                     action: .hardwareButton(button: "home")
                                 ))
                             }
+                            Button("Back") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "back")
+                                ))
+                            }
+                            Button("Recents") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "recents")
+                                ))
+                            }
+                            Button("Power") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .hardwareButton(button: "power")
+                                ))
+                            }
+                            Button("Enter") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .key(code: "Enter", key: "Enter", down: true, meta: false, ctrl: false)
+                                ))
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .key(code: "Enter", key: "Enter", down: false, meta: false, ctrl: false)
+                                ))
+                            }
                             Button("Rotate") {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
