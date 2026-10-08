@@ -1,7 +1,7 @@
 //! The visible list combines wire summaries with locally observed activity.
 use crate::models::{task_active, task_title};
 use crate::{models::Project, state::Snapshot};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadSummary {
     pub id: crate::session::SessionRef,
@@ -10,6 +10,7 @@ pub struct ThreadSummary {
     pub active: bool,
     pub unread: bool,
     pub worktree_status: Option<crate::models::WorktreeStatus>,
+    pub depth: u32,
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadList {
@@ -56,10 +57,8 @@ impl Snapshot {
         if !self.archived_scopes.is_empty() {
             notices.push("保存領域が変更されています。以前の下書き・未保存編集は保持しています。Hostの保存先設定を元に戻すと再び表示できます。".into());
         }
-        Some(ThreadList {
-            notice: (!notices.is_empty()).then(|| notices.join("\n")),
-            threads: list
-                .data
+        let summaries =
+            list.data
                 .iter()
                 .filter_map(|thread| {
                     let id = thread.id.clone()?;
@@ -82,9 +81,19 @@ impl Snapshot {
                         active,
                         unread,
                         worktree_status: thread.worktree_status,
+                        depth: 0,
                     })
                 })
-                .collect(),
+                .collect();
+        Some(ThreadList {
+            notice: (!notices.is_empty()).then(|| notices.join("\n")),
+            threads: nest_threads(
+                summaries,
+                list.data
+                    .iter()
+                    .filter_map(|thread| Some((thread.id.as_ref()?, thread.parent_id.as_ref()?)))
+                    .collect(),
+            ),
             projects: list.projects.clone(),
             more_project_ids: list.more_project_ids.clone(),
             has_more_chats: list.has_more_chats,
@@ -93,13 +102,165 @@ impl Snapshot {
     }
 }
 
+/// Preserve root/sibling recency, then place descendants below their direct parent.
+fn nest_threads(
+    summaries: Vec<ThreadSummary>,
+    parents: HashMap<&crate::session::SessionRef, &crate::session::SessionRef>,
+) -> Vec<ThreadSummary> {
+    let positions: HashMap<_, _> = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, thread)| (&thread.id, index))
+        .collect();
+    let mut children = vec![Vec::new(); summaries.len()];
+    let mut roots = Vec::new();
+    for (index, summary) in summaries.iter().enumerate() {
+        let parent = parents
+            .get(&summary.id)
+            .filter(|parent| parent.provider == summary.id.provider && **parent != &summary.id);
+        if let Some(parent) = parent.and_then(|parent| positions.get(parent)) {
+            children[*parent].push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+    let mut pending = Vec::new();
+    let mut summaries: Vec<_> = summaries.into_iter().map(Some).collect();
+    let mut result = Vec::with_capacity(summaries.len());
+    // The second pass keeps malformed cycles reachable, each row at most once.
+    for root in roots.into_iter().chain(0..summaries.len()) {
+        pending.push((root, 0, None));
+        while let Some((index, depth, project_id)) = pending.pop() {
+            let Some(mut summary) = summaries[index].take() else {
+                continue;
+            };
+            summary.depth = depth;
+            if depth > 0 {
+                summary.project_id = project_id;
+            }
+            pending.extend(
+                children[index]
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, depth + 1, summary.project_id.clone())),
+            );
+            result.push(summary);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::operations::ListSessions;
     use crate::state::operations::Operation;
     use agent_protocol::models;
+    use proptest::prelude::*;
     use serde_json::json;
+
+    fn snapshot_list(data: serde_json::Value) -> Snapshot {
+        Snapshot {
+            threads: Some(std::sync::Arc::new(
+                serde_json::from_value(json!({
+                    "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
+                    "moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+                }))
+                .unwrap(),
+            )),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn subagents_keep_direct_lineage_provider_identity_and_parent_project() {
+        let snapshot = snapshot_list(json!([
+            {"id":{"provider":"codex","id":"grandchild"},"parentId":{"provider":"codex","id":"child"}},
+            {"id":{"provider":"claude","id":"child"},"name":"Separate"},
+            {"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"},"status":"running"},
+            {"id":{"provider":"codex","id":"root"},"projectId":"project"},
+            {"id":{"provider":"codex","id":"sibling"},"parentId":{"provider":"codex","id":"root"}}
+        ]));
+        let list = snapshot.thread_list().unwrap();
+        let rows: Vec<_> = list
+            .threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.id.id.as_str(),
+                    thread.id.provider,
+                    thread.depth,
+                    thread.project_id.as_deref(),
+                    thread.active,
+                )
+            })
+            .collect();
+        use crate::session::ProviderKind::{Claude, Codex};
+        assert_eq!(
+            rows,
+            [
+                ("child", Claude, 0, None, false),
+                ("root", Codex, 0, Some("project"), false),
+                ("child", Codex, 1, Some("project"), true),
+                ("grandchild", Codex, 2, Some("project"), false),
+                ("sibling", Codex, 1, Some("project"), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_lineage_keeps_each_conversation_reachable() {
+        let snapshot = snapshot_list(json!([
+            {"id":{"provider":"codex","id":"a"},"parentId":{"provider":"codex","id":"b"}},
+            {"id":{"provider":"codex","id":"b"},"parentId":{"provider":"codex","id":"a"}},
+            {"id":{"provider":"codex","id":"self"},"parentId":{"provider":"codex","id":"self"}},
+            {"id":{"provider":"codex","id":"missing"},"parentId":{"provider":"codex","id":"absent"}},
+            {"id":{"provider":"claude","id":"cross"},"parentId":{"provider":"codex","id":"self"}}
+        ]));
+        let list = snapshot.thread_list().unwrap();
+        let rows: Vec<_> = list
+            .threads
+            .iter()
+            .map(|thread| (thread.id.id.as_str(), thread.depth))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("self", 0),
+                ("missing", 0),
+                ("cross", 0),
+                ("a", 0),
+                ("b", 1)
+            ]
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_recency_preserves_unique_contiguous_subagent_trees(priorities in prop::collection::vec(any::<u16>(), 1..40)) {
+            let mut order: Vec<_> = (0..priorities.len()).collect();
+            order.sort_by_key(|index| (priorities[*index], *index));
+            let data: Vec<_> = order.iter().map(|index| json!({
+                "id":{"provider":"codex","id":index.to_string()},
+                "parentId": (*index > 0).then(|| json!({"provider":"codex","id":((index - 1)/2).to_string()})),
+                "projectId": if *index == 0 {Some("project")} else {None}
+            })).collect();
+            let list = snapshot_list(json!(data)).thread_list().unwrap();
+            prop_assert_eq!(list.threads.len(), priorities.len());
+            let ids: Vec<usize> = list.threads.iter().map(|thread| thread.id.id.parse().unwrap()).collect();
+            prop_assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), priorities.len());
+            for (position, thread) in list.threads.iter().enumerate() {
+                let index = ids[position];
+                prop_assert_eq!(thread.depth, (index + 1).ilog2());
+                prop_assert_eq!(thread.project_id.as_deref(), Some("project"));
+                if index > 0 {
+                    let parent_position = ids.iter().position(|id| *id == (index - 1)/2).unwrap();
+                    prop_assert!(parent_position < position);
+                    prop_assert!(list.threads[parent_position + 1..position].iter().all(|row| row.depth > list.threads[parent_position].depth));
+                }
+            }
+        }
+    }
 
     #[test]
     fn list_preserves_order_and_only_exposes_known_project_membership() {

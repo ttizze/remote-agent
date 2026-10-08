@@ -259,7 +259,7 @@ private struct ThreadListRow: View {
                         )
                 }
             }
-            .padding(.leading, indented ? 40 : 0)
+            .padding(.leading, (indented ? 40 : 0) + CGFloat(thread.depth) * 20)
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier("tasks.row.\(accessibilityID)")

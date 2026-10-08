@@ -1076,7 +1076,7 @@ impl HostRpcService {
         let mut threads = Vec::new();
         let agents = self.agents();
         for (_, agent) in &agents {
-            let pages = session_pages(agent.as_ref(), "");
+            let pages = session_pages(agent.as_ref(), "", None);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
@@ -1272,7 +1272,7 @@ impl HostRpcService {
         let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
             futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
-                let mut threads = session_pages(agent.as_ref(), search)
+                let mut threads = session_pages(agent.as_ref(), search, None)
                     .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
                     .try_flatten()
                     .boxed();
@@ -1341,6 +1341,52 @@ impl HostRpcService {
             ));
         }
         let mut page = titles.finish();
+        // The recent page can end before a visible root's older descendants.
+        let descendants = futures_util::future::join_all(page.data.iter().filter_map(|thread| {
+            let id = thread.id.as_ref()?;
+            if thread.parent_id.is_some() || id.provider != ProviderKind::Codex {
+                return None;
+            }
+            let (_, agent) = agents
+                .iter()
+                .find(|(provider, _)| *provider == id.provider)?;
+            Some(async move {
+                let mut threads = session_pages(agent.as_ref(), "", Some(&id.id))
+                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                    .try_flatten()
+                    .boxed();
+                let mut children = Vec::new();
+                loop {
+                    match next_title(&mut threads, deadline).await {
+                        Ok(Some(summary)) => children.push(summary),
+                        Ok(None) => return (children, agent.capabilities(), None),
+                        Err(error) => return (children, agent.capabilities(), Some(error)),
+                    }
+                }
+            })
+        }))
+        .await;
+        let mut children = Vec::new();
+        for (summaries, capabilities, error) in descendants {
+            if let Some(error) = error {
+                provider_errors.insert("codex".into(), serde_json::to_value(error)?);
+            }
+            for summary in summaries {
+                let mut thread = summary.thread;
+                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
+                    branches.insert(id.clone(), branch);
+                }
+                describe_thread(&mut thread, capabilities, &snapshot);
+                children.push(crate::projects::titles::summary(thread));
+            }
+        }
+        children.sort_by(|a, b| {
+            b.updated_at
+                .unwrap_or_default()
+                .total_cmp(&a.updated_at.unwrap_or_default())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        page.data = crate::projects::titles::append_descendants(page.data, children);
         let sources: Vec<_> = page
             .data
             .iter()
