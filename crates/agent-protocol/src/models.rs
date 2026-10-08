@@ -2483,7 +2483,7 @@ mod settings_tests {
                         "slug": "reasoning",
                         "capabilities": {
                             "optionDescriptors": [{
-                            "Select": {
+                            "select": {
                                     "id": "effort",
                                     "label": "Reasoning",
                                     "description": null,
@@ -2513,7 +2513,7 @@ mod settings_tests {
         );
         assert_eq!(
             serde_json::to_value(&capabilities.provider_instances["capabilities"].custom_models)
-                .unwrap()[0]["capabilities"]["optionDescriptors"][0]["Select"]["id"],
+                .unwrap()[0]["capabilities"]["optionDescriptors"][0]["select"]["id"],
             "effort"
         );
         let custom = ProviderInstanceConfig {
