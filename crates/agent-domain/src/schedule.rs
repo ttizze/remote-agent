@@ -78,7 +78,7 @@ pub fn next_run_at<Tz: TimeZone>(schedule: &Schedule, from: &DateTime<Tz>) -> Op
                 let date = from
                     .date_naive()
                     .checked_add_signed(Duration::days(offset))?;
-                let candidate = at_time(from.timezone(), date, hour, minute)?;
+                let candidate = at_time(&from.timezone(), date, hour, minute)?;
                 if candidate <= *from {
                     return None;
                 }
