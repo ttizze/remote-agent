@@ -1041,27 +1041,6 @@ struct Encoder {
     child: Child,
     input: Option<ChildStdin>,
     output: PathBuf,
-    executable: PathBuf,
-}
-
-fn ffmpeg_executable() -> PathBuf {
-    if let Some(path) = std::env::var_os("AGENT_FFMPEG_EXECUTABLE") {
-        return PathBuf::from(path);
-    }
-    let sibling_name = if cfg!(target_os = "windows") {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(directory) = executable.parent()
-    {
-        let sibling = directory.join(sibling_name);
-        if sibling.is_file() {
-            return sibling;
-        }
-    }
-    PathBuf::from(sibling_name)
 }
 
 async fn read_bounded<R>(reader: R) -> Result<Vec<u8>, String>
@@ -1125,7 +1104,7 @@ async fn run_bounded_command(mut command: Command) -> Result<Output, String> {
 
 impl Encoder {
     async fn start(output: &Path, frame_rate: u8) -> Result<Self, String> {
-        let executable = ffmpeg_executable();
+        let executable = crate::ffmpeg::executable();
         let mut probe = Command::new(&executable);
         probe
             .args(["-hide_banner", "-loglevel", "error", "-encoders"])

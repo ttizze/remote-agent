@@ -10,7 +10,6 @@ use agent_core::view::device::DeviceVideoFrameView;
 use host_daemon::device_stream::jpeg_bounds;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -19,6 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const MAX_ACCESS_UNIT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DECODED_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WORKER_QUEUE: usize = 8;
 const MAX_WORKER_OUTPUT: usize = 8;
 const WORKER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -190,6 +190,34 @@ impl DeviceVideoDecoder {
         self.error = None;
     }
 
+    /// Drop decoder processes and buffered stream state whose session was
+    /// closed or reopened. A session epoch is part of every stream key, so a
+    /// late frame from the previous capture must never keep its worker alive
+    /// or remain visible after a reconnect.
+    pub(super) fn retain_sessions(&mut self, active: &BTreeSet<(String, String, String, String)>) {
+        let mut keys = BTreeSet::new();
+        keys.extend(self.workers.keys().cloned());
+        keys.extend(self.latest_sequence.keys().cloned());
+        keys.extend(self.awaiting_keyframe.iter().cloned());
+        keys.extend(self.descriptions.keys().cloned());
+        keys.extend(self.decoded_sequence.keys().cloned());
+        let stale = keys
+            .into_iter()
+            .filter(|key| {
+                !active.contains(&(key.0.clone(), key.1.clone(), key.2.clone(), key.3.clone()))
+            })
+            .collect::<Vec<_>>();
+        for key in stale {
+            if let Some(mut worker) = self.workers.remove(&key) {
+                worker.shutdown();
+            }
+            self.latest_sequence.remove(&key);
+            self.awaiting_keyframe.remove(&key);
+            self.descriptions.remove(&key);
+            self.decoded_sequence.remove(&key);
+        }
+    }
+
     pub(super) fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -238,7 +266,9 @@ impl DeviceVideoDecoder {
             .is_none();
         match frame.encoding.as_str() {
             "jpeg" | "mjpeg" => {
-                if let Some((start, end)) = jpeg_bounds(&frame.payload) {
+                if frame.payload.len() > MAX_DECODED_IMAGE_BYTES {
+                    self.error = Some("Device stream returned an oversized JPEG frame".into());
+                } else if let Some((start, end)) = jpeg_bounds(&frame.payload) {
                     self.decoded_sequence
                         .insert(stream_key, frame.sequence);
                     decoded.push(DecodedDeviceImage {
@@ -256,7 +286,7 @@ impl DeviceVideoDecoder {
                 }
             }
             "png" => {
-                if !frame.payload.is_empty() {
+                if !frame.payload.is_empty() && frame.payload.len() <= MAX_DECODED_IMAGE_BYTES {
                     self.decoded_sequence
                         .insert(stream_key, frame.sequence);
                     decoded.push(DecodedDeviceImage {
@@ -269,10 +299,16 @@ impl DeviceVideoDecoder {
                         bytes: frame.payload,
                     });
                     self.error = None;
+                } else if frame.payload.len() > MAX_DECODED_IMAGE_BYTES {
+                    self.error = Some("Device stream returned an oversized PNG frame".into());
                 }
             }
             "avcc-description" => {
-                let description = description_to_annex_b(&frame.payload);
+                let description = if frame.payload.len() <= MAX_ACCESS_UNIT_BYTES {
+                    description_to_annex_b(&frame.payload)
+                } else {
+                    Vec::new()
+                };
                 if description.is_empty() {
                     self.error = Some("Device stream returned an invalid H.264 description".into());
                 } else {
@@ -285,6 +321,11 @@ impl DeviceVideoDecoder {
                     self.awaiting_keyframe.insert(stream_key.clone());
                 }
                 if self.awaiting_keyframe.contains(&stream_key) && !frame.keyframe {
+                    return;
+                }
+                if frame.payload.len() > MAX_ACCESS_UNIT_BYTES {
+                    self.error = Some("Device video decoder dropped an oversized access unit".into());
+                    self.resync_stream(&stream_key);
                     return;
                 }
                 let access_unit = to_annex_b(&frame.payload);
@@ -364,6 +405,11 @@ impl DeviceVideoDecoder {
         for item in output {
             match item {
                 WorkerOutput::Image { sequence, bytes } => {
+                    if bytes.len() > MAX_DECODED_IMAGE_BYTES {
+                        self.error = Some("Device video decoder returned an oversized image".into());
+                        failed = true;
+                        continue;
+                    }
                     let Some((start, end)) = jpeg_bounds(&bytes) else {
                         self.error = Some("Device video decoder returned an invalid image".into());
                         failed = true;
@@ -420,16 +466,12 @@ impl Drop for DeviceVideoDecoder {
     }
 }
 
-fn ffmpeg_executable() -> PathBuf {
-    host_daemon::ffmpeg::executable()
-}
-
 fn run_decoder_worker(
     command_rx: Receiver<WorkerCommand>,
     output_tx: SyncSender<WorkerOutput>,
     cancelled: Arc<AtomicBool>,
 ) {
-    let executable = ffmpeg_executable();
+    let executable = host_daemon::ffmpeg::executable();
     let mut child = match Command::new(executable)
         .args([
             "-hide_banner",
@@ -655,7 +697,7 @@ fn spawn_jpeg_reader(
                     }
                 };
                 buffer.extend_from_slice(&chunk[..read]);
-                if buffer.len() > MAX_ACCESS_UNIT_BYTES {
+                if buffer.len() > MAX_DECODED_IMAGE_BYTES {
                     let _ = events.try_send(ReaderEvent::Error(
                         "Device video decoder returned an oversized image stream".into(),
                     ));
@@ -664,6 +706,12 @@ fn spawn_jpeg_reader(
                 while let Some((start, end)) = jpeg_bounds(&buffer) {
                     let image = buffer[start..end].to_vec();
                     buffer.drain(..end);
+                    if image.len() > MAX_DECODED_IMAGE_BYTES {
+                        let _ = events.try_send(ReaderEvent::Error(
+                            "Device video decoder returned an oversized image".into(),
+                        ));
+                        return;
+                    }
                     if events.try_send(ReaderEvent::Image(image)).is_err() {
                         let _ = events.try_send(ReaderEvent::Error(
                             "Device video decoder output queue is full".into(),
@@ -815,6 +863,7 @@ mod tests {
     #[test]
     fn access_unit_bound_is_separate_from_inflight_queue_bound() {
         assert_eq!(MAX_ACCESS_UNIT_BYTES, 8 * 1024 * 1024);
+        assert_eq!(MAX_DECODED_IMAGE_BYTES, 16 * 1024 * 1024);
         assert_eq!(MAX_WORKER_QUEUE, 8);
         assert_eq!(MAX_WORKER_OUTPUT, 8);
     }

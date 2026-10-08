@@ -1599,6 +1599,13 @@ impl DeviceService {
         format!("{}-{sequence}", now_iso())
     }
 
+    async fn next_frame_sequence(&self, host_id: &str, device_id: &str, screen_id: Option<u8>) -> u64 {
+        let mut sequences = self.inner.frame_sequences.lock().await;
+        let sequence = sequences.entry((host_id.to_owned(), device_id.to_owned(), screen_id)).or_insert(0);
+        *sequence = sequence.saturating_add(1).max(1);
+        *sequence
+    }
+
     /// Reports work that must settle before the Host hands its process to an
     /// update. Device discovery helpers can stay warm, but an open session,
     /// boot transition, or active recording owns live device state and cannot

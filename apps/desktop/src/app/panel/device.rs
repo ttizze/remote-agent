@@ -101,7 +101,7 @@ impl Desktop {
         let (x, y) = point;
         self.perform(Intent::DeviceAction {
             host_id: Some(host_id.clone()),
-            device_id: Some(device_id.clone()),
+            device_id: device_id.clone(),
             action: DeviceActionIntent::Touch { phase: phase.into(), x, y },
         });
         if phase == "end" {
@@ -123,7 +123,7 @@ impl Desktop {
         let Some(touch) = self.panels.device.active_touch.take() else { return false };
         self.perform(Intent::DeviceAction {
             host_id: Some(touch.host_id),
-            device_id: Some(touch.device_id),
+            device_id: touch.device_id,
             action: DeviceActionIntent::Touch {
                 phase: "end".into(),
                 x: touch.x,
@@ -151,12 +151,12 @@ impl Desktop {
     }
 
     fn send_device_key(&mut self, host_id: String, device_id: String, keystroke: &Keystroke, down: bool) {
-        let key = keystroke.key.clone();
+        let key = device_key_value(&keystroke.key);
         let code = device_key_code(&key);
         let modifiers = keystroke.modifiers;
         self.perform(Intent::DeviceAction {
             host_id: Some(host_id),
-            device_id: Some(device_id),
+            device_id,
             action: DeviceActionIntent::Key {
                 code,
                 key,
@@ -238,7 +238,7 @@ impl Desktop {
     }
 
     fn attach_device_recording(&self, draft_key: String, recording: agent_core::view::device::DeviceRecordingView) {
-        let Some((extension, mime_type)) = recording_file_type(&recording.format, &recording.bytes) else {
+        let Some((extension, mime_type)) = recording_file_type(&recording) else {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
             self.stage(draft_key, move || {
                 Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
@@ -316,11 +316,28 @@ impl Desktop {
             }
         }
         let view = self.snapshot.device();
+        let active_decoder_sessions = view
+            .sessions
+            .iter()
+            .filter(|session| session.thread_id == thread)
+            .map(|session| {
+                (
+                    session.thread_id.to_string(),
+                    session.host_id.clone(),
+                    session.device_id.clone(),
+                    session.session_epoch.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        self.panels
+            .device
+            .decoder
+            .retain_sessions(&active_decoder_sessions);
         let live_epochs = view
             .sessions
             .iter()
             .filter(|session| session.thread_id == thread)
-            .map(|session| ((session.host_id.clone(), session.device_id.clone()), session.opened_at.clone()))
+            .map(|session| ((session.host_id.clone(), session.device_id.clone()), session.session_epoch.clone()))
             .collect::<BTreeMap<_, _>>();
         self.panels.device.frame_epochs.retain(|(host_id, device_id, _), epoch| {
             live_epochs.get(&(host_id.clone(), device_id.clone())) == Some(epoch)
@@ -661,7 +678,7 @@ impl Desktop {
                     move |view, _, _, _| view.perform(Intent::StartDeviceRecording {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
-                        format: "avcc".into(),
+                        format: "mp4".into(),
                     })
                 })))
                 .child(Button::new(SharedString::from(format!("device-stop-record-{host_id}-{device_id}"))).label("Stop record").xsmall().on_click(cx.listener({
@@ -953,22 +970,43 @@ fn device_key_code(key: &str) -> String {
     .into()
 }
 
-fn recording_file_type(format: &str, bytes: &[u8]) -> Option<(&'static str, &'static str)> {
-    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
-        return Some(("webm", "video/webm"));
+fn device_key_value(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "enter" | "return" => "Enter".into(),
+        "tab" => "Tab".into(),
+        "backspace" => "Backspace".into(),
+        "delete" | "forwarddelete" => "Delete".into(),
+        "escape" | "esc" => "Escape".into(),
+        "up" | "arrowup" => "ArrowUp".into(),
+        "down" | "arrowdown" => "ArrowDown".into(),
+        "left" | "arrowleft" => "ArrowLeft".into(),
+        "right" | "arrowright" => "ArrowRight".into(),
+        "home" => "Home".into(),
+        "end" => "End".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        "space" => " ".into(),
+        _ => key.into(),
     }
-    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        return Some(("mp4", "video/mp4"));
+}
+
+fn recording_file_type(recording: &agent_core::view::device::DeviceRecordingView) -> Option<(&'static str, String)> {
+    let extension = std::path::Path::new(&recording.file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())?;
+    if !extension.eq_ignore_ascii_case("mp4")
+        || !recording.mime_type.eq_ignore_ascii_case("video/mp4")
+        || recording.bytes.len() < 12
+        || &recording.bytes[4..8] != b"ftyp"
+    {
+        return None;
     }
-    if format == "mjpeg" && bytes.windows(2).any(|window| window == [0xff, 0xd8]) {
-        return Some(("mjpeg", "video/x-motion-jpeg"));
-    }
-    None
+    Some(("mp4", recording.mime_type.clone()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::device_key_code;
+    use super::{device_key_code, device_key_value};
 
     #[test]
     fn gpui_keys_use_dom_physical_codes() {
@@ -977,5 +1015,13 @@ mod tests {
         assert_eq!(device_key_code("up"), "ArrowUp");
         assert_eq!(device_key_code("enter"), "Enter");
         assert_eq!(device_key_code("?"), "Slash");
+    }
+
+    #[test]
+    fn gpui_keys_carry_canonical_semantic_values() {
+        assert_eq!(device_key_value("up"), "ArrowUp");
+        assert_eq!(device_key_value("enter"), "Enter");
+        assert_eq!(device_key_value("a"), "a");
+        assert_eq!(device_key_value("1"), "1");
     }
 }

@@ -1662,10 +1662,8 @@ impl Owner {
                     };
                     return Ok(Next::call(
                         Call::DeviceInput(d::DeviceInput {
-                            thread_id: Some(request.thread_id),
                             host_id: request.host_id,
                             device_id: request.device_id,
-                            request_id: Some(request.request_id),
                             input: d::DeviceInputKind::Duo {
                                 command: device_duo_command(request.command),
                             },
@@ -1676,13 +1674,7 @@ impl Owner {
                 let action = device_action(action)?;
                 match action {
                     d::DeviceActionKind::Input(input) => Next::call(
-                        Call::DeviceInput(d::DeviceInput {
-                            thread_id: self.state.selected_thread.clone(),
-                            host_id,
-                            device_id,
-                            request_id: None,
-                            input,
-                        }),
+                        Call::DeviceInput(d::DeviceInput { host_id, device_id, input }),
                         None,
                     ),
                     action => Next::call(
@@ -1696,11 +1688,11 @@ impl Owner {
                 None,
             ),
             Intent::LoadDeviceAccessibility { host_id, device_id } => Next::call(
-                Call::DeviceAccessibility(d::DeviceAccessibilityInput { thread_id: self.selected()?, host_id, device_id }),
+                Call::DeviceAccessibility(d::DeviceAccessibilityInput { host_id, device_id }),
                 None,
             ),
             Intent::LoadDeviceEventLog { host_id, device_id, limit } => Next::call(
-                Call::DeviceEventLog(d::DeviceEventLogInput { thread_id: self.selected()?, host_id, device_id, limit }),
+                Call::DeviceEventLog(d::DeviceEventLogInput { host_id, device_id, limit }),
                 None,
             ),
             Intent::StartDeviceRecording { host_id, device_id, format } => Next::call(

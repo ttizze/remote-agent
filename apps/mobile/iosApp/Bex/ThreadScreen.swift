@@ -310,7 +310,7 @@ struct DeviceScreen: View {
     var body: some View {
         let view = model.snapshot.device()
         let threadSessions = view.sessions.filter { $0.threadId == threadId }
-        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.openedAt)" }.joined(separator: ",")
+        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.sessionEpoch)" }.joined(separator: ",")
         let decodedFrames = deviceFrames.frames(for: threadId)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -462,7 +462,7 @@ struct DeviceScreen: View {
                                 ))
                             }
                             Button("Record") {
-                                model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "avcc"))
+                                model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "mp4"))
                             }
                             Button("Stop record") {
                                 model.perform(.stopDeviceRecording(hostId: session.hostId, deviceId: session.deviceId))
@@ -519,19 +519,6 @@ struct DeviceScreen: View {
                                     .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                             }
                         }
-                    } else if let frame = view.videoFrames.filter({ $0.threadId == threadId && ($0.encoding == "jpeg" || $0.encoding == "mjpeg") }).max(by: { $0.sequence < $1.sequence }),
-                              let image = UIImage(data: Data(frame.payload)) {
-                        ZStack {
-                            Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
-                            DeviceAccessibilityOverlay(view: view, deviceKey: "\(frame.hostId):\(frame.deviceId)")
-                        }
-                        .overlay {
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .contentShape(Rectangle())
-                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
-                            }
-                        }
                     } else {
                         Text("Open a device to see its live frame").foregroundStyle(AppTheme.muted)
                     }
@@ -554,23 +541,23 @@ struct DeviceScreen: View {
                                 .foregroundStyle(AppTheme.muted)
                             HStack(spacing: 8) {
                                 Button("Save recording") {
-                                    guard let file = deviceRecordingFileType(recording.format, recording.bytes) else {
+                                    guard let file = deviceRecordingFileType(recording.fileName, recording.mimeType, recording.bytes) else {
                                         model.notice = "The Host did not return a playable device recording."
                                         return
                                     }
                                     recordingDocument = DeviceRecordingDocument(data: Data(recording.bytes))
-                                    recordingFileName = "device-recording.\(file.extension)"
+                                    recordingFileName = recording.fileName
                                     recordingContentType = file.type
                                     exportingRecording = true
                                 }
                             Button("Attach recording") {
                                 do {
                                     let directory = try AttachmentFiles.directory()
-                                    guard let file = deviceRecordingFileType(recording.format, recording.bytes) else {
+                                    guard let file = deviceRecordingFileType(recording.fileName, recording.mimeType, recording.bytes) else {
                                         model.notice = "The Host did not return a playable device recording."
                                         return
                                     }
-                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).\(file.extension)")
+                                    let url = directory.appendingPathComponent(recording.fileName)
                                     try Data(recording.bytes).write(to: url, options: .atomic)
                                     model.perform(.attachFiles(draftKey: model.snapshot.currentDraftKey(), files: [
                                         LocalFile(path: url.path, name: url.lastPathComponent, mimeType: file.mime)
@@ -604,6 +591,9 @@ struct DeviceScreen: View {
             deviceFrames.consume(next.videoEvents, threadId: threadId)
         }
         .onChange(of: threadSessionKey) { _, _ in
+            deviceFrames.reset(threadId: threadId)
+            let next = model.snapshot.device()
+            deviceFrames.consume(next.videoEvents, threadId: threadId)
             let sessions = model.snapshot.device().sessions
             for session in sessions where session.threadId == threadId {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
@@ -674,7 +664,7 @@ struct DeviceScreen: View {
 }
 
 /// Maps a panel point into the resource-owned device frame, preserving the
-/// frame's aspect ratio and letterbox margins before clamping to [0, 1].
+/// frame's aspect ratio and rejecting letterbox margins.
 private func projectDevicePoint(_ point: CGPoint, viewSize: CGSize, frameSize: CGSize) -> CGPoint? {
     guard let projected = AgentCore.projectDevicePoint(
         viewWidth: Float(viewSize.width),
@@ -704,17 +694,10 @@ private struct DeviceRecordingDocument: FileDocument {
     }
 }
 
-private func deviceRecordingFileType(_ format: String, _ bytes: [UInt8]) -> (extension: String, mime: String, type: UTType)? {
-    if bytes.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) {
-        return ("webm", "video/webm", UTType(filenameExtension: "webm") ?? .movie)
-    }
-    if bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) {
-        return ("mp4", "video/mp4", UTType(filenameExtension: "mp4") ?? .movie)
-    }
-    if format == "mjpeg", zip(bytes, bytes.dropFirst()).contains(where: { $0.0 == 0xff && $0.1 == 0xd8 }) {
-        return ("mjpeg", "video/x-motion-jpeg", UTType.data)
-    }
-    return nil
+private func deviceRecordingFileType(_ fileName: String, _ mimeType: String, _ bytes: [UInt8]) -> (extension: String, mime: String, type: UTType)? {
+    guard fileName.lowercased().hasSuffix(".mp4"), mimeType.lowercased() == "video/mp4",
+          bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) else { return nil }
+    return ("mp4", mimeType, UTType(filenameExtension: "mp4") ?? .movie)
 }
 
 private struct DeviceAccessibilityOverlay: View {

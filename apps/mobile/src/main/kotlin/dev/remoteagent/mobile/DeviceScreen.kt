@@ -52,7 +52,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val view = model.snapshot.device()
     val context = LocalContext.current
     val threadSessions = view.sessions.filter { it.threadId == threadId }
-    val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}:${it.openedAt}" }
+    val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}:${it.sessionEpoch}" }
     LaunchedEffect(threadId) {
         model.perform(Intent.OpenThread(threadId))
         model.perform(Intent.LoadDevices)
@@ -219,7 +219,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         )
                     }) { Text("Rotate") }
                     Button(onClick = {
-                        model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "avcc"))
+                        model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "mp4"))
                     }) { Text("Record") }
                     Button(onClick = {
                         model.perform(Intent.StopDeviceRecording(session.hostId, session.deviceId))
@@ -308,7 +308,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 item(key = "last-recording-${recording.deviceId}-${recording.byteCount}") {
                     Text("Recording ready · ${recording.frameCount} frames · ${recording.byteCount} bytes")
                     Button(onClick = {
-                        val type = deviceRecordingFileType(recording.format, recording.bytes)
+                        val type = deviceRecordingFileType(recording.fileName, recording.mimeType, recording.bytes)
                         if (type == null) {
                             model.notice = "The device recording is incomplete or has an unsupported format."
                         } else {
@@ -345,17 +345,10 @@ private fun DeviceAccessibilityOverlay(view: DeviceView, hostId: String, deviceI
     }
 }
 
-private fun deviceRecordingFileType(format: String, bytes: ByteArray): Pair<String, String>? {
-    if (bytes.size >= 4 && bytes[0] == 0x1a && bytes[1] == 0x45.toByte() && bytes[2] == 0xdf.toByte() && bytes[3] == 0xa3.toByte() && format == "webm") {
-        return "webm" to "video/webm"
-    }
-    if (bytes.size >= 12 && bytes.copyOfRange(4, 8).contentEquals(byteArrayOf('f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte())) && format == "avcc") {
-        return "mp4" to "video/mp4"
-    }
-    if (bytes.size >= 2 && bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() && format == "mjpeg") {
-        return "jpg" to "image/jpeg"
-    }
-    return null
+private fun deviceRecordingFileType(fileName: String, mimeType: String, bytes: ByteArray): Pair<String, String>? {
+    if (!fileName.lowercase().endsWith(".mp4") || mimeType.lowercase() != "video/mp4" || bytes.size < 12) return null
+    if (!bytes.copyOfRange(4, 8).contentEquals(byteArrayOf('f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte()))) return null
+    return "mp4" to mimeType
 }
 
 private fun Modifier.deviceTouchInput(
