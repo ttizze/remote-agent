@@ -297,7 +297,7 @@ fn wait_for_host_stop(
     let deadline = Instant::now() + UPDATE_HANDOFF_TIMEOUT;
     loop {
         let current = registry.resolve(preferred)?;
-        if current.directory != directory {
+        if current.directory.as_path() != directory {
             if created {
                 let _ = host_daemon::clear_update_handoff(directory);
             }
