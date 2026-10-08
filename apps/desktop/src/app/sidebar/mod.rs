@@ -921,6 +921,9 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !event.modifiers.shift {
+            self.snapshot_shift_presses = 0;
+        }
         let held = event.modifiers.secondary()
             && !event.modifiers.shift
             && !event.modifiers.alt

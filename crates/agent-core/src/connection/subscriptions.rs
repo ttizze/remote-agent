@@ -561,9 +561,38 @@ impl Owner {
         update: ThreadUpdate,
     ) -> Option<bool> {
         let failed = matches!(update, ThreadUpdate::Failed(_));
-        let sync = self.state.threads.get_mut(thread)?;
-        let applied = Arc::make_mut(sync).apply(vec![update]);
+        let (applied, state_after) = {
+            let sync = self.state.threads.get_mut(thread)?;
+            let applied = Arc::make_mut(sync).apply(vec![update]);
+            (applied, sync.state.clone())
+        };
         let deleted = applied.deleted;
+        let should_publish = failed
+            || self.state.selected_thread.as_ref() != Some(thread)
+            || crate::view::streaming::should_publish(
+                self.state.host_settings.as_ref().map_or(
+                    agent_protocol::models::ResponseStreamingMode::Paragraph,
+                    |host| {
+                        let project = self
+                            .state
+                            .threads
+                            .get(thread)
+                            .and_then(|sync| sync.state.as_ref())
+                            .and_then(|state| state.thread.as_ref())
+                            .map(|thread| thread.project.as_str());
+                        crate::view::settings::resolve_project_settings(host, project)
+                            .response_streaming_mode
+                            .0
+                    },
+                ),
+                state_after.as_deref(),
+            );
+        self.stream_publish_deferred = !should_publish;
+        if should_publish {
+            self.stream_publish_pending = false;
+        } else {
+            self.stream_publish_pending = true;
+        }
         self.thread_applied(thread, applied);
         failed.then_some(deleted)
     }

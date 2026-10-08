@@ -102,6 +102,7 @@ impl Conversation {
                 codex: config.programs.codex.clone(),
                 codex_home: config.programs.codex_home.clone(),
                 claude: config.programs.claude.clone(),
+                worktrees: Some(resources.worktrees.clone()),
             },
         });
         let runtime = Arc::new(Runtime::open(config.runtime, io, host.clone()).await?);
@@ -126,7 +127,7 @@ impl Conversation {
     /// Recovers unfinished threads, then starts effects, import and the agent tools.
     pub(crate) async fn start(&self) -> anyhow::Result<()> {
         self.resources.projects.refresh().await?;
-        self.resources.worktrees.conversation_settings(None).await?;
+        self.resources.worktrees.host_settings(None).await?;
         self.runtime.start().await?;
         let _ = self
             .settled_terminals

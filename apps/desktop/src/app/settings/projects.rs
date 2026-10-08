@@ -175,7 +175,7 @@ impl Desktop {
             )
             .into_any_element(),
         );
-        if self.snapshot.conversation_settings_loaded() {
+        if self.snapshot.host_settings_loaded() {
             sections.extend(self.render_setting_sections(&scope, &view.sections, window, cx));
         } else {
             sections.push(notice(if self.snapshot.connected {

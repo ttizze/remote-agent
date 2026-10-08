@@ -45,7 +45,7 @@ pub(super) enum Reply {
     Environment(m::EnvironmentDescriptor),
     AwarenessRegistration(m::AwarenessRegistrationResult),
     Transcription(String),
-    ConversationSettings(m::ConversationSettings),
+    HostSettings(m::HostSettings),
     SessionScan(c::SessionScan),
     ProviderCommands(w::ProviderCommands),
     EntrySearch(w::EntrySearch),
@@ -89,8 +89,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::WorktreeSettings(peer.request(call).await?)
         }
         Call::ListWorktrees(_) => Reply::Worktrees(peer.request(call).await?),
-        Call::ReadConversationSettings(_) | Call::UpdateConversationSettings(_) => {
-            Reply::ConversationSettings(peer.request(call).await?)
+        Call::ReadSettings(_) | Call::UpdateSettings(_) => {
+            Reply::HostSettings(peer.request(call).await?)
         }
         Call::ScanAgentSessions(_) => Reply::SessionScan(peer.request(call).await?),
         Call::ProviderCommands(_) => Reply::ProviderCommands(peer.request(call).await?),
@@ -192,7 +192,7 @@ impl Owner {
         for call in [
             Call::ListProviders(m::Empty {}),
             Call::ListAccounts(m::Empty {}),
-            Call::ReadConversationSettings(m::Empty {}),
+            Call::ReadSettings(m::Empty {}),
         ] {
             self.job(call, None, None);
         }
@@ -684,8 +684,25 @@ impl Owner {
                 self.state.environment = Some(environment);
             }
             Reply::AwarenessRegistration(_) => {}
-            Reply::ConversationSettings(settings) => {
-                self.state.conversation_settings = Some(settings)
+            Reply::HostSettings(settings) => {
+                self.state.default_draft.runtime_mode = settings.default_runtime_mode;
+                if let Some(selection) = &settings.default_model_selection {
+                    self.state.default_draft.instance_id = selection.instance.clone();
+                    self.state.default_draft.driver = selection.driver;
+                    self.state.default_draft.model = selection.model.clone();
+                    self.state.default_draft.options = selection
+                        .options
+                        .iter()
+                        .map(|(key, value)| ModelOption {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect();
+                }
+                self.state.host_settings = Some(settings);
+                if matches!(call, Call::UpdateSettings(_)) {
+                    self.job(Call::ListProviders(m::Empty {}), None, None);
+                }
             }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::SessionScan(scan) => {

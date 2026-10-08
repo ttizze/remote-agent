@@ -19,7 +19,7 @@ use crate::{
             AttachmentCandidate, AttachmentFileKind, admit_attachments, image_preparation_error,
         },
         models::staging::remember_model_options,
-        settings::{ProjectSettingKey, clear_project_overrides, plan_conversation_settings_update},
+        settings::{ProjectSettingKey, clear_project_overrides, plan_settings_update},
     },
 };
 use agent_domain::{
@@ -774,6 +774,75 @@ impl Owner {
                 self.state.preferences.working_section = enabled;
                 Next::Done
             }
+            Intent::SetNotificationMode { mode } => {
+                self.state.preferences.notification_mode = mode;
+                Next::Done
+            }
+            Intent::SetInAppNotificationsEnabled { enabled } => {
+                self.state.preferences.in_app_notifications_enabled = enabled;
+                Next::Done
+            }
+            Intent::SetLoadBalancingEnabled { enabled } => {
+                self.state.preferences.load_balancing_enabled = enabled;
+                Next::Done
+            }
+            Intent::SetLoadBalancingWeight {
+                instance_id,
+                weight,
+            } => {
+                if weight > 100 {
+                    return Err(invalid("Load balancing weights must be 0 to 100."));
+                }
+                self.state
+                    .preferences
+                    .load_balancing_weights
+                    .insert(instance_id, weight);
+                Next::Done
+            }
+            Intent::SetSnapshotCaptureEnabled { enabled } => {
+                self.state.preferences.snapshot_capture.enabled = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotIncludeAccessibility { enabled } => {
+                self.state
+                    .preferences
+                    .snapshot_capture
+                    .include_accessibility = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotShortcut { shortcut } => {
+                self.state.preferences.snapshot_capture.shortcut = shortcut;
+                Next::Done
+            }
+            Intent::SetSnapshotPlaySound { enabled } => {
+                self.state.preferences.snapshot_capture.play_sound = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotSound { sound } => {
+                self.state.preferences.snapshot_capture.sound = sound;
+                Next::Done
+            }
+            Intent::SetSnapshotFlash { enabled } => {
+                self.state.preferences.snapshot_capture.flash = enabled;
+                Next::Done
+            }
+            Intent::SetSnapshotAnimations { enabled } => {
+                self.state.preferences.snapshot_capture.animations = enabled;
+                Next::Done
+            }
+            Intent::ImportShare { content } => {
+                let incoming = crate::view::share::compose(&content);
+                if !incoming.is_empty() {
+                    let key = self.state.draft_key();
+                    let mut draft = self.state.current_draft();
+                    if !draft.text.is_empty() {
+                        draft.text.push_str("\n\n");
+                    }
+                    draft.text.push_str(&incoming);
+                    self.state.drafts.insert(key, draft);
+                }
+                Next::Done
+            }
             Intent::SetDefaultModel {
                 instance_id,
                 driver,
@@ -785,9 +854,15 @@ impl Owner {
                 defaults.driver = driver;
                 defaults.model = model;
                 defaults.options = options;
-                defaults.selection().map_err(invalid)?;
+                let selection = defaults.selection().map_err(invalid)?;
                 self.state.default_draft = defaults;
-                Next::Done
+                Next::call(
+                    Call::UpdateSettings(Box::new(m::HostSettingsPatch {
+                        default_model_selection: Some(m::Nullable::Value(selection)),
+                        ..Default::default()
+                    })),
+                    None,
+                )
             }
             Intent::SetDefaultRuntimeMode { mode } => {
                 let mut defaults = self.state.default_draft.user_defaults();
@@ -823,24 +898,31 @@ impl Owner {
             Intent::RemoveKeybinding { rule } => {
                 Next::call(Call::RemoveKeybinding(rule.into()), None)
             }
-            Intent::LoadConversationSettings => {
-                Next::call(Call::ReadConversationSettings(m::Empty {}), None)
-            }
-            Intent::UpdateConversationSettings { scope, change } => {
-                match plan_conversation_settings_update(&scope, &change) {
-                    Some(patch) => Next::call(Call::UpdateConversationSettings(patch), None),
+            Intent::LoadSettings => Next::call(Call::ReadSettings(m::Empty {}), None),
+            Intent::UpdateSettings { scope, change } => {
+                match plan_settings_update(&scope, &change) {
+                    Some(patch) => Next::call(Call::UpdateSettings(Box::new(patch)), None),
                     None => Next::Done,
                 }
             }
             Intent::ResetProjectSettings { project_id } => Next::call(
-                Call::UpdateConversationSettings(clear_project_overrides(
+                Call::UpdateSettings(Box::new(clear_project_overrides(
                     &project_id,
                     &[
                         ProjectSettingKey::AutoSettle,
                         ProjectSettingKey::ContinueAfterRestart,
+                        ProjectSettingKey::DefaultRuntimeMode,
+                        ProjectSettingKey::DefaultThreadEnvMode,
+                        ProjectSettingKey::WorktreeSubmodules,
                         ProjectSettingKey::NewWorktreesStartFromOrigin,
+                        ProjectSettingKey::AgentBrowserAccess,
+                        ProjectSettingKey::DefaultAutoPull,
+                        ProjectSettingKey::AutoSettleOnMerge,
+                        ProjectSettingKey::ResponseStreamingMode,
+                        ProjectSettingKey::BranchNamingMode,
+                        ProjectSettingKey::PullRequestMergeMethod,
                     ],
-                )),
+                ))),
                 None,
             ),
             Intent::UpdateProjectScripts {
@@ -1816,6 +1898,7 @@ impl Owner {
                 }),
                 None,
             ),
+            Intent::LoadProviders => Next::call(Call::ListProviders(m::Empty {}), None),
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),
                 None,

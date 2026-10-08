@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Settings this device keeps across launches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Preferences {
     pub timestamp_format: TimestampFormat,
     pub favorite_models: Vec<FavoriteModel>,
@@ -29,6 +30,16 @@ pub struct Preferences {
     /// Each model's last chosen options, which a newly picked model takes.
     pub model_options: crate::view::models::staging::ModelOptionMemory,
     pub usage: crate::view::usage::UsagePreferences,
+    /// How this device presents thread attention and completion events.
+    pub notification_mode: crate::view::notifications::NotificationMode,
+    /// Whether foreground thread events appear as in-app notices.
+    pub in_app_notifications_enabled: bool,
+    /// Routes new threads across ready provider instances on this device.
+    pub load_balancing_enabled: bool,
+    /// Integer weights by provider instance; omitted instances use 100.
+    pub load_balancing_weights: BTreeMap<String, u8>,
+    /// Device-local screenshot capture behavior.
+    pub snapshot_capture: crate::view::snapshot_capture::SnapshotPreferences,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -43,6 +54,11 @@ impl Default for Preferences {
             terminal_font_size: None,
             model_options: BTreeMap::new(),
             usage: Default::default(),
+            notification_mode: crate::view::notifications::NotificationMode::default(),
+            in_app_notifications_enabled: true,
+            load_balancing_enabled: false,
+            load_balancing_weights: BTreeMap::new(),
+            snapshot_capture: Default::default(),
         }
     }
 }

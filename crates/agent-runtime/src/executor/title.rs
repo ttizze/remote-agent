@@ -108,6 +108,9 @@ impl GenerateTitle {
             linked_context: linked.as_deref(),
             instructions: instructions.as_deref(),
         });
+        let generation = context
+            .ops
+            .text_generation_settings(&thread.project, "generateThreadTitle");
         let raw = context
             .ops
             .generate_text(TextGenerationRequest {
@@ -116,6 +119,8 @@ impl GenerateTitle {
                 cwd,
                 prompt,
                 attachments,
+                model: generation.model,
+                instructions: generation.instructions,
                 output_schema: thread_title_output_schema(),
             })
             .await?;

@@ -43,11 +43,14 @@ pub(crate) enum SettingsPage {
     Archived,
     ScheduledTasks,
     Usage,
+    About,
+    Diagnostics,
+    Licenses,
 }
 
 impl SettingsPage {
     /// The navigation entries in their order.
-    fn sections() -> [SettingsPage; 9] {
+    fn sections() -> [SettingsPage; 12] {
         [
             SettingsPage::Projects { project_id: None },
             SettingsPage::General,
@@ -58,6 +61,9 @@ impl SettingsPage {
             SettingsPage::Archived,
             SettingsPage::ScheduledTasks,
             SettingsPage::Usage,
+            SettingsPage::About,
+            SettingsPage::Diagnostics,
+            SettingsPage::Licenses,
         ]
     }
     fn label(&self) -> &'static str {
@@ -71,6 +77,9 @@ impl SettingsPage {
             SettingsPage::Archived => "Archive",
             SettingsPage::ScheduledTasks => "Scheduled tasks",
             SettingsPage::Usage => "Usage",
+            SettingsPage::About => "About",
+            SettingsPage::Diagnostics => "Diagnostics",
+            SettingsPage::Licenses => "Licenses",
         }
     }
     fn icon(&self) -> &'static str {
@@ -84,6 +93,9 @@ impl SettingsPage {
             SettingsPage::Archived => "archive",
             SettingsPage::ScheduledTasks => "calendar-clock",
             SettingsPage::Usage => "chart-no-axes-combined",
+            SettingsPage::About => "info",
+            SettingsPage::Diagnostics => "activity",
+            SettingsPage::Licenses => "scroll-text",
         }
     }
     fn same_section(&self, other: &SettingsPage) -> bool {
@@ -270,6 +282,9 @@ impl Desktop {
             SettingsPage::Archived => self.render_archived(window, cx),
             SettingsPage::ScheduledTasks => self.render_scheduled_tasks(window, cx),
             SettingsPage::Usage => self.render_usage(window, cx),
+            SettingsPage::About => self.render_about(),
+            SettingsPage::Diagnostics => self.render_diagnostics(),
+            SettingsPage::Licenses => self.render_licenses(),
         };
         v_flex()
             .id("settings")
@@ -484,12 +499,16 @@ impl Desktop {
     fn load_settings_page(&mut self, page: &SettingsPage, cx: &mut Context<Self>) {
         match page {
             SettingsPage::General => {
-                self.perform(Intent::LoadConversationSettings);
+                self.perform(Intent::LoadSettings);
                 self.perform(Intent::LoadWorktreeSettings);
                 self.perform(Intent::ListWorktrees);
             }
-            SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
-            SettingsPage::Providers => self.perform(Intent::LoadAccounts),
+            SettingsPage::Projects { .. } => self.perform(Intent::LoadSettings),
+            SettingsPage::Providers => {
+                self.perform(Intent::LoadAccounts);
+                self.perform(Intent::LoadProviders);
+                self.perform(Intent::LoadSettings);
+            }
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
             SettingsPage::Archived
             | SettingsPage::Appearance
@@ -498,8 +517,81 @@ impl Desktop {
             SettingsPage::Usage => self.perform(Intent::LoadUsageSummary {
                 input: usage::summary_input(&self.snapshot),
             }),
-            SettingsPage::Archived | SettingsPage::Appearance | SettingsPage::Keybindings => {}
+            SettingsPage::About
+            | SettingsPage::Diagnostics
+            | SettingsPage::Licenses => {}
         }
+    }
+
+    fn render_about(&self) -> AnyElement {
+        page_container(
+            896.,
+            vec![section(
+                Some("About".into()),
+                None,
+                None,
+                vec![
+                    Row::new("Version")
+                        .description(env!("CARGO_PKG_VERSION"))
+                        .render(),
+                    Row::new("Privacy")
+                        .description("The Host and clients keep conversation data in their local stores.")
+                        .render(),
+                ],
+            )
+            .into_any_element()],
+        )
+    }
+
+    fn render_diagnostics(&self) -> AnyElement {
+        page_container(
+            896.,
+            vec![
+                section(
+                    Some("Diagnostics".into()),
+                    None,
+                    None,
+                    vec![
+                        Row::new("Connection")
+                            .description(if self.snapshot.connected {
+                                "Connected"
+                            } else {
+                                "Disconnected"
+                            })
+                            .render(),
+                        Row::new("Logs")
+                            .description(
+                                crate::platform::state_dir()
+                                    .map(|path| path.join("logs").display().to_string())
+                                    .unwrap_or_else(|error| format!("Unavailable: {error}")),
+                            )
+                            .render(),
+                    ],
+                )
+                .into_any_element(),
+            ],
+        )
+    }
+
+    fn render_licenses(&self) -> AnyElement {
+        page_container(
+            896.,
+            vec![
+                section(
+                    Some("Licenses and legal".into()),
+                    None,
+                    None,
+                    vec![
+                        Row::new("Open-source notices")
+                            .description(
+                                "Third-party license notices are included with this release.",
+                            )
+                            .render(),
+                    ],
+                )
+                .into_any_element(),
+            ],
+        )
     }
 }
 

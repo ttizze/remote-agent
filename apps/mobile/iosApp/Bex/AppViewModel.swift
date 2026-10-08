@@ -51,6 +51,7 @@ final class BexAppViewModel: ObservableObject {
     var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
+    private var incomingShareHandoffsInFlight: Set<URL> = []
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
@@ -81,6 +82,40 @@ final class BexAppViewModel: ObservableObject {
         initialization = Task { [weak self] in
             await writing?.value
             await self?.initialize(id, previous: old)
+        }
+    }
+
+    func handleShortcut() {
+        screen = .threads
+        perform(.newThread(projectId: snapshot.selectedProjectId()))
+    }
+
+    func handleSurfaceURL(_ url: URL) {
+        guard url.scheme == "remote-agent" else { return }
+        if url.host == "new" {
+            handleShortcut()
+            return
+        }
+        guard url.host == "share" else { return }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let text = query.filter { $0.name == "text" }.compactMap(\.value).joined(separator: "\n")
+        let urls = query.filter { $0.name == "url" }.compactMap(\.value)
+        perform(.importShare(content: ShareContent(text: text, urls: urls)))
+        screen = .threads
+    }
+
+    func ingestIncomingShareHandoffs() {
+        let pending = RemoteAgentShareInbox.pending()
+        guard !pending.isEmpty else { return }
+        screen = .threads
+        for handoff in pending {
+            guard incomingShareHandoffsInFlight.insert(handoff.file).inserted else { continue }
+            perform(.importShare(content: handoff.content)) { [weak self] result in
+                self?.incomingShareHandoffsInFlight.remove(handoff.file)
+                if case .success = result {
+                    RemoteAgentShareInbox.remove(handoff.file)
+                }
+            }
         }
     }
 
@@ -169,6 +204,7 @@ final class BexAppViewModel: ObservableObject {
             observe(owner, host: id)
             connect()
             startBackgroundProfiles(id)
+            ingestIncomingShareHandoffs()
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
@@ -325,6 +361,7 @@ final class BexAppViewModel: ObservableObject {
                     isConnecting = false
                     observe(owner, host: id)
                     startBackgroundProfiles(id)
+                    ingestIncomingShareHandoffs()
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -443,8 +480,21 @@ extension BexAppViewModel {
             profiles[index].name = name
             do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
         }
+        let becameUnavailable = snapshot.error() == nil && next.error() != nil
         if snapshot.error() != next.error() {
             notice = next.error()
+        }
+        if becameUnavailable && UIApplication.shared.applicationState != .active {
+            let mode = next.preferences().notificationMode
+            let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
+            let soundEnabled = mode == .sound || mode == .notificationsAndSound
+            if notificationsEnabled || soundEnabled {
+                LocalNotifications.deliver(
+                    title: "Bex needs your attention",
+                    body: next.error() ?? "The Host reported an error.",
+                    sound: soundEnabled
+                )
+            }
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next

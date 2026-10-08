@@ -85,6 +85,8 @@ pub struct PreferencesView {
     pub working_section: bool,
     pub diff_ignore_whitespace: bool,
     pub follow_up: FollowUpBehavior,
+    pub notification_mode: crate::view::notifications::NotificationMode,
+    pub in_app_notifications_enabled: bool,
 }
 
 impl Snapshot {
@@ -275,7 +277,7 @@ impl Snapshot {
     pub fn settings(&self, scope: SettingsScope) -> SettingsView {
         settings_view(
             self,
-            self.conversation_settings.as_ref(),
+            self.host_settings.as_ref(),
             &scope,
             self.preferences.timestamp_format,
         )
@@ -497,6 +499,8 @@ impl Snapshot {
             working_section: preferences.working_section,
             diff_ignore_whitespace: preferences.diff_ignore_whitespace,
             follow_up: self.follow_up,
+            notification_mode: preferences.notification_mode,
+            in_app_notifications_enabled: preferences.in_app_notifications_enabled,
         }
     }
     /// The project's icon; `None` shows its initials. Clients cache the image
@@ -519,8 +523,8 @@ impl Snapshot {
             .and_then(|entry| entry.icon.as_ref())
             .map(|icon| icon.hash.clone())
     }
-    pub fn conversation_settings_loaded(&self) -> bool {
-        self.conversation_settings.is_some()
+    pub fn host_settings_loaded(&self) -> bool {
+        self.host_settings.is_some()
     }
     /// The files of one draft, such as a question answer's.
     pub fn draft_attachments(&self, draft_key: String) -> Vec<DraftAttachment> {

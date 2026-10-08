@@ -30,6 +30,7 @@ use agent_core::{
     },
     state::{Intent, Snapshot},
     view::{
+        command_palette::{self, CommandPaletteItem, CommandPaletteItemKind},
         new_thread::NewThreadView,
         sidebar::{SidebarOptions, SidebarView},
         thread::{ThreadView, ThreadViewOptions},
@@ -39,7 +40,13 @@ use agent_core::{
 };
 use agent_protocol::models::RemoteHost;
 use gpui_kit::{
-    component::{WindowExt, h_flex, notification::Notification, v_flex},
+    component::{
+        Sizable, WindowExt, h_flex,
+        input::{Input, InputEvent, InputState},
+        menu::PopupMenuItem,
+        notification::Notification,
+        v_flex,
+    },
     prelude::FluentBuilder,
     *,
 };
@@ -178,6 +185,12 @@ pub(crate) struct Desktop {
     pub(crate) panels: panel::PanelState,
     pub(crate) settings: settings::SettingsState,
     pub(crate) menus: menus::MenuState,
+    command_palette_query: Entity<InputState>,
+    command_palette_open: bool,
+    /// Number of Shift key presses in the current modifier pair. GPUI exposes
+    /// modifier state but not left/right identity, so the desktop surface
+    /// keeps this small edge-triggered latch for the both-Shift shortcut.
+    snapshot_shift_presses: u8,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
     /// Decoded project icons, by content hash.
@@ -379,6 +392,17 @@ impl Desktop {
         let panels = panel::PanelState::new(window, cx);
         let settings = settings::SettingsState::new(window, cx);
         let menus = menus::MenuState::new(window, cx);
+        let command_palette_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands and threads"));
+        subscriptions.push(cx.subscribe_in(
+            &command_palette_query,
+            window,
+            |view, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) && view.command_palette_open {
+                    view.reopen_command_palette(window, cx);
+                }
+            },
+        ));
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
@@ -421,6 +445,9 @@ impl Desktop {
             panels,
             settings,
             menus,
+            command_palette_query,
+            command_palette_open: false,
+            snapshot_shift_presses: 0,
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
             project_icons: Default::default(),
@@ -876,7 +903,7 @@ impl Desktop {
                 self.connecting = false;
                 self.selected_retry_at = None;
                 self.perform(Intent::LoadAccounts);
-                self.perform(Intent::LoadConversationSettings);
+                self.perform(Intent::LoadSettings);
                 self.snapshot_changed(window, cx);
             }
             Update::Connected(Err(error)) => {
@@ -1148,6 +1175,33 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> bool {
         let keystroke = &event.keystroke;
+        let capture = self.snapshot.preferences.snapshot_capture.clone();
+        if capture.shortcut == agent_core::view::snapshot_capture::SnapshotShortcut::BothShiftKeys
+            && keystroke.key.eq_ignore_ascii_case("shift")
+        {
+            self.snapshot_shift_presses = self.snapshot_shift_presses.saturating_add(1);
+        } else if !keystroke.modifiers.shift {
+            self.snapshot_shift_presses = 0;
+        }
+        if capture.enabled
+            && agent_core::view::snapshot_capture::shortcut_matches(
+                capture.shortcut,
+                &keystroke.key,
+                keystroke.modifiers.shift,
+                keystroke.modifiers.platform,
+                keystroke.modifiers.control,
+                self.snapshot_shift_presses >= 2,
+            )
+            && let Some(draft_key) = self.composer_attachment_target()
+        {
+            self.capture_snapshot(draft_key);
+            self.snapshot_shift_presses = 0;
+            return true;
+        }
+        if keystroke.key == "k" && (keystroke.modifiers.platform || keystroke.modifiers.control) {
+            self.open_command_palette(window, cx);
+            return true;
+        }
         if keystroke.key == "escape" && self.cancel_sweep(window, cx) {
             return true;
         }
@@ -1163,6 +1217,103 @@ impl Desktop {
             return false;
         };
         self.run_command(&command, window, cx)
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
+        self.command_palette_query
+            .update(cx, |query, cx| query.set_value("", window, cx));
+        self.open_command_palette_menu(window, cx);
+    }
+
+    fn reopen_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        self.open_command_palette_menu(window, cx);
+    }
+
+    fn open_command_palette_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.command_palette_items();
+        let query = self.command_palette_query.read(cx).value().to_string();
+        let items = command_palette::filter(&items, &query, &Default::default());
+        let input = self.command_palette_query.clone();
+        let owner = cx.entity().downgrade();
+        self.open_menu(
+            point(px(240.), px(72.)),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                menu = menu
+                    .label("Command palette")
+                    .item(PopupMenuItem::element(move |_, _| {
+                        Input::new(&input)
+                            .appearance(false)
+                            .small()
+                            .aria_label("Command palette search")
+                    }))
+                    .min_w(px(320.));
+                for item in items {
+                    let key = item.key;
+                    let title = item.title;
+                    let owner = owner.clone();
+                    menu = menu.item(PopupMenuItem::new(title).on_click(move |_, window, cx| {
+                        let key = key.clone();
+                        let _ = owner.update(cx, |view, cx| {
+                            view.close_menu(cx);
+                            match key.strip_prefix("thread:") {
+                                Some(thread) => view.open_thread(thread.to_owned(), cx),
+                                None if key == "action:new" => view.new_thread(None, cx),
+                                None if key == "action:settings" => {
+                                    view.open_settings(settings::SettingsPage::General, window, cx)
+                                }
+                                None if key == "action:sidebar" => {
+                                    view.sidebar_hidden = !view.sidebar_hidden;
+                                    cx.notify();
+                                }
+                                _ => {}
+                            }
+                        });
+                    }));
+                }
+                menu
+            },
+        );
+        self.command_palette_open = true;
+        self.command_palette_query
+            .update(cx, |query, cx| query.focus(window, cx));
+    }
+
+    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        let mut items = vec![
+            CommandPaletteItem {
+                key: "action:new".into(),
+                kind: CommandPaletteItemKind::Action,
+                title: "New thread".into(),
+                detail: Some("Start a conversation".into()),
+                search_terms: vec!["chat".into()],
+            },
+            CommandPaletteItem {
+                key: "action:settings".into(),
+                kind: CommandPaletteItemKind::Action,
+                title: "Open settings".into(),
+                detail: None,
+                search_terms: vec!["preferences".into()],
+            },
+            CommandPaletteItem {
+                key: "action:sidebar".into(),
+                kind: CommandPaletteItemKind::Action,
+                title: "Toggle sidebar".into(),
+                detail: None,
+                search_terms: vec!["navigation".into()],
+            },
+        ];
+        items.extend(self.views.sidebar.rows().map(|row| CommandPaletteItem {
+            key: format!("thread:{}", row.id),
+            kind: CommandPaletteItemKind::Thread,
+            title: row.title.clone(),
+            detail: row.project_name.clone(),
+            search_terms: vec![row.branch.clone().unwrap_or_default()],
+        }));
+        items
     }
 
     /// Where focus is, as the keymap's `when` clauses read it.

@@ -97,7 +97,7 @@ results! {
     PreviewSession(crate::preview::PreviewSessionSnapshot),
     PermissionSettings(crate::permissions::PermissionSettings),
     Providers(Vec<crate::models::ProviderInstance>), WorktreeSettings(crate::models::WorktreeSettings),
-    ConversationSettings(crate::models::ConversationSettings),
+    HostSettings(crate::models::HostSettings),
     Keybindings(crate::keybindings::KeybindingsConfig),
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
     Empty(crate::models::Empty),

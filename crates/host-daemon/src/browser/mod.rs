@@ -133,6 +133,9 @@ impl Browser {
             "args":["browser-mcp", "--socket", self.socket(), "--thread", thread]}),
         )
     }
+    pub(crate) fn profile(&self) -> &std::path::Path {
+        &self.profile
+    }
     fn socket(&self) -> PathBuf {
         self.bridge_directory.path().join("bridge.sock")
     }
@@ -220,10 +223,14 @@ impl Browser {
         )?;
         Self::action(&mut state, &thread, &request.action).await?;
         let mut frame = Self::frame(&mut state, &thread).await?;
-        if frame.image_id == request.image_id {
+        let changed = frame.image_id != request.image_id;
+        if !changed {
             frame.image.clear();
         }
         drop(state);
+        if changed {
+            self.persist_artifact(&thread, &frame).await;
+        }
         self.report_preview_frame(&thread, &frame);
         Ok(frame)
     }
@@ -240,6 +247,7 @@ impl Browser {
         Self::action(&mut state, thread, &action).await?;
         let frame = Self::frame(&mut state, thread).await?;
         drop(state);
+        self.persist_artifact(thread, &frame).await;
         self.report_preview_frame(thread, &frame);
         Ok(frame)
     }
@@ -294,6 +302,37 @@ impl Browser {
             Self::action(&mut state, thread, &action).await?;
         }
         Self::frame(&mut state, thread).await
+    }
+
+    async fn persist_artifact(&self, thread: &str, frame: &BrowserFrame) {
+        if frame.image.is_empty() {
+            return;
+        }
+        let component = |value: &str| {
+            value
+                .chars()
+                .map(|character| {
+                    character
+                        .is_ascii_alphanumeric()
+                        .then_some(character)
+                        .or_else(|| matches!(character, '-' | '_').then_some(character))
+                        .unwrap_or('_')
+                })
+                .collect::<String>()
+        };
+        let directory = self.profile.join("artifacts");
+        let path = directory.join(format!(
+            "{}-{}.png",
+            component(thread),
+            component(&frame.image_id)
+        ));
+        if let Err(error) = tokio::fs::create_dir_all(&directory).await {
+            tracing::debug!(%error, "could not create browser artifact directory");
+            return;
+        }
+        if let Err(error) = tokio::fs::write(path, &frame.image).await {
+            tracing::debug!(%error, "could not persist browser screenshot artifact");
+        }
     }
 
     pub async fn resize_preview_tab(

@@ -80,6 +80,72 @@ fn opened(state: agent_domain::State) -> Owner {
     owner.thread_update(&thread_id(), ThreadUpdate::Synchronized);
     owner
 }
+
+#[test]
+fn an_incoming_share_appends_to_the_draft_being_edited() {
+    let mut owner = opened(thread_state("Thread"));
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "typed before handoff".into(),
+            ..draft()
+        },
+    );
+
+    owner.intent(
+        Intent::ImportShare {
+            content: crate::view::share::ShareContent {
+                text: "shared context".into(),
+                urls: vec!["https://example.test/context".into()],
+            },
+        },
+        oneshot::channel().0,
+    );
+
+    assert_eq!(
+        owner.state.current_draft().text,
+        "typed before handoff\n\nshared context\nhttps://example.test/context"
+    );
+}
+
+#[test]
+fn an_incoming_share_targets_the_thread_selected_at_arrival() {
+    let mut owner = opened(thread_state("Thread"));
+    let selected = thread_id();
+    let other = ThreadId::new("other").unwrap();
+    owner.state.drafts.insert(
+        selected.to_string(),
+        Draft {
+            text: "selected draft".into(),
+            ..draft()
+        },
+    );
+    owner.state.drafts.insert(
+        other.to_string(),
+        Draft {
+            text: "other draft".into(),
+            ..draft()
+        },
+    );
+
+    owner.select_thread(Some(other.clone()));
+    owner.intent(
+        Intent::ImportShare {
+            content: crate::view::share::ShareContent {
+                text: "incoming text".into(),
+                urls: vec![],
+            },
+        },
+        oneshot::channel().0,
+    );
+
+    assert_eq!(
+        owner.state.drafts.get(selected.as_str()).unwrap().text,
+        "selected draft"
+    );
+    assert_eq!(owner.state.current_draft().text, "other draft\n\nincoming text");
+}
+
 fn committed(sequence: u64, reply: Reply) -> Delivered {
     Delivered::Committed(Committed {
         reply,
@@ -2660,15 +2726,15 @@ fn only_applies_the_start_from_origin_default_to_new_worktree_drafts() {
         .unwrap();
     assert!(!owner.state.new_thread_workspace().start_from_origin);
 
-    let mut settings = crate::models::ConversationSettings::default();
+    let mut settings = crate::models::HostSettings::default();
     settings.project_overrides.insert(
         "app".into(),
-        crate::models::ProjectConversationSettings {
+        crate::models::ProjectSettingsOverrides {
             new_worktrees_start_from_origin: Some(false),
             ..Default::default()
         },
     );
-    owner.state.conversation_settings = Some(settings);
+    owner.state.host_settings = Some(settings);
     owner
         .set_new_thread_workspace(ThreadWorkspaceMode::Worktree)
         .unwrap();

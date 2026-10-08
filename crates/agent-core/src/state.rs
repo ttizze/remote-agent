@@ -552,7 +552,7 @@ pub struct Snapshot {
     pub inbox_returns: crate::view::inbox::InboxReturns,
     pub thread_order: Option<ThreadOrderHold>,
     /// The Host's conversation settings once read.
-    pub conversation_settings: Option<crate::models::ConversationSettings>,
+    pub host_settings: Option<crate::models::HostSettings>,
     /// Resume-compaction offers dismissed with "Keep full history" in this
     /// session, by thread and context snapshot.
     pub resume_compaction_dismissals: BTreeSet<String>,
@@ -916,10 +916,70 @@ impl Snapshot {
             .cloned()
             .unwrap_or_else(|| {
                 self.selected_thread.as_ref().map_or_else(
-                    || self.default_draft.user_defaults(),
+                    || self.new_thread_default_draft(),
                     |id| self.draft_for_thread(id),
                 )
             })
+    }
+    /// The new-thread defaults after applying the selected project's overrides.
+    /// A draft explicitly saved for that project still wins over this fallback.
+    pub fn new_thread_default_draft(&self) -> Draft {
+        let mut draft = self.default_draft.clone();
+        let Some(host) = &self.host_settings else {
+            return draft;
+        };
+        let overrides = self
+            .selected_project
+            .as_deref()
+            .and_then(|project| host.project_overrides.get(project));
+        if let Some(mode) = overrides.and_then(|project| project.default_runtime_mode) {
+            draft.runtime_mode = mode;
+        }
+        if let Some(agent_protocol::models::Nullable::Value(selection)) =
+            overrides.and_then(|project| project.default_model_selection.as_ref())
+        {
+            draft = draft.with_selection(selection);
+        }
+        if self.preferences.load_balancing_enabled {
+            let providers = self.providers.as_deref().unwrap_or(&[]);
+            let candidates = providers
+                .iter()
+                .map(|provider| crate::view::load_balancing::Candidate {
+                    instance_id: provider.instance.clone(),
+                    driver: provider.driver,
+                    ready: provider.enabled
+                        && provider.status == agent_protocol::models::ProviderStatus::Ready,
+                })
+                .collect::<Vec<_>>();
+            let seed = crate::view::load_balancing::seed(
+                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
+            );
+            if let Some(instance) = crate::view::load_balancing::select_instance(
+                &candidates,
+                draft.driver,
+                &self.preferences.load_balancing_weights,
+                seed,
+            ) {
+                if let Some(provider) = providers
+                    .iter()
+                    .find(|provider| provider.instance == instance)
+                {
+                    let model = provider
+                        .models
+                        .iter()
+                        .find(|model| model.slug == draft.model)
+                        .or_else(|| provider.models.iter().find(|model| model.is_default))
+                        .or_else(|| provider.models.first());
+                    if let Some(model) = model {
+                        draft.instance_id = provider.instance.clone();
+                        draft.driver = provider.driver;
+                        draft.model = model.slug.clone();
+                        draft.options.clear();
+                    }
+                }
+            }
+        }
+        draft
     }
     /// A thread's draft, or one with the thread's model and modes.
     pub fn draft_for_thread(&self, id: &ThreadId) -> Draft {
@@ -1033,17 +1093,33 @@ impl Snapshot {
             }
             return workspace;
         }
-        let worktree = self.new_thread_project_root().is_some()
-            && self
-                .workspace
-                .worktree_settings
-                .as_ref()
-                .is_some_and(|settings| settings.create_on_new_session);
-        let mode = if worktree {
-            ThreadWorkspaceMode::Worktree
-        } else {
-            ThreadWorkspaceMode::Local
-        };
+        let mode = self
+            .host_settings
+            .as_ref()
+            .and_then(|host| {
+                self.selected_project
+                    .as_deref()
+                    .and_then(|project| host.project_overrides.get(project))
+                    .and_then(|project| project.default_thread_env_mode)
+                    .or(host.default_thread_env_mode)
+            })
+            .map(|mode| match mode {
+                agent_protocol::models::ThreadEnvMode::Local => ThreadWorkspaceMode::Local,
+                agent_protocol::models::ThreadEnvMode::Worktree => ThreadWorkspaceMode::Worktree,
+            })
+            .unwrap_or_else(|| {
+                let worktree = self.new_thread_project_root().is_some()
+                    && self
+                        .workspace
+                        .worktree_settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.create_on_new_session);
+                if worktree {
+                    ThreadWorkspaceMode::Worktree
+                } else {
+                    ThreadWorkspaceMode::Local
+                }
+            });
         let (branch, worktree_path) = match mode {
             ThreadWorkspaceMode::Local => self.new_thread_local_selection(),
             ThreadWorkspaceMode::Worktree => (None, None),
@@ -1064,8 +1140,8 @@ impl Snapshot {
     ) -> bool {
         mode == crate::view::projects::selection::ThreadWorkspaceMode::Worktree
             && crate::view::settings::new_worktrees_start_from_origin(
-                self.conversation_settings.as_ref(),
-                self.new_thread_project_id(),
+                self.host_settings.as_ref(),
+                self.selected_project.as_deref(),
             )
     }
     /// Where a thread's files and terminals open: its worktree or checkout,
@@ -1916,6 +1992,44 @@ pub enum Intent {
     SetWorkingSection {
         enabled: bool,
     },
+    /// The local device notification presentation mode.
+    SetNotificationMode {
+        mode: crate::view::notifications::NotificationMode,
+    },
+    /// Whether foreground attention events appear as in-app notices.
+    SetInAppNotificationsEnabled {
+        enabled: bool,
+    },
+    /// Enables weighted routing of new threads across provider instances.
+    SetLoadBalancingEnabled {
+        enabled: bool,
+    },
+    /// Sets one provider instance's local routing weight from 0 to 100.
+    SetLoadBalancingWeight {
+        instance_id: String,
+        weight: u8,
+    },
+    SetSnapshotCaptureEnabled {
+        enabled: bool,
+    },
+    SetSnapshotIncludeAccessibility {
+        enabled: bool,
+    },
+    SetSnapshotShortcut {
+        shortcut: crate::view::snapshot_capture::SnapshotShortcut,
+    },
+    SetSnapshotPlaySound {
+        enabled: bool,
+    },
+    SetSnapshotSound {
+        sound: crate::view::snapshot_capture::SnapshotSound,
+    },
+    SetSnapshotFlash {
+        enabled: bool,
+    },
+    SetSnapshotAnimations {
+        enabled: bool,
+    },
     /// The model new threads start with; an open thread keeps its own.
     SetDefaultModel {
         instance_id: String,
@@ -1948,10 +2062,14 @@ pub enum Intent {
     RemoveKeybinding {
         rule: crate::view::keybindings::KeybindingTarget,
     },
-    LoadConversationSettings,
-    UpdateConversationSettings {
+    /// Adds content received through a native share surface to the current draft.
+    ImportShare {
+        content: crate::view::share::ShareContent,
+    },
+    LoadSettings,
+    UpdateSettings {
         scope: crate::view::settings::SettingsScope,
-        change: crate::view::settings::ConversationSettingChange,
+        change: crate::view::settings::SettingChange,
     },
     ResetProjectSettings {
         project_id: String,
@@ -2032,6 +2150,7 @@ pub enum Intent {
         account_id: String,
         credit_id: Option<String>,
     },
+    LoadProviders,
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,
@@ -2253,6 +2372,118 @@ mod tests {
                 ..draft
             }
         );
+    }
+
+    #[test]
+    fn selected_project_defaults_apply_to_a_new_thread_fallback() {
+        let mut host = crate::models::HostSettings::default();
+        host.project_overrides.insert(
+            "project".into(),
+            agent_protocol::models::ProjectSettingsOverrides {
+                default_runtime_mode: Some(RuntimeMode::ApprovalRequired),
+                default_thread_env_mode: Some(agent_protocol::models::ThreadEnvMode::Local),
+                default_model_selection: Some(agent_protocol::models::Nullable::Value(
+                    ModelSelection {
+                        instance: "claude".into(),
+                        driver: Driver::Claude,
+                        model: "sonnet".into(),
+                        options: Default::default(),
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+        let snapshot = Snapshot {
+            selected_project: Some("project".into()),
+            host_settings: Some(host),
+            default_draft: Draft {
+                instance_id: "codex".into(),
+                driver: Driver::Codex,
+                model: "gpt".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let draft = snapshot.new_thread_default_draft();
+        assert_eq!(draft.runtime_mode, RuntimeMode::ApprovalRequired);
+        assert_eq!(draft.instance_id, "claude");
+        assert_eq!(draft.model, "sonnet");
+        assert_eq!(
+            snapshot.new_thread_workspace().mode,
+            crate::view::projects::selection::ThreadWorkspaceMode::Local
+        );
+    }
+
+    #[test]
+    fn load_balancing_routes_a_new_thread_to_the_weighted_ready_instance() {
+        let mut snapshot = Snapshot {
+            selected_project: Some("project".into()),
+            host_settings: Some(crate::models::HostSettings::default()),
+            default_draft: Draft {
+                instance_id: "codex".into(),
+                driver: Driver::Codex,
+                model: "shared".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        snapshot.preferences.load_balancing_enabled = true;
+        snapshot
+            .preferences
+            .load_balancing_weights
+            .insert("codex-build".into(), 100);
+        snapshot.providers = Some(vec![
+            crate::models::ProviderInstance {
+                instance: "codex".into(),
+                driver: Driver::Codex,
+                display_name: "Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+            crate::models::ProviderInstance {
+                instance: "codex-build".into(),
+                driver: Driver::Codex,
+                display_name: "Build Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+        ]);
+        let draft = snapshot.new_thread_default_draft();
+        assert_eq!(draft.instance_id, "codex-build");
     }
 
     #[test]

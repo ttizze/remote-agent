@@ -348,6 +348,7 @@ impl Desktop {
                 .is_some_and(|open| open.menu == *menu)
             {
                 view.menus.open = None;
+                view.command_palette_open = false;
                 cx.notify();
             }
         });
@@ -362,6 +363,7 @@ impl Desktop {
 
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.menus.open.take().is_some() {
+            self.command_palette_open = false;
             cx.notify();
         }
     }

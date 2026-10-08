@@ -115,6 +115,10 @@ pub(super) struct CommandCache {
 }
 
 impl CommandCache {
+    pub(super) fn clear(&self) {
+        self.entries.lock().unwrap().clear();
+    }
+
     /// A complete earlier scan.
     pub(super) fn get(&self, instance: &str, cwd: &str) -> Option<ProviderCommands> {
         self.entries

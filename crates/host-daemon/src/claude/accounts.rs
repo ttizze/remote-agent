@@ -316,6 +316,8 @@ impl Accounts {
                     let response = super::control::ClaudeProgram {
                         program,
                         config_home,
+                        environment: Default::default(),
+                        launch_args: vec![],
                     }
                     .query_control(
                         &home,

@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +53,9 @@ internal fun RemoteAgentApp(
     }
     BackHandler(model.stack.size > 1) { model.back() }
     AppMaterialTheme {
+        LaunchedEffect(model.snapshot.preferences().notificationMode.toString()) {
+            (activity as? MainActivity)?.requestNotificationPermissionIfNeeded()
+        }
         val context = LocalContext.current
         val root = model.snapshot.currentDirectory()
         val markdown =
