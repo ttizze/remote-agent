@@ -33,7 +33,6 @@ import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
 import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.notificationEvents as buildNotificationEvents
-import dev.remoteagent.core.notificationBadgeCount as buildNotificationBadgeCount
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.subscriptionUsageWidgetsJson
 import dev.remoteagent.core.validateInvitation
@@ -330,13 +329,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun environmentSnapshotsForCore(): List<Snapshot> = environmentSnapshots.values.toList()
-
-    /** Core computes each Host's attention count; the native badge aggregates
-     * those independent counts across every connected environment. */
-    fun notificationBadgeCount(): UInt =
-        environmentSnapshots.values.fold(0u) { total, snapshot ->
-            total + buildNotificationBadgeCount(snapshot)
-        }
 
     fun environmentProjects(query: String): List<EnvironmentProjectRow> =
         buildEnvironmentProjectRows(environmentSnapshotsForCore(), query)
@@ -861,6 +853,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun removeProfile(id: String) {
         runCatching {
+            val environmentId = environmentSnapshots[id]?.environmentId() ?: id
+            LocalNotifications.removeEnvironment(context, environmentId)
             val unregistration = unregisterPush(id)
             val background = backgroundOwners.remove(id)
             backgroundJobs.remove(id)?.cancel()
@@ -967,6 +961,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     /** Foreground: subscriptions resume from their cursors and the connection is checked. */
     fun foreground() {
         appInBackground = false
+        LocalNotifications.clearDelivered(context)
         owner?.appBecameActive()
         connect()
         startBackgroundProfiles(profileId)
@@ -1062,7 +1057,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun deliverAttentionEvents(previous: Snapshot, current: Snapshot) {
         val appActive = !appInBackground
-        val badgeCount = if (appActive) 0u else notificationBadgeCount()
         if (appActive) LocalNotifications.clearDelivered(context)
         val attentionEvents = buildNotificationEvents(previous, current, appActive, appActive)
         attentionEvents.forEach { event ->
@@ -1078,7 +1072,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     sound = event.sound,
                     threadId = event.threadId,
                     deepLink = event.deepLink,
-                    badgeCount = badgeCount,
                     kind = event.kind.toString(),
                     soundKind = event.soundKind.toString(),
                 )
@@ -1086,8 +1079,19 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 LocalNotifications.playSound(context, event.soundKind.toString())
             }
         }
-        LocalNotifications.updateBadge(context, badgeCount)
+        if (appActive || !nativeNotificationsEnabled(current)) {
+            LocalNotifications.clearDelivered(context)
+        } else {
+            LocalNotifications.updateBadge(context)
+        }
     }
+
+    private fun nativeNotificationsEnabled(snapshot: Snapshot): Boolean =
+        when (snapshot.preferences().notificationMode) {
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS,
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
+            else -> false
+        }
 
     /** Saves the model preferences every Host shares; the store writes its own state. */
     fun persist() {

@@ -319,6 +319,8 @@ final class BexAppViewModel: ObservableObject {
     func removeProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do {
+            let environmentId = environmentSnapshots[id]?.environmentId() ?? id
+            LocalNotifications.removeEnvironment(environmentId)
             let remaining = profiles.filter { $0.id != id }
             let unregistration = unregisterPush(id)
             let background = backgroundOwners.removeValue(forKey: id)
@@ -911,16 +913,6 @@ final class BexAppViewModel: ObservableObject {
         Array(environmentSnapshots.values)
     }
 
-    /// Core computes attention per Host; native badges represent the sum for
-    /// every saved environment rather than a boolean for the selected Host.
-    func notificationBadgeCount() -> UInt32 {
-        environmentSnapshots.values.reduce(UInt32(0)) { total, snapshot in
-            total.addingReportingOverflow(
-                AgentCore.notificationBadgeCount(snapshot: snapshot)
-            ).partialValue
-        }
-    }
-
     func environmentProjects(_ query: String) -> [EnvironmentProjectRow] {
         AgentCore.environmentProjectRows(snapshots: environmentSnapshotsForCore(), query: query)
     }
@@ -1094,7 +1086,6 @@ extension BexAppViewModel {
             appVisible: appActive,
             appFocused: appActive
         )
-        let badgeCount = appActive ? 0 : notificationBadgeCount()
         if appActive { LocalNotifications.clearDelivered() }
         for event in attentionEvents {
             if event.inApp {
@@ -1108,7 +1099,6 @@ extension BexAppViewModel {
                     sound: event.sound,
                     threadId: event.threadId,
                     deepLink: event.deepLink,
-                    badgeCount: badgeCount,
                     kind: String(describing: event.kind),
                     soundKind: String(describing: event.soundKind)
                 )
@@ -1116,11 +1106,24 @@ extension BexAppViewModel {
                 LocalNotifications.playSound(soundKind: String(describing: event.soundKind))
             }
         }
-        LocalNotifications.updateBadge(badgeCount)
+        if appActive || !nativeNotificationsEnabled(current) {
+            LocalNotifications.clearDelivered()
+        } else {
+            LocalNotifications.updateBadge()
+        }
+    }
+
+    private func nativeNotificationsEnabled(_ snapshot: AgentCore.Snapshot) -> Bool {
+        // Keep the decision in core; this string projection only avoids a
+        // second native enum declaration while consuming the generated value.
+        String(describing: snapshot.preferences().notificationMode)
+            .lowercased()
+            .contains("notifications")
     }
 
     func openNotificationThread() {
         guard let route = notificationThreadRoute else { return }
+        LocalNotifications.acknowledge(route)
         if AgentPushCenter.isActivityOverviewDeepLink(route) {
             notificationThreadRoute = nil
             notice = nil
