@@ -97,6 +97,7 @@ pub(super) enum Written {
 
 pub(super) enum Event {
     Intent(Intent, Waiter),
+    ReportHostPower(agent_protocol::background::HostPowerSnapshot, Waiter),
     AppActive,
     Attach {
         peer: Peer,
@@ -567,6 +568,9 @@ impl Owner {
     pub async fn handle(&mut self, event: Event) {
         match event {
             Event::Intent(intent, complete) => self.intent(intent, complete),
+            Event::ReportHostPower(snapshot, complete) => {
+                self.job(Call::ReportHostPowerState(snapshot), Some(complete), None)
+            }
             Event::AppActive => self.app_became_active(),
             Event::Attach {
                 peer,

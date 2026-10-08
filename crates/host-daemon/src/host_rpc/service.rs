@@ -1095,7 +1095,17 @@ impl HostRpcService {
                             continue;
                         }
                         last_git_fetch.insert(cwd.clone(), now.clone());
-                        if let Err(error) = crate::vcs::refresh_remote(cwd.clone(), stop.clone()).await {
+                        let started = std::time::Instant::now();
+                        let result = crate::vcs::refresh_remote(cwd.clone(), stop.clone()).await;
+                        service.inner.resources.background.record_attribution(
+                            "git",
+                            "remote.fetch",
+                            0,
+                            0,
+                            1,
+                            started.elapsed().as_millis() as u64,
+                        );
+                        if let Err(error) = result {
                             tracing::debug!(target: "bex", operation = "host.vcs.background_refresh", cwd = %cwd, message = %error);
                         }
                     }
@@ -1130,7 +1140,19 @@ impl HostRpcService {
 
     async fn refresh_provider_cache(&self) -> Vec<agent_protocol::models::ProviderInstance> {
         let _refresh = self.inner.resources.provider_refresh.lock().await;
+        let started = std::time::Instant::now();
         let providers = self.providers_uncached().await;
+        let logical_read_bytes = serde_json::to_vec(&providers)
+            .map(|value| value.len() as u64)
+            .unwrap_or(0);
+        self.inner.resources.background.record_attribution(
+            "provider",
+            "health.refresh",
+            logical_read_bytes,
+            0,
+            1,
+            started.elapsed().as_millis() as u64,
+        );
         *self.inner.resources.provider_cache.write().await = Some(ProviderHealthCache {
             refreshed_at: Self::host_now(),
             providers: providers.clone(),

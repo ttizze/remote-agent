@@ -64,10 +64,23 @@ pub fn background_rows(snapshot: &BackgroundPolicySnapshot) -> Vec<DiagnosticRow
         DiagnosticRow { key: "foregroundLeases".into(), value: snapshot.active_foreground_lease_count.to_string() },
         DiagnosticRow { key: "opportunisticWork".into(), value: snapshot.should_run_opportunistic_work.to_string() },
         DiagnosticRow { key: "hostPower".into(), value: format!("{:?}", snapshot.host_power.source) },
+        DiagnosticRow {
+            key: "hostPowerSpeedLimitPercent".into(),
+            value: snapshot
+                .host_power
+                .speed_limit_percent
+                .map_or_else(|| "unknown".into(), |value| format!("{value}%")),
+        },
     ]
 }
 
 pub fn host_resource_rows(snapshot: &HostResourcesSnapshot) -> Vec<DiagnosticRow> {
+    if !snapshot.usable_for_load_balancing() {
+        return vec![DiagnosticRow {
+            key: "status".into(),
+            value: "unavailable".into(),
+        }];
+    }
     vec![
         DiagnosticRow {
             key: "cpuUtilization".into(),
@@ -126,5 +139,17 @@ mod tests {
             updated_at: at,
         };
         assert_eq!(background_rows(&snapshot)[0].value, "balanced");
+    }
+
+    #[test]
+    fn host_resource_rows_wait_for_a_valid_capacity_probe() {
+        let rows = host_resource_rows(&HostResourcesSnapshot {
+            sampled_at: 1,
+            cpu_utilization: None,
+            cpu_count: 0,
+            available_memory_bytes: 0,
+            total_memory_bytes: 0,
+        });
+        assert_eq!(rows, vec![DiagnosticRow { key: "status".into(), value: "unavailable".into() }]);
     }
 }
