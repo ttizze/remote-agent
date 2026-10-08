@@ -155,6 +155,7 @@ impl Outbound {
 /// encoders, arbitration and queue delivery run under their conversation's lock.
 #[derive(Default)]
 struct State {
+    apns: Option<Arc<crate::apns::Apns>>,
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
     executions: HashMap<SessionRef, Arc<Mutex<SessionActor>>>,
@@ -190,6 +191,68 @@ fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl SessionRouter {
+    pub(super) fn set_apns(&self, apns: Option<Arc<crate::apns::Apns>>) {
+        lock_state(&self.state).apns = apns;
+    }
+    pub(super) fn apns(&self) -> Option<Arc<crate::apns::Apns>> {
+        lock_state(&self.state).apns.clone()
+    }
+    pub(super) fn revoke_device(&self, principal: &str) {
+        let state = lock_state(&self.state);
+        for output in state
+            .sessions
+            .values()
+            .filter(|output| output.principal == principal)
+        {
+            output.alive.store(false, Relaxed);
+        }
+        if let Some(apns) = &state.apns {
+            apns.revoke(principal);
+        }
+    }
+    pub(super) fn register_live_activity(
+        &self,
+        connection: SessionId,
+        params: &agent_protocol::live_activity::RegisterLiveActivity,
+        native: Thread,
+    ) -> Result<(), String> {
+        if native.id.as_ref() != Some(&params.session) {
+            return Err("native session ID does not match".into());
+        }
+        let actor = self.actor(&params.session);
+        let owned = lock_state(&actor);
+        let thread = owned.overlay(native);
+        let state = lock_state(&self.state);
+        let principal = state
+            .sessions
+            .get(&connection)
+            .filter(|output| output.alive.load(Relaxed))
+            .ok_or("connection is closed")?;
+        let apns = state.apns.as_ref().ok_or("APNs is unavailable")?;
+        let phase = agent_protocol::live_activity::task_phase(
+            !matches!(
+                thread.status,
+                agent_protocol::models::SessionStatus::Unknown
+                    | agent_protocol::models::SessionStatus::Unavailable
+            ),
+            thread.status == agent_protocol::models::SessionStatus::Running,
+            thread.requests.values().any(|request| {
+                request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+            }),
+            thread
+                .turns
+                .as_ref()
+                .and_then(|turns| turns.last())
+                .map(|turn| turn.status),
+        );
+        apns.register(
+            &principal.principal,
+            params,
+            agent_protocol::models::task_title(thread.name.as_deref(), thread.preview.as_deref()),
+            phase,
+        )
+        .map_err(str::to_owned)
+    }
     pub(crate) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
@@ -902,6 +965,28 @@ impl SessionRouter {
             let frame = protocol::encode(Notification::Activity { session: target.clone(), active, finished: !active && matches!(change, SessionChange::Turn { completed: true, turn } if turn.status == agent_protocol::execution::TurnStatus::Completed) }).expect("activity encodes");
             failed.extend(self.broadcast_frames(frame));
         }
+        if let Some(apns) = self.apns() {
+            let timeline = &actor.timeline;
+            apns.update(
+                target,
+                agent_protocol::live_activity::task_phase(
+                    !matches!(
+                        timeline.status,
+                        agent_protocol::models::SessionStatus::Unknown
+                            | agent_protocol::models::SessionStatus::Unavailable
+                    ),
+                    timeline.status == agent_protocol::models::SessionStatus::Running,
+                    timeline.requests.values().any(|request| {
+                        request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+                    }),
+                    timeline
+                        .turns
+                        .as_ref()
+                        .and_then(|turns| turns.last())
+                        .map(|turn| turn.status),
+                ),
+            );
+        }
         actor.release();
     }
 }
@@ -909,6 +994,87 @@ impl SessionRouter {
 mod tests {
     use super::*;
     use agent_protocol::models::{Item, Thread, Turn};
+
+    #[test]
+    fn live_activity_survives_disconnect_and_gets_terminal_result_before_execution_is_pruned() {
+        use agent_protocol::{
+            execution::TurnStatus,
+            live_activity::{PushEnvironment, RegisterLiveActivity},
+            models::SessionStatus,
+        };
+        let router = SessionRouter::new();
+        let apns = crate::apns::Apns::testing();
+        router.set_apns(Some(apns.clone()));
+        let phone = router.open_authenticated_session(Some("phone".into()));
+        let target = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "task".into(),
+        };
+        let params = RegisterLiveActivity {
+            session: target.clone(),
+            activity_id: "activity".into(),
+            token: vec![1; 32],
+            environment: PushEnvironment::Sandbox,
+        };
+        router.session_change(
+            &target,
+            SessionChange::Turn {
+                turn: Turn {
+                    id: "turn".into(),
+                    status: TurnStatus::Running,
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        );
+        router
+            .register_live_activity(
+                phone.id(),
+                &params,
+                Thread {
+                    id: Some(target.clone()),
+                    name: Some("タスク".into()),
+                    status: SessionStatus::Idle,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["status"],
+            "running"
+        );
+        drop(phone);
+        router.session_change(
+            &target,
+            SessionChange::Turn {
+                turn: Turn {
+                    id: "turn".into(),
+                    status: TurnStatus::Failed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        );
+        assert!(router.execution_targets().is_empty());
+        let final_payload = &apns.test_payloads(crate::apns::now() + 2)[0]["aps"];
+        assert_eq!(final_payload["event"], "end");
+        assert_eq!(final_payload["content-state"]["status"], "failed");
+        let replacement = router.open_authenticated_session(Some("phone".into()));
+        router.revoke_device("phone");
+        assert!(apns.test_payloads(crate::apns::now() + 3).is_empty());
+        assert!(
+            router
+                .register_live_activity(
+                    replacement.id(),
+                    &params,
+                    Thread {
+                        id: Some(target),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn detail_reads_are_ordered_with_live_changes_and_stay_on_the_requesting_connection() {

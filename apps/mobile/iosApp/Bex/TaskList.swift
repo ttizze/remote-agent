@@ -56,8 +56,11 @@ struct ThreadsScreen: View {
                             }
                         } label: {
                             HStack(spacing: 16) {
-                                Image(systemName: "folder")
-                                    .font(.title3).frame(width: 24)
+                                ProjectIcon(
+                                    png: project.iconPng,
+                                    monogram: project.monogram,
+                                    colorRGB: project.iconColor
+                                )
                                 Text(project.name).font(.title3).lineLimit(1)
                                 Spacer(minLength: 0)
                             }
@@ -217,6 +220,34 @@ struct ThreadsScreen: View {
     }
 }
 
+private struct ProjectIcon: View {
+    let png: Data?
+    let monogram: String
+    let colorRGB: UInt32
+
+    var body: some View {
+        let color = Color(
+            red: Double((colorRGB >> 16) & 255) / 255,
+            green: Double((colorRGB >> 8) & 255) / 255,
+            blue: Double(colorRGB & 255) / 255
+        )
+        Group {
+            if let png, let image = UIImage(data: png) {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                Text(monogram)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(color.opacity(0.15))
+            }
+        }
+        .frame(width: 24, height: 24)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityHidden(true)
+    }
+}
+
 extension View {
     func taskListRowStyle() -> some View {
         listRowSeparator(.hidden)
@@ -259,7 +290,7 @@ private struct ThreadListRow: View {
                         )
                 }
             }
-            .padding(.leading, indented ? 40 : 0)
+            .padding(.leading, (indented ? 40 : 0) + CGFloat(thread.depth) * 20)
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier("tasks.row.\(accessibilityID)")

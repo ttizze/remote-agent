@@ -134,6 +134,28 @@ extension BexAppViewModel {
         }
     }
 
+    func openTaskActivity(_ url: URL) {
+        guard url.scheme == "bex", url.host == "task",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let items = components.queryItems ?? []
+        func value(_ name: String) -> String? {
+            items.first { $0.name == name }?.value
+        }
+        guard let host = value("host"), profiles.contains(where: { $0.id == host }),
+              let providerName = value("provider"), let session = value("session"), !session.isEmpty else { return }
+        let provider: ProviderKind
+        switch providerName {
+        case "codex": provider = .codex
+        case "claude": provider = .claude
+        default: return
+        }
+        if selectedProfileId != host {
+            selectProfile(host)
+        }
+        screen = .thread
+        perform(.readThread(ReadThread(threadId: SessionRef(provider: provider, id: session), open: true)))
+    }
+
     func loadOlderHistory() {
         guard !loadingHistory, let id = selectedThreadId else { return }
         perform(.readOlder(threadId: id))

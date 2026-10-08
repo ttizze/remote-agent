@@ -26,9 +26,9 @@ tokio-stream = { version = "0.1", default-features = false }
 thiserror.workspace = true
 scopeguard = "1.2"
 markdown = "=1.0.0"
+base64.workspace = true
 
 [dev-dependencies]
-base64.workspace = true
 ring.workspace = true
 tempfile = "3"
 insta = { version = "1.46", default-features = false, features = ["json"] }

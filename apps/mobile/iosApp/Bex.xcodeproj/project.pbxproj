@@ -55,8 +55,17 @@
 		C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000006 /* ConversationSideChat.swift */; };
 		CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */; };
 		B2E000270000000000000001 /* ConversationRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E000270000000000000002 /* ConversationRequest.swift */; };
+		F70000000000000000000001 /* TaskLiveActivities.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000011; };
+		F70000000000000000000002 /* TaskActivityAttributes.swift in App Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000012; };
+		F70000000000000000000003 /* TaskActivityAttributes.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000012; };
+		F70000000000000000000004 /* TaskActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000013; };
+		F70000000000000000000005 /* BexTaskActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = F70000000000000000000010; settings = {ATTRIBUTES = (RemoveHeadersOnCopy,); }; };
 		C0DE00000000000000000501 /* ModelDefaultsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000502 /* ModelDefaultsControls.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		F70000000000000000000023 /* Embed App Extensions */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (F70000000000000000000005,); name = "Embed App Extensions"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		C0DE0000000000000000039A /* BexModelScopeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexModelScopeUITests.swift; sourceTree = "<group>"; };
@@ -109,6 +118,11 @@
 		C0DE00000000000000000006 /* ConversationSideChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChat.swift; sourceTree = "<group>"; };
 		1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileEditor.swift; sourceTree = "<group>"; };
 		B2E000270000000000000002 /* ConversationRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRequest.swift; sourceTree = "<group>"; };
+		F70000000000000000000010 /* BexTaskActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BexTaskActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		F70000000000000000000011 /* TaskLiveActivities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskLiveActivities.swift; sourceTree = "<group>"; };
+		F70000000000000000000012 /* TaskActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskActivityAttributes.swift; sourceTree = "<group>"; };
+		F70000000000000000000013 /* TaskActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskActivityWidget.swift; sourceTree = "<group>"; };
+		F70000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C0DE00000000000000000502 /* ModelDefaultsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDefaultsControls.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -125,6 +139,7 @@
 			files = ();
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F70000000000000000000021 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -132,6 +147,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000031 /* Bex */,
+				F70000000000000000000030 /* TaskActivity */,
 				B20000000000000000000031 /* BexUITests */,
 				A10000000000000000000032 /* Frameworks */,
 				A10000000000000000000033 /* Products */,
@@ -161,6 +177,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000011 /* BexIOSApp.swift */,
+				F70000000000000000000011 /* TaskLiveActivities.swift */,
 				A10000000000000000000012 /* PlatformServices.swift */,
 				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
 				A10000000000000000000017 /* SwiftUIRoot.swift */,
@@ -207,8 +224,14 @@
 		};
 		A10000000000000000000033 /* Products */ = {
 			isa = PBXGroup;
-			children = (A10000000000000000000010 /* Bex.app */, B20000000000000000000010 /* BexUITests.xctest */,);
+			children = (A10000000000000000000010 /* Bex.app */, B20000000000000000000010 /* BexUITests.xctest */, F70000000000000000000010 /* BexTaskActivity.appex */,);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		F70000000000000000000030 /* TaskActivity */ = {
+			isa = PBXGroup;
+			children = (F70000000000000000000012, F70000000000000000000013, F70000000000000000000014,);
+			path = TaskActivity;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -221,9 +244,10 @@
 				A10000000000000000000020 /* Sources */,
 				A10000000000000000000021 /* Frameworks */,
 				A10000000000000000000022 /* Resources */,
+				F70000000000000000000023 /* Embed App Extensions */,
 			);
 			buildRules = ();
-			dependencies = ();
+			dependencies = (F70000000000000000000050,);
 			packageProductDependencies = (C30000000000000000000002, D60000000000000000000002,);
             name = Bex;
 			productName = Bex;
@@ -245,6 +269,17 @@
 			productReference = B20000000000000000000010 /* BexUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		F70000000000000000000040 /* BexTaskActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F70000000000000000000041;
+			buildPhases = (F70000000000000000000020, F70000000000000000000021, F70000000000000000000022,);
+			buildRules = ();
+			dependencies = ();
+			name = BexTaskActivity;
+			productName = BexTaskActivity;
+			productReference = F70000000000000000000010;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -262,7 +297,7 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
-					A10000000000000000000040 = { CreatedOnToolsVersion = 26.0; };
+					A10000000000000000000040 = { CreatedOnToolsVersion = 26.0; SystemCapabilities = { com.apple.Push = { enabled = 1; }; }; };
 					B20000000000000000000040 = { CreatedOnToolsVersion = 26.0; TestTargetID = A10000000000000000000040; };
 				};
 			};
@@ -276,7 +311,7 @@
 			projectDirPath = "";
 			projectRoot = "";
             packageReferences = (C30000000000000000000005, D60000000000000000000003,);
-			targets = (A10000000000000000000040 /* Bex */, B20000000000000000000040 /* BexUITests */,);
+			targets = (A10000000000000000000040 /* Bex */, B20000000000000000000040 /* BexUITests */, F70000000000000000000040 /* BexTaskActivity */,);
 		};
 /* End PBXProject section */
 
@@ -288,6 +323,7 @@
 			remoteGlobalIDString = A10000000000000000000040;
 			remoteInfo = Bex;
 		};
+		F70000000000000000000051 = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000050; proxyType = 1; remoteGlobalIDString = F70000000000000000000040; remoteInfo = BexTaskActivity; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
@@ -296,6 +332,7 @@
 			target = A10000000000000000000040 /* Bex */;
 			targetProxy = B20000000000000000000051 /* PBXContainerItemProxy */;
 		};
+		F70000000000000000000050 = {isa = PBXTargetDependency; target = F70000000000000000000040; targetProxy = F70000000000000000000051; };
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
@@ -306,6 +343,7 @@
 			files = ();
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F70000000000000000000022 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -314,6 +352,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* BexIOSApp.swift in Sources */,
+				F70000000000000000000001 /* TaskLiveActivities.swift in Sources */,
+				F70000000000000000000002 /* TaskActivityAttributes.swift in App Sources */,
 				A10000000000000000000002 /* PlatformServices.swift in Sources */,
 				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,
 				A10000000000000000000006 /* SwiftUIRoot.swift in Sources */,
@@ -367,6 +407,7 @@
 				328998D7336CC8BC714813B1 /* BexDictationUITests.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F70000000000000000000020 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F70000000000000000000003, F70000000000000000000004,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
@@ -406,6 +447,8 @@
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Bex/Info.plist;
+				CODE_SIGN_ENTITLEMENTS = Bex/Bex.entitlements;
+				APNS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
@@ -434,6 +477,8 @@
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Bex/Info.plist;
+				CODE_SIGN_ENTITLEMENTS = Bex/Bex.entitlements;
+				APNS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
@@ -480,6 +525,52 @@
 			};
 			name = Release;
 		};
+		F70000000000000000000062 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 70;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TaskActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Bex Tasks";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.TaskActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F70000000000000000000063 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 70;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TaskActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Bex Tasks";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.TaskActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -501,6 +592,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		F70000000000000000000041 = {isa = XCConfigurationList; buildConfigurations = (F70000000000000000000062, F70000000000000000000063,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 /* End XCConfigurationList section */
 	};
 	rootObject = A10000000000000000000050 /* Project object */;

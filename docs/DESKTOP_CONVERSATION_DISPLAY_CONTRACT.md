@@ -120,6 +120,23 @@ complete retrieval and reopening.
 
 ## Conversation navigation
 
+- The sidebar nests Codex subagent conversations below their direct parent,
+  including deeper descendants. Native parent IDs determine lineage; forked
+  side chats remain independent conversations. Agent nicknames label untitled
+  children. Children share their root's project section and do not consume the
+  root conversation display limits. Each child retains its own running/unread
+  indicator and opens its own native history on click. Parent disclosures open
+  initially and allow hiding children without opening a different conversation.
+  List refreshes discover running children without requiring the parent turn to
+  finish. Search matches remain reachable when their parent is outside the page.
+  Native read-only conversations display the shared input restriction and keep
+  Send disabled.
+  Claude child transcripts continue to use the originating activity detail;
+  they do not yet have independent native session identities.
+  Acceptance: `subagents_keep_direct_lineage_provider_identity_and_parent_project`,
+  `children_follow_visible_roots_without_consuming_title_limits`, and desktop
+  `pending_operations_do_not_block_task_navigation`.
+
 - Desktop, iPhone and Android show a down-arrow button at the bottom center of
   the conversation when the reader is away from the latest content. Activating it
   reaches the bottom of the last message, including a message taller than the
@@ -211,6 +228,18 @@ Acceptance: `adding_a_chat_folder_registers_a_project_before_submission` and
 `project_registration_navigates_only_while_current` cover registration, restart,
 duplicate selections, and navigation races. Host registration and workspace
 matching are covered by `projects` tests.
+
+## Project icons in task lists
+
+Project headings in the task list use the Host's discovered favicon or app icon.
+The Host probes common local icon paths and HTML/route metadata, then sends a
+small PNG thumbnail so desktop and mobile render the same asset. A refresh
+rechecks changed or deleted icons. Missing or unreadable branding falls back to
+the shared core's stable colored monogram. Desktop uses a separate chevron for
+project disclosure and preserves the heading's new-chat action.
+
+Acceptance: `projects::icons` covers discovery, format normalization, refresh,
+and bounded local reads; `presentation::list` covers the shared fallback.
 
 ## Workspace folder labels
 

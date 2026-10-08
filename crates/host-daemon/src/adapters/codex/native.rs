@@ -457,12 +457,28 @@ pub(crate) fn parse_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
 }
 
 pub(crate) fn parse_thread(mut value: Value) -> Result<Thread, serde_json::Error> {
+    let parent_id = field::<Option<String>>(&value, "parentThreadId")?
+        .map(|id| SessionRef::new(ProviderKind::Codex, id))
+        .transpose()
+        .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+    let name = field::<Option<String>>(&value, "name")?
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            parent_id.as_ref()?;
+            value["agentNickname"]
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| value["agentRole"].as_str())
+                .map(str::to_owned)
+        });
     Ok(Thread {
         id: Some(
             SessionRef::new(ProviderKind::Codex, field(&value, "id")?)
                 .map_err(<serde_json::Error as serde::de::Error>::custom)?,
         ),
-        name: field(&value, "name")?,
+        parent_id,
+        can_accept_direct_input: field(&value, "canAcceptDirectInput")?,
+        name,
         cwd: field(&value, "cwd")?,
         status: session_status(&value["status"]),
         turns: take_field::<Option<Vec<Value>>>(&mut value, "turns")?
@@ -540,6 +556,25 @@ mod tests {
         assert_eq!(tiers[0].name.as_deref(), Some("Fast"));
     }
 
+    #[test]
+    fn spawned_threads_keep_native_lineage_and_agent_labels_without_nesting_forks() {
+        let child = parse_thread(json!({"id":"child", "parentThreadId":"parent", "agentNickname":"Curie", "agentRole":"reviewer", "canAcceptDirectInput":false})).unwrap();
+        assert_eq!(
+            child.parent_id,
+            Some(SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap())
+        );
+        assert_eq!(child.name.as_deref(), Some("Curie"));
+        assert_eq!(parse_thread(json!({"id":"child", "parentThreadId":"parent", "name":"", "agentNickname":"", "agentRole":"reviewer"})).unwrap().name.as_deref(), Some("reviewer"));
+        assert_eq!(parse_thread(json!({"id":"child", "parentThreadId":"parent", "name":"Named", "agentNickname":"Curie"})).unwrap().name.as_deref(), Some("Named"));
+        assert!(
+            agent_protocol::session::input_unavailable_reason(&child)
+                .unwrap()
+                .contains("閲覧専用")
+        );
+        let fork = parse_thread(json!({"id":"fork", "forkedFromId":"parent"})).unwrap();
+        assert!(fork.parent_id.is_none());
+        assert!(parse_thread(json!({"id":"child", "parentThreadId":""})).is_err());
+    }
     #[test]
     fn codex_items_keep_phase_indexes_tool_metadata_and_scoped_subagents() {
         let assistant = parse_item(

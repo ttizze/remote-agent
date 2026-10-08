@@ -95,6 +95,12 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
+    pub async fn enable_apns(&self, path: &std::path::Path, host_name: &str) -> anyhow::Result<()> {
+        self.inner
+            .router
+            .set_apns(crate::apns::Apns::load(path, host_name).await?);
+        Ok(())
+    }
     pub fn new(backends: impl IntoIterator<Item = Backend>, projects: ProjectStore) -> Self {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
@@ -240,6 +246,7 @@ impl HostRpcService {
 
     pub(crate) fn revoke_device(&self, principal: &str) {
         self.inner.terminals.revoke_device(principal);
+        self.inner.router.revoke_device(principal);
     }
     pub fn open_session(&self) -> HostSession {
         self.start_event_pumps();
@@ -631,6 +638,44 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::RegisterLiveActivity(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let enabled = self
+                    .inner
+                    .router
+                    .apns()
+                    .is_some_and(|apns| apns.environment() == params.environment);
+                if enabled {
+                    let _lease = self
+                        .inner
+                        .router
+                        .retain_execution(params.session.clone())
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let thread = self
+                        .agent(params.session.provider)?
+                        .open(&params.session.id, 1, false)
+                        .await?
+                        .thread;
+                    self.inner
+                        .router
+                        .register_live_activity(session, params, thread)
+                        .map_err(|error| Failure::new("live_activity_failed", error))?;
+                }
+                agent_protocol::live_activity::LiveActivityRegistration { enabled }.into()
+            }
+            Call::UnregisterLiveActivity(params) => {
+                let principal = self
+                    .inner
+                    .router
+                    .principal(session)
+                    .map_err(|error| Failure::new("connection_closed", error))?;
+                if let Some(apns) = self.inner.router.apns() {
+                    apns.unregister(&principal, &params.activity_id);
+                }
+                agent_protocol::models::Empty {}.into()
+            }
             Call::ReadTurnItems(params) => {
                 let read = self
                     .inner
@@ -924,10 +969,14 @@ impl HostRpcService {
             }
             Call::RenameSession(params) => {
                 let target = target_session.expect("session-scoped rename");
-                self.agent(target.provider)?
+                let result = self
+                    .agent(target.provider)?
                     .rename(&target.id, &params.name)
-                    .await?
-                    .into()
+                    .await?;
+                if let Some(apns) = self.inner.router.apns() {
+                    apns.rename(target, &params.name);
+                }
+                result.into()
             }
             _ => {
                 return Err(Failure::new(
@@ -962,7 +1011,7 @@ impl HostRpcService {
         let mut threads = Vec::new();
         let agents = self.agents();
         for (_, agent) in &agents {
-            let pages = session_pages(agent.as_ref(), "");
+            let pages = session_pages(agent.as_ref(), "", None);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
@@ -1158,7 +1207,7 @@ impl HostRpcService {
         let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
             futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
-                let mut threads = session_pages(agent.as_ref(), search)
+                let mut threads = session_pages(agent.as_ref(), search, None)
                     .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
                     .try_flatten()
                     .boxed();
@@ -1227,6 +1276,63 @@ impl HostRpcService {
             ));
         }
         let mut page = titles.finish();
+        // The recent page can end before a visible root's older descendants.
+        let descendants = futures_util::future::join_all(page.data.iter().filter_map(|thread| {
+            let id = thread.id.as_ref()?;
+            if thread.parent_id.is_some() || id.provider != ProviderKind::Codex {
+                return None;
+            }
+            let (_, agent) = agents
+                .iter()
+                .find(|(provider, _)| *provider == id.provider)?;
+            Some(async move {
+                let mut threads = session_pages(agent.as_ref(), "", Some(&id.id))
+                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                    .try_flatten()
+                    .boxed();
+                let mut children = Vec::new();
+                loop {
+                    match next_title(&mut threads, deadline).await {
+                        Ok(Some(summary)) => children.push(summary),
+                        Ok(None) => return (children, agent.capabilities(), None),
+                        Err(error) => return (children, agent.capabilities(), Some(error)),
+                    }
+                }
+            })
+        }))
+        .await;
+        let mut children = Vec::new();
+        for (summaries, capabilities, error) in descendants {
+            if let Some(error) = error {
+                provider_errors.insert("codex".into(), serde_json::to_value(error)?);
+            }
+            for summary in summaries {
+                let mut thread = summary.thread;
+                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
+                    branches.insert(id.clone(), branch);
+                }
+                describe_thread(&mut thread, capabilities, &snapshot);
+                children.push(crate::projects::titles::summary(thread));
+            }
+        }
+        children.sort_by(|a, b| {
+            b.updated_at
+                .unwrap_or_default()
+                .total_cmp(&a.updated_at.unwrap_or_default())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        page.data = crate::projects::titles::append_descendants(page.data, children);
+        page.projects = tokio::task::spawn_blocking(move || {
+            let mut projects = page.projects;
+            for project in &mut projects {
+                project.favicon_png = project.roots.iter().find_map(|root| {
+                    crate::projects::icons::resolve(std::path::Path::new(&root.path))
+                });
+            }
+            projects
+        })
+        .await
+        .map_err(|error| Failure::new("project_icons_unavailable", error))?;
         let sources: Vec<_> = page
             .data
             .iter()
@@ -1432,6 +1538,7 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
         Call::ReadItem(p) => (Some(&p.thread_id), None),
         Call::ReadTurnItems(p) => (Some(&p.session), None),
         Call::RenameSession(p) => (Some(&p.thread_id), None),
+        Call::RegisterLiveActivity(p) => (Some(&p.session), None),
         _ => (None, None),
     }
 }
@@ -1461,6 +1568,61 @@ fn describe_thread(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn live_activity_registration_falls_back_without_apns_and_rejects_malformed_tokens() {
+        use super::*;
+        use agent_protocol::{
+            live_activity::{LiveActivityRegistration, PushEnvironment, RegisterLiveActivity},
+            session::SessionRef,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("provider is offline".into()),
+            ProjectStore::new(directory.path().join("projects.json")),
+        );
+        let connection = service.open_session();
+        let mut params = RegisterLiveActivity {
+            session: SessionRef {
+                provider: ProviderKind::Codex,
+                id: "task".into(),
+            },
+            activity_id: "activity".into(),
+            token: vec![1; 32],
+            environment: PushEnvironment::Sandbox,
+        };
+        for configured in [false, true] {
+            if configured {
+                service
+                    .inner
+                    .router
+                    .set_apns(Some(crate::apns::Apns::testing()));
+                params.environment = PushEnvironment::Production;
+            }
+            let response = service
+                .dispatch(connection.id(), &Call::RegisterLiveActivity(params.clone()))
+                .await
+                .unwrap();
+            let Response::Success { result } = agent_protocol::protocol::decode::<
+                Response<LiveActivityRegistration>,
+            >(&response.initial)
+            .unwrap() else {
+                panic!("unconfigured or mismatched APNs must keep local updates available");
+            };
+            assert!(!result.enabled);
+        }
+        params.token.clear();
+        let response = service
+            .dispatch(connection.id(), &Call::RegisterLiveActivity(params))
+            .await
+            .unwrap();
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Response<LiveActivityRegistration>>(
+                &response.initial
+            )
+            .unwrap(),
+            Response::Failure { .. }
+        ));
+    }
     #[test]
     fn worktree_activity_requires_finished_delivery_and_no_other_live_work() {
         use super::worktree_active;
@@ -1917,6 +2079,62 @@ mod tests {
                     .into_value();
                 assert_eq!(response["error"]["code"], "provider_unavailable");
                 assert_eq!(response["error"]["delivery"], "notSent");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn task_list_delivers_project_branding_to_core_and_refreshes_removed_icons() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("remote-agent");
+        let native = root.path().join("native");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir_all(native.join("projects")).unwrap();
+        std::fs::write(workspace.join("favicon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
+        let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
+        projects.register(&workspace).await.unwrap();
+        let service = HostRpcService::new(Err("unavailable".into()), projects);
+        service
+            .enable_claude(
+                root.path().join("does-not-exist"),
+                root.path().join("state"),
+                Some(native),
+            )
+            .await
+            .unwrap();
+        let session = service.open_session();
+        let call = agent_protocol::protocol::Call::ListSessions(
+            agent_protocol::operations::ListSessions {
+                query: Default::default(),
+            },
+        );
+        for has_icon in [true, false] {
+            if !has_icon {
+                std::fs::remove_file(workspace.join("favicon.svg")).unwrap();
+            }
+            let response = service.dispatch(session.id(), &call).await.unwrap();
+            let reply = agent_protocol::protocol::decode::<
+                Response<agent_protocol::models::ThreadList>,
+            >(&response.initial)
+            .unwrap();
+            let Response::Success { result } = reply else {
+                panic!("task list failed: {reply:?}")
+            };
+            let snapshot = agent_core::state::Snapshot {
+                threads: Some(Arc::new(result)),
+                ..Default::default()
+            };
+            let list = snapshot.thread_list().unwrap();
+            assert_eq!(list.projects.len(), 1);
+            let project = &list.projects[0];
+            assert_eq!(project.monogram, "RA");
+            assert_eq!(project.icon_png.is_some(), has_icon);
+            if let Some(png) = &project.icon_png {
+                let image = image::load_from_memory(png).unwrap().into_rgba8();
+                assert_eq!(image.dimensions(), (64, 64));
+                assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
             }
         }
     }

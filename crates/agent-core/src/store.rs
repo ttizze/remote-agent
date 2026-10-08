@@ -27,6 +27,9 @@ const MAX_WAITERS: usize = 128;
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
+    LiveActivityRegistered {
+        enabled: bool,
+    },
     #[default]
     Applied,
     StartedThread {

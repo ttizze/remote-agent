@@ -90,6 +90,8 @@ pub struct Thread {
     #[serde(default)]
     pub submissions: BTreeMap<crate::ids::ClientInputId, crate::session::SubmissionDelivery>,
     pub id: Option<crate::session::SessionRef>,
+    pub parent_id: Option<crate::session::SessionRef>,
+    pub can_accept_direct_input: Option<bool>,
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub worktree_status: Option<WorktreeStatus>,
@@ -201,6 +203,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
+    /// Host-resolved PNG thumbnail for every native client.
+    pub favicon_png: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectRoot {
@@ -428,6 +432,15 @@ pub fn compact_title(value: &str) -> String {
         Some((end, _)) => format!("{}…", &line[..end]),
         None => line.to_owned(),
     }
+}
+
+pub fn task_active(observed: Option<bool>, status: SessionStatus) -> bool {
+    observed.unwrap_or(status == SessionStatus::Running)
+}
+pub fn task_title<'a>(name: Option<&'a str>, preview: Option<&'a str>) -> &'a str {
+    name.filter(|name| !name.is_empty())
+        .or_else(|| preview.filter(|preview| !preview.is_empty()))
+        .unwrap_or("無題のタスク")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
