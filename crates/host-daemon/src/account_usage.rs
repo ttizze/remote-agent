@@ -309,6 +309,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_refresh_preserves_the_last_usable_snapshot() {
+        let entry = UsageEntry::default();
+        let first = entry
+            .read(async {
+                Ok(UsageSnapshot {
+                    windows: vec![UsageWindow::from_used("週間枠".into(), 41.2, None).unwrap()],
+                    credential_fingerprint: Some("provider-account".into()),
+                    reset_credits: Some(agent_protocol::usage::ResetCredits {
+                        available_count: 1,
+                        next_expires_at: Some(1_900_000_000),
+                        next_credit_id: Some("credit-1".into()),
+                    }),
+                    external_usage: Some(agent_protocol::usage::ExternalUsage {
+                        label: "Provider usage".into(),
+                        url: "https://example.invalid/usage".into(),
+                    }),
+                })
+            })
+            .await;
+        entry.0.lock().await.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(61);
+
+        let refreshed = entry.read(async { Ok(UsageSnapshot::default()) }).await;
+
+        assert_eq!(refreshed, first);
+    }
+
+    #[tokio::test]
     async fn reset_outcome_invalidates_cached_usage_even_when_redemption_fails() {
         let entry = Arc::new(UsageEntry::default());
         let first = entry
