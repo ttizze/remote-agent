@@ -253,7 +253,7 @@ fn main() {
             cx.set_app_identity(platform::APPLICATION_IDENTITY, platform::APPLICATION_NAME);
             cx.on_app_quit(|cx| {
                 tracing::info!(target: "desktop", operation = "shutdown", "Desktop shutting down");
-                platform::set_notification_badge(0);
+                platform::shutdown_notification_badge();
                 let runtime = cx.global::<Runtime>().clone();
                 async move {
                     runtime.closing.close();

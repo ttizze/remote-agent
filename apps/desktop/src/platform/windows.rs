@@ -62,6 +62,10 @@ pub(super) fn set_notification_badge(count: u32) {
     }
 }
 
+pub(super) fn shutdown_notification_badge() {
+    set_notification_badge(0);
+}
+
 unsafe extern "system" fn collect_process_window(window: HWND, data: LPARAM) -> BOOL {
     if !IsWindowVisible(window).as_bool() {
         return BOOL(1);

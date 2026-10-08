@@ -268,14 +268,6 @@ pub fn notification_events(
     notifications::between(&previous, &current, app_visible, app_focused)
 }
 
-/// The aggregate attention count used by native notification badges. This is
-/// exposed separately from event folding because focus and thread selection
-/// can clear attention without producing a new transition event.
-#[uniffi::export]
-pub fn notification_badge_count(snapshot: Arc<Snapshot>) -> u32 {
-    notifications::badge_count(&snapshot)
-}
-
 #[uniffi::export]
 impl Snapshot {
     #[uniffi::constructor]

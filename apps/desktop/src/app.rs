@@ -368,29 +368,6 @@ fn local_host_power_publish_allowed(
     local_host_supervised && !remote_selected && !probe_in_flight
 }
 
-fn register_pending_notification(
-    tags: &mut BTreeMap<String, Option<String>>,
-    tag: String,
-    environment_id: Option<String>,
-) {
-    tags.insert(tag, environment_id);
-}
-
-fn remove_pending_notifications_for_environment(
-    tags: &mut BTreeMap<String, Option<String>>,
-    environment_id: &str,
-) -> Vec<String> {
-    let removed = tags
-        .iter()
-        .filter(|(_, owner)| owner.as_deref() == Some(environment_id))
-        .map(|(tag, _)| tag.clone())
-        .collect::<Vec<_>>();
-    for tag in &removed {
-        tags.remove(tag);
-    }
-    removed
-}
-
 /// Keys every window binds; screens handle their own focus-specific keys.
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(
@@ -1638,11 +1615,8 @@ impl Desktop {
                         label: "Open".into(),
                     }],
                 });
-                register_pending_notification(
-                    &mut self.active_notification_tags,
-                    tag,
-                    event.environment_id.clone(),
-                );
+                self.active_notification_tags
+                    .insert(tag, event.environment_id.clone());
             }
             if event.sound {
                 let sound_kind = event.sound_kind;
@@ -1693,10 +1667,14 @@ impl Desktop {
         environment_id: &str,
         cx: &mut Context<Self>,
     ) {
-        for tag in remove_pending_notifications_for_environment(
-            &mut self.active_notification_tags,
-            environment_id,
-        ) {
+        let removed = self
+            .active_notification_tags
+            .iter()
+            .filter(|(_, owner)| owner.as_deref() == Some(environment_id))
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<_>>();
+        for tag in removed {
+            self.active_notification_tags.remove(&tag);
             cx.dismiss_system_notification(&tag);
         }
         self.publish_notification_badge();
@@ -2241,11 +2219,7 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        local_host_power_publish_allowed, register_pending_notification,
-        remove_pending_notifications_for_environment,
-    };
-    use std::collections::BTreeMap;
+    use super::local_host_power_publish_allowed;
 
     #[test]
     fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
@@ -2255,50 +2229,6 @@ mod tests {
         assert!(!local_host_power_publish_allowed(true, false, true));
     }
 
-    #[test]
-    fn pending_notifications_replace_same_tag_and_retain_completion_until_focus() {
-        let mut tags = BTreeMap::new();
-        register_pending_notification(
-            &mut tags,
-            "remoteagent://threads/host-a/thread-1".into(),
-            Some("host-a".into()),
-        );
-        register_pending_notification(
-            &mut tags,
-            "remoteagent://threads/host-a/thread-1".into(),
-            Some("host-a".into()),
-        );
-        assert_eq!(tags.len(), 1, "a replacement must not add another badge");
-        assert!(tags.contains_key("remoteagent://threads/host-a/thread-1"));
-
-        tags.clear();
-        assert!(tags.is_empty(), "focus clears the posted-notice registry");
-    }
-
-    #[test]
-    fn removing_an_environment_retracts_only_its_posted_notifications() {
-        let mut tags = BTreeMap::new();
-        register_pending_notification(
-            &mut tags,
-            "remoteagent://threads/host-a/thread-1".into(),
-            Some("host-a".into()),
-        );
-        register_pending_notification(
-            &mut tags,
-            "remoteagent://threads/host-b/thread-1".into(),
-            Some("host-b".into()),
-        );
-
-        let removed = remove_pending_notifications_for_environment(&mut tags, "host-a");
-        assert_eq!(
-            removed,
-            vec!["remoteagent://threads/host-a/thread-1".to_owned()]
-        );
-        assert_eq!(
-            tags.keys().cloned().collect::<Vec<_>>(),
-            vec!["remoteagent://threads/host-b/thread-1".to_owned()]
-        );
-    }
 }
 
 impl Render for Desktop {

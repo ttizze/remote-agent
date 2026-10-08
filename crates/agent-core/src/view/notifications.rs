@@ -1,8 +1,8 @@
 //! Pure notification policy shared by desktop and mobile clients.
 //!
 //! Delivery is intentionally left to each client. This module decides whether
-//! a state transition merits an in-app notice, an operating-system notice, a
-//! sound, or a badge. It never asks for permission or talks to a transport.
+//! a state transition merits an in-app notice, an operating-system notice, or
+//! a sound. It never asks for permission or talks to a transport.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -106,46 +106,12 @@ pub struct NotificationEvent {
     pub in_app: bool,
     pub operating_system: bool,
     pub sound: bool,
-    pub badge_count: u32,
 }
 
 pub fn notification_deep_link(environment_id: Option<&str>, thread_id: &str) -> String {
     environment_id.map_or_else(
         || agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK.to_owned(),
         |environment| agent_domain::activity_thread_deep_link(environment, thread_id),
-    )
-}
-
-fn notification_badge_count(threads: impl Iterator<Item = NotificationThread>) -> u32 {
-    threads
-        .filter(|thread| {
-            matches!(
-                thread.status,
-                ThreadNotificationStatus::Input
-                    | ThreadNotificationStatus::Approval
-                    | ThreadNotificationStatus::Failed
-                    | ThreadNotificationStatus::Limited
-            )
-        })
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX)
-}
-
-/// Returns the current aggregate attention count for a Host snapshot.
-///
-/// Clients call this after every snapshot publication so selecting a thread or
-/// clearing attention also clears the native badge; an event is not required
-/// for those state changes.
-pub fn badge_count(snapshot: &Snapshot) -> u32 {
-    if !snapshot.preferences.notification_mode.has_notifications() {
-        return 0;
-    }
-    let selected_thread = snapshot.selected_thread.as_ref().map(ToString::to_string);
-    notification_badge_count(
-        notification_threads(snapshot)
-            .into_values()
-            .filter(move |thread| selected_thread.as_deref() != Some(thread.id.as_str())),
     )
 }
 
@@ -263,7 +229,6 @@ pub fn between(
         return vec![];
     }
     let previous_threads = notification_threads(previous);
-    let aggregate_badge_count = badge_count(current);
     let environment_id = current.context_environment_id().map(str::to_owned);
     let selected_thread = current.selected_thread.as_ref().map(ToString::to_string);
     let mut events = vec![];
@@ -307,7 +272,6 @@ pub fn between(
             in_app: decision.in_app,
             operating_system: decision.operating_system,
             sound: decision.sound,
-            badge_count: aggregate_badge_count,
         });
     }
     events
@@ -447,7 +411,6 @@ mod tests {
                     in_app: decision.in_app,
                     operating_system: decision.operating_system,
                     sound: decision.sound,
-                    badge_count: notification_badge_count(current.iter().cloned()),
                 })
             })
             .collect()
@@ -466,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn deep_links_keep_the_owning_environment_and_badges_count_attention() {
+    fn deep_links_keep_the_owning_environment() {
         assert_eq!(
             notification_deep_link(Some("host-a"), "thread-1"),
             "remoteagent://threads/host-a/thread-1"
@@ -475,24 +438,6 @@ mod tests {
             notification_deep_link(None, "thread-1"),
             agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK
         );
-        let threads = [
-            thread("input", ThreadNotificationStatus::Input, None),
-            thread("approval", ThreadNotificationStatus::Approval, None),
-            thread("done", ThreadNotificationStatus::Completed, Some(1)),
-        ];
-        assert_eq!(notification_badge_count(threads.into_iter()), 2);
-    }
-
-    #[test]
-    fn selected_attention_is_removed_from_the_aggregate_badge() {
-        let mut row = fixtures::row("input", "project", "needs input");
-        row.latest_run = Some(RunId::new("run-1").unwrap());
-        row.status = Some(RunStatus::Failed);
-        let mut snapshot = fixtures::snapshot(vec![], vec![row]);
-        snapshot.preferences.notification_mode = NotificationMode::Notifications;
-        assert_eq!(badge_count(&snapshot), 1);
-        snapshot.selected_thread = Some(ThreadId::new("input").unwrap());
-        assert_eq!(badge_count(&snapshot), 0);
     }
 
     #[test]
@@ -527,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn background_attention_adds_an_os_badge_and_selected_threads_are_suppressed() {
+    fn background_attention_adds_an_os_notice_and_selected_threads_are_suppressed() {
         let decision = decide(
             NotificationMode::Notifications,
             true,

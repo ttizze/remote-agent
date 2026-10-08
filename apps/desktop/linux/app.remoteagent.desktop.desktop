@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Remote Agent
+Comment=Desktop control surface for local coding agents
+Exec=desktop %U
+TryExec=desktop
+Terminal=false
+Type=Application
+Categories=Development;
