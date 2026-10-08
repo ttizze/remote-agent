@@ -1332,7 +1332,7 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 
 ### 段階 1・2 の検証記録（2026-10-06）
 
-実装・テストの最終 revision は `4a52416ab649fa888b80322f7a2884715d270beb`。以後のコミットは検証記録のみ。新しい domain / provider 層の実装と上記の挙動検証を終え、push と PR 更新後にレビューを待つ。
+この段階の実装・テスト検証 revision は `4a52416ab649fa888b80322f7a2884715d270beb`。これは 2026-10-06 時点の記録であり、後続段階の実装・checkpoint を含まない。新しい domain / provider 層の実装と上記の挙動検証を終えた時点の記録として残す。
 
 - `cargo test -p agent-domain -p agent-providers`: **128 件通過**（各 64 件）。状態機械の proptest と、固定版 71 transcript の projection replay を含む。
 - `NEXTEST_TEST_THREADS=4 scripts/dev-env.sh just unit-tests`: **533 件通過、既存 5 件 skip**。standalone agent-peer の 5 テスト群も通過。
