@@ -3,7 +3,7 @@ use super::client::ResultKind;
 use agent_protocol::{
     live_activity::{
         RegisterLiveActivity, TASK_ACTIVITY_DISMISS_SECONDS, TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS,
-        TaskActivityDisplay, TaskActivitySummary,
+        TaskActivityDisplay, TaskActivitySummary, task_activity_update_is_urgent,
     },
     session::SessionRef,
 };
@@ -146,8 +146,12 @@ impl Registry {
             if entry.content.display == display {
                 continue;
             }
+            entry.urgent |= task_activity_update_is_urgent(
+                display.urgent,
+                display.current.total,
+                entry.content.display.current.total,
+            );
             entry.content.display = display.clone();
-            entry.urgent |= display.urgent;
             self.generation += 1;
             entry.generation = self.generation;
             entry.due = now.max(entry.sent_at + 1);
@@ -364,7 +368,10 @@ mod tests {
         assert!(initial.urgent);
         registry.complete(&initial, ResultKind::Accepted, 100);
         registry.update(&claude, "completed", 101);
-        assert!(!registry.deliveries(101).remove(0).urgent);
+        let completion = registry.deliveries(101).remove(0);
+        assert!(completion.urgent);
+        registry.complete(&completion, ResultKind::Accepted, 101);
+        assert!(!registry.deliveries(161).remove(0).urgent);
     }
     #[test]
     fn registration_capacity_expiry_and_payload_size_are_bounded() {

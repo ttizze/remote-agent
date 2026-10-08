@@ -1,5 +1,5 @@
 //! HTTP/2 APNs transport. Credentials stay in memory and outside the repository.
-use agent_protocol::live_activity::PushEnvironment;
+use agent_protocol::live_activity::{PushEnvironment, TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS};
 use anyhow::{Context, Result};
 use base64::{
     Engine,
@@ -175,7 +175,10 @@ impl Client {
             )
             .header("apns-push-type", "liveactivity")
             .header("apns-priority", if urgent { "10" } else { "5" })
-            .header("apns-expiration", (now + 120).to_string())
+            .header(
+                "apns-expiration",
+                (now + u64::from(TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS)).to_string(),
+            )
             .header("content-type", "application/json")
             .body(payload.to_owned())
             .build()
@@ -342,7 +345,7 @@ mod tests {
                     request.headers()["apns-priority"],
                     if urgent { "10" } else { "5" }
                 );
-                assert_eq!(request.headers()["apns-expiration"], "10120");
+                assert_eq!(request.headers()["apns-expiration"], "10600");
                 assert_eq!(request.headers()["content-type"], "application/json");
                 assert!(request.headers()["authorization"].is_sensitive());
                 assert_eq!(request.body().unwrap().as_bytes(), Some(payload.as_slice()));

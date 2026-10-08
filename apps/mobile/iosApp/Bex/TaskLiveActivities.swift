@@ -29,7 +29,7 @@ private extension TaskActivityAttributes.View {
 @MainActor
 final class TaskLiveActivities {
     enum Request {
-        case intent(hostID: String, activityID: String, token: Data?, intent: Intent)
+        case intent(hostID: String, intent: Intent)
         case flush(CheckedContinuation<Void, Never>)
     }
 
@@ -79,8 +79,8 @@ final class TaskLiveActivities {
         }
     }
 
-    func registrationFinished(activityID: String, token: Data?, enabled: Bool) {
-        guard let token, tokens[activityID] == token else { return }
+    func registrationFinished(activityID: String, token: Data, enabled: Bool) {
+        guard tokens[activityID] == token else { return }
         logger.info("Host Live Activity push updates enabled: \(enabled, privacy: .public)")
         guard remote.contains(activityID) != enabled else { return }
         if enabled {
@@ -100,7 +100,7 @@ final class TaskLiveActivities {
         let environment: PushEnvironment = Bundle.main
             .object(forInfoDictionaryKey: "BexAPNSEnvironment") as? String == "production"
             ? .production : .sandbox
-        output.yield(.intent(hostID: activity.attributes.hostID, activityID: activity.id, token: token,
+        output.yield(.intent(hostID: activity.attributes.hostID,
                              intent: .registerLiveActivity(RegisterLiveActivity(
                                  activityId: activity.id, token: token, environment: environment
                              ))))
@@ -139,7 +139,7 @@ final class TaskLiveActivities {
         stateObservers.removeValue(forKey: activity.id)?.cancel()
         tokens.removeValue(forKey: activity.id)
         remote.remove(activity.id)
-        output.yield(.intent(hostID: activity.attributes.hostID, activityID: activity.id, token: nil,
+        output.yield(.intent(hostID: activity.attributes.hostID,
                              intent: .unregisterLiveActivity(UnregisterLiveActivity(activityId: activity.id))))
     }
 
@@ -250,17 +250,18 @@ extension BexAppViewModel {
                     continuation.resume()
                     continue
                 }
-                guard case let .intent(hostID, activityID, token, intent) = request,
+                guard case let .intent(hostID, intent) = request,
                       let self, selectedProfileId == hostID, snapshot.connected(),
                       let owner = store else { continue }
                 do {
                     let receipt = try owner.dispatch(intent: intent)
                     // Finish each request before dispatching a rotated token or unregistering.
                     let outcome = try await receipt.wait()
-                    guard case let .liveActivityRegistered(enabled) = outcome else { continue }
+                    guard case let .liveActivityRegistered(enabled) = outcome,
+                          case let .registerLiveActivity(registration) = intent else { continue }
                     liveActivities.registrationFinished(
-                        activityID: activityID,
-                        token: token,
+                        activityID: registration.activityId,
+                        token: registration.token,
                         enabled: enabled
                     )
                     synchronizeLiveActivities(foreground: UIApplication.shared.applicationState == .active)

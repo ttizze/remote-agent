@@ -1042,8 +1042,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["display"]["current"]
-                ["total"],
-            1
+                ["label"],
+            "実行中 1件"
         );
         drop(phone);
         router.session_change(
