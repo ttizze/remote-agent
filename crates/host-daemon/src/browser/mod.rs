@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::Duration,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 struct Page {
@@ -66,10 +66,18 @@ struct State {
     pages: HashMap<String, Page>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingStartupState {
+    Pending,
+    Started,
+    Failed,
+}
+
 struct ActiveRecording {
     cancel: CancellationToken,
     abort: tokio::task::AbortHandle,
     artifact_path: PathBuf,
+    startup: watch::Sender<RecordingStartupState>,
     done: tokio::sync::watch::Sender<
         Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
     >,
@@ -79,6 +87,7 @@ struct ActiveRecording {
 
 type RecordingKey = (String, String);
 type RecordingArtifact = agent_protocol::preview::PreviewRecordingArtifact;
+const MAX_RETAINED_RECORDINGS: usize = 4;
 
 pub struct Browser {
     profile: PathBuf,
@@ -187,15 +196,22 @@ impl Browser {
             (endpoint, dimensions.0, dimensions.1)
         };
         let key = (thread.to_owned(), tab_id.to_owned());
-        let mut protected_paths = self
-            .recording_artifacts
-            .lock()
-            .await
+        // Keep the completed-artifact owner locked through the synchronous
+        // storage prune and active-slot insertion.  The monitor takes this
+        // lock before publishing a completion, so a completion cannot land
+        // between the protected-path snapshot and prune.
+        let artifacts = self.recording_artifacts.lock().await;
+        let previous_artifact_paths = artifacts
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .map(|artifact| PathBuf::from(artifact.path.as_str()))
+            .collect::<Vec<_>>();
+        let mut protected_paths = artifacts
             .values()
             .flatten()
             .map(|artifact| PathBuf::from(artifact.path.as_str()))
             .collect::<Vec<_>>();
-        let previous_artifact_paths = protected_paths.clone();
         let mut recordings = self.recordings.lock().await;
         protected_paths.extend(
             recordings
@@ -230,20 +246,24 @@ impl Browser {
             Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
         >(None);
         let mut done_receiver = done.subscribe();
+        let (startup_state, _) = watch::channel(RecordingStartupState::Pending);
         recordings.insert(
             key.clone(),
             ActiveRecording {
                 cancel,
                 abort,
                 artifact_path,
+                startup: startup_state.clone(),
                 done: done.clone(),
                 started_at: started_at.clone(),
                 stopping: false,
             },
         );
         drop(recordings);
+        drop(artifacts);
         let recordings = self.recordings.clone();
         let recording_artifacts = self.recording_artifacts.clone();
+        let browser_state = self.state.clone();
         let preview = self.preview.get().cloned();
         let monitor_key = key.clone();
         let monitor_tab_id = tab_id.to_owned();
@@ -253,13 +273,54 @@ impl Browser {
                 Ok(result) => result,
                 Err(error) => Err(format!("recording task terminated: {error}")),
             };
+            let mut paths_to_remove = Vec::new();
             if let Ok(artifact) = &result {
-                recording_artifacts
-                    .lock()
-                    .await
-                    .entry(monitor_key.clone())
-                    .or_default()
-                    .push(artifact.clone());
+                let open_recording_keys = {
+                    let state = browser_state.lock().await;
+                    state
+                        .pages
+                        .iter()
+                        .flat_map(|(thread, page)| {
+                            page.preview_tabs
+                                .iter()
+                                .map(|tab_id| (thread.clone(), tab_id.clone()))
+                        })
+                        .collect::<HashSet<_>>()
+                };
+                let mut artifacts = recording_artifacts.lock().await;
+                let entries = artifacts.entry(monitor_key.clone()).or_default();
+                entries.push(artifact.clone());
+                // One completed artifact per tab is enough for a duplicate
+                // stop or a client that is still displaying Save/Attach.
+                while entries.len() > 1 {
+                    paths_to_remove.push(PathBuf::from(entries.remove(0).path));
+                }
+                while artifacts.len() > MAX_RETAINED_RECORDINGS {
+                    let Some(oldest_key) = artifacts
+                        .iter()
+                        .filter(|(key, _)| !open_recording_keys.contains(*key))
+                        .filter_map(|(key, entries)| {
+                            entries
+                                .first()
+                                .map(|artifact| (key.clone(), artifact.created_at.clone()))
+                        })
+                        .min_by(|(_, left), (_, right)| left.cmp(right))
+                        .map(|(key, _)| key)
+                    else {
+                        break;
+                    };
+                    if let Some(entries) = artifacts.remove(&oldest_key) {
+                        paths_to_remove.extend(
+                            entries
+                                .into_iter()
+                                .map(|artifact| PathBuf::from(artifact.path)),
+                        );
+                    }
+                }
+            }
+            drop(recording_artifacts);
+            for path in paths_to_remove {
+                let _ = tokio::fs::remove_file(path).await;
             }
             done.send_replace(Some(result));
             if let Some(preview) = preview
@@ -269,15 +330,24 @@ impl Browser {
             }
             recordings.lock().await.remove(&monitor_key);
         });
-        let startup_result = tokio::select! {
-            result = recording::await_startup(startup) => result,
-            _ = request_cancel.cancelled() => {
-                self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5)).await;
-                self.discard_recording_artifact_path(&key, &artifact_path_for_failure)
-                    .await;
-                return Err(format!("recording start was cancelled for tab {tab_id}"));
-            }
+        let startup_future = recording::await_startup(startup);
+        tokio::pin!(startup_future);
+        let (startup_result, request_cancelled) = tokio::select! {
+            result = &mut startup_future => (result, request_cancel.is_cancelled()),
+            _ = request_cancel.cancelled() => (startup_future.as_mut().await, true),
         };
+        startup_state.send_replace(if startup_result.is_ok() {
+            RecordingStartupState::Started
+        } else {
+            RecordingStartupState::Failed
+        });
+        if request_cancelled {
+            self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
+                .await;
+            self.discard_recording_artifact_path(&key, &artifact_path_for_failure)
+                .await;
+            return Err(format!("recording start was cancelled for tab {tab_id}"));
+        }
         if let Err(error) = startup_result {
             self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
                 .await;
@@ -321,13 +391,6 @@ impl Browser {
                 return Err(format!("recording stopped during startup for tab {tab_id}"));
             }
         }
-        if request_cancel.is_cancelled() {
-            self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
-                .await;
-            self.discard_recording_artifact_path(&key, &artifact_path_for_failure)
-                .await;
-            return Err(format!("recording start was cancelled for tab {tab_id}"));
-        }
         // A successful start clears the previous core-offered artifact.  Keep
         // it protected until this point so a failed start never leaves Save or
         // Attach pointing at a pruned file.
@@ -347,7 +410,6 @@ impl Browser {
             Duration::from_secs(
                 agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
             ),
-            false,
             None,
         )
         .await
@@ -365,7 +427,6 @@ impl Browser {
             Duration::from_secs(
                 agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
             ),
-            false,
             Some(request_cancel),
         )
         .await
@@ -376,7 +437,6 @@ impl Browser {
         thread: &str,
         tab_id: &str,
         timeout: Duration,
-        allow_stopping: bool,
         request_cancel: Option<CancellationToken>,
     ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
         let key = (thread.to_owned(), tab_id.to_owned());
@@ -384,28 +444,38 @@ impl Browser {
             let mut recordings = self.recordings.lock().await;
             match recordings.get_mut(&key) {
                 Some(active) => {
-                    if active.stopping && !allow_stopping {
-                        return Err(format!(
-                            "recording is already stopping for preview tab {tab_id}"
-                        ));
-                    }
-                    active.stopping = true;
+                    let initiate_stop = begin_recording_stop(&mut active.stopping);
                     Some((
                         active.cancel.clone(),
                         active.abort.clone(),
                         active.done.subscribe(),
+                        active.startup.subscribe(),
+                        initiate_stop,
                     ))
                 }
                 None => None,
             }
         };
-        let Some((cancel, abort, mut done)) = active else {
+        let Some((cancel, abort, mut done, mut startup, initiate_stop)) = active else {
             return self
                 .completed_recording(&key)
                 .await
                 .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"));
         };
-        cancel.cancel();
+        if initiate_stop {
+            let startup_result = tokio::time::timeout(
+                Duration::from_secs(5),
+                wait_for_recording_startup(&mut startup),
+            )
+            .await;
+            if let Err(_) = startup_result {
+                abort.abort();
+                return Err(format!(
+                    "recording startup did not settle before stopping for preview tab {tab_id}"
+                ));
+            }
+            cancel.cancel();
+        }
         let result = if let Some(request_cancel) = request_cancel {
             tokio::select! {
                 result = tokio::time::timeout(timeout, wait_for_recording_completion(&mut done)) => result.map_err(|_| {
@@ -415,11 +485,6 @@ impl Browser {
                     )
                 }),
                 _ = request_cancel.cancelled() => {
-                    abort.abort();
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        wait_for_recording_completion(&mut done),
-                    ).await;
                     return Err(format!("recording stop was cancelled for tab {tab_id}"));
                 }
             }
@@ -436,7 +501,9 @@ impl Browser {
         let result = match result {
             Ok(Ok(result)) => result,
             Ok(Err(error)) | Err(error) => {
-                abort.abort();
+                if initiate_stop {
+                    abort.abort();
+                }
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
                     wait_for_recording_completion(&mut done),
@@ -473,19 +540,19 @@ impl Browser {
 
     async fn discard_recording_artifact_path(&self, key: &RecordingKey, path: &PathBuf) {
         let target = path.to_string_lossy().into_owned();
-        {
-            let mut artifacts = self.recording_artifacts.lock().await;
-            let empty = if let Some(entries) = artifacts.get_mut(key) {
-                entries.retain(|artifact| artifact.path.as_str() != target.as_str());
-                entries.is_empty()
-            } else {
-                false
-            };
-            if empty {
-                artifacts.remove(key);
-            }
+        let is_offered = self
+            .recording_artifacts
+            .lock()
+            .await
+            .get(key)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|artifact| artifact.path.as_str() == target.as_str())
+            });
+        if !is_offered {
+            let _ = tokio::fs::remove_file(path).await;
         }
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     async fn clear_replaced_recording_artifacts(
@@ -590,15 +657,22 @@ impl Browser {
         self.stop.cancel();
         let keys = self.recordings.lock().await.keys().cloned().collect::<Vec<_>>();
         for key in keys {
-            let mut done = {
+            let (mut done, mut startup) = {
                 let mut recordings = self.recordings.lock().await;
                 let Some(active) = recordings.get_mut(&key) else { continue; };
                 active.stopping = true;
-                active.cancel.cancel();
-                active.done.subscribe()
+                (active.done.subscribe(), active.startup.subscribe())
             };
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                wait_for_recording_startup(&mut startup),
+            )
+            .await;
+            if let Some(active) = self.recordings.lock().await.get(&key) {
+                active.cancel.cancel();
+            }
             match tokio::time::timeout(
-                Duration::from_secs(10),
+                Duration::from_secs(120),
                 wait_for_recording_completion(&mut done),
             )
             .await
@@ -901,15 +975,29 @@ impl Browser {
     }
 
     pub async fn close_preview_tab(&self, thread: &str, tab_id: &str) -> Result<(), String> {
+        self.close_preview_tab_with_cancel(thread, tab_id, CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn close_preview_tab_with_cancel(
+        &self,
+        thread: &str,
+        tab_id: &str,
+        request_cancel: CancellationToken,
+    ) -> Result<(), String> {
+        if request_cancel.is_cancelled() {
+            return Err(format!("closing Preview tab {tab_id} was cancelled"));
+        }
         let key = (thread.to_owned(), tab_id.to_owned());
         let stop_result = if self.recordings.lock().await.contains_key(&key) {
             let result = self
                 .stop_preview_recording_with_timeout(
                     thread,
                     tab_id,
-                    Duration::from_secs(5),
-                    true,
-                    None,
+                    Duration::from_secs(
+                        agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
+                    ),
+                    Some(request_cancel.clone()),
                 )
                 .await;
             match result {
@@ -919,6 +1007,9 @@ impl Browser {
         } else {
             None
         };
+        if request_cancel.is_cancelled() {
+            return Err(format!("closing Preview tab {tab_id} was cancelled"));
+        }
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
         {
@@ -928,7 +1019,12 @@ impl Browser {
             }
         }
         let chrome = state.chrome.as_mut().unwrap();
-        let close_result = chrome.close_target(tab_id).await;
+        let close_result = tokio::select! {
+            result = chrome.close_target(tab_id) => result,
+            _ = request_cancel.cancelled() => {
+                return Err(format!("closing Preview tab {tab_id} was cancelled"));
+            }
+        };
         if let Err(error) = close_result {
             return Err(match stop_result {
                 Some(Err(stop_error)) => {
@@ -1159,6 +1255,12 @@ impl Browser {
     }
 }
 
+fn begin_recording_stop(stopping: &mut bool) -> bool {
+    let initiate_stop = !*stopping;
+    *stopping = true;
+    initiate_stop
+}
+
 async fn wait_for_recording_completion(
     done: &mut tokio::sync::watch::Receiver<
         Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
@@ -1172,6 +1274,21 @@ async fn wait_for_recording_completion(
         done.changed()
             .await
             .map_err(|_| "recording completion channel closed".to_owned())?;
+    }
+}
+
+async fn wait_for_recording_startup(
+    startup: &mut watch::Receiver<RecordingStartupState>,
+) -> Result<RecordingStartupState, String> {
+    loop {
+        let state = *startup.borrow();
+        if state != RecordingStartupState::Pending {
+            return Ok(state);
+        }
+        startup
+            .changed()
+            .await
+            .map_err(|_| "recording startup channel closed".to_owned())?;
     }
 }
 

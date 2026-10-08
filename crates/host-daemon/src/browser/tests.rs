@@ -51,6 +51,25 @@ async fn recording_completion_is_replayable_after_startup_receiver_drops() {
     assert_eq!(result.id, "browser-recording-test");
 }
 
+#[tokio::test]
+async fn stop_waits_for_startup_before_cancelling_capture() {
+    let (startup, mut receiver) = tokio::sync::watch::channel(RecordingStartupState::Pending);
+    let waiting = tokio::spawn(async move { wait_for_recording_startup(&mut receiver).await });
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+
+    startup.send_replace(RecordingStartupState::Started);
+    assert_eq!(waiting.await.unwrap().unwrap(), RecordingStartupState::Started);
+}
+
+#[test]
+fn duplicate_stop_requests_share_one_completion_owner() {
+    let mut stopping = false;
+    assert!(begin_recording_stop(&mut stopping));
+    assert!(!begin_recording_stop(&mut stopping));
+    assert!(stopping);
+}
+
 fn request(thread: &ThreadId, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
     BrowserRequest {
         thread_id: thread.clone(),
