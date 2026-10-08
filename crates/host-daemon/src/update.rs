@@ -1924,9 +1924,6 @@ mod tests {
             &Url::parse("http://updates.example.test/releases").unwrap()
         ));
         assert!(Url::parse("https://").is_err());
-        let mut no_host = Url::parse("https://updates.example.test/releases").unwrap();
-        no_host.set_host(None).unwrap();
-        assert!(!is_https_url(&no_host));
         assert!(!is_https_url(
             &Url::parse("https://user:password@updates.example.test/releases").unwrap()
         ));

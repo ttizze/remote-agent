@@ -761,9 +761,11 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn pooled_percentages_and_columns_stay_bounded(used in proptest::collection::vec(0u32..=100, 1..8)) {
-            let average = used.iter().map(|value| f64::from(*value)).sum::<f64>()
-                / used.len() as f64
-                / 10.0;
+            let average = used
+                .iter()
+                .map(|value| f64::from(*value) / 10.0)
+                .sum::<f64>()
+                / used.len() as f64;
             let accounts = used
                 .into_iter()
                 .enumerate()
