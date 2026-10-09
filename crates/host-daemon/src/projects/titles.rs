@@ -320,7 +320,7 @@ mod tests {
             &projects,
             TitleQuery::Root {
                 limit: 1,
-                project_limit: 5,
+                project_limit: 2,
                 searching: false,
             },
         );

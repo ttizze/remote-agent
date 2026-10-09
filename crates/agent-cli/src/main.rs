@@ -29,7 +29,7 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     List {
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = ListQuery::default().limit)]
         limit: u32,
         #[arg(long, default_value = "")]
         search: String,
