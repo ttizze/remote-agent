@@ -8,11 +8,11 @@ pub(crate) const BACKGROUND: u32 = 0x080808;
 pub(crate) const SIDEBAR: u32 = 0x000000;
 pub(crate) const SURFACE: u32 = 0x0f0f0f;
 pub(crate) const RAISED: u32 = 0x141414;
-pub(crate) const HOVER: u32 = 0x191919;
-pub(crate) const SELECTED: u32 = 0x1b1c1c;
-pub(crate) const BORDER: u32 = 0x202020;
+pub(crate) const HOVER: u32 = 0x202020;
+pub(crate) const SELECTED: u32 = 0x282828;
+pub(crate) const BORDER: u32 = 0x303030;
 pub(crate) const FOREGROUND: u32 = 0xe6e6e6;
-pub(crate) const MUTED: u32 = 0x939393;
+pub(crate) const MUTED: u32 = 0xa6a6a6;
 pub(crate) const ACCENT: u32 = 0x346bf1;
 
 pub(crate) fn init(cx: &mut App) {
@@ -23,7 +23,7 @@ pub(crate) fn init(cx: &mut App) {
         background: rgb(BACKGROUND).into(),
         foreground: rgb(FOREGROUND).into(),
         border: rgb(BORDER).into(),
-        input: rgb(BORDER).into(),
+        input: rgb(0x666666).into(),
         caret: rgb(FOREGROUND).into(),
         accent: rgb(SELECTED).into(),
         accent_foreground: rgb(FOREGROUND).into(),
@@ -32,7 +32,7 @@ pub(crate) fn init(cx: &mut App) {
         secondary: rgb(RAISED).into(),
         secondary_hover: rgb(HOVER).into(),
         secondary_active: rgb(SELECTED).into(),
-        secondary_foreground: rgb(MUTED).into(),
+        secondary_foreground: rgb(FOREGROUND).into(),
         primary: rgb(ACCENT).into(),
         primary_hover: rgb(0x477af5).into(),
         primary_active: rgb(0x285bd5).into(),
@@ -44,7 +44,7 @@ pub(crate) fn init(cx: &mut App) {
         button_secondary: rgb(RAISED).into(),
         button_secondary_hover: rgb(HOVER).into(),
         button_secondary_active: rgb(SELECTED).into(),
-        button_secondary_foreground: rgb(MUTED).into(),
+        button_secondary_foreground: rgb(FOREGROUND).into(),
         ring: rgb(ACCENT).into(),
         selection: rgb(ACCENT).opacity(0.25).into(),
         button: rgb(RAISED).into(),
