@@ -926,8 +926,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(listing.has_more);
     assert_eq!(
         page_reads(),
-        6,
-        "recent list does not wait for each project or chat section"
+        7,
+        "assigned rows require only one widened follow-up page"
     );
     let expanded = local
         .peer
@@ -957,8 +957,41 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(expanded.has_more);
     assert_eq!(
         page_reads(),
-        13,
+        14,
         "project expansion reads only its own title page, never other sections"
+    );
+    let empty_projects: Vec<_> = (0..6)
+        .map(|index| {
+            serde_json::json!({
+                "id":format!("empty-{index}"),"name":format!("Empty {index}"),
+                "roots":[{"path":root.join(format!("empty-{index}"))}],
+            })
+        })
+        .collect();
+    std::fs::write(
+        root.join("bex-projects.json"),
+        serde_json::to_vec(&empty_projects).unwrap(),
+    )
+    .unwrap();
+    let before_empty = page_reads();
+    for project_limit in [5, 15] {
+        let page = local
+            .peer
+            .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+                project_limit,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(page.data.len(), 5);
+        assert!(page.has_more);
+        assert_eq!(page.projects.len(), (project_limit as usize).min(6));
+        assert_eq!(page.has_more_projects, project_limit == 5);
+    }
+    assert_eq!(
+        page_reads(),
+        before_empty + 2,
+        "initial and expanded empty headers each need only one native page"
     );
     local.close().await;
     host.close().await.unwrap();

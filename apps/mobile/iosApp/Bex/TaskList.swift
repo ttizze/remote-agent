@@ -144,25 +144,24 @@ struct ThreadsScreen: View {
                         .foregroundColor(.secondary)
                         .accessibilityIdentifier("tasks.empty")
                         .taskListRowStyle()
-                } else {
-                    ForEach(chats, id: \.id) { thread in
-                        ThreadListRow(thread: thread) { model.openThread(thread.id) }
-                    }
-                    if model.list?.hasMore == true {
-                        Button {
-                            model.expandTaskList()
-                        } label: {
-                            HStack(spacing: 8) {
-                                if model.loadingThreads {
-                                    ProgressView().controlSize(.mini)
-                                }
-                                Text("もっと見る")
+                }
+                ForEach(chats, id: \.id) { thread in
+                    ThreadListRow(thread: thread) { model.openThread(thread.id) }
+                }
+                if model.list?.hasMore == true {
+                    Button {
+                        model.expandTaskList()
+                    } label: {
+                        HStack(spacing: 8) {
+                            if model.loadingThreads {
+                                ProgressView().controlSize(.mini)
                             }
+                            Text("もっと見る")
                         }
-                            .disabled(model.loadingThreads)
-                            .accessibilityIdentifier("tasks.chats.more")
-                            .taskListRowStyle()
                     }
+                        .disabled(model.loadingThreads)
+                        .accessibilityIdentifier("tasks.chats.more")
+                        .taskListRowStyle()
                 }
             } header: {
                 Text("チャット")
