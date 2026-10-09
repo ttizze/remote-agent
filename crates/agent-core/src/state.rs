@@ -537,30 +537,26 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             });
         }
         Intent::SetProjectExpanded { project_id, expanded } => {
-            if previous.expanded_projects.contains_key(&project_id) == expanded {
-                return (next, Vec::new());
-            }
-            if expanded {
+            if !expanded {
+                Arc::make_mut(&mut next.expanded_projects).remove(&project_id);
+                Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
+            } else if !previous.expanded_projects.contains_key(&project_id) {
                 if previous.threads.as_ref().is_none_or(|page| {
                     !page.projects.iter().any(|project| project.id == project_id)
                 }) {
                     return (next, Vec::new());
                 }
-                Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), 5);
-                let effects = if next.connected {
-                    vec![Effect::execute(op::ListProjectSessions {
+                let page = previous.project_threads.get(&project_id);
+                let limit = page.map_or(5, |page| u32::try_from(page.data.len()).unwrap_or(u32::MAX).max(5));
+                Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), limit);
+                if page.is_none() && next.connected {
+                    return prepare(previous, next, op::ListProjectSessions {
                         project_id,
-                        limit: 5,
+                        limit,
                         search_term: previous.list_query.search_term.clone(),
-                    })]
-                } else {
-                    Vec::new()
-                };
-                return (next, effects);
+                    });
+                }
             }
-            Arc::make_mut(&mut next.expanded_projects).remove(&project_id);
-            Arc::make_mut(&mut next.project_threads).remove(&project_id);
-            Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
         }
         Intent::ExpandThreadList { project_id } => {
             if let Some(project_id) = project_id {

@@ -144,6 +144,33 @@ async fn completed(
     .await
 }
 
+async fn listed(store: &Store, id: &agent_protocol::session::SessionRef) -> Arc<Snapshot> {
+    store
+        .dispatch(Intent::ListSessions(op::ListSessions::new(
+            Default::default(),
+        )))
+        .await
+        .unwrap();
+    if let Some(project_id) = store.snapshot().conversations[id].project_id.as_ref() {
+        store
+            .dispatch(Intent::SetProjectExpanded {
+                project_id: project_id.clone(),
+                expanded: true,
+            })
+            .await
+            .unwrap();
+    }
+    until(store, |snapshot| {
+        snapshot.thread_list().is_some_and(|list| {
+            list.threads
+                .iter()
+                .chain(list.projects.iter().flat_map(|project| &project.threads))
+                .any(|thread| &thread.id == id)
+        })
+    })
+    .await
+}
+
 fn fixture_program() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_bex-claude-fixture"))
 }
@@ -367,8 +394,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         assert_eq!(inputs[number]["content"].as_array().unwrap().len(), if attachment == "none" { 1 } else { 2 });
                         if attachment == "image" { assert_eq!(inputs[number]["content"][1]["source"]["media_type"], "image/png"); }
                         if attachment == "file" { assert!(inputs[number]["content"][1]["text"].as_str().unwrap().contains("note.txt")); }
-                        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
-                        assert!(store.snapshot().threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref() == Some(&id)));
+                        listed(&store, &id).await;
                         store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
                         assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
                         let saved: Snapshot = serde_json::from_slice(&serde_json::to_vec(store.snapshot().as_ref()).unwrap()).unwrap();
@@ -854,10 +880,8 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                     else { assert_eq!(Path::new(&current), if selected { workspace.clone() } else { root.join("bex-chats") }); }
                     let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
                     assert!(turns[index].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
-                    store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
-                    let snapshot = store.snapshot();
+                    let snapshot = listed(&store, &id).await;
                     let list = snapshot.threads.as_ref().unwrap();
-                    assert!(list.data.iter().any(|thread| thread.id.as_ref() == Some(&id)));
                     assert!(list.provider_errors.as_ref().unwrap()["codex"]["message"].is_string());
                     let management = fixture.local().await.unwrap();
                     let status = management.peer.call(&rpc::ReadHostStatus {}).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();

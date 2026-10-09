@@ -51,7 +51,7 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Fork inherits the selected answer and accepts a new turn")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let number = try XCTUnwrap(originalAnswerID.split(separator: "-").dropLast().last)
-        let original = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(number)"]
+        let original = app.descendants(matching: .any)["tasks.project.row.codex:fixture-thread-\(number)"]
         XCTAssertTrue(original.waitForExistence(timeout: 15)); original.tap()
         XCTAssertTrue(app.descendants(matching: .any)[nextID].waitForExistence(timeout: 20))
     }
@@ -229,7 +229,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("external-conversation")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = app.buttons["tasks.row.codex:fixture-external-thread"]
+        let row = app.buttons["tasks.project.row.codex:fixture-external-thread"]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)["item.answer-fixture-external-thread"]
             .waitForExistence(timeout: 15))

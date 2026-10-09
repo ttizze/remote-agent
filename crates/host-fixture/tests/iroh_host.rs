@@ -907,6 +907,13 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                         }
                         store.dispatch(Intent::ShowThreadList).await.unwrap();
                         store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+                        if project {
+                            store.dispatch(Intent::SetProjectExpanded { project_id: "default".into(), expanded: true }).await.unwrap();
+                            loop {
+                                if updates.borrow_and_update().project_threads.get("default").is_some_and(|page| page.data.iter().any(|thread| thread.id.as_ref() == Some(&id))) { break; }
+                                updates.changed().await.unwrap();
+                            }
+                        }
                         store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
                         if project {
                             store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: cwd.clone() })).await.unwrap();
@@ -922,7 +929,8 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                         assert!(snapshot.connected);
                         assert!(snapshot.error.is_none(), "{prompt}: {:?}", snapshot.error);
                         assert!(snapshot.pending_submissions.is_empty());
-                        let listed = snapshot.threads.as_ref().unwrap().data.iter().find(|thread| thread.id.as_ref() == Some(&id)).expect("sent conversation must be listed");
+                        let page = if project { &snapshot.project_threads["default"] } else { snapshot.threads.as_ref().unwrap() };
+                        let listed = page.data.iter().find(|thread| thread.id.as_ref() == Some(&id)).expect("sent conversation must be listed");
                         assert_eq!(listed.project_id, if project { models::ProjectMembership::Assigned("default".into()) } else { models::ProjectMembership::Unassigned {} });
                         let restored: agent_core::state::Snapshot = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
                         assert_eq!(restored.selected_directory(), snapshot.selected_directory());
@@ -2472,6 +2480,11 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                 let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None).await.unwrap();
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                if scoped {
+                    let mut initial = store.subscribe();
+                    while initial.borrow_and_update().threads.is_none() { initial.changed().await.unwrap(); }
+                    store.dispatch(Intent::SetProjectExpanded { project_id: "project".into(), expanded: true }).await.unwrap();
+                }
                 let key = store.snapshot().navigation.draft_key.clone();
                 store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] list automatically".into() }).await.unwrap();
                 store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "sidebar-message".into() }).await.unwrap();
@@ -2481,7 +2494,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                     loop {
                         let snapshot = updates.borrow_and_update().clone();
                         let complete = snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.first().is_some_and(|turn| turn.status == agent_protocol::execution::TurnStatus::Completed));
-                        let listed = snapshot.thread_list().is_some_and(|list| list.threads.iter().any(|thread| thread.id == id && thread.title == "Completed conversation" && thread.project_id == scoped.then(|| "project".into())));
+                        let listed = snapshot.thread_list().is_some_and(|list| list.threads.iter().chain(list.projects.iter().flat_map(|project| &project.threads)).any(|thread| thread.id == id && thread.title == "Completed conversation" && thread.project_id == scoped.then(|| "project".into())));
                         if complete && listed {
                             assert!(snapshot.pending_submissions.is_empty());
                             assert!(snapshot.error.is_none(), "{:?}", snapshot.error);

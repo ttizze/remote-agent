@@ -98,7 +98,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("worktree-conversation")
         app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-worktree-thread"]
+        let row = app.descendants(matching: .any)["tasks.project.row.codex:fixture-worktree-thread"]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let prompt = app.textFields["task.message"]
         XCTAssertTrue(prompt.waitForExistence(timeout: 10))
@@ -183,7 +183,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.staticTexts["attachment-fixture.txt"].waitForExistence(timeout: 15))
         app.terminate()
         let reopened = try connectedSimulatorApp()
-        let row = prefixedElement(reopened, prefix: "tasks.row.codex:fixture-thread-")
+        let row = prefixedElement(reopened, prefix: "tasks.project.row.codex:fixture-thread-")
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(reopened.staticTexts["attachment-fixture.txt"].waitForExistence(timeout: 10))
         let message = reopened.descendants(matching: .any)["task.message"]

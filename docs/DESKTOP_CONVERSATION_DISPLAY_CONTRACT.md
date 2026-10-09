@@ -69,9 +69,11 @@ hydration must not change this default.
   window. The Host does not fill project task pages or scan old tasks to prove
   that a small project is complete. Native timestamp ties are ordered within the
   requested root window; they never require exhausting old pages.
-- Opening a project loads its first five root titles independently. More adds ten
-  titles only to that project. Closing it removes its read target and ignores late
-  replies. Project pages use the same title search as the root list. Matching
+- Opening an unread project loads its first five root titles independently. More
+  adds ten titles only to that project. Closing it removes its read target and
+  ignores late replies, preserving the received page for reopening without a
+  read. Search and storage changes clear those pages. Project pages use the same
+  title search as the root list. Matching
   projects expand automatically while searching, with five titles loaded
   independently per visible project. Project loading and failure stay local to
   that section; the chat list remains usable and its loading indicator does not

@@ -15,7 +15,7 @@ extension BexLaunchUITests {
 
         let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
         let session = try JSONDecoder().decode(CreatedTask.self, from: response).threadId
-        return "tasks.row.\(session.provider):\(session.id)"
+        return "tasks.project.row.\(session.provider):\(session.id)"
     }
 
     func testSimulatorOpensTasksBeforeHistoryReadFinishes() throws {
@@ -24,7 +24,7 @@ extension BexLaunchUITests {
         addTeardownBlock { _ = try self.simulatorFixture("release-history-reads") }
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = app.buttons["tasks.row.codex:fixture-external-thread"]
+        let row = app.buttons["tasks.project.row.codex:fixture-external-thread"]
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         try simulatorFixture("hold-history-reads")
         row.tap()
@@ -128,7 +128,7 @@ extension BexLaunchUITests {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let number = firstAnswerID.replacingOccurrences(of: "item.fixture-final-", with: "")
             .split(separator: "-")[0]
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(number)"]
+        let row = app.descendants(matching: .any)["tasks.project.row.codex:fixture-thread-\(number)"]
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[secondAnswerID].waitForExistence(timeout: 20))
         XCTAssertFalse(banner.exists)
@@ -143,7 +143,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("external-conversation")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-external-thread"]
+        let row = app.descendants(matching: .any)["tasks.project.row.codex:fixture-external-thread"]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["item.answer-fixture-external-thread"].waitForExistence(timeout: 15),
@@ -229,7 +229,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "value == %@", "完了・未確認")).firstMatch.exists)
         try startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
+        let row = prefixedElement(app, prefix: "tasks.project.row.codex:fixture-thread-")
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         XCTAssertEqual(row.value as? String, "実行中")
         captureScreen(app, named: "Task running in list")

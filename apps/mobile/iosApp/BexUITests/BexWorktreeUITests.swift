@@ -205,7 +205,7 @@ extension BexLaunchUITests {
         app.buttons["tasks.refresh"].tap()
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10)); project.tap()
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-worktree-thread"]
+        let row = app.descendants(matching: .any)["tasks.project.row.codex:fixture-worktree-thread"]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let changes = app.buttons["task.diff"]
         XCTAssertTrue(changes.waitForExistence(timeout: 15))

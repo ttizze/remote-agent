@@ -932,12 +932,19 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert!(store.snapshot().project_threads.is_empty());
+            let received = store.snapshot().project_threads["old"].clone();
             assert!(
                 store.snapshot().thread_list().unwrap().projects[0]
                     .error
                     .is_none()
             );
+            store.dispatch(Intent::SetProjectExpanded {
+                project_id: "old".into(), expanded: true,
+            }).await.unwrap();
+            assert!(Arc::ptr_eq(&received, &store.snapshot().project_threads["old"]));
+            assert!(!store.snapshot().thread_list().unwrap().projects[0].loading);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_request()).await.is_err(),
+                "a received page must not be read again on reopening");
             store.close().await.unwrap();
         })
         .await
@@ -1096,8 +1103,11 @@ mod tests {
         store.close().await.unwrap();
     }
 
-    #[test]
-    fn scoped_project_reply_is_discarded_after_close_and_keeps_root_navigation() {
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(5)]
+    #[case(15)]
+    fn project_disclosure_keeps_received_rows_and_discards_late_replies(#[case] count: usize) {
         let root = |title: &str| {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
                 "data":[{"id":{"provider":"codex","id":title},"name":title}],
@@ -1108,7 +1118,7 @@ mod tests {
         };
         let project = |title: &str| {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
-                "data":[{"id":{"provider":"codex","id":title},"projectId":"old","name":title}],
+                "data":(0..count).map(|index| serde_json::json!({"id":{"provider":"codex","id":format!("{title}-{index}")},"projectId":"old","name":title})).collect::<Vec<_>>(),
                 "projects":[{"id":"old","name":"Old","roots":[]}],
                 "hasMore":false,"hasMoreProjects":false
             }))
@@ -1145,13 +1155,23 @@ mod tests {
             &root_before,
             published.threads.as_ref().unwrap()
         ));
+        if count > 5 {
+            (published, _) = reduce_intent(
+                &published,
+                Intent::ExpandThreadList {
+                    project_id: Some("old".into()),
+                },
+            );
+        }
+        let limit = published.expanded_projects["old"];
         ListProjectSessions {
             project_id: "old".into(),
-            limit: 5,
+            limit,
             search_term: String::new(),
         }
         .apply(&mut published, project("old-task"));
-        assert_eq!(published.project_threads["old"].data.len(), 1);
+        assert_eq!(published.project_threads["old"].data.len(), count);
+        let received = published.project_threads["old"].clone();
         let navigation = published.navigation.clone();
         let drafts = published.drafts.clone();
         let (mut closed, effects) = reduce_intent(
@@ -1164,13 +1184,35 @@ mod tests {
         assert!(effects.is_empty());
         ListProjectSessions {
             project_id: "old".into(),
-            limit: 5,
+            limit,
             search_term: String::new(),
         }
         .apply(&mut closed, project("late-task"));
-        assert!(closed.project_threads.is_empty());
+        assert!(Arc::ptr_eq(&received, &closed.project_threads["old"]));
+        assert!(closed.thread_list().unwrap().projects[0].threads.is_empty());
+        let (reopened, effects) = reduce_intent(
+            &closed,
+            Intent::SetProjectExpanded {
+                project_id: "old".into(),
+                expanded: true,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(
+            reopened.thread_list().unwrap().projects[0].threads.len(),
+            count
+        );
+        assert_eq!(reopened.expanded_projects["old"], count.max(5) as u32);
+        assert!(!reopened.thread_list().unwrap().projects[0].loading);
         assert_eq!(closed.navigation, navigation);
         assert_eq!(closed.drafts, drafts);
+        ListSessions::new(crate::models::ListQuery {
+            search_term: "other".into(),
+            ..Default::default()
+        })
+        .prepare(&mut closed)
+        .unwrap();
+        assert!(closed.project_threads.is_empty());
     }
 
     #[test]

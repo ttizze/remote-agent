@@ -193,7 +193,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     );
     let latest = read(&mut reader).await;
     assert_eq!(latest["method"], "host/session/list");
-    assert_eq!(latest["params"]["limit"], 120);
+    assert_eq!(latest["params"]["limit"], 35);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), reader.read_request())
             .await
@@ -3467,7 +3467,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     );
     assert_eq!(
         requests["host/session/list"]["params"],
-        json!({"limit":5,"searchTerm":""})
+        serde_json::to_value(agent_protocol::models::ListQuery::default()).unwrap()
     );
     // Review completes first; the other automatic reads must remain current.
     for (method, result) in [

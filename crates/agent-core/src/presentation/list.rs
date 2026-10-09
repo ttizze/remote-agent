@@ -152,7 +152,9 @@ impl Snapshot {
                             }
                         }
                     }
-                    if let Some(page) = page {
+                    if summary.expanded
+                        && let Some(page) = page
+                    {
                         summary.threads = thread_summaries(
                             &page.data,
                             &self.activity.active,
