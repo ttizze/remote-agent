@@ -50,7 +50,7 @@ Android 17では、LAN接続を開く前に付近のデバイスへのアクセ�
 
 会話にはGitと、利用可能なエージェントが最低1つ必要です。Codexは任意です。macOSではChatGPT Desktop同梱のCodexを優先し、次にPATH上の`codex`を使います。`--codex <path>`で明示した実行ファイルが最優先です。
 
-Claudeとの会話はNode.js上の公式Agent SDKが実行します。HostのPATHにNode.js 22以降を置くか、`BEX_NODE`で実行ファイルを指定してください。Nixの開発環境はNode.jsを含みます。SDKはnpmのlockfileに固定し、Hostへ同梱するコードを生成するため、実行時にnpmでインストールする必要はありません。
+Claudeとの会話は公式Agent SDKが実行します。Macアプリは署名済みのポータブルなNode.jsを同梱するため、Claude Codeがインストール済みならNodeやnpmを別途用意する必要はありません。既定ではアプリ内のNodeを使い、`BEX_NODE`で別の実行ファイルを明示できます。単体HostではPATHにNode.js 22以降を置くか、`BEX_NODE`で指定してください。Nixの開発環境はNode.jsを含み、Mac同梱用ランタイムのバージョンとチェックサムも固定します。SDKはnpmのlockfileに固定し、Hostへ同梱するコードを生成します。
 
 ```sh
 scripts/dev-env.sh cargo build --locked -p bex-process --bin bex-provider-supervisor
@@ -212,7 +212,7 @@ Android CIは、固定したNix SDKとUbuntu 24.04でKotlinのチェック・ユ
 
 `just unit-tests`は、ネイティブバインディングを有効にしたRustワークスペースのライブラリ・バイナリテスト、単独agent-peerのCargoテスト、macOSのヘッドレスSwift Markdownテストを実行します。RustはNix固定のcargo-nextestでクレートをまたいで並行実行し、Swiftも並行で進めます。両方の結果を待って失敗を集計します。Androidには現在JVMユニットテストがなく、計装テストはCIで実行します。CIも結合・E2E確認の前に同じコマンド・Rust機能構成を使い、Nixのagent-peerパッケージも確認します。監視用実行ファイルはテスト前にビルドします。`agent-ffi/bindgen`はバインディング生成時だけ有効にしてください。ユニットテストはなく、ワークスペーステストに含めると不要な依存構成でネイティブライブラリを置き換えます。整理・接続診断・ネイティブテストはRustの`cargo xtask`で管理します。macOSのプロセス調査はOS付属の`lsof`、LinuxはNix版を使います。Swift Markdownテストは、ソース・バインディング・コンパイラー・SDK・ランナーが一致するときのみビルドを再利用し、毎回現在のRustライブラリへアサーションを実行します。iOS UIテストは初期化済みの空Simulatorを複製して隔離Hostと組み合わせ、`BEX_IOS_TEST_WORKERS=1`–`10`で並行数を指定できます。リポジトリ共通ロックで、ワークツリー・Cargo出力をまたぐiOS確認を直列化します。
 
-`scripts/dev-env.sh`は`flake.nix`・`flake.lock`・Kacheのパッケージ定義・プラットフォームが同じなら、ワークツリー間で固定Nix環境を再利用します。キャッシュ利用時はNixを起動せず、共有プロファイルで固定ツールをGCから保護します。Cargoのインデックス・ロック・`target`はワークツリーごとに持ち、同じワークツリーのテスト・開発は同じキャッシュ・出力を使います。固定済みの依存ソースとアーカイブだけを既存キャッシュからコピーし、可能ならAPFSのcopy-on-write・reflinkで容量を共有します。変更済みソースは再コンパイルし、未変更の出力は再利用します。テストは必要なヘルパー・バインディングをビルドし、開発アプリのビルド・インストール・再起動は開発環境へ適用するときに行います。
+`scripts/dev-env.sh`は`flake.nix`・`flake.lock`・Kacheと同梱Nodeのパッケージ定義・プラットフォームが同じなら、ワークツリー間で固定Nix環境を再利用します。キャッシュ利用時はNixを起動せず、共有プロファイルで固定ツールをGCから保護します。Cargoのインデックス・ロック・`target`はワークツリーごとに持ち、同じワークツリーのテスト・開発は同じキャッシュ・出力を使います。固定済みの依存ソースとアーカイブだけを既存キャッシュからコピーし、可能ならAPFSのcopy-on-write・reflinkで容量を共有します。変更済みソースは再コンパイルし、未変更の出力は再利用します。テストは必要なヘルパー・バインディングをビルドし、開発アプリのビルド・インストール・再起動は開発環境へ適用するときに行います。
 
 新規ワークツリーのビルド出力を外付けディスクへ置くには、マウント済みディスクにディレクトリを作り、`git config --local bex.buildRoot /absolute/path/to/builds`を設定します。このローカル設定は全ワークツリーで共有します。`scripts/dev-env.sh`は新しい`target`を外付け上の専用ディレクトリへのシンボリックリンクにし、Cargo・Xcode・生成バインディング・キャッシュの既存パスを維持します。既存`target`は移動しません。移す場合は使用していない間に移動して元の場所をリンクへ置き換えてください。指定ディレクトリは事前に存在する必要があり、ディスク取り外しなどで利用できなければコマンドは失敗します。`git config --local --unset bex.buildRoot`で設定を削除すると、その後の新規ワークツリーはローカル出力へ戻ります。
 

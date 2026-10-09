@@ -33,30 +33,37 @@ pub(super) fn executable(
 
 pub(super) fn runtime() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let path = std::env::var_os("PATH");
-    let node = std::env::var_os("BEX_NODE").unwrap_or_else(|| "node".into());
-    let node = executable(Path::new(&node), path.as_deref())?;
+    let node = std::env::var_os("BEX_NODE");
     let host = std::env::current_exe().map_err(|error| error.to_string())?;
-    let bridge = sdk_path(&host)?;
-    if !bridge.is_file() {
-        return Err("bex-claude-sdk.mjs must be installed with the Host".into());
-    }
-    Ok((node, bridge))
+    runtime_from(&host, node.as_deref(), path.as_deref())
 }
 
-fn sdk_path(host: &Path) -> Result<std::path::PathBuf, String> {
+fn runtime_from(
+    host: &Path,
+    node: Option<&std::ffi::OsStr>,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let companion = bex_process::companion_path(host, "bex-claude-sdk.mjs")
         .map_err(|error| error.to_string())?;
     let directory = companion.parent().expect("companion has a parent");
     // macOS treats Contents/MacOS as nested code. JavaScript belongs in the
     // sealed Resources directory, rather than alongside its Mach-O executables.
-    if directory.ends_with("Contents/MacOS") {
-        Ok(directory
-            .parent()
-            .expect("Contents exists")
-            .join("Resources/bex-claude-sdk.mjs"))
+    let (default_node, bridge) = if directory.ends_with("Contents/MacOS") {
+        (
+            directory.join(format!("node{}", std::env::consts::EXE_SUFFIX)),
+            directory
+                .parent()
+                .expect("Contents exists")
+                .join("Resources/bex-claude-sdk.mjs"),
+        )
     } else {
-        Ok(companion)
+        (std::path::PathBuf::from("node"), companion)
+    };
+    let node = executable(node.map(Path::new).unwrap_or(&default_node), path)?;
+    if !bridge.is_file() {
+        return Err("bex-claude-sdk.mjs must be installed with the Host".into());
     }
+    Ok((node, bridge))
 }
 
 pub(super) struct Process {
@@ -72,26 +79,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdk_runtime_uses_the_signed_bundle_resources_and_standalone_companion() {
-        for (host, sdk) in [
-            (
-                "Bex Dev.app/Contents/MacOS/host-daemon",
-                "Bex Dev.app/Contents/Resources/bex-claude-sdk.mjs",
-            ),
-            (
-                "target/release/host-daemon",
-                "target/release/bex-claude-sdk.mjs",
-            ),
-            (
-                "target/debug/deps/claude-test",
-                "target/debug/bex-claude-sdk.mjs",
-            ),
-        ] {
+    fn mac_sdk_uses_bundled_node_without_path_and_respects_explicit_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let executables = root.path().join("Bex Dev.app/Contents/MacOS");
+        let resources = root.path().join("Bex Dev.app/Contents/Resources");
+        std::fs::create_dir_all(&executables).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        let host = executables.join("host-daemon");
+        let bundled = executables.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+        let bridge = resources.join("bex-claude-sdk.mjs");
+        std::fs::write(&bundled, b"bundled runtime").unwrap();
+        std::fs::write(&bridge, b"SDK bridge").unwrap();
+        assert_eq!(
+            runtime_from(&host, None, None).unwrap(),
+            (bundled.clone(), bridge.clone())
+        );
+
+        let path_directory = root.path().join("installed");
+        std::fs::create_dir(&path_directory).unwrap();
+        let installed = path_directory.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&installed, b"installed runtime").unwrap();
+        let path = std::env::join_paths([&path_directory]).unwrap();
+        assert_eq!(runtime_from(&host, None, Some(&path)).unwrap().0, bundled);
+        assert_eq!(
+            runtime_from(&host, Some(installed.as_os_str()), None)
+                .unwrap()
+                .0,
+            installed
+        );
+        let missing = path_directory.join("missing-node");
+        assert!(runtime_from(&host, Some(missing.as_os_str()), Some(&path)).is_err());
+        std::fs::remove_file(&bundled).unwrap();
+        assert!(runtime_from(&host, None, Some(&path)).is_err());
+
+        let standalone = path_directory.join("host-daemon");
+        let standalone_bridge = path_directory.join("bex-claude-sdk.mjs");
+        std::fs::write(&standalone_bridge, b"SDK bridge").unwrap();
+        for host in [&standalone, &path_directory.join("deps/claude-test")] {
             assert_eq!(
-                sdk_path(Path::new(host)).unwrap(),
-                std::path::PathBuf::from(sdk)
+                runtime_from(host, None, Some(&path)).unwrap(),
+                (installed.clone(), standalone_bridge.clone())
             );
         }
+        assert!(runtime_from(&standalone, None, None).is_err());
+        std::fs::remove_file(path_directory.join("bex-claude-sdk.mjs")).unwrap();
+        assert!(
+            runtime_from(&standalone, None, Some(&path))
+                .unwrap_err()
+                .contains("bex-claude-sdk.mjs")
+        );
     }
 }
 

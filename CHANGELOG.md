@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Include a signed portable Node.js runtime in the Mac app, pinned by version and checksum. Claude Code users can use BEX without installing Node or npm; the SDK and provider scripts use the bundled runtime.
+
 - Restore project and standalone chat grouping on desktop, iPhone and Android, with five items initially and ten more per request. Resolve icons for all returned project headers, including empty projects, and preserve search behavior. Host and clients use the updated binary protocol together.
 - Show loading progress on pagination controls while retaining visible rows. Preserve open project pages during root pagination, skip old-title scans for empty project headers, and enlarge follow-up native title reads to reduce repeated requests.
 

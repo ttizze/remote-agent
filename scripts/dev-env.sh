@@ -27,7 +27,7 @@ if [[ ! -e $bex_root/target/CACHEDIR.TAG && ! -L $bex_root/target/CACHEDIR.TAG ]
 fi
 bex_seed_cargo=${CARGO_HOME:-$HOME/.cargo}
 export XDG_CACHE_HOME="$bex_root/target/tool-cache"
-bex_env_key=$({ git hash-object flake.nix flake.lock tools/kache/package.nix; uname -sm; } | git hash-object --stdin)
+bex_env_key=$({ git hash-object flake.nix flake.lock tools/kache/package.nix tools/node-runtime/package.nix; uname -sm; } | git hash-object --stdin)
 bex_env_dir="$(git rev-parse --git-common-dir)/bex-dev-env/$bex_env_key"
 mkdir -p "$bex_env_dir"
 if [[ ! -f $bex_env_dir/env.sh ]]; then

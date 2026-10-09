@@ -3,6 +3,12 @@ use std::{os::unix::process::CommandExt, process::Command};
 pub(super) fn prepare_host(command: &mut Command) {
     command.process_group(0);
     let mut paths = Vec::new();
+    // Provider scripts with an env-node shebang also use the bundled runtime.
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        paths.push(directory.to_path_buf());
+    }
     if let Some(base) = directories::BaseDirs::new() {
         paths.push(base.home_dir().join(".local/bin"));
         paths.push(base.home_dir().join(".nix-profile/bin"));
@@ -16,6 +22,8 @@ pub(super) fn prepare_host(command: &mut Command) {
     }
     paths.extend(
         [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
             "/run/current-system/sw/bin",
             "/usr/bin",
             "/bin",

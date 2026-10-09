@@ -70,6 +70,8 @@ cp "$output/bex-desktop" "$executables/bex"
 cp "$output/host-daemon" "$executables/host-daemon"
 cp crates/host-daemon/src/claude/sdk/bridge.bundle.mjs "$resources/bex-claude-sdk.mjs"
 cp "$output/bex-provider-supervisor" "$executables/bex-provider-supervisor"
+cp "${BEX_NODE_RUNTIME:?Use the pinned Nix development environment}/bin/node" "$executables/node"
+cp "$BEX_NODE_RUNTIME/share/doc/node/LICENSE" "$resources/Node-LICENSE.txt"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
 # Use macOS's libiconv so the app also runs on Macs without Nix.
 for executable in "$executables/bex" "$executables/host-daemon" "$executables/bex-provider-supervisor"; do
@@ -84,8 +86,12 @@ done
 sign "$executables/bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"
+sign --identifier app.bex.node --options runtime --entitlements apps/desktop/macos/Node.entitlements "$executables/node"
+verify "$executables/node"
 sign "$bundle"
 verify "$bundle"
+# Exercise the signed runtime without an installed Node or Nix on PATH.
+env -i PATH=/usr/bin:/bin "$executables/node" "$resources/bex-claude-sdk.mjs" </dev/null
 if [[ -e $destination ]]; then mv "$destination" "$staging/previous.app"; fi
 mv "$bundle" "$destination"
 echo "$destination"

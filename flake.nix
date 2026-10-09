@@ -25,6 +25,8 @@
         kani = pkgs.callPackage ./tools/kani/package.nix { };
         kache = pkgs.callPackage ./tools/kache/package.nix { };
         maestro = pkgs.callPackage ./tools/maestro/package.nix { };
+      } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+        node-runtime = pkgs.callPackage ./tools/node-runtime/package.nix { };
       });
       devShells = forEachSystem (pkgs:
         let
@@ -49,6 +51,7 @@
             ];
           };
           kache = pkgs.callPackage ./tools/kache/package.nix { };
+          nodeRuntime = pkgs.callPackage ./tools/node-runtime/package.nix { };
           kacheHook = ''
             # CI already restores Cargo outputs.
             if [ -z "''${CI:-}" ]; then
@@ -93,6 +96,7 @@
             ];
           };
           native = pkgs.mkShell {
+            BEX_NODE_RUNTIME = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "${nodeRuntime}";
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
             NEXTEST_VERSION = pkgs.cargo-nextest.version;
             packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ]
@@ -115,6 +119,7 @@
             ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";
           };
           default = pkgs.mkShell ({
+            BEX_NODE_RUNTIME = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "${nodeRuntime}";
             packages = with pkgs; [
               just
               jq

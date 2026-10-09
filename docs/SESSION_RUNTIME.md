@@ -106,8 +106,12 @@ authentication. The SDK owns CLI transport, session resume, streaming,
 interrupts, approvals and MCP elicitation. A supervised Node process exchanges
 typed Host operations and SDK events; Rust does not implement Claude control
 requests. Its npm-locked runtime ships beside a standalone Host or in a Mac
-app's sealed Resources and requires Node 22
-or newer (`BEX_NODE` can select the executable). Consecutive turns reuse one
+app's sealed Resources. The Mac app ships a signed portable Node runtime in
+Contents/MacOS and selects it directly, without requiring Node on PATH. Its Host
+also puts that directory on PATH for provider scripts with an env-node shebang.
+A standalone Host requires Node 22 or newer; `BEX_NODE` can explicitly select
+another executable. Claude Code itself remains a user-installed dependency.
+Consecutive turns reuse one
 persistent SDK query and CLI process. SDK 0.3.293 hides host-only session state
 from its iterator; a small filter in its custom spawn hook exposes those SDK
 messages in order. The Host uses result, idle and consumed input to determine
