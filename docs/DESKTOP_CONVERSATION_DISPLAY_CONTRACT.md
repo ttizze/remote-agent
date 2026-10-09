@@ -63,8 +63,32 @@ hydration must not change this default.
 
 ## History pagination and refresh
 
-- List query limits and search are not persisted; reopening restores five-item
-  defaults. Live navigation and reconnection retain the current query.
+- The initial list shows up to five project headers first, followed by the latest
+  five standalone chats. Project tasks never appear again in the standalone chat
+  section. More project headers adds ten headers; more chats adds another recent
+  window. The Host does not fill project task pages or scan old tasks to prove
+  that a small project is complete. Native timestamp ties are ordered within the
+  requested root window; they never require exhausting old pages.
+- Opening a project loads its first five root titles independently. More adds ten
+  titles only to that project. Closing it removes its read target and ignores late
+  replies. Project pages use the same title search as the root list. Matching
+  projects expand automatically while searching, with five titles loaded
+  independently per visible project. Project loading and failure stay local to
+  that section; the chat list remains usable and its loading indicator does not
+  wait for project reads.
+- More controls keep their existing rows visible while loading, show a spinner,
+  and prevent repeated pagination for that list. Project headers and standalone
+  chats share one root-list loading state; each project's task page has its own.
+  Root pagination preserves already loaded project pages instead of refetching
+  them.
+- The Host reads task activity from loaded provider sessions and its owned
+  executions, without listing archived titles or reading conversation bodies.
+  This metadata refresh is independent of task navigation and never holds a
+  root-list receipt or turns its failure into a whole-list error.
+- Recent limits, search and project expansion are not persisted. Reopening
+  restores five standalone chat titles and closed projects. Live navigation and
+  reconnection retain the current selection; the root list publishes before open
+  projects refresh.
 - While a list refresh is running, coalesce further refreshes into one follow-up
   using the latest query. A reply for that query remains valid after task
   navigation; a reply for an older search or display limit must not replace it.
@@ -155,7 +179,8 @@ complete retrieval and reopening.
   `agents_are_scoped_to_the_selected_parent_and_keep_stable_identity`,
   `native_events_enrich_one_agent_without_reparenting_it`,
   `claude_activity_updates_the_same_row_without_a_native_child_session`,
-  `root_titles_exclude_children_without_consuming_limits_including_search`, and desktop
+  `conversation_list_excludes_subagents_and_project_tasks_at_root`,
+  `search_preserves_child_project_matches_without_showing_child_rows`, and desktop
   `agents_open_to_the_right_without_changing_parent_or_draft` and
   `pending_operations_do_not_block_task_navigation`.
 
@@ -185,6 +210,10 @@ that order immediately before microphone and send, aligned to the right.
 Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
+Send/stop, Fast, and reasoning-strength controls use monochrome colors.
+Fast's active state and filled reasoning bars use the foreground color; inactive
+states remain muted. Desktop send/stop uses a light background with a dark icon;
+iPhone send/stop uses the primary foreground color.
 
 The model name opens a searchable catalog. For Claude, the Host forwards the SDK's
 `displayName` unchanged as the model name, without a provider prefix or text from

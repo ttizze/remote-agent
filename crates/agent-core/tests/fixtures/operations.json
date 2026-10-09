@@ -4,9 +4,7 @@
     "command": {
       "type": "listThreads",
       "query": {
-        "projectLimit": 5,
-        "chatLimit": 5,
-        "projectThreadLimits": {},
+        "limit": 5,
         "searchTerm": ""
       }
     },
@@ -14,9 +12,7 @@
       {
         "method": "host/session/list",
         "params": {
-          "projectLimit": 5,
-          "chatLimit": 5,
-          "projectThreadLimits": {},
+          "limit": 5,
           "searchTerm": ""
         },
         "response": {
@@ -42,11 +38,8 @@
                 "roots": []
               }
             ],
-            "moreProjectIds": [
-              "project"
-            ],
-            "hasMoreChats": true,
-            "hasMoreProjects": true,
+            "hasMore": true,
+            "hasMoreProjects": false,
             "opaque": {
               "a": 1
             }
@@ -76,11 +69,8 @@
           "roots": []
         }
       ],
-      "moreProjectIds": [
-        "project"
-      ],
-      "hasMoreChats": true,
-      "hasMoreProjects": true,
+      "hasMore": true,
+      "hasMoreProjects": false,
       "opaque": {
         "a": 1
       }
@@ -91,11 +81,7 @@
     "command": {
       "type": "listThreads",
       "query": {
-        "projectLimit": 15,
-        "chatLimit": 25,
-        "projectThreadLimits": {
-          "project": 15
-        },
+        "limit": 25,
         "searchTerm": "needle"
       }
     },
@@ -103,11 +89,7 @@
       {
         "method": "host/session/list",
         "params": {
-          "projectLimit": 15,
-          "chatLimit": 25,
-          "projectThreadLimits": {
-            "project": 15
-          },
+          "limit": 25,
           "searchTerm": "needle"
         },
         "response": {
@@ -133,11 +115,8 @@
                 "roots": []
               }
             ],
-            "moreProjectIds": [
-              "project"
-            ],
-            "hasMoreChats": true,
-            "hasMoreProjects": true,
+            "hasMore": true,
+            "hasMoreProjects": false,
             "opaque": {
               "a": 1
             }
@@ -167,11 +146,8 @@
           "roots": []
         }
       ],
-      "moreProjectIds": [
-        "project"
-      ],
-      "hasMoreChats": true,
-      "hasMoreProjects": true,
+      "hasMore": true,
+      "hasMoreProjects": false,
       "opaque": {
         "a": 1
       }

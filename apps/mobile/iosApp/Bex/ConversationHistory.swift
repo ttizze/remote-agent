@@ -110,10 +110,9 @@ extension ThreadScreen {
     func loadVisibleHistory() {
         guard isVisible, let thread = conversation, thread.id == model.selectedThreadId,
               model.notice == nil else { return }
-        let oldestVisible = visibleHistoryRows?.threadId == thread.id &&
-            conversationRows(thread.rows, expansion: activityExpansionOverrides).first.map {
-                visibleHistoryRows?.rowIds.contains($0.id) == true
-            } == true
+        let oldestVisible = historyTopVisibility == HistoryTopVisibility(
+            threadId: thread.id, firstRowId: thread.rows.first?.id, visible: true
+        )
         guard AgentCore.shouldLoadHistory(
             hasMore: thread.source.hasMoreHistory(),
             loading: model.loadingHistory,
@@ -136,9 +135,16 @@ extension ThreadScreen {
     }
 }
 
+struct HistoryTopVisibility: Equatable {
+    let threadId: SessionRef?
+    let firstRowId: String?
+    let visible: Bool
+}
+
 struct ConversationScrollMetrics: Equatable {
     let content: CGSize
     let container: CGSize
+    let oldestVisible: Bool
     let latestVisible: Bool
 }
 

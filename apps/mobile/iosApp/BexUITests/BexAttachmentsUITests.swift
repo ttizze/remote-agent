@@ -166,7 +166,7 @@ extension BexLaunchUITests {
             if onPhone.waitForExistence(timeout: 3) {
                 onPhone.tap()
             }
-            let folder = app.staticTexts["Bex"]
+            let folder = app.staticTexts["bex"]
             if folder.waitForExistence(timeout: 3) {
                 folder.tap()
             }

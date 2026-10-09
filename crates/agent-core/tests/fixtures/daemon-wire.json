@@ -345,9 +345,10 @@
         }
       }
     ],
-    "hasMoreChats": false,
+    "hasMore": false,
     "hasMoreProjects": false,
-    "moreProjectIds": [],
+
+
     "projects": [
       {
         "id": "workspace",

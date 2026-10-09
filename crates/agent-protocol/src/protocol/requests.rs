@@ -62,6 +62,7 @@ macro_rules! contracts {
     };
 }
 contracts! {
+    ReadTaskActivity, "host/taskActivity/read" => (crate::live_activity::ReadTaskActivity, crate::live_activity::TaskActivityState) [clone],
     RegisterLiveActivity, "host/liveActivity/register" => (crate::live_activity::RegisterLiveActivity, crate::live_activity::LiveActivityRegistration) [clone],
     UnregisterLiveActivity, "host/liveActivity/unregister" => (crate::live_activity::UnregisterLiveActivity, m::Empty) [clone],
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),
@@ -73,6 +74,7 @@ contracts! {
     ReadItem, "host/session/item/read" => (op::ReadItem, op::ItemResponse) [clone, op::ReadItem::validate],
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
     ListSessions, "host/session/list" => (op::ListSessions, m::ThreadList) [clone],
+    ListProjectSessions, "host/project/sessions" => (op::ListProjectSessions, m::ThreadList) [clone],
     ListAgents, "host/session/agents" => (op::ListAgents, Vec<m::AgentObservation>) [clone],
     CreateSession, "host/session/create" => (op::CreateSession, s::OpenedSession),
     ForkSession, "host/session/fork" => (op::ForkSession, m::ThreadResponse) [clone, op::ForkSession::validate],

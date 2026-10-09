@@ -45,13 +45,38 @@ Codex and Claude Code are the supported providers.
 
 ## Provider boundaries
 
-The task list reads root metadata, with one lookahead per displayed section.
-It does not enumerate descendants or calculate their Git status. Search also
-reads only root titles. Desktop observes `host/session/agents` only
-while the selected conversation's Agents panel is visible; core refreshes that
-fleet on connection and activity updates. Responses contain only identity,
-parent identity, name and status and update conversation metadata without
-replacing history. Mobile task-list restoration does not request this data.
+The current transport ALPN is `remote-agent/streams/8`; Host and clients must use
+the same request layout. The task list reads the newest five standalone chats with
+one lookahead and returns up to five project headers; project tasks never appear
+in the standalone chat section. More project headers and more chats are separate
+pages, with ten added per explicit request. `host/project/sessions` reads the
+selected project's five titles on expansion, adding ten only on explicit
+pagination. Core owns open projects, applies their results separately and drops
+reads and late replies on collapse. Root rows do not prove a project's page, so
+project expansion always owns its scoped read. Project reads start after root
+publication on resume and never hold its loading state. Icons and Git status are
+resolved for every returned project header and task.
+Non-search root reads stop at the standalone-chat lookahead, ordering encountered
+projects first and filling remaining headers from the registry. Empty project
+headers do not require scans of old titles. The first provider page stays small;
+follow-up pages use up to 100 title summaries to avoid many small native requests
+when assigned tasks precede standalone chats.
+Claude pages candidates by the same native file modification time already used
+for ordering, decoding only requested transcript metadata; search can continue
+through older candidates. Unfiltered root title reads exclude native children.
+Codex search includes native child summaries so matching project headers remain
+discoverable; Core filters those child rows from the displayed task list. Claude
+keeps its historical root-only provider list. Desktop observes `host/session/agents` only while the selected fleet panel
+is visible; fleet observations contain identity, parent, name and status without
+history, icons or Git work. Worktree safety checks use the separate all-session
+scope so active child sessions still prevent removal.
+
+System task activity counts root conversations, matching the title list. The Host
+groups loaded sessions by their parent chain and publishes one shared display to
+native clients and APNs. Descendant work keeps its root active; an unanswered
+question or approval anywhere in that tree makes its single icon waiting. Parent
+identity survives execution-cache eviction and can be learned from a delayed read
+without overwriting newer task facts.
 
 Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong

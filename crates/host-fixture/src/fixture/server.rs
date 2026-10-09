@@ -337,7 +337,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                             "isDefault":true,"hidden":false,"description":"Isolated test model"}]);
                     context.respond(id, &json!({"data":models,"nextCursor":null}))?;
                 }
-                "thread/list" => {
+                "thread/list" | "thread/loaded/list" => {
                     if context.home.join("exit-on-list").exists() { std::process::exit(0); }
                     let fixture = context.home.join("list-fixture.json");
                     let contents = if fixture.exists() { Some(fs::read(&fixture)?) } else { None };
@@ -363,6 +363,20 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     } else if contents.is_none() && let Some(saved) = saved_threads.take() {
                         threads = saved; list_contents = None;
                     }
+                    if method == "thread/loaded/list" {
+                        let mut loaded: Vec<_> = threads.values().filter_map(|thread| {
+                            let thread = thread.borrow();
+                            (list_contents.is_none() || thread.metadata.get("loaded") == Some(&Value::Bool(true)) || thread.metadata["status"]["type"] == "active")
+                                .then(|| thread.metadata["id"].as_str().unwrap().to_owned())
+                        }).collect();
+                        loaded.sort();
+                        let offset = params["cursor"].as_str().and_then(|cursor| cursor.parse::<usize>().ok()).unwrap_or(0).min(loaded.len());
+                        let end = (offset + params["limit"].as_u64().unwrap_or(100) as usize).min(loaded.len());
+                        let next = (end < loaded.len()).then(|| end.to_string());
+                        context.trace(method, json!({"cursor":params["cursor"],"returned":end-offset}))?;
+                        context.respond(id, &json!({"data":&loaded[offset..end],"nextCursor":next}))?;
+                        continue;
+                    }
                     if fixture.exists() && params["useStateDbOnly"] != true {
                         context.error(id, -32602, "Title lists must not scan rollout history")?;
                         continue;
@@ -373,6 +387,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     }).filter(|thread| {
                         term.is_empty() || thread.metadata.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
                             .or_else(|| thread.metadata.get("preview").and_then(Value::as_str)).unwrap_or("").to_lowercase().contains(&term)
+                    }).filter(|thread| {
+                        let Some(kinds) = params["sourceKinds"].as_array().filter(|kinds| !kinds.is_empty()) else { return true; };
+                        let kind = if thread.metadata.get("parentThreadId").is_some_and(Value::is_string) {
+                            "subAgentThreadSpawn"
+                        } else { "cli" };
+                        kinds.iter().any(|value| value.as_str() == Some(kind))
                     }).filter(|thread| {
                         let Some(ancestor) = params["ancestorThreadId"].as_str() else { return true; };
                         let mut parent = thread.metadata.get("parentThreadId").and_then(Value::as_str).map(str::to_owned);

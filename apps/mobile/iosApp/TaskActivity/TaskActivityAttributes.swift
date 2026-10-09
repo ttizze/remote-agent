@@ -2,45 +2,31 @@ import ActivityKit
 import Foundation
 
 struct TaskActivityAttributes: ActivityAttributes, Hashable {
-    struct Summary: Codable, Hashable {
-        var running: UInt32
-        var waiting: UInt32
-        var unknown: UInt32
+    enum IconKind: String, Codable {
+        case running, waiting, unknown, finished
+    }
 
-        var total: Int {
-            Int(running) + Int(waiting) + Int(unknown)
-        }
+    struct Icon: Codable, Hashable {
+        var kind: IconKind
+        var label: String
+    }
 
-        var statusLabel: String {
-            if total == 0 {
-                return "すべてのタスクが終了"
-            }
-            if unknown > 0 {
-                return "更新待ち"
-            }
-            if waiting > 0 {
-                return "確認待ち \(waiting)件 · 実行中 \(running)件"
-            }
-            return "実行中 \(running)件"
-        }
+    struct View: Codable, Hashable {
+        var total: UInt32
+        var label: String
+        var icons: [Icon]
+        var overflow: UInt32
+    }
 
-        /// Keep the widget cheap and legible; additional tasks share a count badge.
-        var icons: [String] {
-            if total == 0 {
-                return ["checkmark.circle.fill"]
-            }
-            var result = [String]()
-            for (count, symbol) in [(waiting, "person.crop.circle.badge.questionmark"),
-                                    (running, "circle.dotted"), (unknown, "arrow.clockwise.circle")] {
-                result += Array(repeating: symbol, count: min(Int(count), 12 - result.count))
-            }
-            return result
-        }
+    struct Display: Codable, Hashable {
+        var current: View
+        var canStart: Bool
+        var ongoing: Bool
+        var urgent: Bool
     }
 
     struct ContentState: Codable, Hashable {
-        var summary: Summary
-        var connected: Bool
+        var display: Display
         var hostName: String
     }
 

@@ -18,7 +18,7 @@ struct ThreadScreen: View {
     @State var showingModelSettings = false
     @State var isVisible = false
     @State var isFollowingLatest = true
-    @State var visibleHistoryRows: (threadId: SessionRef?, rowIds: Set<String>)?
+    @State var historyTopVisibility: HistoryTopVisibility?
     @State var latestHistoryRowVisible = false
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
@@ -120,7 +120,6 @@ struct ThreadScreen: View {
                                     .id(row.id)
                             }
                         }
-                        .scrollTargetLayout()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                         .background(ConversationScrollToTop {
@@ -150,24 +149,26 @@ struct ThreadScreen: View {
                             followLatest(to: lastRowId, using: proxy)
                         }
                     })
-                    .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                        let rowIds = Set(visible)
-                        if visibleHistoryRows?.threadId != thread.id || visibleHistoryRows?.rowIds != rowIds {
-                            visibleHistoryRows = (thread.id, rowIds)
-                        }
-                        loadVisibleHistory()
-                    }
                     .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in
                         ConversationScrollMetrics(
                             content: geometry.contentSize,
                             container: geometry.containerSize,
+                            oldestVisible: geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
+                                geometry.visibleRect.minY <= 0,
                             latestVisible: geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
                                 geometry.visibleRect.minY < geometry.contentSize.height &&
                                 geometry.visibleRect.maxY > 0 &&
                                 geometry.contentSize.height - geometry.visibleRect.maxY <= 80
                         )
                     } action: { old, new in
-                        latestHistoryRowVisible = new.latestVisible
+                        let top = HistoryTopVisibility(threadId: thread.id, firstRowId: thread.rows.first?.id,
+                                                       visible: new.oldestVisible)
+                        if historyTopVisibility != top {
+                            historyTopVisibility = top
+                        }
+                        if latestHistoryRowVisible != new.latestVisible {
+                            latestHistoryRowVisible = new.latestVisible
+                        }
                         // Lazy rows settle after insertion; sending also resizes the keyboard and composer.
                         if old.content != new.content || old.container != new.container || !new.latestVisible {
                             followLatest(to: lastRowId, using: proxy)
@@ -206,9 +207,11 @@ struct ThreadScreen: View {
                 } else if model.isNewThread {
                     ScrollView {
                         newThreadContext
-                            .padding(24)
+                            .padding(.horizontal, 24)
+                            .frame(maxWidth: .infinity)
                     }
                     .defaultScrollAnchor(.center, for: .alignment)
+                    .padding(.vertical, 24)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("task.empty")
                 } else if let id = model.selectedThreadId, model.notice != nil {
@@ -316,7 +319,7 @@ extension ThreadScreen {
                         }
                     }
                     if model.list?.hasMoreProjects == true {
-                        Button("さらにプロジェクトを読み込む") { model.expandTaskList(projects: true) }
+                        Button("さらにプロジェクトを読み込む") { model.perform(.expandProjects) }
                     }
                 } label: {
                     Text(project?

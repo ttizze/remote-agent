@@ -5,23 +5,44 @@ use agent_protocol::live_activity::*;
 use agent_protocol::permissions::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
-use std::collections::BTreeMap;
 #[uniffi::remote(Enum)]
 enum PushEnvironment {
     Sandbox,
     Production,
 }
 #[uniffi::remote(Record)]
+struct ReadTaskActivity {}
+#[uniffi::remote(Record)]
 struct RegisterLiveActivity {
     pub activity_id: String,
     pub token: Vec<u8>,
     pub environment: PushEnvironment,
 }
+#[uniffi::remote(Enum)]
+enum TaskActivityIconKind {
+    Running,
+    Waiting,
+    Unknown,
+    Finished,
+}
 #[uniffi::remote(Record)]
-struct TaskActivitySummary {
-    pub running: u32,
-    pub waiting: u32,
-    pub unknown: u32,
+struct TaskActivityIcon {
+    pub kind: TaskActivityIconKind,
+    pub label: String,
+}
+#[uniffi::remote(Record)]
+struct TaskActivityDisplay {
+    pub current: TaskActivityView,
+    pub can_start: bool,
+    pub ongoing: bool,
+    pub urgent: bool,
+}
+#[uniffi::remote(Record)]
+struct TaskActivityView {
+    pub total: u32,
+    pub label: String,
+    pub icons: Vec<TaskActivityIcon>,
+    pub overflow: u32,
 }
 #[uniffi::remote(Record)]
 struct UnregisterLiveActivity {
@@ -73,9 +94,8 @@ struct ReasoningEffort {
 }
 #[uniffi::remote(Record)]
 struct ListQuery {
+    pub limit: u32,
     pub project_limit: u32,
-    pub chat_limit: u32,
-    pub project_thread_limits: BTreeMap<String, u32>,
     pub search_term: String,
 }
 #[uniffi::remote(Record)]
@@ -508,6 +528,12 @@ struct AddProject {
 #[uniffi::remote(Record)]
 struct ListSessions {
     pub query: crate::models::ListQuery,
+}
+#[uniffi::remote(Record)]
+struct ListProjectSessions {
+    pub project_id: String,
+    pub limit: u32,
+    pub search_term: String,
 }
 #[uniffi::remote(Record)]
 struct ListAgents {

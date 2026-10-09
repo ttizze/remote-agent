@@ -4,7 +4,7 @@ use crate::{
     state::Snapshot,
 };
 use base64::Engine;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProjectSummary {
     pub id: String,
@@ -13,6 +13,11 @@ pub struct ProjectSummary {
     pub icon_png: Option<Vec<u8>>,
     pub monogram: String,
     pub icon_color: u32,
+    pub expanded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub threads: Vec<ThreadSummary>,
+    pub has_more: bool,
 }
 
 fn project_summary(project: &Project) -> ProjectSummary {
@@ -54,6 +59,11 @@ fn project_summary(project: &Project) -> ProjectSummary {
             .and_then(|png| base64::engine::general_purpose::STANDARD.decode(png).ok()),
         monogram,
         icon_color: COLORS[index],
+        expanded: false,
+        loading: false,
+        error: None,
+        threads: Vec::new(),
+        has_more: false,
     }
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -70,23 +80,18 @@ pub struct ThreadList {
     pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<ProjectSummary>,
-    pub more_project_ids: Vec<String>,
-    pub has_more_chats: bool,
+    pub has_more: bool,
     pub has_more_projects: bool,
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     /// The selected folder is separate from the provider's execution directory.
     pub fn selected_directory(&self) -> String {
-        let thread = self.navigation.thread_id.as_ref().and_then(|id| {
-            self.conversations.get(id).map(AsRef::as_ref).or_else(|| {
-                self.threads
-                    .as_ref()?
-                    .data
-                    .iter()
-                    .find(|thread| thread.id.as_ref() == Some(id))
-            })
-        });
+        let thread = self
+            .navigation
+            .thread_id
+            .as_ref()
+            .and_then(|id| self.thread_metadata(id));
         if thread.is_some_and(|thread| {
             thread.project_id == (crate::models::ProjectMembership::Unassigned {})
         }) {
@@ -110,42 +115,98 @@ impl Snapshot {
         if !self.archived_scopes.is_empty() {
             notices.push("保存領域が変更されています。以前の下書き・未保存編集は保持しています。Hostの保存先設定を元に戻すと再び表示できます。".into());
         }
-        let summaries = list
-            .data
-            .iter()
-            .filter(|thread| thread.parent_id.is_none())
-            .filter_map(|thread| {
-                let id = thread.id.clone()?;
-                let active = task_active(self.activity.active.get(&id).copied(), thread.status);
-                let unread = self.activity.unread.contains(&id);
-                Some(ThreadSummary {
-                    id,
-                    title: task_title(thread.name.as_deref(), thread.preview.as_deref()).to_owned()
-                        + if thread.list_stale == Some(true) {
-                            "（保存済み・未確認）"
-                        } else {
-                            ""
-                        },
-                    project_id: thread
-                        .project_id
-                        .as_ref()
-                        .filter(|id| project_ids.contains(id.as_str()))
-                        .cloned(),
-                    active,
-                    unread,
-                    worktree_status: thread.worktree_status,
-                })
-            })
-            .collect();
+        let summaries = thread_summaries(
+            &list.data,
+            &self.activity.active,
+            &self.activity.unread,
+            &project_ids,
+        )
+        .into_iter()
+        .filter(|thread| thread.project_id.is_none())
+        .collect();
         Some(ThreadList {
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: summaries,
-            projects: list.projects.iter().map(project_summary).collect(),
-            more_project_ids: list.more_project_ids.clone(),
-            has_more_chats: list.has_more_chats,
+            projects: list
+                .projects
+                .iter()
+                .map(|project| {
+                    let page = self.project_threads.get(&project.id);
+                    let mut summary = project_summary(project);
+                    summary.expanded = self.expanded_projects.contains_key(&project.id);
+                    if summary.expanded && !self.connected && page.is_none() {
+                        summary.error = Some("接続するとタスクを読み込めます".into());
+                    }
+                    if let Some(operation) =
+                        self.operations
+                            .get(&crate::state::operations::OperationKey::ProjectList {
+                                project_id: project.id.clone(),
+                            })
+                    {
+                        match &operation.phase {
+                            crate::state::operations::OperationPhase::Running => {
+                                summary.loading = true
+                            }
+                            crate::state::operations::OperationPhase::Failed { message } => {
+                                summary.error = Some(message.clone())
+                            }
+                        }
+                    }
+                    if let Some(page) = page {
+                        summary.threads = thread_summaries(
+                            &page.data,
+                            &self.activity.active,
+                            &self.activity.unread,
+                            &project_ids,
+                        );
+                        summary.has_more = page.has_more;
+                        if let Some(errors) = &page.provider_errors {
+                            summary.error = Some(format!(
+                                "一部を取得できません（{}）",
+                                errors.keys().cloned().collect::<Vec<_>>().join("、")
+                            ));
+                        }
+                    }
+                    summary
+                })
+                .collect(),
+            has_more: list.has_more,
             has_more_projects: list.has_more_projects,
         })
     }
+}
+
+fn thread_summaries(
+    data: &[crate::models::Thread],
+    active: &BTreeMap<crate::session::SessionRef, bool>,
+    unread: &BTreeSet<crate::session::SessionRef>,
+    project_ids: &HashSet<&str>,
+) -> Vec<ThreadSummary> {
+    data.iter()
+        .filter(|thread| thread.parent_id.is_none())
+        .filter_map(|thread| {
+            let id = thread.id.clone()?;
+            let active = task_active(active.get(&id).copied(), thread.status);
+            let unread = unread.contains(&id);
+            Some(ThreadSummary {
+                id,
+                title: task_title(thread.name.as_deref(), thread.preview.as_deref()).to_owned()
+                    + if thread.list_stale == Some(true) {
+                        "（保存済み・未確認）"
+                    } else {
+                        ""
+                    },
+                project_id: thread
+                    .project_id
+                    .as_ref()
+                    .filter(|id| project_ids.contains(id.as_str()))
+                    .cloned(),
+                active,
+                unread,
+                worktree_status: thread.worktree_status,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -155,6 +216,7 @@ mod tests {
     use crate::state::operations::Operation;
     use agent_protocol::models;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[rstest::rstest]
     #[case("remote-agent", "RA")]
@@ -190,8 +252,7 @@ mod tests {
             threads: Some(std::sync::Arc::new(
                 serde_json::from_value(json!({
                     "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
-                    "moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-                }))
+                    "hasMore":false,"hasMoreProjects":false,}))
                 .unwrap(),
             )),
             ..Default::default()
@@ -199,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_list_excludes_subagents_without_hiding_forks_or_other_providers() {
+    fn conversation_list_excludes_subagents_and_project_tasks_at_root() {
         let snapshot = snapshot_list(json!([
             {"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"}},
             {"id":{"provider":"claude","id":"child"}},
@@ -213,11 +274,11 @@ mod tests {
             .map(|thread| (thread.id.provider, thread.id.id.as_str()))
             .collect();
         use crate::session::ProviderKind::{Claude, Codex};
-        assert_eq!(rows, [(Claude, "child"), (Codex, "root"), (Codex, "fork")]);
+        assert_eq!(rows, [(Claude, "child"), (Codex, "fork")]);
     }
 
     #[test]
-    fn list_preserves_order_and_only_exposes_known_project_membership() {
+    fn list_keeps_only_standalone_chats_at_root_and_exposes_known_membership() {
         let mut snapshot = Snapshot::default();
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
@@ -229,8 +290,7 @@ mod tests {
                     {"id":{"provider":"codex","id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
-                "moreProjectIds":["known"], "hasMoreChats":true, "hasMoreProjects":true
-            }))
+                 "hasMore":true,"hasMoreProjects":false, }))
             .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
@@ -241,23 +301,50 @@ mod tests {
             .collect();
         assert_eq!(
             memberships,
-            vec![
-                ("assigned", Some("known")),
-                ("missing", None),
-                ("chat", None),
-                ("unknown", None)
-            ]
+            vec![("missing", None), ("chat", None), ("unknown", None)]
         );
         assert_eq!(list.projects[0].id, "known");
-        assert_eq!(list.more_project_ids, vec!["known"]);
-        assert!(list.has_more_chats && list.has_more_projects);
+        assert!(list.has_more);
+        assert!(!list.has_more_projects);
+    }
+
+    #[test]
+    fn returned_project_header_replaces_branding_while_preserving_loaded_tasks() {
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.expanded_projects).insert("project".into(), 5);
+        crate::state::operations::ListProjectSessions {
+            project_id: "project".into(),
+            limit: 5,
+            search_term: String::new(),
+        }
+        .apply(
+            &mut snapshot,
+            serde_json::from_value(json!({
+                "data":[{"id":{"provider":"codex","id":"task"},"projectId":"project"}],
+                "projects":[{"id":"project","name":"Old project","roots":[],"faviconPng":"BAUG"}],
+                "hasMore":false,"hasMoreProjects":false
+            }))
+            .unwrap(),
+        );
+        for icon in [Some("AQID"), None] {
+            ListSessions::new(Default::default()).apply(&mut snapshot, serde_json::from_value(json!({
+                "data":[],
+                "projects":[{"id":"project","name":"Renamed project","roots":[],"faviconPng":icon}],
+                "hasMore":false,"hasMoreProjects":false
+            })).unwrap());
+            let list = snapshot.thread_list().unwrap();
+            let project = &list.projects[0];
+            assert_eq!(project.name, "Renamed project");
+            assert_eq!(project.icon_png, icon.map(|_| vec![1, 2, 3]));
+            assert_eq!(project.threads[0].id.id, "task");
+        }
     }
 
     #[test]
     fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
         let mut snapshot = Snapshot::default();
         let page = |data, errors| {
-            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
+            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
         };
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
@@ -325,9 +412,8 @@ mod tests {
             thread["worktreeStatus"] = json!(status);
         }
         let page: models::ThreadList = serde_json::from_value(json!({
-            "data":[thread], "projects":[], "moreProjectIds":[],
-            "hasMoreChats":false, "hasMoreProjects":false
-        }))
+            "data":[thread], "projects":[],
+            "hasMore":false,"hasMoreProjects":false, }))
         .unwrap();
         ListSessions::new(Default::default()).apply(&mut snapshot, page);
         let restored: Snapshot =

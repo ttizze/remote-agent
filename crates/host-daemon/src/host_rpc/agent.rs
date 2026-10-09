@@ -22,6 +22,14 @@ pub(crate) struct SessionPage {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SessionListScope<'a> {
+    Roots,
+    All,
+    Loaded,
+    Descendants(&'a str),
+}
+
 /// Submission evidence from one read, including whether starting needs the
 /// adapter to reload its session. The Host may also require a reload after
 /// recreating the workspace.
@@ -30,12 +38,14 @@ pub(crate) struct SubmissionState {
     pub needs_reload: bool,
 }
 
-/// Consume native pages with one cursor policy, preserving earlier pages if a
-/// later read fails. Callers decide whether partial results are useful.
+/// Preserve healthy pages on a later failure and reject repeated cursors.
+/// Filtered lists can widen follow-up reads without enlarging the first page.
 pub(crate) fn session_pages<'a>(
     agent: &'a dyn Agent,
     search: &'a str,
-    ancestor: Option<&'a str>,
+    scope: SessionListScope<'a>,
+    first_limit: u32,
+    later_limit: u32,
 ) -> impl Stream<Item = Result<Vec<SessionSummary>, Failure>> + 'a {
     futures_util::stream::try_unfold(
         Some((None, std::collections::HashSet::new())),
@@ -43,7 +53,12 @@ pub(crate) fn session_pages<'a>(
             let Some((cursor, mut seen)) = state else {
                 return Ok(None);
             };
-            let page = Agent::list(agent, search, cursor, ancestor).await?;
+            let limit = if cursor.is_none() {
+                first_limit
+            } else {
+                later_limit
+            };
+            let page = Agent::list(agent, search, cursor, scope, limit).await?;
             let next = page.next_cursor.filter(|cursor| !cursor.is_empty());
             if let Some(cursor) = &next
                 && !seen.insert(cursor.clone())
@@ -118,7 +133,8 @@ pub(crate) trait Agent: Identity {
         &self,
         search: &str,
         cursor: Option<String>,
-        ancestor: Option<&str>,
+        scope: SessionListScope<'_>,
+        limit: u32,
     ) -> Result<SessionPage, Failure>;
     async fn open(
         &self,
@@ -175,6 +191,10 @@ pub(crate) trait Agent: Identity {
 }
 
 pub(crate) enum AgentChange {
+    TaskParent {
+        session: SessionRef,
+        parent: SessionRef,
+    },
     Session {
         session: SessionRef,
         change: agent_protocol::session::SessionChange,
@@ -202,6 +222,7 @@ pub(crate) struct AgentEvent {
 impl AgentChange {
     pub fn apply(self, router: &SessionRouter) -> Result<(), String> {
         match self {
+            Self::TaskParent { session, parent } => router.task_parent(session, parent),
             Self::Session { session, change } => router.session_change(&session, change),
             Self::Request {
                 session,

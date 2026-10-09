@@ -1100,7 +1100,7 @@ impl Desktop {
             .debug_selector(move || id.into())
             .h(px(44.))
             .text_color(if fast {
-                rgb(0x78adff)
+                rgb(appearance::FOREGROUND)
             } else {
                 rgb(appearance::MUTED)
             })
@@ -1170,7 +1170,7 @@ impl Desktop {
                     ))
                     .rounded(px(1.))
                     .bg(if (index as u32) < controls.effort_level {
-                        rgb(0x78adff)
+                        rgb(appearance::FOREGROUND)
                     } else {
                         rgb(0x555555)
                     }),

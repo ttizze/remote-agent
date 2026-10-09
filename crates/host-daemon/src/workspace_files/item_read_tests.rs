@@ -113,9 +113,12 @@ impl Fixture {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => {
-                            json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                            json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,})
                         }
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
+                        "host/taskActivity/read" => {
+                            json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                        }
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let items = if automatic_reads {

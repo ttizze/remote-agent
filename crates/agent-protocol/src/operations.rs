@@ -294,6 +294,14 @@ pub struct ListSessions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ListProjectSessions {
+    pub project_id: String,
+    pub limit: u32,
+    pub search_term: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListAgents {
     pub thread_id: crate::session::SessionRef,
 }

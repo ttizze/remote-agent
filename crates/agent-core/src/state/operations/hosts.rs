@@ -1,5 +1,73 @@
 use super::*;
-pub use agent_protocol::live_activity::{RegisterLiveActivity, UnregisterLiveActivity};
+pub use agent_protocol::live_activity::{
+    ReadTaskActivity, RegisterLiveActivity, UnregisterLiveActivity,
+};
+
+impl Operation for ReadTaskActivity {
+    rpc_operation!();
+    const BACKGROUND: bool = true;
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::TaskActivity)
+    }
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::LatestTaskActivity
+    }
+    fn apply(self, snapshot: &mut Snapshot, state: Self::Output) -> Vec<Effect> {
+        snapshot.accept_task_activity(state);
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod task_activity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[allow(dead_code)]
+    mod host_fixture {
+        include!("../../../tests/support/host.rs");
+    }
+
+    #[tokio::test]
+    async fn activity_read_survives_navigation_and_failures_stay_out_of_the_recent_list() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let initial = Snapshot::default();
+            let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
+            let store = crate::store::Store::new(peer, initial);
+            let mut activity = None;
+            for _ in 0..4 {
+                let request = reader.read_request().await.unwrap().unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "host/taskActivity/read" => { activity = Some(request); continue; }
+                    "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false}),
+                    "host/model/list" => json!({"data":[],"nextCursor":null}),
+                    "host/account/list" => json!({"accounts":[],"selected":{}}),
+                    method => panic!("unexpected bootstrap method {method}"),
+                };
+                writer.reply(&request, json!({"result":result})).await.unwrap();
+            }
+            let mut updates = store.subscribe();
+            while store.snapshot().threads.is_none() || store.snapshot().account.accounts.is_none() {
+                updates.changed().await.unwrap();
+            }
+            store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
+            let display = agent_protocol::live_activity::TaskActivitySummary { running: 1, ..Default::default() }.display();
+            writer.reply(&activity.unwrap(), json!({"result":{"revision":1,"display":display}})).await.unwrap();
+            while store.snapshot().task_activity.is_none() { updates.changed().await.unwrap(); }
+            assert_eq!(store.snapshot().task_activity.as_ref().unwrap().display.current.total, 1);
+            tokio::time::timeout(std::time::Duration::from_secs(5), store.dispatch(Intent::ReadTaskActivity(ReadTaskActivity {})))
+                .await.expect("activity receipt waits for the provider").unwrap();
+            let request = reader.read_request().await.unwrap().unwrap();
+            assert_eq!(request["method"], "host/taskActivity/read");
+            writer.reply(&request, json!({"error":{"code":"provider_failed","message":"fixture unavailable","delivery":"notSent"}})).await.unwrap();
+            while store.snapshot().operation_running(OperationKey::TaskActivity) { updates.changed().await.unwrap(); }
+            assert!(store.snapshot().error.is_none());
+            assert_eq!(store.snapshot().task_activity.as_ref().unwrap().display.current.total, 1);
+            assert!(store.snapshot().threads.is_some());
+            store.close().await.unwrap();
+        }).await.expect("activity lifecycle deadline");
+    }
+}
 
 impl Operation for RegisterLiveActivity {
     rpc_operation!();

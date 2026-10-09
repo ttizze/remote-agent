@@ -111,7 +111,10 @@ impl SidebarRow {
                             })
                             .on_click(move |_, _, cx| {
                                 let _ = target.update(cx, |desktop, cx| {
-                                    toggle_set(&mut desktop.expanded_projects, &project_id);
+                                    desktop.dispatch(Intent::SetProjectExpanded {
+                                        project_id: project_id.clone(),
+                                        expanded: !expanded,
+                                    });
                                     cx.notify();
                                 });
                             }),
@@ -225,6 +228,9 @@ impl Desktop {
 
     fn conversation_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
         let list = self.snapshot.thread_list();
+        let loading_session_list = self
+            .snapshot
+            .operation_running(op::OperationKey::SessionList);
         let mut projects = Vec::new();
         for project in list
             .as_ref()
@@ -232,8 +238,7 @@ impl Desktop {
             .unwrap_or_default()
         {
             let id = project.id.clone();
-            let expanded = self.expanded_projects.contains(&id)
-                || !self.snapshot.list_query.search_term.is_empty();
+            let expanded = project.expanded;
             let new_root = project
                 .roots
                 .first()
@@ -251,69 +256,77 @@ impl Desktop {
                 desktop: cx.entity().downgrade(),
             });
             if expanded {
-                for button in self.thread_buttons(
-                    list.as_ref()
-                        .map(|page| page.threads.as_slice())
-                        .unwrap_or_default(),
-                    Some(&project.id),
-                    cx,
-                ) {
+                for button in project
+                    .threads
+                    .iter()
+                    .map(|thread| self.thread_button(thread, cx).icon(Icon::empty().size_4()))
+                {
                     projects.push(button.into());
                 }
-                if list
-                    .as_ref()
-                    .is_some_and(|page| page.more_project_ids.contains(&project.id))
-                {
+                if project.loading && !project.has_more {
+                    projects.push(SidebarMenuItem::new("読み込み中…").into());
+                }
+                if let Some(error) = &project.error {
+                    projects.push(SidebarMenuItem::new(error.clone()).into());
+                    let retry_id = id.clone();
                     projects.push(
-                        SidebarMenuItem::new("もっと表示する")
-                            .icon(Icon::empty().size_4())
+                        SidebarMenuItem::new("再試行")
                             .on_click(cx.listener(move |s, _, _, cx| {
-                                s.dispatch(Intent::ExpandThreadList {
-                                    project_id: Some(id.clone()),
-                                    projects: false,
+                                s.dispatch(Intent::RefreshProject {
+                                    project_id: retry_id.clone(),
                                 });
                                 cx.notify();
                             }))
                             .into(),
                     );
                 }
+                if project.has_more {
+                    let mut more = SidebarMenuItem::new("もっと表示する")
+                        .icon(Icon::empty().size_4())
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.dispatch(Intent::ExpandThreadList {
+                                project_id: Some(id.clone()),
+                            });
+                            cx.notify();
+                        }));
+                    if project.loading {
+                        more = more.suffix(|_, _| spinner::Spinner::new().small());
+                    }
+                    projects.push(more.disable(project.loading).into());
+                }
             }
         }
         if list.as_ref().is_some_and(|page| page.has_more_projects) {
-            projects.push(
-                SidebarMenuItem::new("もっとプロジェクトを表示")
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        s.dispatch(Intent::ExpandThreadList {
-                            project_id: None,
-                            projects: true,
-                        });
-                        cx.notify();
-                    }))
-                    .into(),
-            );
+            let mut more = SidebarMenuItem::new("もっとプロジェクトを表示").on_click(cx.listener(
+                |s, _, _, cx| {
+                    s.dispatch(Intent::ExpandProjects);
+                    cx.notify();
+                },
+            ));
+            if loading_session_list {
+                more = more.suffix(|_, _| spinner::Spinner::new().small());
+            }
+            projects.push(more.disable(loading_session_list).into());
         }
-        let mut chats = Vec::new();
-        for button in self.thread_buttons(
-            list.as_ref()
-                .map(|page| page.threads.as_slice())
-                .unwrap_or_default(),
-            None,
-            cx,
-        ) {
-            chats.push(button.into());
-        }
-        if list.as_ref().is_some_and(|page| page.has_more_chats) {
-            chats.push(
-                SidebarMenuItem::new("もっと表示する")
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        s.dispatch(Intent::ExpandThreadList {
-                            project_id: None,
-                            projects: false,
-                        });
-                        cx.notify();
-                    }))
-                    .into(),
-            );
+        let mut chats: Vec<SidebarRow> = list
+            .as_ref()
+            .map(|page| {
+                page.threads
+                    .iter()
+                    .map(|thread| self.thread_button(thread, cx).into())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if list.as_ref().is_some_and(|page| page.has_more) {
+            let mut more =
+                SidebarMenuItem::new("もっと表示する").on_click(cx.listener(|s, _, _, cx| {
+                    s.dispatch(Intent::ExpandThreadList { project_id: None });
+                    cx.notify();
+                }));
+            if loading_session_list {
+                more = more.suffix(|_, _| spinner::Spinner::new().small());
+            }
+            chats.push(more.disable(loading_session_list).into());
         }
         Sidebar::new("desktop-sidebar")
             .header(
@@ -394,24 +407,6 @@ impl Desktop {
                     )),
             )
     }
-    fn thread_buttons(
-        &self,
-        threads: &[agent_core::presentation::list::ThreadSummary],
-        project_id: Option<&str>,
-        cx: &Context<Self>,
-    ) -> Vec<SidebarMenuItem> {
-        threads
-            .iter()
-            .filter(|thread| thread.project_id.as_deref() == project_id)
-            .map(|thread| {
-                self.thread_button(thread, cx)
-                    .when(project_id.is_some(), |button| {
-                        button.icon(Icon::empty().size_4())
-                    })
-            })
-            .collect()
-    }
-
     fn thread_button(
         &self,
         thread: &agent_core::presentation::list::ThreadSummary,
@@ -486,17 +481,14 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |desktop, cx| {
                 let page = desktop.snapshot.thread_list().unwrap();
-                v_flex().w(px(272.)).children(
-                    desktop
-                        .thread_buttons(&page.threads, None, cx)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, button)| {
-                            div()
-                                .debug_selector(move || format!("task-{index}"))
-                                .child(button.render(format!("task-button-{index}"), window, cx))
-                        }),
-                )
+                v_flex()
+                    .w(px(272.))
+                    .children(page.threads.iter().enumerate().map(|(index, thread)| {
+                        let button = desktop.thread_button(thread, cx);
+                        div()
+                            .debug_selector(move || format!("task-{index}"))
+                            .child(button.render(format!("task-button-{index}"), window, cx))
+                    }))
             })
         }
     }
@@ -528,8 +520,7 @@ mod tests {
             snapshot.threads = Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
                     "data":[], "projects":[{"id":"brand", "name":"remote-agent", "roots":[]}],
-                    "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
-                }))
+                     "hasMore":false,"hasMoreProjects":false, }))
                 .unwrap(),
             ));
             Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
@@ -541,6 +532,21 @@ mod tests {
                     ..Default::default()
                 }),
             );
+            let store =
+                runtime.block_on(async { Arc::new(Store::offline((*desktop.snapshot).clone())) });
+            let app_runtime = desktop.runtime.clone();
+            desktop.session = Some(runtime.block_on(async {
+                let (updates, receive) = async_channel::unbounded();
+                tokio::spawn(StoreSession::publish(
+                    Ok(store.clone()),
+                    app_runtime,
+                    updates,
+                    Some,
+                    |_| None,
+                ));
+                receive.recv().await.unwrap().unwrap().unwrap()
+            }));
+            desktop.snapshot = store.snapshot();
             desktop
         });
         window.simulate_resize(size(px(1000.), px(700.)));
@@ -551,9 +557,16 @@ mod tests {
         assert_eq!(icon.size, size(px(16.), px(16.)));
         for expanded in [true, false] {
             window.simulate_click(project, Modifiers::default());
+            view.update(window, |view, cx| {
+                view.snapshot = view.session.as_ref().unwrap().store.snapshot();
+                cx.notify();
+            });
             window.run_until_parked();
             view.update(window, |view, _| {
-                assert_eq!(view.expanded_projects.contains("brand"), expanded);
+                assert_eq!(
+                    view.snapshot.expanded_projects.contains_key("brand"),
+                    expanded
+                );
             });
             assert_eq!(window.debug_bounds("project-monogram").unwrap(), icon);
         }
@@ -618,8 +631,7 @@ mod tests {
                     "data":[{"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"first"},"name":"Child task","status":"running"},
                             {"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
                             {"id":{"provider":"codex","id":"second"},"name":"Second task","worktreeStatus":"merged"}],
-                    "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-                }))
+                    "projects":[],"hasMore":false,"hasMoreProjects":false,}))
                 .unwrap(),
             )),
             ..Default::default()

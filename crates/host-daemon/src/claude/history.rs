@@ -32,6 +32,128 @@ pub(super) fn home() -> Result<PathBuf> {
         .context("Claude home directory is unavailable")
 }
 
+/// Cursor is a candidate offset, so search can skip nonmatching transcripts
+/// without retaining their bodies or repeatedly decoding earlier pages.
+pub(super) fn list_page(
+    home: &Path,
+    running: Vec<Thread>,
+    search: &str,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<super::SessionPage> {
+    let mut candidates: Vec<_> = files(home)?
+        .into_iter()
+        .map(|path| {
+            let timestamp = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|time| time.as_secs())
+                .unwrap_or_default();
+            let id = path
+                .file_stem()
+                .and_then(|id| id.to_str())
+                .context("invalid transcript filename")?
+                .to_owned();
+            Ok((timestamp, id, Some(path), None))
+        })
+        .collect::<Result<_>>()?;
+    let active: HashSet<_> = running
+        .iter()
+        .filter_map(|t| t.id.as_ref().map(|id| id.id.clone()))
+        .collect();
+    for thread in running {
+        let id = thread.id.as_ref().unwrap().id.clone();
+        if !candidates
+            .iter()
+            .any(|(_, candidate, _, _)| candidate == &id)
+        {
+            candidates.push((
+                thread.updated_at.unwrap_or_default() as u64,
+                id,
+                None,
+                Some(thread),
+            ));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let offset = cursor
+        .map(str::parse::<usize>)
+        .transpose()
+        .context("invalid Claude list cursor")?
+        .unwrap_or(0);
+    if offset > candidates.len() {
+        anyhow::bail!("invalid Claude list cursor");
+    }
+    let total = candidates.len();
+    let search = search.trim().to_lowercase();
+    let mut data = Vec::new();
+    let mut visited = offset;
+    for (timestamp, id, path, fallback) in candidates.into_iter().skip(offset) {
+        visited += 1;
+        let mut summary = if let Some(path) = path {
+            summary(&path).unwrap_or_else(|error| {
+                let mut thread = Thread {
+                    id: Some(SessionRef {
+                        provider: ProviderKind::Claude,
+                        id,
+                    }),
+                    updated_at: Some(timestamp as f64),
+                    name: Some("Claude履歴を読み取れません".into()),
+                    status: SessionStatus::Unknown,
+                    ..Default::default()
+                };
+                thread.history_read_state = Some(agent_protocol::session::HistoryReadState::new(
+                    agent_protocol::session::HistoryReadKind::Unavailable,
+                    vec![format!("{error:#}")],
+                ));
+                super::SessionSummary {
+                    thread,
+                    branch: None,
+                }
+            })
+        } else {
+            super::SessionSummary {
+                thread: fallback.unwrap(),
+                branch: None,
+            }
+        };
+        if summary
+            .thread
+            .id
+            .as_ref()
+            .is_some_and(|id| active.contains(&id.id))
+        {
+            summary.thread.status = SessionStatus::Running;
+        }
+        if search.is_empty()
+            || summary
+                .thread
+                .name
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(&search)
+            || summary
+                .thread
+                .preview
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(&search)
+        {
+            data.push(summary);
+            if data.len() >= limit.max(1) as usize {
+                break;
+            }
+        }
+    }
+    Ok(super::SessionPage {
+        data,
+        next_cursor: (visited < total).then(|| visited.to_string()),
+    })
+}
+
 pub(super) fn files(home: &Path) -> Result<Vec<PathBuf>> {
     let projects = match fs::read_dir(home.join("projects")) {
         Ok(projects) => projects,
@@ -521,6 +643,53 @@ mod tests {
         let path = project.join(format!("{ID}.jsonl"));
         fs::write(&path, bytes).unwrap();
         (root, path)
+    }
+    #[test]
+    fn metadata_pages_decode_only_the_requested_files_and_search_can_reach_old_titles() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/p");
+        fs::create_dir_all(&project).unwrap();
+        for index in 1..=8u128 {
+            let id = Uuid::from_u128(index).to_string();
+            let path = project.join(format!("{id}.jsonl"));
+            fs::write(&path,serde_json::json!({"type":"user","sessionId":id,"cwd":"/fixture","message":{"content":format!("title {index}")}}).to_string()+"\n").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(index as u64)),
+                )
+                .unwrap();
+        }
+        let first = list_page(root.path(), vec![], "", None, 3).unwrap();
+        assert_eq!(
+            first
+                .data
+                .iter()
+                .map(|t| t.thread.updated_at.unwrap() as u64)
+                .collect::<Vec<_>>(),
+            [8, 7, 6]
+        );
+        assert_eq!(first.next_cursor.as_deref(), Some("3"));
+        let second = list_page(root.path(), vec![], "", first.next_cursor.as_deref(), 3).unwrap();
+        assert_eq!(
+            second
+                .data
+                .iter()
+                .map(|t| t.thread.updated_at.unwrap() as u64)
+                .collect::<Vec<_>>(),
+            [5, 4, 3]
+        );
+        let last = list_page(root.path(), vec![], "", second.next_cursor.as_deref(), 3).unwrap();
+        assert_eq!(last.data.len(), 2);
+        assert!(last.next_cursor.is_none());
+        let found = list_page(root.path(), vec![], "title 1", None, 3).unwrap();
+        assert_eq!(found.data.len(), 1);
+        assert!(found.next_cursor.is_none());
+        assert!(list_page(root.path(), vec![], "", Some("bad"), 3).is_err());
+        assert!(list_page(root.path(), vec![], "", Some("9"), 3).is_err());
     }
     #[test]
     fn attachments_and_queued_prompts_are_preserved_in_the_active_history() {

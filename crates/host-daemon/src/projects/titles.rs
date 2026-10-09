@@ -1,138 +1,147 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use agent_protocol::models::{Project, Thread, ThreadList};
+use std::collections::HashMap;
 
-use agent_protocol::models::{ListQuery, Project, Thread, ThreadList};
-
-/// Select from newest-first DB metadata. Retain only visible titles and one
-/// lookahead per section; never retain rollout bodies or unused thread fields.
-pub(crate) struct TitleList<'a> {
-    projects: &'a [Project],
-    known_projects: HashSet<&'a str>,
-    recent_projects: Vec<&'a str>,
-    threads: HashMap<&'a str, Vec<Thread>>,
-    chats: Vec<Thread>,
-    project_limit: usize,
-    chat_limit: usize,
-    thread_limits: &'a BTreeMap<String, u32>,
-    searching: bool,
+#[derive(Clone, Copy)]
+pub(crate) enum TitleQuery<'a> {
+    Root {
+        limit: u32,
+        project_limit: u32,
+        searching: bool,
+    },
+    Project {
+        id: &'a str,
+        limit: u32,
+        searching: bool,
+    },
 }
 
+/// Retain only the requested standalone chat titles and one lookahead. Project
+/// contents are read only when a project is opened; the root list keeps only
+/// enough project headers to determine its own page.
+pub(crate) struct TitleList<'a> {
+    projects: &'a [Project],
+    query: TitleQuery<'a>,
+    data: Vec<Thread>,
+    recent_projects: Vec<String>,
+}
 impl<'a> TitleList<'a> {
-    pub(crate) fn new(projects: &'a [Project], params: &'a ListQuery) -> Self {
-        let known_projects = projects.iter().map(|project| project.id.as_str()).collect();
+    pub(crate) fn new(projects: &'a [Project], query: TitleQuery<'a>) -> Self {
         Self {
             projects,
-            known_projects,
+            query,
+            data: Vec::new(),
             recent_projects: Vec::new(),
-            threads: HashMap::new(),
-            chats: Vec::new(),
-            project_limit: params.project_limit.max(1) as usize,
-            chat_limit: params.chat_limit.max(1) as usize,
-            thread_limits: &params.project_thread_limits,
-            searching: !params.search_term.trim().is_empty(),
         }
     }
-
-    fn thread_limit(&self, project_id: &str) -> usize {
-        self.thread_limits
-            .get(project_id)
-            .copied()
-            .unwrap_or(5)
-            .max(1) as usize
-    }
-
-    pub(crate) fn push(&mut self, thread: Thread) {
-        let project_id = thread
-            .project_id
-            .as_deref()
-            .and_then(|id| self.known_projects.get(id).copied());
-        if thread.parent_id.is_some() {
-            return;
+    fn limit(&self) -> usize {
+        match self.query {
+            TitleQuery::Root { limit, .. } | TitleQuery::Project { limit, .. } => {
+                limit.max(1) as usize
+            }
         }
-        let target = if let Some(project_id) = project_id {
-            let position = match self.recent_projects.iter().position(|id| *id == project_id) {
-                Some(position) => position,
-                None => {
-                    self.recent_projects.push(project_id);
-                    self.recent_projects.len() - 1
-                }
-            };
-            // A new project encountered later cannot outrank visible projects.
-            if position >= self.project_limit {
-                return;
-            }
-            let maximum = self.thread_limit(project_id);
-            if self
-                .threads
-                .get(project_id)
-                .is_some_and(|entries| entries.len() > maximum)
-            {
-                return;
-            }
-            self.threads.entry(project_id).or_default()
-        } else {
-            if self.chats.len() > self.chat_limit {
-                return;
-            }
-            &mut self.chats
-        };
-        target.push(summary(thread));
     }
-
-    pub(crate) fn complete(&self) -> bool {
-        self.recent_projects.len()
-            >= self
-                .project_limit
+    fn project_limit(&self) -> usize {
+        match self.query {
+            TitleQuery::Root { project_limit, .. } => project_limit.max(1) as usize,
+            TitleQuery::Project { .. } => usize::MAX,
+        }
+    }
+    pub(crate) fn remaining_chats(&self) -> Option<usize> {
+        matches!(self.query, TitleQuery::Root { .. }).then(|| {
+            self.limit()
                 .saturating_add(1)
-                .min(self.projects.len())
-            && self.chats.len() > self.chat_limit
-            && self
-                .recent_projects
-                .iter()
-                .take(self.project_limit)
-                .all(|id| self.threads[id].len() > self.thread_limit(id))
+                .saturating_sub(self.data.len())
+        })
     }
-
+    fn projects_complete(&self) -> bool {
+        match self.query {
+            TitleQuery::Root { .. } => {
+                self.recent_projects.len()
+                    >= self
+                        .project_limit()
+                        .saturating_add(1)
+                        .min(self.projects.len())
+            }
+            TitleQuery::Project { .. } => true,
+        }
+    }
+    pub(crate) fn done(&self) -> bool {
+        self.complete()
+            && (!matches!(
+                self.query,
+                TitleQuery::Root {
+                    searching: true,
+                    ..
+                }
+            ) || self.projects_complete())
+    }
+    pub(crate) fn push(&mut self, thread: Thread) -> bool {
+        let searching = match self.query {
+            TitleQuery::Root { searching, .. } | TitleQuery::Project { searching, .. } => searching,
+        };
+        let child = thread.parent_id.is_some();
+        if self.done() {
+            return false;
+        }
+        if !searching && child {
+            return false;
+        }
+        if let TitleQuery::Project { id, .. } = self.query {
+            if thread.project_id.as_deref() != Some(id) {
+                return false;
+            }
+            self.data.push(summary(thread));
+            return !child;
+        }
+        if let Some(id) = thread.project_id.as_ref() {
+            if !self.projects_complete() && !self.recent_projects.contains(id) {
+                self.recent_projects.push(id.clone());
+            }
+            return false;
+        }
+        if self.complete() {
+            return false;
+        }
+        self.data.push(summary(thread));
+        !child
+    }
+    fn complete(&self) -> bool {
+        self.data.len() > self.limit()
+    }
     pub(crate) fn finish(mut self) -> ThreadList {
         let positions: HashMap<_, _> = self
             .recent_projects
             .iter()
             .enumerate()
-            .map(|(index, id)| (*id, index))
+            .map(|(index, id)| (id.as_str(), index))
             .collect();
-        let mut projects = self
+        let mut projects: Vec<_> = self
             .projects
             .iter()
-            .filter(|project| !self.searching || positions.contains_key(project.id.as_str()))
-            .collect::<Vec<_>>();
+            .filter(|project| match self.query {
+                TitleQuery::Root { searching, .. } => {
+                    !searching || positions.contains_key(project.id.as_str())
+                }
+                TitleQuery::Project { id, .. } => project.id == id,
+            })
+            .cloned()
+            .collect();
         projects.sort_by_key(|project| {
             positions
                 .get(project.id.as_str())
                 .copied()
                 .unwrap_or(usize::MAX)
         });
-        let mut more_project_ids = Vec::new();
-        let mut data = Vec::new();
-        for id in self.recent_projects.iter().take(self.project_limit) {
-            let maximum = self.thread_limit(id);
-            let mut threads = self.threads.remove(id).unwrap_or_default();
-            if threads.len() > maximum {
-                more_project_ids.push((*id).to_owned());
-                threads.truncate(maximum);
-            }
-            data.extend(threads);
-        }
-        let more_projects = projects.len() > self.project_limit;
-        projects.truncate(self.project_limit);
-        let more_chats = self.chats.len() > self.chat_limit;
-        self.chats.truncate(self.chat_limit);
-        data.extend(self.chats);
+        let has_more = self.complete();
+        let has_more_projects = projects.len() > self.project_limit();
+        self.data.truncate(self.limit());
+        projects.truncate(self.project_limit());
         ThreadList {
+            data: self.data,
+            projects,
+            has_more,
+            has_more_projects,
             provider_errors: None,
-            data,
-            projects: projects.into_iter().cloned().collect(),
-            more_project_ids,
-            has_more_projects: more_projects,
-            has_more_chats: more_chats,
         }
     }
 }
@@ -168,132 +177,228 @@ pub(crate) fn summary(mut thread: Thread) -> Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
-    #[test]
-    fn root_titles_exclude_children_without_consuming_limits_including_search() {
-        let query = ListQuery {
-            chat_limit: 1,
-            ..Default::default()
-        };
-        let mut list = TitleList::new(&[], &query);
-        for (id, parent) in [
-            ("grandchild", Some("child")),
-            ("hidden-child", Some("hidden")),
-            ("child", Some("root")),
-            ("root", None),
-            ("hidden", None),
-        ] {
-            list.push(thread(json!({"id":{"provider":"codex","id":id}, "parentId":parent.map(|id| json!({"provider":"codex","id":id})), "preview":format!("Title {id}")})));
-        }
-        let result = list.finish();
-        assert!(result.has_more_chats);
-        let ids: Vec<_> = result
-            .data
-            .iter()
-            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
-            .collect();
-        assert_eq!(ids, ["root"]);
-        assert!(result.data.iter().all(|thread| thread.name.is_some()
-            && thread.preview.is_none()
-            && thread.turns.is_none()));
-        let search = ListQuery {
-            search_term: "child".into(),
-            ..Default::default()
-        };
-        let mut list = TitleList::new(&[], &search);
-        list.push(thread(json!({"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"},"name":"Matches"})));
-        list.push(thread(
-            json!({"id":{"provider":"codex","id":"root"},"name":"Matching root"}),
-        ));
-        let result = list.finish();
-        assert_eq!(result.data.len(), 1);
-        assert_eq!(result.data[0].id.as_ref().unwrap().id, "root");
-    }
-    fn thread(value: Value) -> Thread {
-        serde_json::from_value(value).unwrap()
-    }
+    use serde_json::json;
     fn project(id: &str) -> Project {
         Project {
             id: id.into(),
             name: id.into(),
-            roots: vec![],
-            favicon_png: None,
+            ..Default::default()
         }
+    }
+    fn thread(id: &str, project: Option<&str>) -> Thread {
+        serde_json::from_value(
+            json!({"id":{"provider":"codex","id":id},"projectId":project,
+            "preview":"\nFirst line\nprivate body", "turns":[{"id":"turn"}]}),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn root_list_pages_standalone_chats_without_consuming_slots_for_projects() {
+        let projects = vec![project("old"), project("recent"), project("empty")];
+        let mut titles = TitleList::new(
+            &projects,
+            TitleQuery::Root {
+                limit: 1,
+                project_limit: 1,
+                searching: false,
+            },
+        );
+        titles.push(thread("latest", Some("recent")));
+        titles.push(thread("chat", None));
+        titles.push(thread("third", Some("recent")));
+        assert!(!titles.complete());
+        titles.push(thread("lookahead", Some("recent")));
+        titles.push(thread("chat-2", None));
+        assert!(titles.complete());
+        assert_eq!(titles.remaining_chats(), Some(0));
+        titles.push(thread("old-task", Some("old")));
+        let page = titles.finish();
+        assert_eq!(page.data.len(), 1);
+        assert!(page.has_more);
+        assert_eq!(
+            page.projects
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["recent"]
+        );
+        assert!(page.has_more_projects);
+        assert_eq!(
+            page.data
+                .iter()
+                .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+                .collect::<Vec<_>>(),
+            ["chat"]
+        );
+        assert!(page.data.iter().all(|t| t.turns.is_none()
+            && t.preview.is_none()
+            && t.name.as_deref() == Some("First line")));
+    }
+    #[test]
+    fn project_page_selects_only_requested_roots_and_has_no_total_limit() {
+        let projects = vec![project("p"), project("q")];
+        let mut titles = TitleList::new(
+            &projects,
+            TitleQuery::Project {
+                id: "p",
+                limit: 1005,
+                searching: false,
+            },
+        );
+        for index in 0..1001 {
+            titles.push(thread(&format!("q-{index}"), Some("q")));
+            titles.push(thread(&format!("p-{index}"), Some("p")));
+        }
+        assert!(!titles.complete());
+        let page = titles.finish();
+        assert_eq!(page.data.len(), 1001);
+        assert!(!page.has_more);
+        assert_eq!(page.projects.len(), 1);
+        assert!(
+            page.data
+                .iter()
+                .all(|t| t.project_id.as_deref() == Some("p"))
+        );
     }
 
     #[test]
-    fn returns_latest_five_titles_per_recent_project_and_independent_chat_page() {
-        let projects = (1..=7)
+    fn root_project_headers_page_independently_from_standalone_chats() {
+        let projects = (1..=4)
             .map(|id| project(&format!("p{id}")))
             .collect::<Vec<_>>();
-        let query = ListQuery::default();
-        let mut list = TitleList::new(&projects, &query);
-        for index in 0..9 {
-            for project in (1..=7).rev() {
-                list.push(thread(json!({"id":{"provider":"codex","id":format!("p{project}-{index}")},"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
-            }
-            list.push(thread(json!({"id":{"provider":"codex","id":format!("chat-{index}")},"preview":"\nFirst line\nprivate body","cwd":"/other"})));
-        }
-        assert!(list.complete());
-        let page = list.finish();
-        assert!(agent_protocol::protocol::encode(&page).unwrap().len() < 4096);
-        let result = serde_json::to_value(page).unwrap();
-        let data = result["data"].as_array().unwrap();
-        assert_eq!(data.len(), 30);
-        assert_eq!(data[0]["id"]["id"], "p7-0");
-        assert_eq!(data[4]["id"]["id"], "p7-4");
-        assert_eq!(data[25]["id"]["id"], "chat-0");
-        assert_eq!(data[29]["id"]["id"], "chat-4");
-        assert_eq!(data[25]["name"], "First line");
-        assert!(
-            data.iter()
-                .all(|thread| thread["preview"].is_null() && thread["turns"].is_null())
+        let mut titles = TitleList::new(
+            &projects,
+            TitleQuery::Root {
+                limit: 1,
+                project_limit: 2,
+                searching: false,
+            },
         );
-        assert_eq!(result["projects"][0]["id"], "p7");
-        assert_eq!(result["projects"].as_array().unwrap().len(), 5);
-        assert_eq!(result["hasMoreProjects"], true);
-        assert_eq!(result["moreProjectIds"].as_array().unwrap().len(), 5);
-        assert_eq!(result["hasMoreChats"], true);
+        titles.push(thread("p4-task", Some("p4")));
+        titles.push(thread("chat", None));
+        titles.push(thread("p3-task", Some("p3")));
+        titles.push(thread("p2-task", Some("p2")));
+        let page = titles.finish();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].id.as_ref().unwrap().id, "chat");
+        assert_eq!(
+            page.projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            ["p4", "p3"]
+        );
+        assert!(page.has_more_projects);
     }
 
     #[test]
-    fn repeated_expansion_has_no_hidden_total_title_limit() {
-        let projects = [project("p")];
-        let query = ListQuery {
-            project_thread_limits: [("p".into(), 1005)].into(),
-            ..Default::default()
-        };
-        let mut list = TitleList::new(&projects, &query);
-        for index in 0..1001 {
-            list.push(thread(
-                json!({"id":{"provider":"codex","id":format!("t{index}")},"projectId":"p","name":"Title"}),
-            ));
-        }
-        let result = serde_json::to_value(list.finish()).unwrap();
-        assert_eq!(result["data"].as_array().unwrap().len(), 1001);
-        assert_eq!(result["data"][1000]["id"]["id"], "t1000");
-        assert_eq!(result["moreProjectIds"], json!([]));
+    fn search_completion_waits_for_chat_and_project_lookaheads() {
+        let projects = vec![project("p1"), project("p2")];
+        let mut titles = TitleList::new(
+            &projects,
+            TitleQuery::Root {
+                limit: 1,
+                project_limit: 1,
+                searching: true,
+            },
+        );
+        titles.push(thread("chat-1", None));
+        titles.push(thread("chat-2", None));
+        assert!(titles.complete());
+        assert!(!titles.projects_complete());
+        assert!(!titles.done());
+        titles.push(thread("p1-task", Some("p1")));
+        titles.push(thread("p2-task", Some("p2")));
+        assert!(titles.projects_complete());
+        assert!(titles.done());
     }
 
     #[test]
-    fn expanding_one_project_does_not_expand_other_sections_and_exact_end_has_no_more() {
-        let projects = [project("p"), project("q")];
-        let query = ListQuery {
-            project_thread_limits: [("p".into(), 15)].into(),
-            ..Default::default()
-        };
-        let mut list = TitleList::new(&projects, &query);
-        for index in 0..15 {
-            list.push(thread(
-                json!({"id":{"provider":"codex","id":format!("p{index}")},"projectId":"p","name":"P"}),
-            ));
-            list.push(thread(
-                json!({"id":{"provider":"codex","id":format!("q{index}")},"projectId":"q","name":"Q"}),
-            ));
+    fn root_stops_without_scanning_old_tasks_for_empty_project_headers() {
+        let projects = vec![project("p1"), project("p2")];
+        let mut exact_page = TitleList::new(
+            &projects,
+            TitleQuery::Root {
+                limit: 1,
+                project_limit: 2,
+                searching: false,
+            },
+        );
+        exact_page.push(thread("chat-1", None));
+        exact_page.push(thread("chat-2", None));
+        assert!(exact_page.done());
+        let page = exact_page.finish();
+        assert_eq!(page.projects.len(), 2);
+        assert_eq!(page.data.len(), 1);
+        assert!(page.has_more);
+        assert!(!page.has_more_projects);
+    }
+
+    #[test]
+    fn assigned_rows_do_not_consume_the_root_chat_lookahead() {
+        let projects = vec![project("p1")];
+        let mut titles = TitleList::new(
+            &projects,
+            TitleQuery::Root {
+                limit: 5,
+                project_limit: 1,
+                searching: false,
+            },
+        );
+        for index in 0..64 {
+            titles.push(thread(&format!("assigned-{index}"), Some("p1")));
         }
-        let result = serde_json::to_value(list.finish()).unwrap();
-        assert_eq!(result["data"].as_array().unwrap().len(), 20);
-        assert_eq!(result["moreProjectIds"], json!(["q"]));
-        assert_eq!(result["hasMoreChats"], false);
+        assert!(!titles.complete());
+        assert!(titles.projects_complete());
+        for index in 0..6 {
+            titles.push(thread(&format!("chat-{index}"), None));
+        }
+        assert!(titles.done());
+        let page = titles.finish();
+        assert_eq!(page.data.len(), 5);
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn search_preserves_child_project_matches_without_showing_child_rows() {
+        let projects = vec![project("p"), project("q")];
+        let mut titles = TitleList::new(
+            &projects,
+            TitleQuery::Root {
+                limit: 5,
+                project_limit: 5,
+                searching: true,
+            },
+        );
+        let mut child = thread("child", Some("p"));
+        child.parent_id = Some(
+            agent_protocol::session::SessionRef::new(
+                agent_protocol::session::ProviderKind::Codex,
+                "root".into(),
+            )
+            .unwrap(),
+        );
+        titles.push(child);
+        assert!(!titles.complete());
+        let page = titles.finish();
+        assert!(page.data.is_empty());
+        assert_eq!(
+            page.projects
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["p"]
+        );
+    }
+    proptest::proptest! {
+        #[test]
+        fn limits_use_exact_lookahead(count in 0usize..80, limit in 1u32..40) {
+            let mut titles=TitleList::new(&[],TitleQuery::Root { limit, project_limit:5, searching:false });
+            for index in 0..count { titles.push(thread(&index.to_string(),None)); }
+            proptest::prop_assert_eq!(titles.remaining_chats(), Some((limit as usize + 1).saturating_sub(count)));
+            let page=titles.finish();
+            proptest::prop_assert_eq!(page.data.len(), count.min(limit as usize));
+            proptest::prop_assert_eq!(page.has_more, count>limit as usize);
+        }
     }
 }

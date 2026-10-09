@@ -343,7 +343,7 @@ async fn quiet_simulator(
 fn simulator_app_pid(processes: &str, simulator: &str) -> Option<u32> {
     let device = format!("/Devices/{simulator}/");
     processes.lines().find_map(|line| {
-        if line.contains(&device) && line.trim_end().ends_with("/Bex.app/Bex") {
+        if line.contains(&device) && line.trim_end().ends_with("/bex.app/bex") {
             line.split_whitespace().next()?.parse().ok()
         } else {
             None
@@ -658,7 +658,7 @@ async fn worker(
             if needs_media_fixtures(&tests) {
                 preparation.push(("addmedia", args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", records.join("attachment-video.mov")]));
             }
-            preparation.push(("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")]));
+            preparation.push(("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/bex.app")]));
             if tests.iter().any(|test| test == "testSimulatorOpensOnlyTheTappedImageAndSavesIt") {
                 preparation.push(("photos-add permission", args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "dev.remoteagent.mobile.ios"]));
             }
@@ -1094,10 +1094,10 @@ mod tests {
         #[test]
         fn diagnostic_sampling_stays_with_its_simulator(pid in 1u32..100_000, simulator in "[A-F0-9-]{36}") {
             let processes = format!(
-                "44 1 100 99 /Devices/{simulator}0/data/Applications/Bex.app/Bex\n\
-                 45 1 100 99 /Devices/{simulator}/data/Applications/Bex.app/BexUITests-Runner\n\
-                 46 1 100 99 /Devices/{simulator}/data/Applications/Bex.app/BexHelper\n\
-                 {pid} 1 100 99 /Devices/{simulator}/data/Applications/Bex.app/Bex\n"
+                "44 1 100 99 /Devices/{simulator}0/data/Applications/bex.app/bex\n\
+                 45 1 100 99 /Devices/{simulator}/data/Applications/bex.app/BexUITests-Runner\n\
+                 46 1 100 99 /Devices/{simulator}/data/Applications/bex.app/BexHelper\n\
+                 {pid} 1 100 99 /Devices/{simulator}/data/Applications/bex.app/bex\n"
             );
             prop_assert_eq!(simulator_app_pid(&processes, &simulator), Some(pid));
             prop_assert_eq!(simulator_app_pid(&processes, "other-device"), None);

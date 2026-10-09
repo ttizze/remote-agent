@@ -125,7 +125,7 @@ extension ThreadScreen {
                     if let next = controls.toggleFastTo {
                         Button { model.chooseServiceTier(next) } label: {
                             Image(systemName: controls.fast ? "bolt.fill" : "bolt")
-                                .foregroundStyle(controls.fast ? Color.accentColor : .secondary)
+                                .foregroundStyle(controls.fast ? Color.primary : .secondary)
                                 .frame(width: 44, height: 44)
                         }
                         .accessibilityLabel("Fast")
@@ -321,7 +321,7 @@ private struct ComposerSendButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(.accentColor)
+            .foregroundColor(.primary)
             .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.3)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())

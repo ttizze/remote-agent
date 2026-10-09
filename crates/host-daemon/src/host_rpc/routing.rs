@@ -1,4 +1,5 @@
 use super::{requests::RequestOrigin, session_actor::SessionActor};
+use agent_protocol::live_activity::TaskState;
 use agent_protocol::{
     models::{Thread, ThreadResponse},
     protocol::{self, Notification},
@@ -151,17 +152,25 @@ impl Outbound {
     }
 }
 
-/// Only the connection and identity registries share this lock. History transforms,
-/// encoders, arbitration and queue delivery run under their conversation's lock.
+/// Connections and compact task facts share this lock; conversation history has its own lock.
 #[derive(Default)]
 struct State {
     apns: Option<Arc<crate::apns::Apns>>,
+    tasks: HashMap<SessionRef, Task>,
+    task_revision: u64,
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
     executions: HashMap<SessionRef, Arc<Mutex<SessionActor>>>,
     subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
     requests: HashMap<agent_protocol::ids::RequestId, SessionRef>,
     native_requests: HashMap<(uuid::Uuid, String), agent_protocol::ids::RequestId>,
+}
+#[derive(Default)]
+struct Task {
+    facts: Option<TaskState>,
+    parent: Option<SessionRef>,
+    // Parent discovery must not fence out an already pending read of execution facts.
+    facts_revision: u64,
 }
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
@@ -190,6 +199,67 @@ fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn task_display(
+    tasks: &HashMap<SessionRef, Task>,
+) -> agent_protocol::live_activity::TaskActivityDisplay {
+    use agent_protocol::live_activity::TaskActivitySummary;
+    // A conversation and all of its descendants contribute one icon and one count.
+    let mut conversations: HashMap<&SessionRef, TaskActivitySummary> = HashMap::new();
+    for (session, task) in tasks {
+        let Some(facts) = task.facts else { continue };
+        let contribution = TaskActivitySummary::from_statuses([facts.phase().0]);
+        if contribution == TaskActivitySummary::default() {
+            continue;
+        }
+        let mut root = session;
+        let mut depth = 0;
+        while let Some(parent) = tasks.get(root).and_then(|task| task.parent.as_ref()) {
+            if depth == tasks.len() {
+                // Invalid ancestry cannot certify that known work has finished.
+                root = session;
+                break;
+            }
+            root = parent;
+            depth += 1;
+        }
+        let summary = conversations.entry(root).or_default();
+        summary.waiting += contribution.waiting;
+        summary.running += contribution.running;
+        summary.unknown += contribution.unknown;
+    }
+    TaskActivitySummary::from_statuses(conversations.values().map(|summary| {
+        if summary.waiting > 0 {
+            "waiting"
+        } else if summary.running > 0 {
+            "running"
+        } else {
+            "unknown"
+        }
+    }))
+    .display()
+}
+fn publish_task_activity(
+    apns: Option<&crate::apns::Apns>,
+    sessions: &HashMap<SessionId, Outbound>,
+    revision: u64,
+    display: &agent_protocol::live_activity::TaskActivityDisplay,
+) -> Vec<SessionId> {
+    if let Some(apns) = apns {
+        apns.update(display.clone());
+    }
+    let frame = protocol::encode(Notification::TaskActivity {
+        state: agent_protocol::live_activity::TaskActivityState {
+            revision,
+            display: display.clone(),
+        },
+    })
+    .expect("task activity encodes");
+    sessions
+        .iter()
+        .filter_map(|(id, output)| output.try_send(*id, frame.clone()).err().map(|_| *id))
+        .collect()
+}
+
 impl SessionRouter {
     pub(super) fn set_apns(&self, apns: Option<Arc<crate::apns::Apns>>) {
         lock_state(&self.state).apns = apns;
@@ -210,38 +280,123 @@ impl SessionRouter {
             apns.revoke(principal);
         }
     }
+    pub(super) fn task_activity_revision(&self) -> u64 {
+        lock_state(&self.state).task_revision
+    }
+    pub(super) fn task_parent(&self, session: SessionRef, parent: SessionRef) {
+        let mut state = lock_state(&self.state);
+        if state
+            .tasks
+            .get(&session)
+            .and_then(|task| task.parent.as_ref())
+            == Some(&parent)
+        {
+            return;
+        }
+        let before = task_display(&state.tasks);
+        state.task_revision += 1;
+        let revision = state.task_revision;
+        let task = state.tasks.entry(session).or_default();
+        task.parent = Some(parent);
+        let display = task_display(&state.tasks);
+        let failed = if before != display {
+            publish_task_activity(state.apns.as_deref(), &state.sessions, revision, &display)
+        } else {
+            Vec::new()
+        };
+        drop(state);
+        self.close_failed(failed);
+    }
+    pub(super) fn task_activity(
+        &self,
+        native: Vec<Thread>,
+        read_revision: u64,
+    ) -> agent_protocol::live_activity::TaskActivityState {
+        let tasks: Vec<_> = native
+            .into_iter()
+            .filter_map(|thread| {
+                let target = thread.id.clone()?;
+                let thread_parent = thread.parent_id.clone();
+                let actor = self.actor(&target);
+                let owned = lock_state(&actor);
+                let task = if owned.timeline.status
+                    == agent_protocol::models::SessionStatus::Unknown
+                    && thread.list_stale == Some(true)
+                {
+                    None
+                } else {
+                    let thread = owned.overlay(thread);
+                    Some(TaskState {
+                        status: thread.status,
+                        waiting: thread.requests.values().any(|request| {
+                            request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+                        }),
+                        latest: thread
+                            .turns
+                            .as_ref()
+                            .and_then(|turns| turns.last())
+                            .map(|turn| turn.status),
+                    })
+                };
+                drop(owned);
+                self.prune(&target, &actor);
+                task.map(|task| (target, task, thread_parent))
+            })
+            .collect();
+        let mut state = lock_state(&self.state);
+        let before = task_display(&state.tasks);
+        // Provider events received while loading the list take precedence, including completion.
+        for (session, task, parent) in tasks {
+            let previous = state.tasks.get(&session);
+            // Parent identity is immutable and can arrive with an older execution read.
+            let parent = parent.or_else(|| previous.and_then(|old| old.parent.clone()));
+            let previous_facts = previous.and_then(|old| old.facts);
+            let accepts_facts = !previous.is_some_and(|old| old.facts_revision > read_revision)
+                && (task.phase().0 != "unknown" || previous_facts.is_some_and(|old| old.phase().1))
+                && (previous_facts.is_some() || task.phase().1);
+            let facts = if accepts_facts {
+                Some(task)
+            } else {
+                previous_facts
+            };
+            if previous_facts == facts
+                && previous.and_then(|old| old.parent.as_ref()) == parent.as_ref()
+            {
+                continue;
+            }
+            state.task_revision += 1;
+            let revision = state.task_revision;
+            let owned = state.tasks.entry(session).or_default();
+            owned.parent = parent;
+            if owned.facts != facts {
+                owned.facts = facts;
+                owned.facts_revision = revision;
+            }
+        }
+        let display = task_display(&state.tasks);
+        let failed = if display != before {
+            publish_task_activity(
+                state.apns.as_deref(),
+                &state.sessions,
+                state.task_revision,
+                &display,
+            )
+        } else {
+            Vec::new()
+        };
+        let result = agent_protocol::live_activity::TaskActivityState {
+            revision: state.task_revision,
+            display,
+        };
+        drop(state);
+        self.close_failed(failed);
+        result
+    }
     pub(super) fn register_live_activity(
         &self,
         connection: SessionId,
         params: &agent_protocol::live_activity::RegisterLiveActivity,
-        native: Vec<Thread>,
     ) -> Result<(), String> {
-        let tasks = native
-            .into_iter()
-            .filter_map(|thread| {
-                let target = thread.id.clone()?;
-                let actor = self.actor(&target);
-                let thread = lock_state(&actor).overlay(thread);
-                let phase = agent_protocol::live_activity::task_phase(
-                    !matches!(
-                        thread.status,
-                        agent_protocol::models::SessionStatus::Unknown
-                            | agent_protocol::models::SessionStatus::Unavailable
-                    ),
-                    thread.status == agent_protocol::models::SessionStatus::Running,
-                    thread.requests.values().any(|request| {
-                        request.delivery == agent_protocol::session::RequestDelivery::Awaiting
-                    }),
-                    thread
-                        .turns
-                        .as_ref()
-                        .and_then(|turns| turns.last())
-                        .map(|turn| turn.status),
-                );
-                self.prune(&target, &actor);
-                Some((target, phase.0.to_owned()))
-            })
-            .collect();
         let state = lock_state(&self.state);
         let principal = state
             .sessions
@@ -252,7 +407,7 @@ impl SessionRouter {
             .apns
             .as_ref()
             .ok_or("APNs is unavailable")?
-            .register(&principal.principal, params, tasks)
+            .register(&principal.principal, params, task_display(&state.tasks))
             .map_err(str::to_owned)
     }
     pub(crate) fn new() -> Self {
@@ -967,29 +1122,47 @@ impl SessionRouter {
             let frame = protocol::encode(Notification::Activity { session: target.clone(), active, finished: !active && matches!(change, SessionChange::Turn { completed: true, turn } if turn.status == agent_protocol::execution::TurnStatus::Completed) }).expect("activity encodes");
             failed.extend(self.broadcast_frames(frame));
         }
-        if let Some(apns) = self.apns() {
-            let timeline = &actor.timeline;
-            apns.update(
-                target,
-                agent_protocol::live_activity::task_phase(
-                    !matches!(
-                        timeline.status,
-                        agent_protocol::models::SessionStatus::Unknown
-                            | agent_protocol::models::SessionStatus::Unavailable
-                    ),
-                    timeline.status == agent_protocol::models::SessionStatus::Running,
-                    timeline.requests.values().any(|request| {
-                        request.delivery == agent_protocol::session::RequestDelivery::Awaiting
-                    }),
-                    timeline
-                        .turns
-                        .as_ref()
-                        .and_then(|turns| turns.last())
-                        .map(|turn| turn.status),
-                )
-                .0,
-            );
+        let mut state = lock_state(&self.state);
+        let previous = state.tasks.get(target).and_then(|task| task.facts);
+        let task = TaskState {
+            status: if actor.timeline.status != agent_protocol::models::SessionStatus::Unknown
+                || matches!(change, SessionChange::Status { .. })
+            {
+                actor.timeline.status
+            } else {
+                previous.map(|task| task.status).unwrap_or_default()
+            },
+            waiting: actor.timeline.requests.values().any(|request| {
+                request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+            }),
+            latest: actor
+                .timeline
+                .turns
+                .as_ref()
+                .and_then(|turns| turns.last())
+                .map(|turn| turn.status)
+                .or_else(|| previous.and_then(|task| task.latest)),
+        };
+        if previous != Some(task)
+            && (task.phase().0 != "unknown" || previous.is_some_and(|task| task.phase().1))
+        {
+            let before = task_display(&state.tasks);
+            state.task_revision += 1;
+            let revision = state.task_revision;
+            let owned = state.tasks.entry(target.clone()).or_default();
+            owned.facts = Some(task);
+            owned.facts_revision = revision;
+            let display = task_display(&state.tasks);
+            if before != display {
+                failed.extend(publish_task_activity(
+                    state.apns.as_deref(),
+                    &state.sessions,
+                    state.task_revision,
+                    &display,
+                ));
+            }
         }
+        drop(state);
         actor.release();
     }
 }
@@ -997,6 +1170,296 @@ impl SessionRouter {
 mod tests {
     use super::*;
     use agent_protocol::models::{Item, Thread, Turn};
+
+    #[test]
+    fn subagent_work_and_requests_share_the_root_conversation_activity() {
+        use agent_protocol::{models::SessionStatus, session::RequestDelivery};
+        let router = SessionRouter::new();
+        let root = SessionRef::new(ProviderKind::Codex, "root".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let grandchild = SessionRef::new(ProviderKind::Codex, "grandchild".into()).unwrap();
+        let other = SessionRef::new(ProviderKind::Claude, "root".into()).unwrap();
+        let seed = |id: &SessionRef, parent| Thread {
+            id: Some(id.clone()),
+            parent_id: parent,
+            status: SessionStatus::Running,
+            ..Default::default()
+        };
+        let initial = router.task_activity(
+            vec![
+                seed(&root, None),
+                seed(&child, Some(root.clone())),
+                seed(&grandchild, Some(child.clone())),
+                seed(&other, None),
+            ],
+            0,
+        );
+        assert_eq!(initial.display.current.total, 2);
+        assert_eq!(initial.display.current.label, "実行中 2件");
+        for (id, body) in [
+            ("question", serde_json::json!({"question":{"questions":[]}})),
+            (
+                "approval",
+                serde_json::json!({"approval":{"kind":"command","description":"run","details":"","choices":[]}}),
+            ),
+        ] {
+            let request = serde_json::from_value(
+                serde_json::json!({"id":id,"target":"session","delivery":"awaiting","body":body}),
+            )
+            .unwrap();
+            router.session_change(&grandchild, SessionChange::Request { request });
+            let waiting = router.task_activity(Vec::new(), 0).display;
+            assert_eq!(waiting.current.total, 2);
+            assert_eq!(waiting.current.label, "確認待ち 1件 · 実行中 1件");
+            router.session_change(
+                &grandchild,
+                SessionChange::RequestDelivery {
+                    request_id: id.into(),
+                    state: RequestDelivery::Sent,
+                },
+            );
+            router.session_change(
+                &grandchild,
+                SessionChange::ResolveRequest {
+                    request_id: id.into(),
+                },
+            );
+        }
+        for target in [&root, &child, &grandchild] {
+            router.session_change(
+                target,
+                SessionChange::Status {
+                    status: SessionStatus::Idle,
+                },
+            );
+        }
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 1);
+        // Completed actors are evicted; a later child turn retains its conversation identity.
+        router.session_change(
+            &grandchild,
+            SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        );
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 2);
+        router.session_change(
+            &grandchild,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        router.session_change(
+            &other,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        assert!(!router.task_activity(Vec::new(), 0).display.ongoing);
+    }
+
+    #[test]
+    fn parent_identity_can_arrive_after_newer_task_facts_without_overwriting_them() {
+        use agent_protocol::models::SessionStatus;
+        let router = SessionRouter::new();
+        let root = SessionRef::new(ProviderKind::Codex, "root".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let revision = router.task_activity_revision();
+        for target in [&root, &child] {
+            router.session_change(
+                target,
+                SessionChange::Status {
+                    status: SessionStatus::Running,
+                },
+            );
+        }
+        let corrected = router.task_activity(
+            vec![Thread {
+                id: Some(child.clone()),
+                parent_id: Some(root.clone()),
+                status: SessionStatus::Idle,
+                ..Default::default()
+            }],
+            revision,
+        );
+        assert_eq!(corrected.display.current.total, 1);
+        router.session_change(
+            &root,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        assert_eq!(
+            router.task_activity(Vec::new(), 0).display.current.total,
+            1,
+            "the delayed read preserved the child's newer running state"
+        );
+        let orphan = SessionRef::new(ProviderKind::Codex, "orphan".into()).unwrap();
+        router.session_change(
+            &orphan,
+            SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        );
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 2);
+        router.task_parent(orphan, root);
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 1);
+    }
+
+    #[test]
+    fn invalid_parent_cycles_preserve_known_work_without_hanging() {
+        let router = SessionRouter::new();
+        let id = |name: &str| SessionRef::new(ProviderKind::Codex, name.into()).unwrap();
+        let display = router
+            .task_activity(
+                vec![
+                    Thread {
+                        id: Some(id("root")),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                    Thread {
+                        id: Some(id("a")),
+                        parent_id: Some(id("b")),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                    Thread {
+                        id: Some(id("b")),
+                        parent_id: Some(id("a")),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                ],
+                0,
+            )
+            .display;
+        assert_eq!(display.current.total, 3);
+        assert!(display.ongoing);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn descendant_count_and_list_order_do_not_inflate_conversation_count(roots in 1usize..8, descendants in 0usize..24, nested in proptest::bool::ANY, reverse in proptest::bool::ANY) {
+            let router = SessionRouter::new();
+            let mut threads = Vec::new();
+            for root in 0..roots {
+                let id = SessionRef::new(ProviderKind::Codex, format!("root-{root}")).unwrap();
+                threads.push(Thread { id: Some(id.clone()), status: agent_protocol::models::SessionStatus::Running, ..Default::default() });
+                let mut parent = id.clone();
+                for child in 0..descendants {
+                    let id = SessionRef::new(ProviderKind::Codex, format!("child-{root}-{child}")).unwrap();
+                    threads.push(Thread { id: Some(id.clone()), parent_id: Some(parent.clone()), status: agent_protocol::models::SessionStatus::Running, ..Default::default() });
+                    if nested { parent = id; }
+                }
+            }
+            if reverse { threads.reverse(); }
+            let display = router.task_activity(threads, 0).display;
+            proptest::prop_assert_eq!(display.current.total, roots as u32);
+            proptest::prop_assert_eq!(display.current.icons.len(), roots);
+        }
+    }
+
+    #[test]
+    fn task_state_is_authoritative_without_apns_or_conversation_subscriptions() {
+        use agent_protocol::models::SessionStatus;
+        use agent_protocol::session::RequestDelivery;
+        let router = SessionRouter::new();
+        let target = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "task".into(),
+        };
+        let other = SessionRef {
+            provider: ProviderKind::Claude,
+            id: "task".into(),
+        };
+        let seed = |id: &SessionRef, status| Thread {
+            id: Some(id.clone()),
+            status,
+            ..Default::default()
+        };
+        let initial = router.task_activity(
+            vec![
+                seed(&target, SessionStatus::Running),
+                seed(&other, SessionStatus::Running),
+            ],
+            0,
+        );
+        assert_eq!(initial.display.current.label, "実行中 2件");
+        let mut cached = seed(&target, SessionStatus::Idle);
+        cached.list_stale = Some(true);
+        assert_eq!(
+            router.task_activity(vec![cached], initial.revision).display,
+            initial.display,
+            "a cached list cannot change the last confirmed task state"
+        );
+        router.session_change(
+            &target,
+            SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        );
+        for (id, body) in [
+            ("question", serde_json::json!({"question":{"questions":[]}})),
+            (
+                "approval",
+                serde_json::json!({"approval":{"kind":"command","description":"run","details":"","choices":[]}}),
+            ),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "id":id, "target":"session", "delivery":"awaiting", "body":body
+            }))
+            .unwrap();
+            router.session_change(&target, SessionChange::Request { request });
+            let waiting = router.task_activity(Vec::new(), 0);
+            assert_eq!(waiting.display.current.label, "確認待ち 1件 · 実行中 1件");
+            router.session_change(
+                &target,
+                SessionChange::RequestDelivery {
+                    request_id: id.into(),
+                    state: RequestDelivery::Sent,
+                },
+            );
+            assert_eq!(
+                router.task_activity(Vec::new(), 0).display.current.label,
+                "実行中 2件"
+            );
+        }
+        let read_revision = router.task_activity_revision();
+        router.session_change(
+            &target,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        let remaining =
+            router.task_activity(vec![seed(&target, SessionStatus::Running)], read_revision);
+        assert_eq!(remaining.display.current.label, "実行中 1件");
+        let mut cached = seed(&target, SessionStatus::Running);
+        cached.list_stale = Some(true);
+        assert_eq!(
+            router
+                .task_activity(vec![cached], remaining.revision)
+                .display,
+            remaining.display,
+            "a cached list cannot revive an already completed task"
+        );
+        router.session_change(
+            &other,
+            SessionChange::Status {
+                status: SessionStatus::Unavailable,
+            },
+        );
+        assert_eq!(
+            router.task_activity(Vec::new(), 0).display.current.label,
+            "状態確認中 1件"
+        );
+        let completed = router.task_activity(
+            vec![seed(&other, SessionStatus::Idle)],
+            router.task_activity_revision(),
+        );
+        assert!(!completed.display.ongoing);
+        assert!(completed.revision > initial.revision);
+    }
 
     #[test]
     fn live_activity_survives_disconnect_and_gets_terminal_result_before_execution_is_pruned() {
@@ -1029,20 +1492,19 @@ mod tests {
                 completed: false,
             },
         );
-        router
-            .register_live_activity(
-                phone.id(),
-                &params,
-                vec![Thread {
-                    id: Some(target.clone()),
-                    status: SessionStatus::Idle,
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
+        router.task_activity(
+            vec![Thread {
+                id: Some(target.clone()),
+                status: SessionStatus::Idle,
+                ..Default::default()
+            }],
+            0,
+        );
+        router.register_live_activity(phone.id(), &params).unwrap();
         assert_eq!(
-            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["summary"]["running"],
-            1
+            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["display"]["current"]
+                ["label"],
+            "実行中 1件"
         );
         drop(phone);
         router.session_change(
@@ -1059,20 +1521,16 @@ mod tests {
         assert!(router.execution_targets().is_empty());
         let final_payload = &apns.test_payloads(crate::apns::now() + 2)[0]["aps"];
         assert_eq!(final_payload["event"], "end");
-        assert_eq!(final_payload["content-state"]["summary"]["running"], 0);
+        assert_eq!(
+            final_payload["content-state"]["display"]["current"]["total"],
+            0
+        );
         let replacement = router.open_authenticated_session(Some("phone".into()));
         router.revoke_device("phone");
         assert!(apns.test_payloads(crate::apns::now() + 3).is_empty());
         assert!(
             router
-                .register_live_activity(
-                    replacement.id(),
-                    &params,
-                    vec![Thread {
-                        id: Some(target),
-                        ..Default::default()
-                    }]
-                )
+                .register_live_activity(replacement.id(), &params)
                 .is_err()
         );
     }
@@ -1770,7 +2228,7 @@ mod tests {
             .updates
             .unwrap();
         // A provider can deliver a buffered burst before the network writer is scheduled.
-        // This is less than 100 KiB, well within the connection's memory budget.
+        // Both notification streams remain well within the connection's memory budget.
         for index in 0..512 {
             router.session_change(
                 &SessionRef::new(
@@ -1806,6 +2264,13 @@ mod tests {
                 panic!("expected activity")
             };
             assert_eq!(active, index % 2 == 0);
+            let activity =
+                protocol::decode::<Notification>(&connection.recv().await.unwrap()).unwrap();
+            let Notification::TaskActivity { state } = activity else {
+                panic!("expected task state")
+            };
+            assert_eq!(state.display.ongoing, active);
+            assert_eq!(state.revision, index + 1);
         }
         assert_eq!(
             connection

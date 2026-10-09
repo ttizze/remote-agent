@@ -483,7 +483,7 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
     let query = op::ListSessions::new(agent_protocol::models::ListQuery {
-        chat_limit: 200,
+        limit: 200,
         ..Default::default()
     });
     let listing = local.peer.call(&query).await.unwrap();
@@ -582,10 +582,12 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
             .map(|index| {
                 serde_json::json!({
                     "id":format!("page-{index}"),
+                    "parentThreadId":(index == 0).then_some("parent-outside-the-checkout"),
                     "cwd":if index == 0 { &paths[0] } else { &paths[1] },
                     "name":format!("Conversation {index}: {running}"),
                     "updatedAt":index,
                     "status":{"type":if index == 0 && running { "active" } else { "idle" }},
+                    "loaded":index == 0,
                 })
             })
             .collect();
@@ -627,6 +629,22 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
             .unwrap();
         assert_eq!(deleted.branch, "削除済み");
         assert!(deleted.blocked_reason.is_none() && deleted.threads.is_empty());
+        let activity = local
+            .peer
+            .call(&agent_protocol::live_activity::ReadTaskActivity {})
+            .await
+            .unwrap();
+        assert_eq!(activity.display.current.total, u32::from(running));
+        assert_eq!(activity.display.ongoing, running);
+        assert_eq!(
+            activity.display.current.label,
+            if running {
+                "実行中 1件"
+            } else {
+                "すべてのタスクが終了"
+            },
+            "task activity includes the oldest native page outside the visible title list"
+        );
     }
     local.close().await;
     host.close().await.unwrap();
@@ -656,20 +674,20 @@ async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_adm
                 .filter(|entry| entry["method"] == "thread/list" && entry["ancestorThreadId"].is_string()).count()
         };
         let query = op::ListSessions::new(agent_protocol::models::ListQuery {
-            chat_limit: 150, ..Default::default()
+            limit: 150, ..Default::default()
         });
         let (first_page, second_page) = tokio::join!(first.peer.call(&query), second.peer.call(&query));
         for page in [first_page.unwrap(), second_page.unwrap()] {
             assert!(page.provider_errors.is_none());
-            assert!(page.has_more_chats);
+            assert!(page.has_more);
             assert_eq!(page.data.len(), 150);
             assert!(page.data.iter().all(|thread| thread.parent_id.is_none()));
         }
         let complete = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            chat_limit: 250, ..Default::default()
+            limit: 250, ..Default::default()
         })).await.unwrap();
         assert!(complete.provider_errors.is_none());
-        assert!(!complete.has_more_chats);
+        assert!(!complete.has_more);
         assert_eq!(complete.data.len(), 200);
         let searched = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
             search_term: "Conversation 199".into(), ..Default::default()
@@ -742,32 +760,71 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .filter(|entry| entry["method"] == "thread/list")
             .collect::<Vec<_>>()
     };
+    let page_reads = || {
+        list_reads()
+            .iter()
+            .filter(|entry| entry["ancestorThreadId"].is_null())
+            .count()
+    };
     let listing = local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            limit: 5,
+            ..Default::default()
+        }))
         .await
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
     assert_eq!(listing.data.len(), 5);
     assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
     assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
-    assert!(listing.has_more_chats);
+    assert!(listing.has_more);
     assert!(listing.provider_errors.is_none());
+    assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
+    local
+        .peer
+        .call(&agent_protocol::live_activity::ReadTaskActivity {})
+        .await
+        .unwrap();
     assert_eq!(
-        list_reads().len(),
+        page_reads(),
         1,
-        "initial list must not fetch all 20 pages"
+        "activity bootstrap must not scan historical titles"
     );
+    let descendant_roots = list_reads()
+        .iter()
+        .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
     assert!(
+        descendant_roots.is_empty(),
+        "root titles must not read fleets"
+    );
+    let selected = listing
+        .data
+        .iter()
+        .filter_map(|thread| thread.id.as_ref())
+        .find(|id| id.provider == ProviderKind::Codex)
+        .unwrap();
+    let agents = local
+        .peer
+        .call(&op::ListAgents {
+            thread_id: selected.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(agents.is_empty());
+    assert_eq!(
         list_reads()
             .iter()
-            .all(|entry| entry["ancestorThreadId"].is_null()),
-        "root titles must not trigger descendant reads"
+            .filter_map(|entry| entry["ancestorThreadId"].as_str())
+            .collect::<Vec<_>>(),
+        [selected.id.as_str()],
+        "fleet reads must target only the selected parent"
     );
     let expanded = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            chat_limit: 150,
+            limit: 150,
             ..Default::default()
         }))
         .await
@@ -775,9 +832,9 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(expanded.data.len(), 150);
     assert_eq!(expanded.data[0].id.as_ref(), Some(&session));
     assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
-    assert!(expanded.has_more_chats);
+    assert!(expanded.has_more);
     assert_eq!(
-        list_reads().len(),
+        page_reads(),
         3,
         "expansion needs only two additional page reads"
     );
@@ -792,8 +849,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .unwrap();
     assert_eq!(found.data.len(), 1);
     assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
-    assert!(!found.has_more_chats);
-    assert_eq!(list_reads().len(), 4);
+    assert!(!found.has_more);
+    assert_eq!(page_reads(), 4);
 
     let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
         "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":100,
@@ -801,24 +858,26 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     std::fs::write(&fixture, serde_json::to_vec(&tied).unwrap()).unwrap();
     let listing = local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            limit: 5,
+            ..Default::default()
+        }))
         .await
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(
+    assert_eq!(listing.data.len(), 5);
+    assert!(
         listing
             .data
             .iter()
             .skip(1)
-            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
-            .collect::<Vec<_>>(),
-        ["equal-000", "equal-001", "equal-002", "equal-003"]
+            .all(|t| t.updated_at == Some(100.0))
     );
-    assert!(listing.has_more_chats);
+    assert!(listing.has_more);
     assert_eq!(
-        list_reads().len(),
-        7,
-        "finish timestamp ties across native page boundaries"
+        page_reads(),
+        5,
+        "recent lists never exhaust timestamp ties across old pages"
     );
 
     let projects: Vec<_> = (0..3)
@@ -841,7 +900,11 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     std::fs::write(&fixture, serde_json::to_vec(&scoped).unwrap()).unwrap();
     let listing = local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            limit: 5,
+            project_limit: 5,
+            ..Default::default()
+        }))
         .await
         .unwrap();
     assert_eq!(
@@ -852,29 +915,83 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .collect::<Vec<_>>(),
         ["project-2", "project-1", "project-0"]
     );
-    assert_eq!(listing.data.len(), 20);
-    assert_eq!(listing.more_project_ids.len(), 3);
-    assert!(listing.has_more_chats);
+    assert_eq!(listing.data.len(), 5);
+    assert!(
+        listing
+            .data
+            .iter()
+            .all(|thread| thread.project_id.is_none())
+    );
+    assert!(!listing.has_more_projects);
+    assert!(listing.has_more);
     assert_eq!(
-        list_reads().len(),
-        8,
-        "stop when all visible sections have their lookahead"
+        page_reads(),
+        7,
+        "assigned rows require only one widened follow-up page"
     );
     let expanded = local
         .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            project_thread_limits: [("project-0".into(), 150)].into(),
-            ..Default::default()
-        }))
+        .call(&op::ListProjectSessions {
+            project_id: "project-0".into(),
+            limit: 150,
+            search_term: String::new(),
+        })
         .await
         .unwrap();
-    assert_eq!(expanded.data.len(), 165);
-    assert_eq!(expanded.data[159].id.as_ref().unwrap().id, "scoped-1400");
-    assert_eq!(expanded.data[160].id.as_ref(), Some(&session));
+    assert_eq!(expanded.data.len(), 150);
+    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "scoped-1400");
     assert_eq!(
-        list_reads().len(),
-        15,
-        "expand only the requested project before stopping"
+        expanded
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<Vec<_>>(),
+        ["project-0"]
+    );
+    assert!(
+        expanded
+            .data
+            .iter()
+            .all(|t| t.project_id.as_deref() == Some("project-0"))
+    );
+    assert!(expanded.has_more);
+    assert_eq!(
+        page_reads(),
+        14,
+        "project expansion reads only its own title page, never other sections"
+    );
+    let empty_projects: Vec<_> = (0..6)
+        .map(|index| {
+            serde_json::json!({
+                "id":format!("empty-{index}"),"name":format!("Empty {index}"),
+                "roots":[{"path":root.join(format!("empty-{index}"))}],
+            })
+        })
+        .collect();
+    std::fs::write(
+        root.join("bex-projects.json"),
+        serde_json::to_vec(&empty_projects).unwrap(),
+    )
+    .unwrap();
+    let before_empty = page_reads();
+    for project_limit in [5, 15] {
+        let page = local
+            .peer
+            .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+                project_limit,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(page.data.len(), 5);
+        assert!(page.has_more);
+        assert_eq!(page.projects.len(), (project_limit as usize).min(6));
+        assert_eq!(page.has_more_projects, project_limit == 5);
+    }
+    assert_eq!(
+        page_reads(),
+        before_empty + 2,
+        "initial and expanded empty headers each need only one native page"
     );
     local.close().await;
     host.close().await.unwrap();

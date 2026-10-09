@@ -3,8 +3,6 @@ use std::sync::{Arc, OnceLock};
 
 use agent_protocol::operations as op;
 
-use agent_protocol::models::ListQuery;
-
 use agent_protocol::models::Thread;
 
 use agent_protocol::models::ThreadResponse;
@@ -14,7 +12,7 @@ use agent_protocol::protocol::{Body, Call, Response};
 use agent_transport::peer::RpcMessageError;
 use serde::Serialize;
 
-use super::agent::{Agent, Identity, SessionSummary, session_pages};
+use super::agent::{Agent, Identity, SessionListScope, SessionSummary, session_pages};
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 
@@ -95,6 +93,43 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
+    async fn read_task_activity(
+        &self,
+    ) -> Result<agent_protocol::live_activity::TaskActivityState, Failure> {
+        let revision = self.inner.router.task_activity_revision();
+        let agents = self.agents();
+        let has_sources = !agents.is_empty() || !self.inner.startup_errors.is_empty();
+        let listings =
+            futures_util::future::join_all(agents.into_iter().map(|(_, agent)| async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    session_pages(agent.as_ref(), "", SessionListScope::Loaded, 100, 100)
+                        .try_collect::<Vec<_>>(),
+                )
+                .await
+            }))
+            .await;
+        let mut native = Vec::new();
+        let mut successful = false;
+        for result in listings {
+            if let Ok(Ok(pages)) = result {
+                successful |= pages
+                    .iter()
+                    .flatten()
+                    .all(|summary| summary.thread.list_stale != Some(true));
+                native.extend(pages.into_iter().flatten().map(|summary| summary.thread));
+            }
+        }
+        let state = self.inner.router.task_activity(native, revision);
+        if !successful && has_sources {
+            return Err(Failure::new(
+                "task_activity_unavailable",
+                "タスクの状態を取得できません。",
+            ));
+        }
+        Ok(state)
+    }
+
     pub async fn enable_apns(&self, path: &std::path::Path, host_name: &str) -> anyhow::Result<()> {
         self.inner
             .router
@@ -638,6 +673,7 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::ReadTaskActivity(_) => self.read_task_activity().await?.into(),
             Call::RegisterLiveActivity(params) => {
                 params
                     .validate()
@@ -648,16 +684,10 @@ impl HostRpcService {
                     .apns()
                     .is_some_and(|apns| apns.environment() == params.environment);
                 if enabled {
-                    let list = self
-                        .host_title_list(agent_protocol::models::ListQuery {
-                            project_limit: u32::MAX,
-                            chat_limit: u32::MAX,
-                            ..Default::default()
-                        })
-                        .await?;
+                    self.read_task_activity().await?;
                     self.inner
                         .router
-                        .register_live_activity(session, params, list.data)
+                        .register_live_activity(session, params)
                         .map_err(|error| Failure::new("live_activity_failed", error))?;
                 }
                 agent_protocol::live_activity::LiveActivityRegistration { enabled }.into()
@@ -864,18 +894,44 @@ impl HostRpcService {
             .into(),
             Call::ListSessions(params) => {
                 let started = std::time::Instant::now();
-                let result = self.host_title_list(params.query.clone()).await;
+                let result = self
+                    .host_title_list(
+                        &params.query.search_term,
+                        crate::projects::titles::TitleQuery::Root {
+                            limit: params.query.limit,
+                            project_limit: params.query.project_limit,
+                            searching: !params.query.search_term.trim().is_empty(),
+                        },
+                    )
+                    .await;
                 tracing::info!(target: "bex", operation = "host.thread.list.performance",
                     message = %format_args!("elapsed_ms={} success={}", started.elapsed().as_millis(), result.is_ok()));
                 result?.into()
             }
+            Call::ListProjectSessions(params) => self
+                .host_title_list(
+                    &params.search_term,
+                    crate::projects::titles::TitleQuery::Project {
+                        id: &params.project_id,
+                        limit: params.limit,
+                        searching: !params.search_term.trim().is_empty(),
+                    },
+                )
+                .await?
+                .into(),
             Call::ListAgents(params) => {
                 let agent = self.agent(params.thread_id.provider)?;
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-                let mut threads = session_pages(agent.as_ref(), "", Some(&params.thread_id.id))
-                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
-                    .try_flatten()
-                    .boxed();
+                let mut threads = session_pages(
+                    agent.as_ref(),
+                    "",
+                    SessionListScope::Descendants(&params.thread_id.id),
+                    100,
+                    100,
+                )
+                .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                .try_flatten()
+                .boxed();
                 let mut agents = Vec::new();
                 while let Some(summary) = next_title(&mut threads, deadline).await? {
                     let thread = crate::projects::titles::summary(summary.thread);
@@ -1025,7 +1081,7 @@ impl HostRpcService {
         }
         let mut threads = Vec::new();
         for (_, agent) in self.agents() {
-            let pages = session_pages(agent.as_ref(), "", None);
+            let pages = session_pages(agent.as_ref(), "", SessionListScope::All, 100, 100);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
@@ -1207,25 +1263,45 @@ impl HostRpcService {
 
     async fn host_title_list(
         &self,
-        query: ListQuery,
+        search: &str,
+        query: crate::projects::titles::TitleQuery<'_>,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
-        let search = query.search_term.as_str();
         let agents = self.agents();
+        // Keep the common root request to one lookahead-sized read. Assigned
+        // rows do not consume the standalone-chat quota, so widen only a
+        // follow-up page when the first read proves more native rows are needed.
+        let (first_page_size, later_page_size) = match query {
+            crate::projects::titles::TitleQuery::Root { limit, .. } => {
+                (limit.max(1).saturating_add(1).min(100), 100)
+            }
+            crate::projects::titles::TitleQuery::Project { .. } => (100, 100),
+        };
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
             futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
-                let mut threads = session_pages(agent.as_ref(), search, None)
-                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
-                    .try_flatten()
-                    .boxed();
+                let scope = if search.trim().is_empty() {
+                    SessionListScope::Roots
+                } else {
+                    SessionListScope::All
+                };
+                let mut threads = session_pages(
+                    agent.as_ref(),
+                    search,
+                    scope,
+                    first_page_size,
+                    later_page_size,
+                )
+                .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                .try_flatten()
+                .boxed();
                 let head = next_title(&mut threads, deadline).await;
                 (*provider, agent.capabilities(), threads, head)
             }))
         );
         let snapshot = snapshot?;
-        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
+        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, query);
         let mut provider_errors = self
             .provider_errors()
             .as_object()
@@ -1239,38 +1315,54 @@ impl HostRpcService {
             .map(|summary| summary.thread.updated_at.unwrap_or_default())
             .max_by(f64::total_cmp)
         {
-            // Native pages guarantee descending timestamps, but equal timestamps
-            // can span pages. Finish each tie before applying the stable ID order.
+            // Never scan additional pages merely to exhaust a timestamp tie in
+            // the requested root window. Order ties within that window by ID.
+            let maximum = titles.remaining_chats().unwrap_or(usize::MAX).max(1);
             let mut group = Vec::new();
             for (_, capabilities, threads, head) in &mut listings {
-                while head.as_ref().is_ok_and(|thread| {
-                    thread.as_ref().is_some_and(|summary| {
-                        summary
-                            .thread
-                            .updated_at
-                            .unwrap_or_default()
-                            .total_cmp(&newest)
-                            == std::cmp::Ordering::Equal
+                while group.len() < maximum
+                    && head.as_ref().is_ok_and(|thread| {
+                        thread.as_ref().is_some_and(|summary| {
+                            summary
+                                .thread
+                                .updated_at
+                                .unwrap_or_default()
+                                .total_cmp(&newest)
+                                == std::cmp::Ordering::Equal
+                        })
                     })
-                }) {
+                {
                     group.push((head.as_mut().unwrap().take().unwrap(), *capabilities));
-                    *head = next_title(threads, deadline).await;
+                    if group.len() < maximum {
+                        *head = next_title(threads, deadline).await;
+                    }
                 }
             }
             group.sort_by(|(a, _), (b, _)| a.thread.id.cmp(&b.thread.id));
             for (summary, capabilities) in group {
+                let branch = summary.branch;
+                let id = summary.thread.id.clone();
                 let mut thread = summary.thread;
-                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
-                    branches.insert(id.clone(), branch);
-                }
                 describe_thread(&mut thread, capabilities, &snapshot);
-                titles.push(thread);
-                if titles.complete() {
+                if titles.push(thread)
+                    && let (Some(id), Some(branch)) = (id, branch)
+                {
+                    branches.insert(id, branch);
+                }
+                if titles.done() {
                     break;
                 }
             }
-            if titles.complete() {
+            if titles.done() {
                 break;
+            }
+            // A group can fill its allowance with assigned rows that are not
+            // retained. Continue that provider only if the visible page still
+            // needs rows; do not start another read after its lookahead.
+            for (_, _, threads, head) in &mut listings {
+                if matches!(head, Ok(None)) {
+                    *head = next_title(threads, deadline).await;
+                }
             }
         }
         for (provider, _, _, head) in listings {
@@ -2078,17 +2170,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_list_delivers_project_branding_to_core_and_refreshes_removed_icons() {
+    async fn task_list_refreshes_branding_for_all_project_headers() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("remote-agent");
+        let workspaces = std::iter::once(workspace.clone())
+            .chain((0..5).map(|index| root.path().join(format!("empty-project-{index}"))))
+            .collect::<Vec<_>>();
         let native = root.path().join("native");
-        std::fs::create_dir(&workspace).unwrap();
-        std::fs::create_dir_all(native.join("projects")).unwrap();
-        std::fs::write(workspace.join("favicon.svg"),
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
+        for workspace in &workspaces {
+            std::fs::create_dir(workspace).unwrap();
+            std::fs::write(workspace.join("favicon.svg"),
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
+        }
+        let transcript = native.join("projects/p");
+        std::fs::create_dir_all(&transcript).unwrap();
+        let id = "12345678-1234-4234-8234-123456789abc";
+        std::fs::write(transcript.join(format!("{id}.jsonl")),serde_json::json!({"type":"user","sessionId":id,"cwd":dunce::canonicalize(&workspace).unwrap(),"message":{"content":"Branding task"}}).to_string()+"\n").unwrap();
         let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
-        projects.register(&workspace).await.unwrap();
+        for workspace in &workspaces {
+            projects.register(workspace).await.unwrap();
+        }
         let claude = crate::adapters::Claude::load(
             root.path().join("does-not-exist"),
             root.path().join("state"),
@@ -2104,36 +2206,76 @@ mod tests {
             projects,
         );
         let session = service.open_session();
-        let call = agent_protocol::protocol::Call::ListSessions(
-            agent_protocol::operations::ListSessions {
-                query: Default::default(),
-            },
-        );
         for has_icon in [true, false] {
             if !has_icon {
-                std::fs::remove_file(workspace.join("favicon.svg")).unwrap();
+                for workspace in &workspaces {
+                    std::fs::remove_file(workspace.join("favicon.svg")).unwrap();
+                }
             }
-            let response = service.dispatch(session.id(), &call).await.unwrap();
-            let reply = agent_protocol::protocol::decode::<
-                Response<agent_protocol::models::ThreadList>,
-            >(&response.initial)
-            .unwrap();
-            let Response::Success { result } = reply else {
-                panic!("task list failed: {reply:?}")
-            };
-            let snapshot = agent_core::state::Snapshot {
-                threads: Some(Arc::new(result)),
-                ..Default::default()
-            };
-            let list = snapshot.thread_list().unwrap();
-            assert_eq!(list.projects.len(), 1);
-            let project = &list.projects[0];
-            assert_eq!(project.monogram, "RA");
-            assert_eq!(project.icon_png.is_some(), has_icon);
-            if let Some(png) = &project.icon_png {
-                let image = image::load_from_memory(png).unwrap().into_rgba8();
-                assert_eq!(image.dimensions(), (64, 64));
-                assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
+            for project_limit in [5, 15] {
+                let call = Call::ListSessions(op::ListSessions {
+                    query: agent_protocol::models::ListQuery {
+                        project_limit,
+                        ..Default::default()
+                    },
+                });
+                let response = service.dispatch(session.id(), &call).await.unwrap();
+                let reply = agent_protocol::protocol::decode::<
+                    Response<agent_protocol::models::ThreadList>,
+                >(&response.initial)
+                .unwrap();
+                let Response::Success { result } = reply else {
+                    panic!("task list failed: {reply:?}")
+                };
+                assert!(result.data.is_empty());
+                assert_eq!(result.projects.len(), (project_limit as usize).min(6));
+                assert_eq!(result.has_more_projects, project_limit == 5);
+                let project_id = result.projects[0].id.clone();
+                let response = service
+                    .dispatch(
+                        session.id(),
+                        &Call::ListProjectSessions(op::ListProjectSessions {
+                            project_id: project_id.clone(),
+                            limit: 5,
+                            search_term: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                let Response::Success { result: page } = agent_protocol::protocol::decode::<
+                    Response<agent_protocol::models::ThreadList>,
+                >(&response.initial)
+                .unwrap() else {
+                    panic!("project list failed")
+                };
+                let snapshot = agent_core::state::Snapshot {
+                    threads: Some(Arc::new(result)),
+                    expanded_projects: Arc::new([(project_id.clone(), 5)].into()),
+                    project_threads: Arc::new([(project_id, Arc::new(page))].into()),
+                    ..Default::default()
+                };
+                let list = snapshot.thread_list().unwrap();
+                assert_eq!(list.projects.len(), (project_limit as usize).min(6));
+                assert!(list.threads.is_empty());
+                assert_eq!(list.projects[0].threads.len(), 1);
+                assert_eq!(
+                    list.projects[0].threads[0].project_id.as_ref(),
+                    Some(&list.projects[0].id)
+                );
+                assert!(
+                    list.projects[1..]
+                        .iter()
+                        .all(|project| project.threads.is_empty())
+                );
+                assert_eq!(list.projects[0].monogram, "RA");
+                for project in &list.projects {
+                    assert_eq!(project.icon_png.is_some(), has_icon, "{}", project.name);
+                    if let Some(png) = &project.icon_png {
+                        let image = image::load_from_memory(png).unwrap().into_rgba8();
+                        assert_eq!(image.dimensions(), (64, 64));
+                        assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
+                    }
+                }
             }
         }
     }

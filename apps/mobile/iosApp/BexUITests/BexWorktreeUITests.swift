@@ -8,10 +8,10 @@ extension BexLaunchUITests {
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
-        let running = app.descendants(matching: .any)["tasks.running.codex:merge-active"]
+        let running = app.descendants(matching: .any)["tasks.project.running.codex:merge-active"]
         XCTAssertTrue(running.waitForExistence(timeout: 10))
-        let merged = app.descendants(matching: .any)["tasks.merged.codex:merge-active"]
-        let unmerged = app.descendants(matching: .any)["tasks.unmerged.codex:merge-active"]
+        let merged = app.descendants(matching: .any)["tasks.project.merged.codex:merge-active"]
+        let unmerged = app.descendants(matching: .any)["tasks.project.unmerged.codex:merge-active"]
         XCTAssertFalse(merged.exists || unmerged.exists)
         try simulatorFixture("merge-worktree/dirty")
         refreshSimulatorTaskList(app)
@@ -25,7 +25,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(unmerged.exists)
         XCTAssertTrue(running.exists)
         XCTAssertGreaterThan(merged.frame.minX, running.frame.maxX)
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.merged.codex:merge-idle"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.project.merged.codex:merge-idle"].exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Merged worktree session list"
         screenshot.lifetime = .keepAlways
@@ -46,7 +46,7 @@ extension BexLaunchUITests {
         let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: merged)
         wait(for: [removed], timeout: 10)
         XCTAssertTrue(unmerged.exists)
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.unmerged.codex:merge-idle"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.project.unmerged.codex:merge-idle"].exists)
         XCTAssertTrue(running.exists)
     }
 

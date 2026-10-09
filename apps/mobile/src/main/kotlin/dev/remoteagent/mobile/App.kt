@@ -93,6 +93,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var notice by mutableStateOf<String?>(null)
     val loadingHistory: Boolean
         get() = snapshot.navigation().threadId?.let { snapshot.operationRunning(OperationKey.History(it)) } ?: false
+    val loadingThreads: Boolean
+        get() = snapshot.operationRunning(OperationKey.SessionList)
     var list by mutableStateOf<ThreadList?>(null)
         private set
 
@@ -451,6 +453,7 @@ internal fun RemoteAgentApp(
                         ThreadListScreen(
                             model.list,
                             model.snapshot.listQuery(),
+                            model.loadingThreads,
                             { model.perform(it) },
                             model::showHosts,
                             { intent ->

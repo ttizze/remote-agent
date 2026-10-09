@@ -201,7 +201,7 @@ impl Desktop {
                                 div()
                                     .text_size(px(23.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Bex"),
+                                    .child("bex"),
                             )
                             .child(
                                 div()

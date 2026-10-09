@@ -81,6 +81,43 @@ impl AssetSource for DesktopAssets {
         Ok(paths)
     }
 }
+struct MainWindow(Option<WindowHandle<Root>>);
+impl Global for MainWindow {}
+
+fn open_main_window(cx: &mut App) {
+    if let Some(window) = cx.global::<MainWindow>().0
+        && window
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    {
+        cx.activate(true);
+        return;
+    }
+    let bounds = Bounds::centered(None, size(px(1440.), px(960.)), cx);
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("bex".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(
+                        px(14.),
+                        px((WINDOW_HEADER_HEIGHT - 14.) / 2.),
+                    )),
+                }),
+                ..Default::default()
+            },
+            |window, cx| {
+                let desktop = cx.new(|cx| app::Desktop::new(app::Mode::Main, window, cx));
+                cx.new(|cx| Root::new(desktop, window, cx))
+            },
+        )
+        .expect("open Bex window");
+    cx.global_mut::<MainWindow>().0 = Some(window);
+    cx.activate(true);
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     let _ = std::thread::Builder::new()
@@ -104,69 +141,48 @@ fn main() {
     let handle = runtime.handle().clone();
     let closing = tokio_util::task::TaskTracker::new();
     let shutdown = closing.clone();
-    gpui_kit::application()
+    let application = gpui_kit::application()
         .with_assets(DesktopAssets)
-        .with_http_client(std::sync::Arc::new(gpui_http::ReqwestClient::new()))
-        .run(move |cx| {
-            cx.set_global(Runtime {
-                handle,
-                closing,
-                logging_error,
-                connections: std::sync::Arc::new(platform::Connections::default()),
-            });
-            cx.on_app_quit(|cx| {
-                tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");
-                let runtime = cx.global::<Runtime>().clone();
-                async move {
-                    runtime.closing.close();
-                    let handle = runtime.handle.clone();
-                    let _ = handle
-                        .spawn(async move {
-                            runtime.closing.wait().await;
-                            runtime.connections.close().await;
-                        })
-                        .await;
-                }
-                .boxed_local()
-            })
-            .detach();
-            appearance::init(cx);
-            cx.bind_keys([KeyBinding::new(
-                "ctrl-v",
-                gpui_kit::component::input::Paste,
-                Some("ChatComposer > Input"),
-            )]);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-            let bounds = Bounds::centered(None, size(px(1440.), px(960.)), cx);
-            cx.spawn(async move |cx| {
-                cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("Bex".into()),
-                            appears_transparent: true,
-                            traffic_light_position: Some(point(
-                                px(14.),
-                                px((WINDOW_HEADER_HEIGHT - 14.) / 2.),
-                            )),
-                        }),
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        let desktop = cx.new(|cx| app::Desktop::new(app::Mode::Main, window, cx));
-                        cx.new(|cx| Root::new(desktop, window, cx))
-                    },
-                )
-                .expect("open Bex window");
-            })
-            .detach();
-            cx.activate(true);
+        .with_http_client(std::sync::Arc::new(gpui_http::ReqwestClient::new()));
+    application.on_reopen(open_main_window);
+    application.run(move |cx| {
+        cx.set_global(Runtime {
+            handle,
+            closing,
+            logging_error,
+            connections: std::sync::Arc::new(platform::Connections::default()),
         });
+        cx.on_app_quit(|cx| {
+            tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");
+            let runtime = cx.global::<Runtime>().clone();
+            async move {
+                runtime.closing.close();
+                let handle = runtime.handle.clone();
+                let _ = handle
+                    .spawn(async move {
+                        runtime.closing.wait().await;
+                        runtime.connections.close().await;
+                    })
+                    .await;
+            }
+            .boxed_local()
+        })
+        .detach();
+        appearance::init(cx);
+        cx.bind_keys([KeyBinding::new(
+            "ctrl-v",
+            gpui_kit::component::input::Paste,
+            Some("ChatComposer > Input"),
+        )]);
+        cx.set_global(MainWindow(None));
+        #[cfg(target_os = "macos")]
+        platform::task_menu::init(cx);
+        cx.spawn(async move |cx| {
+            cx.update(open_main_window);
+        })
+        .detach();
+        cx.activate(true);
+    });
     shutdown.close();
     runtime.block_on(shutdown.wait());
 }

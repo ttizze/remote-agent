@@ -107,8 +107,8 @@ extension BexAppViewModel {
         perform(.listSessions(ListSessions(query: snapshot.listQuery())))
     }
 
-    func expandTaskList(projects: Bool = false, projectId: String? = nil) {
-        perform(.expandThreadList(projectId: projectId, projects: projects))
+    func expandTaskList(projectId: String? = nil) {
+        perform(.expandThreadList(projectId: projectId))
     }
 
     func searchTaskList(_ term: String) {

@@ -11,25 +11,39 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("title-fixture")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"]
+            .waitForExistence(timeout: 20))
+        scrollToListElement(
+            app.descendants(matching: .any)["tasks.row.codex:pagination-chat-12"],
+            in: app
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-11"].exists)
         let project = app.buttons["tasks.project.pagination-project-16"]
-        XCTAssertTrue(project.waitForExistence(timeout: 20))
+        scrollToListElement(project, in: app)
         XCTAssertEqual(project.value as? String, "閉じています")
         project.tap()
-        let newest = app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-16"]
+        let newest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-16"]
         XCTAssertTrue(newest.waitForExistence(timeout: 15))
-        scrollToListElement(app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-12"], in: app)
+        let lastInitial = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-12"]
+        scrollToListElement(lastInitial, in: app)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-11"].exists)
         let more = app.buttons["tasks.project.pagination-project-16.more"]
-        for last in [2, 1] {
-            scrollToListElement(more, in: app)
-            more.tap()
-            scrollToEarlierListElement(project, in: app, attempts: 30)
-            scrollToListElement(
-                app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-\(last)"],
-                in: app
-            )
-        }
+        scrollToListElement(more, in: app)
+        more.tap()
+        scrollToEarlierListElement(project, in: app, attempts: 30)
+        scrollToListElement(
+            app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-6"],
+            in: app
+        )
+        scrollToListElement(more, in: app)
+        more.tap()
+        scrollToEarlierListElement(project, in: app, attempts: 30)
+        scrollToListElement(
+            app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-1"],
+            in: app
+        )
         XCTAssertFalse(more.exists)
-        let oldest = app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-1"]
+        let oldest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-1"]
         oldest.tap()
         XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-16-1"]
             .waitForExistence(timeout: 15))
@@ -43,9 +57,14 @@ extension BexLaunchUITests {
         scrollToListElement(otherProject, in: app)
         XCTAssertEqual(otherProject.value as? String, "閉じています")
         otherProject.tap()
-        scrollToListElement(app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-15-12"], in: app)
+        let otherLastInitial = app
+            .descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-12"]
+        scrollToListElement(otherLastInitial, in: app)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"]
+            .exists)
         scrollToListElement(app.buttons["tasks.project.pagination-project-15.more"], in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-15-11"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"]
+            .exists)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Only the selected project's titles expanded and retained after returning")
     }
@@ -61,6 +80,7 @@ extension BexLaunchUITests {
         let newest = app.buttons["tasks.project.pagination-project-16"]
         XCTAssertTrue(newest.waitForExistence(timeout: 20))
         scrollToListElement(app.buttons["tasks.project.pagination-project-12"], in: app)
+        XCTAssertFalse(app.buttons["tasks.project.pagination-project-11"].exists)
         let projectMore = app.buttons["tasks.projects.more"]
         for last in [2, 1] {
             scrollToListElement(projectMore, in: app)
@@ -69,7 +89,9 @@ extension BexLaunchUITests {
             scrollToListElement(app.buttons["tasks.project.pagination-project-\(last)"], in: app)
         }
         XCTAssertFalse(projectMore.exists)
-        scrollToListElement(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"], in: app)
+
+        let newestChat = app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"]
+        XCTAssertTrue(newestChat.waitForExistence(timeout: 20))
         scrollToListElement(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-12"], in: app)
         let chatMore = app.buttons["tasks.chats.more"]
         scrollToListElement(chatMore, in: app)
@@ -78,16 +100,13 @@ extension BexLaunchUITests {
         for last in [2, 1] {
             scrollToListElement(chatMore, in: app)
             chatMore.tap()
-            scrollToEarlierListElement(
-                app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"],
-                in: app,
-                attempts: 30
-            )
+            scrollToEarlierListElement(newestChat, in: app, attempts: 30)
             scrollToListElement(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-\(last)"], in: app)
         }
         XCTAssertFalse(chatMore.exists)
         app.descendants(matching: .any)["tasks.row.codex:pagination-chat-1"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-chat-1"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-chat-1"]
+            .waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Oldest chat opened after separate project and chat pagination")
     }

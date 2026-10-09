@@ -1,6 +1,10 @@
 use agent_core::{client::ClientExt, state::operations as op};
 use agent_protocol::models;
-use agent_protocol::{models::Invitation, operations as rpc};
+use agent_protocol::{
+    models::Invitation,
+    operations as rpc,
+    session::{ProviderKind, SessionRef},
+};
 use agent_transport::{
     client::Client,
     transport::{Endpoint, Identity, Relays, Ticket},
@@ -1449,7 +1453,16 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         let started = mobile.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path().join("large-history")})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
         assert_eq!(started["thread"]["projectId"], json!({"Assigned":"workspace"}));
         let thread = &started["thread"]["id"];
-        let listed = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"limit":20})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+        let listed = mobile
+            .peer
+            .call(&rpc::ListProjectSessions {
+                project_id: "workspace".into(),
+                limit: 20,
+                search_term: String::new(),
+            })
+            .await
+            .map(|output| serde_json::to_value(output).unwrap())
+            .unwrap();
         assert_eq!(listed["data"][0]["id"], *thread);
         assert_eq!(listed["data"][0]["projectId"], json!({"Assigned":"workspace"}));
         let start = std::time::Instant::now();
@@ -1554,41 +1567,131 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
         let checkout = directory.path().join("worktree");
         std::fs::write(directory.path().join("bex-worktrees.json"), json!({"workspaceRoots":{checkout.to_str().unwrap():directory.path().join("project-5")}}).to_string()).unwrap();
-        let fixture = start_host(directory.path()).await;
+        let program = host_fixture::fixture::Config { trace: true, stream_delay_ms: 5, ..Default::default() }
+            .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), directory.path()).unwrap();
+        let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated Host", false, None).await.unwrap();
         let mobile = fixture.local().await.unwrap();
 
-        let request = |project_limit, chat_limit, thread_limit| json!({"projectLimit":project_limit,"chatLimit":chat_limit,"projectThreadLimits":{"project-5":thread_limit}});
         let start = std::time::Instant::now();
-        let first = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>((request(5, 5, 5)).clone()).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let bytes = agent_protocol::protocol::encode(serde_json::from_value::<models::ThreadList>(first.clone()).unwrap()).unwrap().len();
-        println!("title list through iroh: {bytes} bytes, {} ms", start.elapsed().as_millis());
-        assert!(bytes < 16 * 1024, "initial titles exceeded the transfer budget");
-        let rows = first["data"].as_array().unwrap();
-        assert_eq!(rows.len(), 30);
-        assert_eq!(first["projects"].as_array().unwrap().len(), 5);
-        assert_eq!(first["hasMoreProjects"], true);
-        assert_eq!(first["projects"].as_array().unwrap().iter().take(5).map(|project| project["id"].as_str().unwrap()).collect::<Vec<_>>(), ["project-5", "project-3", "project-7", "project-6", "project-4"]);
-        assert_eq!(rows[0]["id"], json!({"provider":"codex","id":"worktree"}));
-        assert_eq!(rows[4]["id"], json!({"provider":"codex","id":"p5-15"}));
-        assert_eq!(rows[5]["id"], json!({"provider":"codex","id":"explicit"}));
-        assert_eq!(rows[25]["id"], json!({"provider":"codex","id":"projectless"}));
-        assert_eq!(rows[29]["id"], json!({"provider":"codex","id":"chat-15"}));
-        assert!(rows.iter().all(|thread| thread["turns"].is_null() && thread["preview"].is_null()));
-        assert_eq!(first["moreProjectIds"].as_array().unwrap().len(), 5);
-        assert_eq!(first["hasMoreChats"], true);
-
-        let more = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>((request(5, 5, 15)).clone()).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        assert_eq!(more["data"].as_array().unwrap().len(), 40);
-        assert_eq!(more["data"][14]["id"], json!({"provider":"codex","id":"p5-5"}));
-        let end = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>((request(15, 25, 25)).clone()).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        assert_eq!(end["data"].as_array().unwrap().len(), 19 + 6*5 + 19);
-        assert_eq!(end["hasMoreChats"], false);
-        assert_eq!(end["hasMoreProjects"], false);
-        assert!(!end["moreProjectIds"].as_array().unwrap().contains(&json!("project-5")));
-        let found = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"searchTerm":"Project 01"})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        assert_eq!(found["projects"].as_array().unwrap().len(), 1);
-        assert_eq!(found["data"].as_array().unwrap().len(), 5);
-        assert_eq!(found["data"][0]["id"], json!({"provider":"codex","id":"p1-18"}));
+        let query = models::ListQuery {
+            limit: 5,
+            project_limit: 5,
+            ..Default::default()
+        };
+        let first = mobile
+            .peer
+            .call(&rpc::ListSessions::new(query.clone()))
+            .await
+            .unwrap();
+        let bytes = agent_protocol::protocol::encode(&first).unwrap().len();
+        println!(
+            "title list through iroh: {bytes} bytes, {} ms",
+            start.elapsed().as_millis()
+        );
+        assert!(bytes < 16 * 1024);
+        assert_eq!(first.data.len(), 5);
+        assert_eq!(first.projects.len(), 5);
+        assert!(first.has_more);
+        assert!(first.has_more_projects);
+        assert_eq!(
+            first
+                .data
+                .iter()
+                .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+                .collect::<Vec<_>>(),
+            ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]
+        );
+        assert!(first.data.iter().all(|thread| {
+            thread.project_id.is_none() && thread.turns.is_none() && thread.preview.is_none()
+        }));
+        assert_eq!(
+            first
+                .projects
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            ["project-5", "project-3", "project-7", "project-6", "project-4"]
+        );
+        let more = mobile
+            .peer
+            .call(&rpc::ListProjectSessions {
+                project_id: "project-5".into(),
+                limit: 5,
+                search_term: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(more.data.len(), 5);
+        assert_eq!(more.data[0].id.as_ref().unwrap().id, "worktree");
+        assert_eq!(more.data[4].id.as_ref().unwrap().id, "p5-15");
+        assert!(more.has_more);
+        assert!(more.data.iter().all(|thread| {
+            thread.project_id.as_deref() == Some("project-5") && thread.turns.is_none()
+        }));
+        let expanded = mobile
+            .peer
+            .call(&rpc::ListProjectSessions {
+                project_id: "project-5".into(),
+                limit: 15,
+                search_term: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(expanded.data.len(), 15);
+        assert_eq!(expanded.data[14].id.as_ref().unwrap().id, "p5-5");
+        assert!(expanded.has_more);
+        let end = mobile
+            .peer
+            .call(&rpc::ListProjectSessions {
+                project_id: "project-5".into(),
+                limit: 25,
+                search_term: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(end.data.len(), 19);
+        assert!(!end.has_more);
+        let old = mobile
+            .peer
+            .call(&rpc::ListProjectSessions {
+                project_id: "project-1".into(),
+                limit: 5,
+                search_term: String::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(old.data.len(), 5);
+        assert_eq!(old.data[0].id.as_ref().unwrap().id, "p1-18");
+        assert!(old.has_more);
+        let found = mobile
+            .peer
+            .call(&rpc::ListSessions::new(models::ListQuery {
+                limit: 5,
+                project_limit: 5,
+                search_term: "Project 01".into(),
+            }))
+            .await
+            .unwrap();
+        assert!(found.data.is_empty(), "root searches keep project contents scoped");
+        assert_eq!(found.projects.len(), 1);
+        assert_eq!(found.projects[0].id, "project-1");
+        assert!(!found.has_more);
+        assert!(!found.has_more_projects);
+        let project_search = mobile
+            .peer
+            .call(&rpc::ListProjectSessions {
+                project_id: "project-1".into(),
+                limit: 5,
+                search_term: "conversation 18".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(project_search.data.len(), 1);
+        assert_eq!(
+            project_search.data[0].id.as_ref().unwrap().id,
+            "p1-18"
+        );
+        assert!(!project_search.has_more);
         let body = open_session(&mobile.peer, &json!({"provider":"codex","id":"p5-1"}), 5).await.0["response"].clone();
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");
@@ -1602,21 +1705,29 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             json!({"id":"hidden-child","parentThreadId":"p1-1","updatedAt":-3}),
         ]);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        let nested = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: models::ListQuery::default() })).await.unwrap();
-        assert_eq!(nested.data.len(), 30, "root titles exclude native descendants");
-        assert!(nested.has_more_chats);
-        assert_eq!(nested.more_project_ids.len(), 5);
-        assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
+        let nested = mobile
+            .peer
+            .call(&rpc::ListSessions::new(query))
+            .await
+            .unwrap();
+        assert_eq!(nested.data.len(), 5, "root titles do not acquire descendants");
+        assert!(nested.has_more);
         assert!(nested.data.iter().all(|thread| thread.parent_id.is_none()));
-        let root = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "worktree".into()).unwrap();
-        let agents = mobile.peer.call(&op::ListAgents { thread_id: root.clone() }).await.unwrap();
+        assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
+        let native_reads = || std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap().lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let before = native_reads().len();
+        let agents = mobile.peer.call(&rpc::ListAgents {
+            thread_id: SessionRef::new(ProviderKind::Codex, "worktree".into()).unwrap()
+        }).await.unwrap();
+        assert_eq!(&native_reads()[before..], ["thread/list"], "fleet metadata must not read history");
         let child = agents.iter().find(|agent| agent.id.id == "older-child").unwrap();
-        assert_eq!(child.parent_id, root);
+        assert_eq!(child.parent_id.id, "worktree");
         assert_eq!(child.name.as_deref(), Some("Curie"));
         let descendants: Vec<_> = agents.iter().map(|agent| agent.id.id.as_str()).collect();
         assert_eq!(descendants, ["older-child", "older-grandchild"]);
-        let child = open_session(&mobile.peer, &json!(child.id), 5).await.0["response"].clone();
-        assert_eq!(child["thread"]["canAcceptDirectInput"], false);
+        let child_body = open_session(&mobile.peer, &json!({"provider":"codex","id":"older-child"}), 5).await.0;
+        assert_eq!(child_body["response"]["thread"]["canAcceptDirectInput"], false);
         mobile.close().await;
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
@@ -1690,14 +1801,42 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
             assert_eq!(read["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
             assert_eq!(read["thread"]["projectId"], json!({"Unassigned":{}}));
         }
-        let listed = request(&restarted, &mut restarted_session, "host/session/list", json!({"chatLimit":10})).await;
-        for id in &ids {
-            let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("worktree task must remain in the project list after restart");
-            assert_eq!(thread["projectId"], json!({"Assigned":"workspace"}));
-        }
+        let listed = request(
+            &restarted,
+            &mut restarted_session,
+            "host/session/list",
+            json!({"limit":30,"projectLimit":5}),
+        )
+        .await;
+        assert!(
+            ids.iter().all(|id| {
+                !listed["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|thread| thread["id"] == *id)
+            }),
+            "root title lists defer project task rows to the scoped endpoint"
+        );
         for id in &chat_ids {
             let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("chat must remain in the list after restart");
             assert_eq!(thread["projectId"], json!({"Unassigned":{}}));
+        }
+        let project_list = request(
+            &restarted,
+            &mut restarted_session,
+            "host/project/sessions",
+            json!({"projectId":"workspace","limit":10,"searchTerm":""}),
+        )
+        .await;
+        for id in &ids {
+            let thread = project_list["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|thread| thread["id"] == *id)
+                .expect("worktree task must remain in its scoped project list after restart");
+            assert_eq!(thread["projectId"], json!({"Assigned":"workspace"}));
         }
         let after = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
         assert_eq!(before, after, "opening and listing must not create worktrees");

@@ -1,8 +1,8 @@
-# Bex
+# bex
 
 [English](README.md) | [日本語](README.ja.md)
 
-Bexは、信頼できるコンピューター上のCodexとClaude Codeを、Macアプリ、iPhoneアプリ、Androidアプリ、またはヘッドレスCLIから操作するアプリです。Rust製のHostデーモンがエージェントのプロセスを管理します。すべてのクライアントはiroh経由で同じJSONL RPCに接続し、同じRustの`Store`へ操作を送ります。用語は[CONTEXT.md](CONTEXT.md)、設計判断は[docs/adr](docs/adr)、動作変更は[CHANGELOG.md](CHANGELOG.md)を参照してください。
+bexは、信頼できるコンピューター上のCodexとClaude Codeを、Macアプリ、iPhoneアプリ、Androidアプリ、またはヘッドレスCLIから操作するアプリです。Rust製のHostデーモンがエージェントのプロセスを管理します。すべてのクライアントはiroh経由で同じJSONL RPCに接続し、同じRustの`Store`へ操作を送ります。用語は[CONTEXT.md](CONTEXT.md)、設計判断は[docs/adr](docs/adr)、動作変更は[CHANGELOG.md](CHANGELOG.md)を参照してください。
 
 irohは公開リリースを使い、netwatch 0.19.3は[UDPの再バインド回復](https://github.com/n0-computer/net-tools/pull/235)を含むフォークのコミットに固定しています。UDPの再バインド失敗時は、非同期I/Oを終了せず、100ミリ秒から5秒までの指数バックオフで再試行します。ソケットを明示的に閉じると回復処理を中止します。修正が含まれる上流リリースを採用したら、このパッチを削除します。
 
@@ -109,8 +109,8 @@ iPhoneから保存済みPCを削除するには、**タスク一覧 → PC一覧
 ## クライアントのビルド
 
 ```sh
-# Mac（署名証明書が必要。BEX_CODE_SIGN_IDENTITYで選択）
-scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
+# Mac配布用（署名証明書が必要。BEX_CODE_SIGN_IDENTITYで選択）
+scripts/dev-env.sh just build-desktop-macos && open target/release/bex.app
 
 # iPhone（iOS 26）: Simulator用ライブラリをビルドしてXcodeを開く
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
@@ -122,7 +122,9 @@ scripts/dev-env.sh ./gradlew :apps:mobile:assembleDebug
 
 Rustのソースを変更したら、iOS用ライブラリも再ビルドしてください。デスクトップの下書きとログは`BEX_STATE_DIR`を使いますが、Host探索で別の認証情報ディレクトリを選ぶことがあります。デスクトップを隔離するには`BEX_ISOLATED_HOST=1`と`BEX_STATE_DIR`の両方が必要です。個人のプロバイダー状態をテストが読み込まないよう、別のCodexホームかフィクスチャ実行ファイルも使ってください。
 
-`scripts/dev-env.sh just dev`は、プロバイダーのアカウントと会話履歴を共有する別のローカルHostを起動します。再ビルド前に実行中タスクを確認し、古い開発Hostを停止してください。ウィンドウを閉じるだけではHostは停止しません。同じ会話を2つのHostで同時に実行しないでください。
+編集中は`scripts/dev-env.sh just check -p agent-core`で、実行ファイルを生成せずにRustを確認できます。`-p`には変更したクレートを指定してください。
+
+`scripts/dev-env.sh just dev`は、Hostとデスクトップを同じdebugビルドで`target/debug/bex.app`にまとめ、プロバイダーのアカウントと会話履歴を共有する別のローカルHostを起動します。配布用は`target/release/bex.app`に保存します。Macの両ビルドコマンドは`dev`または`release`を指定でき、既定は`release`です。再ビルド前に実行中タスクを確認し、古い開発Hostを停止してください。ウィンドウを閉じるだけではHostは停止しません。同じ会話を2つのHostで同時に実行しないでください。
 
 ## 会話の操作
 
@@ -136,7 +138,7 @@ Mac・iPhoneでは、枠のないFast、モデル名、推論強度の操作を�
 
 Hostに通常のパッケージ管理でClaude Codeをインストールし、BexからClaudeのサブスクリプションアカウントを追加するか、Host上の既存の`claude auth login`を使います。新しい会話を作成し、入力欄のモデル選択で**Claude · …**を選びます。モデル名と対応する推論強度は、インストールしたCLIの初期化応答から取得し、選択中アカウント用にキャッシュします。アカウント変更時にキャッシュを無効化します。Claude実行ファイルがない場合もCodexモデルは表示し、プロバイダーの失敗は利用可能なモデルとともに報告します。不完全な一覧でも保存済みモデルの選択を保持し、新規下書きは利用可能なモデルを選びます。
 
-Hostは変更していないCLIを、ストリーミングJSON入出力と独自の権限コールバックで動かします。Claudeが認証情報を管理し、BexはサブスクリプショントークンをCodexへコピーしたり、Anthropicの推論APIを直接呼んだりしません。Claudeのターンにはサブスクリプション認証が必要で、APIキー認証・未認証では送信前に拒否します。Hostの環境でAPIキーを設定している場合は、その上書きを外してください。Codexのアカウント選択はCodexにのみ適用します。Anthropicの[認証](https://code.claude.com/docs/en/authentication)、[プログラム実行](https://code.claude.com/docs/en/headless)、[組み込み条件](https://code.claude.com/docs/en/legal-and-compliance)を参照してください。
+Hostは変更していないCLIを、ストリーミングJSON入出力と独自の権限コールバックで動かします。Claudeが認証情報を管理し、bexはサブスクリプショントークンをCodexへコピーしたり、Anthropicの推論APIを直接呼んだりしません。Claudeのターンにはサブスクリプション認証が必要で、APIキー認証・未認証では送信前に拒否します。Hostの環境でAPIキーを設定している場合は、その上書きを外してください。Codexのアカウント選択はCodexにのみ適用します。Anthropicの[認証](https://code.claude.com/docs/en/authentication)、[プログラム実行](https://code.claude.com/docs/en/headless)、[組み込み条件](https://code.claude.com/docs/en/legal-and-compliance)を参照してください。
 
 テキスト、PNG・JPEG・GIF・WebP画像、ファイル参照、ツール承認、ユーザーへの質問、中断、後続ターンは、Codexと同じStore・認証済み接続を使います。作業ディレクトリ選択と自動ワークツリー設定も共通です。永続的な会話の唯一の保存元はClaudeのネイティブ記録です。Hostは`--claude-home`、`CLAUDE_CONFIG_DIR`、または`~/.claude`を推論実行なしで読み、Bex独自の会話記録は書きません。クライアントを切断しても実行は続き、再接続ではイベントを再送せず、現在有効な未回答の要求を含む最新の状態を開きます。
 

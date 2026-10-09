@@ -190,8 +190,7 @@ pub struct ThreadResponse {
 pub struct ThreadList {
     pub data: Vec<Thread>,
     pub projects: Vec<Project>,
-    pub more_project_ids: Vec<String>,
-    pub has_more_chats: bool,
+    pub has_more: bool,
     pub has_more_projects: bool,
     #[serde(default)]
     #[serde(with = "crate::protocol::json")]
@@ -253,28 +252,26 @@ pub struct ReasoningEffort {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ListQuery {
+    pub limit: u32,
     pub project_limit: u32,
-    pub chat_limit: u32,
-    pub project_thread_limits: BTreeMap<String, u32>,
     pub search_term: String,
 }
 impl Default for ListQuery {
     fn default() -> Self {
         Self {
+            limit: 5,
             project_limit: 5,
-            chat_limit: 5,
-            project_thread_limits: BTreeMap::new(),
             search_term: String::new(),
         }
     }
 }
 impl ListQuery {
     pub fn for_connection(mut self) -> Self {
+        if self.limit == 0 {
+            self.limit = 5;
+        }
         if self.project_limit == 0 {
             self.project_limit = 5;
-        }
-        if self.chat_limit == 0 {
-            self.chat_limit = 5;
         }
         self
     }

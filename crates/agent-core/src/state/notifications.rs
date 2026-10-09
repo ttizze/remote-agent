@@ -27,11 +27,9 @@ pub(super) fn notification(
                 activity.unread.remove(&session);
             }
         }
-        let listed = previous.threads.as_ref().is_some_and(|list| {
-            list.data
-                .iter()
-                .any(|thread| thread.id.as_ref() == Some(&session))
-        });
+        let listed = previous
+            .listed_threads()
+            .any(|thread| thread.id.as_ref() == Some(&session));
         let child = previous
             .conversations
             .get(&session)
@@ -51,6 +49,11 @@ pub(super) fn notification(
     }
 
     match message {
+        Notification::TaskActivity { state } => {
+            let mut next = previous.clone();
+            next.accept_task_activity(state);
+            (next, Vec::new())
+        }
         Notification::TerminalFailed { handle, reason } => {
             reduce(previous, Event::TerminalFailed { handle, reason })
         }
@@ -308,8 +311,7 @@ mod tests {
         Snapshot {
             connected: true,
             threads: Some(Arc::new(serde_json::from_value(json!({
-                "data":[{"id":parent,"name":"Task","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-            })).unwrap())),
+                "data":[{"id":parent,"name":"Task","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"hasMore":false,"hasMoreProjects":false,})).unwrap())),
             subscriptions: Arc::new([(parent.clone(), subscription)].into()),
             conversations: Arc::new([(parent.clone(), Arc::new(crate::models::Thread {
                 id: Some(parent.clone()),

@@ -185,18 +185,23 @@ struct Scope {
     navigation: u64,
     operation: Option<(op::OperationKey, u64)>,
 }
+fn generation_current(
+    operation: Option<&(op::OperationKey, u64)>,
+    operations: &BTreeMap<op::OperationKey, op::OperationState>,
+) -> bool {
+    operation.is_none_or(|(key, generation)| {
+        operations
+            .get(key)
+            .is_some_and(|state| state.generation == *generation)
+    })
+}
 impl Scope {
     fn current(
         &self,
         navigation: u64,
         operations: &BTreeMap<op::OperationKey, op::OperationState>,
     ) -> bool {
-        self.navigation == navigation
-            && self.operation.as_ref().is_none_or(|(key, generation)| {
-                operations
-                    .get(key)
-                    .is_some_and(|state| state.generation == *generation)
-            })
+        self.navigation == navigation && generation_current(self.operation.as_ref(), operations)
     }
     fn finish(
         &self,
@@ -456,6 +461,7 @@ impl Store {
                 drop(self.dispatch(Intent::ListSessions(op::ListSessions::new(
                     (*snapshot.list_query).clone(),
                 ))));
+                drop(self.dispatch(Intent::ReadTaskActivity(op::ReadTaskActivity {})));
                 drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
                 return Ok(performance);
             };
@@ -721,12 +727,15 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         permission_settings,
         composer_catalog,
         host_name,
+        task_activity,
         storage_scope,
         archived_scopes,
         account,
         terminals,
         conversations,
         threads,
+        expanded_projects,
+        project_threads,
         observed_agents,
         models,
         model_errors,
@@ -753,6 +762,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && current.model_defaults == *model_defaults
         && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
         && current.host_name == *host_name
+        && current.task_activity == *task_activity
         && current.permission_settings == *permission_settings
         && current.composer_catalog == *composer_catalog
         && current.storage_scope == *storage_scope
@@ -762,6 +772,8 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && Arc::ptr_eq(&current.account, account)
         && Arc::ptr_eq(&current.conversations, conversations)
         && same_threads
+        && Arc::ptr_eq(&current.expanded_projects, expanded_projects)
+        && Arc::ptr_eq(&current.project_threads, project_threads)
         && current.observed_agents == *observed_agents
         && Arc::ptr_eq(&current.models, models)
         && Arc::ptr_eq(&current.model_errors, model_errors)
@@ -789,14 +801,20 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
     updates.send_if_modified(|snapshot| {
         // Dispatch and completion share this lock. List results and failures
         // belong to their query; view work belongs to the navigation epoch.
-        let current = completed.scheduling.query().map_or_else(
-            || {
-                completed
-                    .scope
-                    .current(snapshot.epoch, &snapshot.operations)
-            },
-            |query| query == snapshot.list_query.as_ref(),
-        );
+        let current = match &completed.scheduling {
+            op::Scheduling::LatestList(query) => query == snapshot.list_query.as_ref(),
+            op::Scheduling::LatestProject(_) | op::Scheduling::LatestTaskActivity => {
+                generation_current(completed.scope.operation.as_ref(), &snapshot.operations)
+            }
+            _ => completed
+                .scope
+                .current(snapshot.epoch, &snapshot.operations),
+        };
+        let global_error = current
+            && !matches!(
+                &completed.scheduling,
+                op::Scheduling::LatestProject(_) | op::Scheduling::LatestTaskActivity
+            );
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
             Ok(applied) => match applied.application.apply(&mut next, current) {
@@ -805,7 +823,7 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
                     Ok(applied.outcome)
                 }
                 Err(error) => {
-                    if current {
+                    if global_error {
                         next.error = Some(error.to_string());
                     }
                     Err(error)
@@ -862,7 +880,7 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
                     )
                     .0;
                 }
-                if current {
+                if global_error {
                     next.error = Some(error.to_string());
                 }
                 Err(error)
@@ -1023,6 +1041,18 @@ async fn run(
         }
         for mut scheduled in std::mem::take(&mut effects) {
             let unobserved = match &scheduled.effect.scheduling {
+                op::Scheduling::LatestTaskActivity => !generation_current(
+                    scheduled.scope.operation.as_ref(),
+                    &updates.borrow().operations,
+                ),
+                op::Scheduling::LatestProject(project_id) => {
+                    let snapshot = updates.borrow();
+                    !snapshot.expanded_projects.contains_key(project_id)
+                        || !generation_current(
+                            scheduled.scope.operation.as_ref(),
+                            &snapshot.operations,
+                        )
+                }
                 op::Scheduling::LatestAgents(session) => {
                     updates.borrow().observed_agents.as_ref() != Some(session)
                 }
@@ -1068,8 +1098,10 @@ async fn run(
                 }
                 op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
                 op::Scheduling::Concurrent
+                | op::Scheduling::LatestTaskActivity
                 | op::Scheduling::LatestList(_)
                 | op::Scheduling::LatestAgents(_)
+                | op::Scheduling::LatestProject(_)
                 | op::Scheduling::LatestReview => MAX_RPC_JOBS,
             };
             if jobs.len() >= limit {
@@ -1531,6 +1563,35 @@ mod tests {
             ("conversations", |snapshot| {
                 snapshot.conversations = Arc::default()
             }),
+            ("task_activity", |snapshot| {
+                snapshot.task_activity =
+                    Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
+                        revision: 1,
+                        display: agent_protocol::live_activity::TaskActivitySummary {
+                            running: 1,
+                            ..Default::default()
+                        }
+                        .display(),
+                    }));
+            }),
+            ("expanded_projects", |snapshot| {
+                snapshot.expanded_projects = Arc::new([("p".into(), 5)].into());
+            }),
+            ("project_threads", |snapshot| {
+                snapshot.project_threads = Arc::new(
+                    [(
+                        "p".into(),
+                        Arc::new(crate::models::ThreadList {
+                            data: vec![],
+                            projects: vec![],
+                            has_more: false,
+                            has_more_projects: false,
+                            provider_errors: None,
+                        }),
+                    )]
+                    .into(),
+                );
+            }),
             ("observed_agents", |snapshot| {
                 snapshot.observed_agents = Some(crate::session::SessionRef {
                     provider: crate::session::ProviderKind::Codex,
@@ -1560,8 +1621,7 @@ mod tests {
                 snapshot.threads = Some(Arc::new(crate::models::ThreadList {
                     data: Vec::new(),
                     projects: Vec::new(),
-                    more_project_ids: Vec::new(),
-                    has_more_chats: false,
+                    has_more: false,
                     has_more_projects: false,
 
                     provider_errors: None,

@@ -39,6 +39,7 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ReadTaskActivity(ReadTaskActivity),
     RegisterLiveActivity(RegisterLiveActivity),
     UnregisterLiveActivity(UnregisterLiveActivity),
     ReadPermissionSettings(ReadPermissionSettings),
@@ -68,14 +69,22 @@ pub enum Intent {
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
     ListSessions(ListSessions),
+    ListProjectSessions(ListProjectSessions),
     ListAgents(ListAgents),
     WatchAgents {
         thread_id: Option<crate::session::SessionRef>,
     },
     AddProject(AddProject),
+    ExpandProjects,
     ExpandThreadList {
         project_id: Option<String>,
-        projects: bool,
+    },
+    SetProjectExpanded {
+        project_id: String,
+        expanded: bool,
+    },
+    RefreshProject {
+        project_id: String,
     },
     CreateSession(CreateSession),
     ReadThread(ReadThread),
@@ -191,6 +200,7 @@ pub enum StalePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    TaskActivity,
     LiveActivity {
         activity_id: String,
     },
@@ -199,6 +209,9 @@ pub enum OperationKey {
         turn: agent_protocol::ids::TurnId,
     },
     SessionList,
+    ProjectList {
+        project_id: String,
+    },
     Agents {
         session: crate::session::SessionRef,
     },
@@ -258,8 +271,10 @@ pub struct OperationState {
 pub enum Scheduling {
     Concurrent,
     Control,
+    LatestTaskActivity,
     LatestList(crate::models::ListQuery),
     LatestAgents(crate::session::SessionRef),
+    LatestProject(String),
     LatestReview,
     Item(ReadItem),
     Terminal { handle: String, starts: bool },
@@ -267,7 +282,11 @@ pub enum Scheduling {
 impl Scheduling {
     pub(crate) fn latest_key(&self) -> Option<OperationKey> {
         match self {
+            Self::LatestTaskActivity => Some(OperationKey::TaskActivity),
             Self::LatestList(_) => Some(OperationKey::SessionList),
+            Self::LatestProject(project_id) => Some(OperationKey::ProjectList {
+                project_id: project_id.clone(),
+            }),
             Self::LatestAgents(session) => Some(OperationKey::Agents {
                 session: session.clone(),
             }),
@@ -278,13 +297,6 @@ impl Scheduling {
     pub(crate) fn item(&self) -> Option<&ReadItem> {
         if let Self::Item(item) = self {
             Some(item)
-        } else {
-            None
-        }
-    }
-    pub(crate) fn query(&self) -> Option<&crate::models::ListQuery> {
-        if let Self::LatestList(query) = self {
-            Some(query)
         } else {
             None
         }

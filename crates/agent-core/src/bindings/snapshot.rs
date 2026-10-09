@@ -23,7 +23,29 @@ impl Snapshot {
             (None, None) => true,
             _ => false,
         };
-        same_list && Arc::ptr_eq(&self.activity, &other.activity)
+        same_list
+            && Arc::ptr_eq(&self.activity, &other.activity)
+            && Arc::ptr_eq(&self.expanded_projects, &other.expanded_projects)
+            && Arc::ptr_eq(&self.project_threads, &other.project_threads)
+            && Arc::ptr_eq(&self.archived_scopes, &other.archived_scopes)
+            && self.connected == other.connected
+            && self
+                .operations
+                .get(&crate::state::operations::OperationKey::SessionList)
+                .map(|state| &state.phase)
+                == other
+                    .operations
+                    .get(&crate::state::operations::OperationKey::SessionList)
+                    .map(|state| &state.phase)
+            && self.threads.as_ref().is_none_or(|list| {
+                list.projects.iter().all(|project| {
+                    let key = crate::state::operations::OperationKey::ProjectList {
+                        project_id: project.id.clone(),
+                    };
+                    self.operations.get(&key).map(|state| &state.phase)
+                        == other.operations.get(&key).map(|state| &state.phase)
+                })
+            })
     }
     pub fn models_unchanged(&self, other: Arc<Self>) -> bool {
         Arc::ptr_eq(&self.models, &other.models)
@@ -237,6 +259,121 @@ pub fn project_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_list_publication_follows_project_lifecycle_without_republishing_other_operations() {
+        use crate::state::{
+            Event, Intent,
+            operations::{
+                ListProjectSessions, Operation, OperationKey, OperationPhase, OperationState,
+            },
+        };
+        let mut initial = Snapshot {
+            connected: true,
+            ..Default::default()
+        };
+        initial.threads = Some(Arc::new(
+            serde_json::from_value(serde_json::json!({
+                "data":[], "projects":[{"id":"old","name":"Archive","roots":[]}], "hasMore":true,"hasMoreProjects":false
+            }))
+            .unwrap(),
+        ));
+        assert!(initial.list_unchanged(Arc::new(initial.clone())));
+        let mut unrelated = initial.clone();
+        Arc::make_mut(&mut unrelated.operations).insert(
+            OperationKey::TaskActivity,
+            OperationState {
+                generation: 1,
+                phase: OperationPhase::Running,
+            },
+        );
+        assert!(unrelated.list_unchanged(Arc::new(initial.clone())));
+        let mut root_loading = initial.clone();
+        Arc::make_mut(&mut root_loading.operations).insert(
+            OperationKey::SessionList,
+            OperationState {
+                generation: 1,
+                phase: OperationPhase::Running,
+            },
+        );
+        assert!(!root_loading.list_unchanged(Arc::new(initial.clone())));
+        assert!(root_loading.list_unchanged(Arc::new(root_loading.clone())));
+        let loading = root_loading.clone();
+        Arc::make_mut(&mut root_loading.operations).clear();
+        assert!(!root_loading.list_unchanged(Arc::new(loading)));
+        assert!(root_loading.list_unchanged(Arc::new(initial.clone())));
+        let (opened, _) = crate::state::reduce(
+            &initial,
+            Event::Intent(Intent::SetProjectExpanded {
+                project_id: "old".into(),
+                expanded: true,
+            }),
+        );
+        assert!(opened.thread_list().unwrap().projects[0].expanded);
+        assert!(!opened.list_unchanged(Arc::new(initial)));
+        let mut disconnected = opened.clone();
+        disconnected.connected = false;
+        assert!(
+            disconnected.thread_list().unwrap().projects[0]
+                .error
+                .is_some()
+        );
+        assert!(!disconnected.list_unchanged(Arc::new(opened.clone())));
+        let key = OperationKey::ProjectList {
+            project_id: "old".into(),
+        };
+        let mut loading = opened.clone();
+        Arc::make_mut(&mut loading.operations).insert(
+            key.clone(),
+            OperationState {
+                generation: 1,
+                phase: OperationPhase::Running,
+            },
+        );
+        assert!(loading.thread_list().unwrap().projects[0].loading);
+        assert!(!loading.list_unchanged(Arc::new(opened)));
+        let mut failed = loading.clone();
+        Arc::make_mut(&mut failed.operations)
+            .get_mut(&key)
+            .unwrap()
+            .generation = 2;
+        assert!(failed.list_unchanged(Arc::new(loading.clone())));
+        Arc::make_mut(&mut failed.operations)
+            .get_mut(&key)
+            .unwrap()
+            .phase = OperationPhase::Failed {
+            message: "unavailable".into(),
+        };
+        let project = &failed.thread_list().unwrap().projects[0];
+        assert!(!project.loading);
+        assert_eq!(project.error.as_deref(), Some("unavailable"));
+        assert!(!failed.list_unchanged(Arc::new(loading)));
+        let mut loaded = failed.clone();
+        ListProjectSessions { project_id: "old".into(), limit: 5, search_term: String::new() }.apply(&mut loaded, serde_json::from_value(serde_json::json!({
+            "data":[{"id":{"provider":"codex","id":"old-task"},"name":"Old task","projectId":"old","status":"running"}], "projects":[], "hasMore":false,"hasMoreProjects":false
+        })).unwrap());
+        Arc::make_mut(&mut loaded.operations).remove(&key);
+        let project = &loaded.thread_list().unwrap().projects[0];
+        assert_eq!(project.threads[0].title, "Old task");
+        assert!(project.threads[0].active);
+        assert!(!project.loading);
+        assert!(project.error.is_none());
+        assert!(!loaded.list_unchanged(Arc::new(failed)));
+        let (closed, _) = crate::state::reduce(
+            &loaded,
+            Event::Intent(Intent::SetProjectExpanded {
+                project_id: "old".into(),
+                expanded: false,
+            }),
+        );
+        assert!(!closed.thread_list().unwrap().projects[0].expanded);
+        assert!(closed.thread_list().unwrap().projects[0].threads.is_empty());
+        assert!(!closed.list_unchanged(Arc::new(loaded)));
+        let mut archived = closed.clone();
+        Arc::make_mut(&mut archived.archived_scopes).insert("previous".into(), Arc::default());
+        assert!(archived.thread_list().unwrap().notice.is_some());
+        assert!(!archived.list_unchanged(Arc::new(closed)));
+    }
 
     #[test]
     fn abi_handles_preserve_conversation_projection_identity() {
