@@ -34,15 +34,6 @@ async fn exercise(command: &[&str], expected: Value) {
         let mut lists = 0;
         // Connected owns initial reads; the command consumes that same state.
         while let Ok(Some(request)) = reader.read_request().await {
-            // The CLI closes once its command completes, cancelling unrelated initial reads.
-            if handled
-                && matches!(
-                    request["method"].as_str(),
-                    Some("host/model/list" | "host/account/list" | "host/taskActivity/read")
-                )
-            {
-                continue;
-            }
             let result = match request["method"].as_str() {
                 Some("host/session/scope") => json!("fixture-storage"),
                 Some("host/session/request") => {
@@ -110,10 +101,14 @@ async fn exercise(command: &[&str], expected: Value) {
                 None => panic!("unframed approval response is retired"),
             };
             // Keep QUIC alive until the command consumes its reply and closes.
-            writer
+            if writer
                 .reply(&request, json!({"result":result}))
                 .await
-                .unwrap();
+                .is_err()
+            {
+                // The completed CLI can cancel any remaining initial read.
+                break;
+            }
         }
         session.close();
         assert!(handled);

@@ -107,21 +107,30 @@ async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snap
     })
     .await
     .unwrap_or_else(|_| {
+        let snapshot = store.snapshot();
         panic!(
-            "Claude state did not settle: error={:?}, turns={:?}, requests={:?}",
-            store.snapshot().error,
-            store
-                .snapshot()
+            "Claude state did not settle: error={:?}, turns={:?}, requests={:?}, expanded={:?}, root={:?}, pages={:?}",
+            snapshot.error,
+            snapshot
                 .conversations
                 .values()
                 .flat_map(|thread| thread.turns.iter().flatten())
                 .map(|turn| (&turn.id, &turn.status, &turn.error))
                 .collect::<Vec<_>>(),
-            store
-                .snapshot()
+            snapshot
                 .requests()
                 .map(|request| (&request.id, &request.body))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            snapshot.expanded_projects,
+            snapshot.threads.as_ref().map(|list| (
+                list.projects.iter().map(|project| &project.id).collect::<Vec<_>>(),
+                list.data.iter().map(|thread| (&thread.id, &thread.project_id)).collect::<Vec<_>>(),
+                &list.provider_errors,
+            )),
+            snapshot.project_threads.iter().map(|(id, list)| (
+                id,
+                list.data.iter().map(|thread| &thread.id).collect::<Vec<_>>(),
+            )).collect::<Vec<_>>(),
         )
     })
 }
@@ -336,95 +345,94 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
     .expect("CLI settings delegation deadline");
 }
 
+#[rstest::rstest]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claude_submission_preserves_inputs_settings_workspaces_and_history_across_host_restart() {
+async fn claude_submission_preserves_inputs_settings_workspaces_and_history_across_host_restart(
+    #[values(false, true)] automatic: bool,
+    #[values(false, true)] selected: bool,
+    #[values("none", "image", "file")] attachment: &str,
+) {
     tokio::time::timeout(Duration::from_secs(120), async {
-        for automatic in [false, true] {
-            for selected in [false, true] {
-                for attachment in ["none", "image", "file"] {
-                    let root = tempfile::tempdir().unwrap();
-                    let root = dunce::canonicalize(root.path()).unwrap();
-                    let workspace = root.join("project");
-                    std::fs::create_dir(&workspace).unwrap();
-                    git(&workspace, &["init", "--quiet"]);
-                    git(&workspace, &["config", "core.autocrlf", "false"]);
-                    std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
-                    git(&workspace, &["add", "tracked.txt"]);
-                    git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
-                    std::fs::write(root.join("bex-projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
-                    std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
-                    let memory = Arc::new(Memory::default());
-                    let mut fixture = host(&root, memory.clone(), fixture_program()).await;
-                    let (mut store, mut endpoint) = connect(&fixture, Snapshot::default()).await;
-                    store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
-                    let key = store.snapshot().navigation.draft_key.clone();
-                    store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
-                    store.dispatch(Intent::SelectEffort { thread_id: key, effort: "low".into() }).await.unwrap();
-                    let mut previous_id = None;
-                    let mut previous_cwd = None;
-                    for number in 0..2 {
-                        let key = store.snapshot().navigation.draft_key.clone();
-                        if attachment != "none" {
-                            let path = root.join(if attachment == "image" { "photo.png" } else { "note.txt" });
-                            if attachment == "image" {
-                                std::fs::write(&path, include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png")).unwrap();
-                            } else { std::fs::write(&path, "attachment content").unwrap(); }
-                            store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
-                                draft_key: key, directory: store.snapshot().navigation.cwd.clone(),
-                                attachment: Attachment { path: path.to_str().unwrap().into(), name: path.file_name().unwrap().to_str().unwrap().into(), is_image: attachment == "image" },
-                            })).await.unwrap();
-                        }
-                        let id = send(&store, &format!("message {number}"), &format!("client-{number}")).await;
-                        if let Some(previous) = &previous_id { assert_eq!(&id, previous); }
-                        let snapshot = completed(&store, &id, number + 1, "completed").await;
-                        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
-                        assert!(snapshot.pending_submissions.is_empty());
-                        assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.drafts[&agent_core::state::DraftKey::from(&id)].attachments.is_empty());
-                        assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].model.as_ref().map(|model| model.id.as_str()), Some("default"));
-                        assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].effort.as_deref(), Some("low"));
-                        let cwd = snapshot.navigation.cwd.clone();
-                        if let Some(previous) = &previous_cwd { assert_eq!(&cwd, previous); }
-                        if selected && automatic {
-                            assert_eq!(Path::new(&cwd).file_name(), workspace.file_name());
-                            assert_eq!(Path::new(&cwd).parent().unwrap().parent().unwrap(), root.join("worktrees"));
-                        }
-                        else { assert_eq!(Path::new(&cwd), if selected { workspace.clone() } else { root.join("bex-chats") }); }
-                        let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[number];
-                        let items = turn.items.as_ref().unwrap();
-                        assert!(items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::Reasoning { .. }) && item_text(item) == Some("Fixture reasoning")));
-                        let responses: Vec<_> = items.iter().filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. })).collect();
-                        assert_eq!(responses.len(), 1, "streaming and completed blocks must not duplicate");
-                        assert!(item_text(responses[0]).unwrap().starts_with(&format!("reply {}: message {number}", number + 1)));
-                        let user = items.iter().find(|item| matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { .. })).unwrap();
-                        assert_eq!(user.client_input_id.as_deref(), Some(format!("client-{number}").as_str()));
-                        assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: format!("message {number}") })));
-                        let session = &id.id;
-                        let inputs = session_inputs(Path::new(&cwd).join(format!("claude-session-{session}.jsonl")));
-                        assert_eq!(inputs.as_array().unwrap().len(), number + 1);
-                        assert_eq!(inputs[number]["effort"], "low");
-                        assert_eq!(inputs[number]["content"].as_array().unwrap().len(), if attachment == "none" { 1 } else { 2 });
-                        if attachment == "image" { assert_eq!(inputs[number]["content"][1]["source"]["media_type"], "image/png"); }
-                        if attachment == "file" { assert!(inputs[number]["content"][1]["text"].as_str().unwrap().contains("note.txt")); }
-                        listed(&store, &id, selected.then_some("project")).await;
-                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
-                        assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
-                        let saved: Snapshot = serde_json::from_slice(&serde_json::to_vec(store.snapshot().as_ref()).unwrap()).unwrap();
-                        store.close().await.unwrap();
-                        endpoint.close().await;
-                        fixture.close().await.unwrap();
-                        fixture = host(&root, memory.clone(), fixture_program()).await;
-                        (store, endpoint) = connect(&fixture, saved).await;
-                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
-                        assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
-                        previous_id = Some(id);
-                        previous_cwd = Some(cwd);
-                    }
-                    store.close().await.unwrap();
-                    endpoint.close().await;
-                    fixture.close().await.unwrap();
-                }
+        let root = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(root.path()).unwrap();
+        let workspace = root.join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        git(&workspace, &["init", "--quiet"]);
+        git(&workspace, &["config", "core.autocrlf", "false"]);
+        std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
+        git(&workspace, &["add", "tracked.txt"]);
+        git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
+        std::fs::write(root.join("bex-projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
+        std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
+        let memory = Arc::new(Memory::default());
+        let mut fixture = host(&root, memory.clone(), fixture_program()).await;
+        let (mut store, mut endpoint) = connect(&fixture, Snapshot::default()).await;
+        store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
+        store.dispatch(Intent::SelectEffort { thread_id: key, effort: "low".into() }).await.unwrap();
+        let mut previous_id = None;
+        let mut previous_cwd = None;
+        for number in 0..2 {
+            let key = store.snapshot().navigation.draft_key.clone();
+            if attachment != "none" {
+                let path = root.join(if attachment == "image" { "photo.png" } else { "note.txt" });
+                if attachment == "image" {
+                    std::fs::write(&path, include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png")).unwrap();
+                } else { std::fs::write(&path, "attachment content").unwrap(); }
+                store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                    draft_key: key, directory: store.snapshot().navigation.cwd.clone(),
+                    attachment: Attachment { path: path.to_str().unwrap().into(), name: path.file_name().unwrap().to_str().unwrap().into(), is_image: attachment == "image" },
+                })).await.unwrap();
             }
+            let id = send(&store, &format!("message {number}"), &format!("client-{number}")).await;
+            if let Some(previous) = &previous_id { assert_eq!(&id, previous); }
+            let snapshot = completed(&store, &id, number + 1, "completed").await;
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            assert!(snapshot.pending_submissions.is_empty());
+            assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.drafts[&agent_core::state::DraftKey::from(&id)].attachments.is_empty());
+            assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].model.as_ref().map(|model| model.id.as_str()), Some("default"));
+            assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].effort.as_deref(), Some("low"));
+            let cwd = snapshot.navigation.cwd.clone();
+            if let Some(previous) = &previous_cwd { assert_eq!(&cwd, previous); }
+            if selected && automatic {
+                assert_eq!(Path::new(&cwd).file_name(), workspace.file_name());
+                assert_eq!(Path::new(&cwd).parent().unwrap().parent().unwrap(), root.join("worktrees"));
+            }
+            else { assert_eq!(Path::new(&cwd), if selected { workspace.clone() } else { root.join("bex-chats") }); }
+            let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[number];
+            let items = turn.items.as_ref().unwrap();
+            assert!(items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::Reasoning { .. }) && item_text(item) == Some("Fixture reasoning")));
+            let responses: Vec<_> = items.iter().filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. })).collect();
+            assert_eq!(responses.len(), 1, "streaming and completed blocks must not duplicate");
+            assert!(item_text(responses[0]).unwrap().starts_with(&format!("reply {}: message {number}", number + 1)));
+            let user = items.iter().find(|item| matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { .. })).unwrap();
+            assert_eq!(user.client_input_id.as_deref(), Some(format!("client-{number}").as_str()));
+            assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: format!("message {number}") })));
+            let session = &id.id;
+            let inputs = session_inputs(Path::new(&cwd).join(format!("claude-session-{session}.jsonl")));
+            assert_eq!(inputs.as_array().unwrap().len(), number + 1);
+            assert_eq!(inputs[number]["effort"], "low");
+            assert_eq!(inputs[number]["content"].as_array().unwrap().len(), if attachment == "none" { 1 } else { 2 });
+            if attachment == "image" { assert_eq!(inputs[number]["content"][1]["source"]["media_type"], "image/png"); }
+            if attachment == "file" { assert!(inputs[number]["content"][1]["text"].as_str().unwrap().contains("note.txt")); }
+            listed(&store, &id, selected.then_some("project")).await;
+            store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+            assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
+            let saved: Snapshot = serde_json::from_slice(&serde_json::to_vec(store.snapshot().as_ref()).unwrap()).unwrap();
+            store.close().await.unwrap();
+            endpoint.close().await;
+            fixture.close().await.unwrap();
+            fixture = host(&root, memory.clone(), fixture_program()).await;
+            (store, endpoint) = connect(&fixture, saved).await;
+            store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+            assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
+            previous_id = Some(id);
+            previous_cwd = Some(cwd);
         }
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
     }).await.expect("Claude input and restart matrix deadline");
 }
 
@@ -844,90 +852,90 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
     .expect("unconfigured Claude deadline");
 }
 
+#[rstest::rstest]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable() {
+async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable(
+    #[values(false, true)] automatic: bool,
+    #[values(false, true)] selected: bool,
+) {
     tokio::time::timeout(Duration::from_secs(90), async {
-        for automatic in [false, true] {
-            for selected in [false, true] {
-                let root = tempfile::tempdir().unwrap();
-                let root = dunce::canonicalize(root.path()).unwrap();
-                let workspace = root.join("project");
-                std::fs::create_dir(&workspace).unwrap();
-                git(&workspace, &["init", "--quiet"]);
-                git(&workspace, &["config", "core.autocrlf", "false"]);
-                std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
-                git(&workspace, &["add", "tracked.txt"]);
-                git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
-                std::fs::write(root.join("bex-projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
-                std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
-                let config = AppServerConfig { program: root.join("missing-codex"), ..Default::default() };
-                let memory = Arc::new(Memory::default());
-                let mut saved = Snapshot::default();
-                let mut thread_id: Option<agent_protocol::session::SessionRef> = None;
-                let mut cwd = None;
-                for index in 0..2 {
-                    let fixture = HostFixture::start(&root, config.clone(), memory.clone(), "Independent Host", false, Some(fixture_program())).await.unwrap();
-                    let (store, endpoint) = connect(&fixture, saved).await;
-                    assert!(store.snapshot().connected);
-                    assert!(store.snapshot().model_errors.contains_key("codex"));
-                    assert!(store.snapshot().models.iter().all(|model| model.model.provider == ProviderKind::Claude));
-                    if let Some(id) = &thread_id {
-                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
-                    } else {
-                        store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
-                        let key = store.snapshot().navigation.draft_key.clone();
-                        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
-                    }
-                    let id = send(&store, &format!("independent {index}"), &format!("independent-{index}")).await;
-                    let snapshot = completed(&store, &id, index + 1, "completed").await;
-                    assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
-                    assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.pending_submissions.is_empty());
-                    let current = snapshot.conversations[&id].cwd.clone().unwrap();
-                    if let Some(previous) = &cwd { assert_eq!(previous, &current); }
-                    if selected && automatic {
-                        assert_eq!(Path::new(&current).file_name(), workspace.file_name());
-                        assert_eq!(Path::new(&current).parent().unwrap().parent().unwrap(), root.join("worktrees"));
-                    }
-                    else { assert_eq!(Path::new(&current), if selected { workspace.clone() } else { root.join("bex-chats") }); }
-                    let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
-                    assert!(turns[index].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
-                    let snapshot = listed(&store, &id, selected.then_some("project")).await;
-                    let list = snapshot.threads.as_ref().unwrap();
-                    assert!(list.provider_errors.as_ref().unwrap()["codex"]["message"].is_string());
-                    let management = fixture.local().await.unwrap();
-                    let status = management.peer.call(&rpc::ReadHostStatus {}).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-                    assert!(status["providerErrors"]["codex"]["message"].is_string());
-                    if selected {
-                        let path = Path::new(&current).join("tracked.txt");
-                        let listed = management.peer.call(&serde_json::from_value::<op::ListFiles>(json!({"path":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-                        assert!(listed["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "tracked.txt"));
-                        let read = management.peer.request::<models::FileContent>(&agent_protocol::protocol::Call::ReadFile(serde_json::from_value::<op::ListFiles>(json!({"path":path})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-                        let contents = format!("workspace edit {index}\n");
-                        let saved_file = management.peer.call(&serde_json::from_value::<rpc::WriteFile>(json!({"path":path,"revision":read["revision"],"text":contents})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap_or_else(|error| panic!("automatic={automatic}, selected={selected}, index={index}, readonly={}: {error:?}", std::fs::metadata(&path).unwrap().permissions().readonly()));
-                        assert_eq!(saved_file["text"], contents);
-                        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
-                        let review = management.peer.call(&serde_json::from_value::<rpc::ReviewWorkspace>(json!({"cwd":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-                        assert!(review["files"].as_array().unwrap().iter().any(|file| file["path"] == "tracked.txt"));
-                    }
-                    let drafts = store.snapshot().drafts.clone();
-                    let dictation = management.peer.request::<rpc::Transcription>(&agent_protocol::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"preparation":null,"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
-                    assert!(dictation.is_err());
-                    assert_eq!(*store.snapshot().drafts, *drafts);
-                    assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());
-                    let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
-                    let before = count_worktrees();
-                    assert!(management.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","model":{"provider":"codex","id":"fixture-model"},"cwd":current})).unwrap()).await.is_err());
-                    assert_eq!(count_worktrees(), before, "an unavailable backend must not create a worktree");
-                    assert!(management.peer.call(&rpc::ReadHostStatus {}).await.is_ok());
-                    management.close().await;
-                    saved = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
-                    thread_id = Some(id);
-                    cwd = Some(current);
-                    store.close().await.unwrap();
-                    endpoint.close().await;
-                    fixture.close().await.unwrap();
-                }
+        let root = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(root.path()).unwrap();
+        let workspace = root.join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        git(&workspace, &["init", "--quiet"]);
+        git(&workspace, &["config", "core.autocrlf", "false"]);
+        std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
+        git(&workspace, &["add", "tracked.txt"]);
+        git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
+        std::fs::write(root.join("bex-projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
+        std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
+        let config = AppServerConfig { program: root.join("missing-codex"), ..Default::default() };
+        let memory = Arc::new(Memory::default());
+        let mut saved = Snapshot::default();
+        let mut thread_id: Option<agent_protocol::session::SessionRef> = None;
+        let mut cwd = None;
+        for index in 0..2 {
+            let fixture = HostFixture::start(&root, config.clone(), memory.clone(), "Independent Host", false, Some(fixture_program())).await.unwrap();
+            let (store, endpoint) = connect(&fixture, saved).await;
+            assert!(store.snapshot().connected);
+            assert!(store.snapshot().model_errors.contains_key("codex"));
+            assert!(store.snapshot().models.iter().all(|model| model.model.provider == ProviderKind::Claude));
+            if let Some(id) = &thread_id {
+                store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+            } else {
+                store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                let key = store.snapshot().navigation.draft_key.clone();
+                store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
             }
+            let id = send(&store, &format!("independent {index}"), &format!("independent-{index}")).await;
+            let snapshot = completed(&store, &id, index + 1, "completed").await;
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.pending_submissions.is_empty());
+            let current = snapshot.conversations[&id].cwd.clone().unwrap();
+            if let Some(previous) = &cwd { assert_eq!(previous, &current); }
+            if selected && automatic {
+                assert_eq!(Path::new(&current).file_name(), workspace.file_name());
+                assert_eq!(Path::new(&current).parent().unwrap().parent().unwrap(), root.join("worktrees"));
+            }
+            else { assert_eq!(Path::new(&current), if selected { workspace.clone() } else { root.join("bex-chats") }); }
+            let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
+            assert!(turns[index].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
+            let snapshot = listed(&store, &id, selected.then_some("project")).await;
+            let list = snapshot.threads.as_ref().unwrap();
+            assert!(list.provider_errors.as_ref().unwrap()["codex"]["message"].is_string());
+            let management = fixture.local().await.unwrap();
+            let status = management.peer.call(&rpc::ReadHostStatus {}).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+            assert!(status["providerErrors"]["codex"]["message"].is_string());
+            if selected {
+                let path = Path::new(&current).join("tracked.txt");
+                let listed = management.peer.call(&serde_json::from_value::<op::ListFiles>(json!({"path":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+                assert!(listed["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "tracked.txt"));
+                let read = management.peer.request::<models::FileContent>(&agent_protocol::protocol::Call::ReadFile(serde_json::from_value::<op::ListFiles>(json!({"path":path})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+                let contents = format!("workspace edit {index}\n");
+                let saved_file = management.peer.call(&serde_json::from_value::<rpc::WriteFile>(json!({"path":path,"revision":read["revision"],"text":contents})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap_or_else(|error| panic!("automatic={automatic}, selected={selected}, index={index}, readonly={}: {error:?}", std::fs::metadata(&path).unwrap().permissions().readonly()));
+                assert_eq!(saved_file["text"], contents);
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+                let review = management.peer.call(&serde_json::from_value::<rpc::ReviewWorkspace>(json!({"cwd":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+                assert!(review["files"].as_array().unwrap().iter().any(|file| file["path"] == "tracked.txt"));
+            }
+            let drafts = store.snapshot().drafts.clone();
+            let dictation = management.peer.request::<rpc::Transcription>(&agent_protocol::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"preparation":null,"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
+            assert!(dictation.is_err());
+            assert_eq!(*store.snapshot().drafts, *drafts);
+            assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());
+            let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
+            let before = count_worktrees();
+            assert!(management.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","model":{"provider":"codex","id":"fixture-model"},"cwd":current})).unwrap()).await.is_err());
+            assert_eq!(count_worktrees(), before, "an unavailable backend must not create a worktree");
+            assert!(management.peer.call(&rpc::ReadHostStatus {}).await.is_ok());
+            management.close().await;
+            saved = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
+            thread_id = Some(id);
+            cwd = Some(current);
+            store.close().await.unwrap();
+            endpoint.close().await;
+            fixture.close().await.unwrap();
         }
     }).await.expect("independent Claude deadline");
 }

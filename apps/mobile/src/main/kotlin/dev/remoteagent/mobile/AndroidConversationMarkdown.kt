@@ -7,10 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,10 +28,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -103,24 +103,19 @@ internal fun ConversationBlocks(
                                         null -> MaterialTheme.typography.bodyLarge
                                         else -> MaterialTheme.typography.titleMedium
                                     }
-                                Row(
-                                    Modifier.height(IntrinsicSize.Min)
-                                        .padding(
-                                            start =
-                                                (block.style.listDepth.toInt() - 1)
-                                                    .coerceAtLeast(0)
-                                                    .times(LIST_INDENT_DP)
-                                                    .dp
+                                val quoteColor = MaterialTheme.colorScheme.outline
+                                Box(
+                                    Modifier.padding(
+                                            start = (block.style.listDepth.toInt() - 1)
+                                                .coerceAtLeast(0).times(LIST_INDENT_DP).dp
                                         )
+                                        .then(if (block.style.quoted) {
+                                            Modifier.drawBehind {
+                                                drawLine(quoteColor, Offset(1.dp.toPx(), 0f),
+                                                    Offset(1.dp.toPx(), size.height), 2.dp.toPx())
+                                            }.padding(start = 12.dp)
+                                        } else Modifier)
                                 ) {
-                                    if (block.style.quoted) {
-                                        Box(
-                                            Modifier.width(2.dp)
-                                                .fillMaxHeight()
-                                                .background(MaterialTheme.colorScheme.outline)
-                                        )
-                                        Spacer(Modifier.width(10.dp))
-                                    }
                                     MarkdownText(block.runs, style, block.style.marker, openFile)
                                 }
                             }
@@ -222,6 +217,7 @@ private fun MarkdownTable(table: MarkdownBlock.Table, index: Int, openFile: (Str
                             Modifier.width(width)
                                 .padding(10.dp)
                                 .testTag("markdown.cell.$index.$row.$column")
+                                .semantics(mergeDescendants = true) {}
                         ) {
                             MarkdownText(
                                 cell.runs,
@@ -284,53 +280,56 @@ private fun MarkdownText(
     openFile: (String) -> Unit,
     alignment: TextAlign = TextAlign.Left,
 ) {
-    val density = LocalDensity.current
-    BoxWithConstraints {
-        val fontWidth =
-            style.fontSize.value.takeIf { it.isFinite() && it > 0 } ?: CHIP_DEFAULT_FONT_SP
-        val maxChipEm = maxWidth.value / (fontWidth * density.fontScale)
-        val chips =
-            runs
-                .mapIndexedNotNull { index, run -> run.file?.let { index.toString() to it } }
-                .toMap()
-        val inline = chips.mapValues { (_, file) ->
-            androidx.compose.foundation.text.InlineTextContent(
-                androidx.compose.ui.text.Placeholder(
-                    minOf(
-                            file.label
-                                .codePointCount(0, file.label.length)
-                                .coerceAtMost(CHIP_MAX_CHARACTERS) * CHIP_CHARACTER_WIDTH_EM +
-                                CHIP_PADDING_EM,
-                            maxChipEm,
-                        )
-                        .em,
-                    CHIP_HEIGHT_EM.em,
-                    androidx.compose.ui.text.PlaceholderVerticalAlign.TextCenter,
-                )
-            ) {
-                FileChip(file.label, file.kind, style.fontSize)
-            }
+    val chips =
+        runs
+            .mapIndexedNotNull { index, run -> run.file?.let { index.toString() to it } }
+            .toMap()
+    val linkColor = MaterialTheme.colorScheme.primary
+    val styledRuns = runs.map { markdownText(listOf(it)) }
+    val text = buildAnnotatedString {
+        if (marker != null) append("$marker ")
+        runs.forEachIndexed { index, run ->
+            val link = run.link
+            if (run.file != null && link != null) {
+                withLink(LinkAnnotation.Clickable(index.toString()) { openFile(link) }) {
+                    appendInlineContent(index.toString(), "[${run.file!!.label}](<$link>)")
+                }
+            } else if (link != null) {
+                withStyle(
+                    SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
+                ) {
+                    withLink(LinkAnnotation.Url(link)) { append(styledRuns[index]) }
+                }
+            } else append(styledRuns[index])
         }
-        val linkColor = MaterialTheme.colorScheme.primary
-        val styledRuns = runs.map { markdownText(listOf(it)) }
-        val text = buildAnnotatedString {
-            if (marker != null) append("$marker ")
-            runs.forEachIndexed { index, run ->
-                val link = run.link
-                if (run.file != null && link != null) {
-                    withLink(LinkAnnotation.Clickable(index.toString()) { openFile(link) }) {
-                        appendInlineContent(index.toString(), "[${run.file!!.label}](<$link>)")
-                    }
-                } else if (link != null) {
-                    withStyle(
-                        SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
-                    ) {
-                        withLink(LinkAnnotation.Url(link)) { append(styledRuns[index]) }
-                    }
-                } else append(styledRuns[index])
+    }
+    if (chips.isEmpty()) {
+        Text(text, style = style, textAlign = alignment)
+    } else {
+        BoxWithConstraints {
+            val density = LocalDensity.current
+            val fontWidth = style.fontSize.value.takeIf { it.isFinite() && it > 0 } ?: CHIP_DEFAULT_FONT_SP
+            val maxChipEm = maxWidth.value / (fontWidth * density.fontScale)
+            val inline = chips.mapValues { (_, file) ->
+                androidx.compose.foundation.text.InlineTextContent(
+                    androidx.compose.ui.text.Placeholder(
+                        minOf(
+                                file.label
+                                    .codePointCount(0, file.label.length)
+                                    .coerceAtMost(CHIP_MAX_CHARACTERS) * CHIP_CHARACTER_WIDTH_EM +
+                                    CHIP_PADDING_EM,
+                                maxChipEm,
+                            )
+                            .em,
+                        CHIP_HEIGHT_EM.em,
+                        androidx.compose.ui.text.PlaceholderVerticalAlign.TextCenter,
+                    )
+                ) {
+                    FileChip(file.label, file.kind, style.fontSize)
+                }
             }
+            Text(text, style = style, textAlign = alignment, inlineContent = inline)
         }
-        Text(text, style = style, textAlign = alignment, inlineContent = inline)
     }
 }
 
