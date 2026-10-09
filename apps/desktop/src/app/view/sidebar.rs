@@ -53,6 +53,7 @@ impl SidebarRow {
                         .size_4()
                         .flex_shrink_0()
                         .object_fit(ObjectFit::Contain)
+                        .bg(rgb(0x777777))
                         .rounded(px(4.))
                         .into_any_element()
                 } else {

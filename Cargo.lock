@@ -1056,6 +1056,7 @@ dependencies = [
  "rfd",
  "rubato",
  "rusqlite",
+ "rust-embed",
  "security-framework",
  "serde_json",
  "sha1 0.10.7",
