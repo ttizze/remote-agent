@@ -58,7 +58,7 @@ struct ReasoningStrengthIcon: View {
         HStack(alignment: .bottom, spacing: 2) {
             ForEach(0 ..< count, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(index < Int(level) ? Color.accentColor : Color.secondary.opacity(0.35))
+                    .fill(index < Int(level) ? Color.primary : Color.secondary.opacity(0.35))
                     .frame(width: 3, height: 6 + 10 * CGFloat(index + 1) / CGFloat(count))
             }
         }

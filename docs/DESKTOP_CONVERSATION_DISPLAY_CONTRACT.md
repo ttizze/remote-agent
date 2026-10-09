@@ -210,6 +210,10 @@ that order immediately before microphone and send, aligned to the right.
 Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
+Send/stop, Fast, and reasoning-strength controls use monochrome colors.
+Fast's active state and filled reasoning bars use the foreground color; inactive
+states remain muted. Desktop send/stop uses a light background with a dark icon;
+iPhone send/stop uses the primary foreground color.
 
 The model name opens a searchable catalog. For Claude, the Host forwards the SDK's
 `displayName` unchanged as the model name, without a provider prefix or text from

@@ -468,7 +468,15 @@ impl Desktop {
                         .child(self.model_menu(cx))
                         .child(self.effort_control("model-effort", false, cx))
                         .child(microphone)
-                        .child(send.large().rounded_full().w(px(40.)).h(px(40.)).primary()),
+                        .child(
+                            send.large().rounded_full().w(px(40.)).h(px(40.)).custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(rgb(appearance::FOREGROUND).into())
+                                    .foreground(rgb(appearance::SIDEBAR).into())
+                                    .hover(rgb(0xd4d4d4).into())
+                                    .active(rgb(appearance::MUTED).into()),
+                            ),
+                        ),
                 )
             })
             .when(phase.is_some(), |composer| {
