@@ -18,7 +18,7 @@ extension BexLaunchUITests {
         let prompt = app.staticTexts["task.prompt"]
         let folder = app.buttons["task.folder"]
         let environment = app.buttons["task.environment"]
-        let emptyChat = app.descendants(matching: .any)["task.empty"]
+        let emptyChat = app.scrollViews["task.empty"]
         XCTAssertTrue(prompt.waitForExistence(timeout: 10))
         XCTAssertTrue(folder.isHittable)
         XCTAssertTrue(environment.isHittable)

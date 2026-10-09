@@ -205,17 +205,14 @@ struct ThreadScreen: View {
                         }
                     }
                 } else if model.isNewThread {
-                    GeometryReader { geometry in
-                        ScrollView {
-                            newThreadContext
-                                .padding(24)
-                                .frame(maxWidth: .infinity)
-                                .frame(minHeight: geometry.size.height)
-                        }
+                    ScrollView {
+                        newThreadContext
+                            .padding(.horizontal, 24)
+                            .frame(maxWidth: .infinity)
                     }
-                    .clipped()
-                    // The native scroll frame extends under safe-area insets; group the visible viewport.
-                    .accessibilityElement(children: .contain)
+                    .defaultScrollAnchor(.center, for: .alignment)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("task.empty")
                 } else if let id = model.selectedThreadId, model.notice != nil {
                     Button("再試行") { model.openThread(id) }
