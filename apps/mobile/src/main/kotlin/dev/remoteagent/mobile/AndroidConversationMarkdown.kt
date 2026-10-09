@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
@@ -57,6 +58,7 @@ private const val FILE_CHIP_COLOR = 0xFF0096AF
 private const val OPAQUE_ALPHA_MASK = 0xFF000000L
 private const val DARK_SURFACE_LUMINANCE = 0.5f
 private const val COPY_FEEDBACK_MILLIS = 1200L
+private const val CHIP_DEFAULT_FONT_SP = 18f
 private const val CHIP_MAX_CHARACTERS = 28
 private const val CHIP_CHARACTER_WIDTH_EM = 0.56f
 private const val CHIP_PADDING_EM = 2.1f
@@ -282,39 +284,54 @@ private fun MarkdownText(
     openFile: (String) -> Unit,
     alignment: TextAlign = TextAlign.Left,
 ) {
-    val chips =
-        runs.mapIndexedNotNull { index, run -> run.file?.let { index.toString() to it } }.toMap()
-    val inline = chips.mapValues { (_, file) ->
-        androidx.compose.foundation.text.InlineTextContent(
-            androidx.compose.ui.text.Placeholder(
-                (file.label.codePointCount(0, file.label.length).coerceAtMost(CHIP_MAX_CHARACTERS) *
-                        CHIP_CHARACTER_WIDTH_EM + CHIP_PADDING_EM)
-                    .em,
-                CHIP_HEIGHT_EM.em,
-                androidx.compose.ui.text.PlaceholderVerticalAlign.TextCenter,
-            )
-        ) {
-            FileChip(file.label, file.kind, style.fontSize)
+    val density = LocalDensity.current
+    BoxWithConstraints {
+        val fontWidth =
+            style.fontSize.value.takeIf { it.isFinite() && it > 0 } ?: CHIP_DEFAULT_FONT_SP
+        val maxChipEm = maxWidth.value / (fontWidth * density.fontScale)
+        val chips =
+            runs
+                .mapIndexedNotNull { index, run -> run.file?.let { index.toString() to it } }
+                .toMap()
+        val inline = chips.mapValues { (_, file) ->
+            androidx.compose.foundation.text.InlineTextContent(
+                androidx.compose.ui.text.Placeholder(
+                    minOf(
+                            file.label
+                                .codePointCount(0, file.label.length)
+                                .coerceAtMost(CHIP_MAX_CHARACTERS) * CHIP_CHARACTER_WIDTH_EM +
+                                CHIP_PADDING_EM,
+                            maxChipEm,
+                        )
+                        .em,
+                    CHIP_HEIGHT_EM.em,
+                    androidx.compose.ui.text.PlaceholderVerticalAlign.TextCenter,
+                )
+            ) {
+                FileChip(file.label, file.kind, style.fontSize)
+            }
         }
-    }
-    val linkColor = MaterialTheme.colorScheme.primary
-    val styledRuns = runs.map { markdownText(listOf(it)) }
-    val text = buildAnnotatedString {
-        if (marker != null) append("$marker ")
-        runs.forEachIndexed { index, run ->
-            val link = run.link
-            if (run.file != null && link != null) {
-                withLink(LinkAnnotation.Clickable(index.toString()) { openFile(link) }) {
-                    appendInlineContent(index.toString(), "[${run.file!!.label}](<$link>)")
-                }
-            } else if (link != null) {
-                withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
-                    withLink(LinkAnnotation.Url(link)) { append(styledRuns[index]) }
-                }
-            } else append(styledRuns[index])
+        val linkColor = MaterialTheme.colorScheme.primary
+        val styledRuns = runs.map { markdownText(listOf(it)) }
+        val text = buildAnnotatedString {
+            if (marker != null) append("$marker ")
+            runs.forEachIndexed { index, run ->
+                val link = run.link
+                if (run.file != null && link != null) {
+                    withLink(LinkAnnotation.Clickable(index.toString()) { openFile(link) }) {
+                        appendInlineContent(index.toString(), "[${run.file!!.label}](<$link>)")
+                    }
+                } else if (link != null) {
+                    withStyle(
+                        SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
+                    ) {
+                        withLink(LinkAnnotation.Url(link)) { append(styledRuns[index]) }
+                    }
+                } else append(styledRuns[index])
+            }
         }
+        Text(text, style = style, textAlign = alignment, inlineContent = inline)
     }
-    Text(text, style = style, textAlign = alignment, inlineContent = inline)
 }
 
 @Composable

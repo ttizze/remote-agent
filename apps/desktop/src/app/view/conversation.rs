@@ -349,7 +349,7 @@ impl Desktop {
                                         }),
                                 ),
                         )
-                        .child(Self::activity_text(format!("output-{id}"), &output, ""))
+                        .child(Self::activity_text(format!("output-{id}"), output, ""))
                         .child(
                             div()
                                 .text_sm()

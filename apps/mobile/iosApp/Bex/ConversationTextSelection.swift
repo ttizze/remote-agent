@@ -21,7 +21,7 @@ struct AssistantSelectableText: UIViewRepresentable {
         Coordinator(self)
     }
 
-    func makeUIView(context: Context) -> UITextView {
+    func makeUIView(context: Context) -> ConversationTextView {
         let view = ConversationTextView(usingTextLayoutManager: false)
         view.scrollsToTop = false
         view.isEditable = false
@@ -39,7 +39,7 @@ struct AssistantSelectableText: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: UITextView, context: Context) {
+    func updateUIView(_ view: ConversationTextView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
         guard coordinator.blocks != blocks || coordinator.sizeCategory != sizeCategory || coordinator
@@ -47,24 +47,18 @@ struct AssistantSelectableText: UIViewRepresentable {
         coordinator.blocks = blocks
         coordinator.sizeCategory = sizeCategory
         coordinator.colorScheme = colorScheme
-        let content = ConversationAttributedText.attributedText(blocks, dark: colorScheme == .dark)
-        let range = view.selectedRange
-        let old = view.text as NSString
-        let next = content.string as NSString
-        let keepSelection = range.length > 0 && NSMaxRange(range) <= old.length && NSMaxRange(range) <= next.length
-            && ConversationAttributedText.selectedText(view.attributedText, range: range) == ConversationAttributedText
-            .selectedText(
-                content,
-                range: range
-            )
-        view.textStorage.setAttributedString(content)
-        view.selectedRange = keepSelection ? range : NSRange(location: 0, length: 0)
-        view.invalidateIntrinsicContentSize()
+        view.setContent(ConversationAttributedText.attributedText(blocks, dark: colorScheme == .dark,
+                                                                  attachmentWidth: view.attachmentWidth))
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context _: Context) -> CGSize? {
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: ConversationTextView, context _: Context) -> CGSize? {
         let width = proposal.width ?? ceil(uiView.attributedText.size().width)
         guard width > 0 else { return nil }
+        if uiView.attachmentWidth != width {
+            uiView.attachmentWidth = width
+            uiView.setContent(ConversationAttributedText.attributedText(blocks, dark: colorScheme == .dark,
+                                                                        attachmentWidth: width))
+        }
         let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         return CGSize(width: width, height: size.height)
     }
@@ -135,7 +129,7 @@ struct AssistantSelectableText: UIViewRepresentable {
 
 private enum ConversationAttributedText {
     static func attributedText(_ blocks: [ConversationMarkdownContent.Block],
-                               dark: Bool) -> NSAttributedString {
+                               dark: Bool, attachmentWidth: CGFloat) -> NSAttributedString {
         let text = NSMutableAttributedString(string: "")
         for (index, block) in blocks.enumerated() {
             if index > 0 {
@@ -152,7 +146,7 @@ private enum ConversationAttributedText {
             }
             for run in block.runs {
                 if let file = run.file, let link = run.link {
-                    text.append(fileChip(file, link: link, font: font))
+                    text.append(fileChip(file, link: link, font: font, maxWidth: attachmentWidth))
                 } else {
                     text.append(NSAttributedString(
                         string: run.text,
@@ -226,13 +220,14 @@ private enum ConversationAttributedText {
 
     private static let copySource = NSAttributedString.Key("bex.markdown-copy")
 
-    private static func fileChip(_ file: MarkdownFileReference, link: String, font: UIFont) -> NSAttributedString {
+    private static func fileChip(_ file: MarkdownFileReference, link: String, font: UIFont,
+                                 maxWidth: CGFloat) -> NSAttributedString {
         let labelFont = UIFont.systemFont(ofSize: font.pointSize * 0.86, weight: .medium)
         let label = file.label as NSString
         let labelWidth = min(label.size(withAttributes: [.font: labelFont]).width, font.pointSize * 16)
         let height = ceil(font.pointSize * 1.42)
         let iconSize = font.pointSize * 0.9
-        let width = min(ceil(labelWidth + iconSize + 17), 300)
+        let width = max(iconSize + 18, min(ceil(labelWidth + iconSize + 17), maxWidth))
         let color = UIColor.systemTeal
         let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height)).image { _ in
             let rect = CGRect(x: 0.5, y: 0.5, width: width - 1, height: height - 1)
@@ -293,7 +288,24 @@ private enum ConversationAttributedText {
 }
 
 /// Decorations stay in the same native text view as selectable prose.
-private final class ConversationTextView: UITextView {
+final class ConversationTextView: UITextView {
+    var attachmentWidth: CGFloat = 300
+
+    func setContent(_ content: NSAttributedString) {
+        let range = selectedRange
+        let old = text as NSString
+        let next = content.string as NSString
+        let keepSelection = range.length > 0 && NSMaxRange(range) <= old.length && NSMaxRange(range) <= next.length
+            && ConversationAttributedText.selectedText(attributedText, range: range) == ConversationAttributedText
+            .selectedText(
+                content,
+                range: range
+            )
+        textStorage.setAttributedString(content)
+        selectedRange = keepSelection ? range : NSRange(location: 0, length: 0)
+        invalidateIntrinsicContentSize()
+    }
+
     static let quote = NSAttributedString.Key("bex.quote")
     static let rule = NSAttributedString.Key("bex.rule")
 
