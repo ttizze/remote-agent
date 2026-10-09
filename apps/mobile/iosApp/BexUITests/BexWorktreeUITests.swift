@@ -2,12 +2,12 @@ import XCTest
 
 extension BexLaunchUITests {
     func testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus() throws {
-        let app = try connectedSimulatorApp(expandProject: false)
+        let app = try connectedSimulatorApp()
         try useSimulatorListFixture("merge-worktree/fresh")
+        // Refresh updates the open project while retaining closed project pages.
         refreshSimulatorTaskList(app)
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
-        project.tap()
         let running = app.descendants(matching: .any)["tasks.running.codex:merge-active"]
         XCTAssertTrue(running.waitForExistence(timeout: 10))
         let merged = app.descendants(matching: .any)["tasks.merged.codex:merge-active"]

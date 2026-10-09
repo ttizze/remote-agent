@@ -157,6 +157,8 @@ async fn listed(
     store: &Store,
     id: &agent_protocol::session::SessionRef,
     project_id: Option<&str>,
+    fixture: &HostFixture,
+    root: &Path,
 ) -> Arc<Snapshot> {
     if let Some(project_id) = project_id {
         until(store, |snapshot| {
@@ -180,15 +182,74 @@ async fn listed(
         )))
         .await
         .unwrap();
-    until(store, |snapshot| {
-        snapshot.thread_list().is_some_and(|list| {
-            list.threads
-                .iter()
-                .chain(list.projects.iter().flat_map(|project| &project.threads))
-                .any(|thread| &thread.id == id)
-        })
+    let mut updates = store.subscribe();
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.thread_list().is_some_and(|list| {
+                list.threads
+                    .iter()
+                    .chain(list.projects.iter().flat_map(|project| &project.threads))
+                    .any(|thread| &thread.id == id)
+            }) {
+                return snapshot;
+            }
+            updates.changed().await.unwrap();
+        }
     })
-    .await
+    .await;
+    match result {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            let snapshot = store.snapshot();
+            let path = root
+                .join("claude-native/projects/fixture-native-project")
+                .join(format!("{}.jsonl", id.id));
+            let native = std::fs::read_to_string(path).map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .map(|row| {
+                        (
+                            row["type"].clone(),
+                            row["sessionId"].clone(),
+                            row["cwd"].clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let management = fixture.local().await.unwrap();
+            let mut query = (*snapshot.list_query).clone();
+            query.project_limits = Some(
+                snapshot
+                    .expanded_projects
+                    .iter()
+                    .map(|(id, limit)| (id.clone(), *limit))
+                    .collect(),
+            );
+            let raw = management
+                .peer
+                .call(&rpc::ListSessions::new(query))
+                .await
+                .unwrap();
+            management.close().await;
+            panic!(
+                "Completed Claude task missing: id={id:?}, query={:?}, operations={:?}, core={:?}, raw={:?}, native={native:?}",
+                snapshot.list_query,
+                snapshot.operations,
+                snapshot
+                    .threads
+                    .iter()
+                    .flat_map(|list| &list.data)
+                    .chain(snapshot.project_threads.values().flat_map(|list| &list.data))
+                    .map(|thread| (&thread.id, &thread.cwd, &thread.project_id))
+                    .collect::<Vec<_>>(),
+                raw.data
+                    .iter()
+                    .map(|thread| (&thread.id, &thread.cwd, &thread.project_id))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 }
 
 fn fixture_program() -> &'static Path {
@@ -416,7 +477,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
             assert_eq!(inputs[number]["content"].as_array().unwrap().len(), if attachment == "none" { 1 } else { 2 });
             if attachment == "image" { assert_eq!(inputs[number]["content"][1]["source"]["media_type"], "image/png"); }
             if attachment == "file" { assert!(inputs[number]["content"][1]["text"].as_str().unwrap().contains("note.txt")); }
-            listed(&store, &id, selected.then_some("project")).await;
+            listed(&store, &id, selected.then_some("project"), &fixture, &root).await;
             store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
             assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
             let saved: Snapshot = serde_json::from_slice(&serde_json::to_vec(store.snapshot().as_ref()).unwrap()).unwrap();
@@ -901,7 +962,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
             else { assert_eq!(Path::new(&current), if selected { workspace.clone() } else { root.join("bex-chats") }); }
             let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
             assert!(turns[index].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
-            let snapshot = listed(&store, &id, selected.then_some("project")).await;
+            let snapshot = listed(&store, &id, selected.then_some("project"), &fixture, &root).await;
             let list = snapshot.threads.as_ref().unwrap();
             assert!(list.provider_errors.as_ref().unwrap()["codex"]["message"].is_string());
             let management = fixture.local().await.unwrap();

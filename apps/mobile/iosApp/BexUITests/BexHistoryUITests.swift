@@ -337,7 +337,7 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Expanded work rows")
         let command = app.buttons.matching(NSPredicate(format: "label == %@", "./gradlew test")).firstMatch
         command.tap()
-        let fullOutput = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "DEFERRED_DETAIL_FULL_TEXT"))
+        let fullOutput = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", "DEFERRED_DETAIL_FULL_TEXT"))
             .firstMatch
         XCTAssertTrue(
             fullOutput.waitForExistence(timeout: 10),

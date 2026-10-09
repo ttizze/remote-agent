@@ -247,4 +247,43 @@ extension BexLaunchUITests {
         XCTAssertEqual(row.value as? String, "")
         captureScreen(app, named: "Completion dot cleared after opening")
     }
+
+    func testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[approval] [deferred-steer] Hold this turn")
+        XCTAssertTrue(app.buttons["request.accept"].waitForExistence(timeout: 15))
+        let command = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        let message = app.textFields["task.message"]
+        message.tap(); message.typeText("Show this additional input immediately")
+        app.buttons["task.send"].tap()
+        let sentMessages = app.textViews.matching(NSPredicate(
+            format: "identifier == %@ AND value == %@", "message.user-text", "Show this additional input immediately"
+        ))
+        let sent = sentMessages.firstMatch
+        XCTAssertTrue(sent.waitForExistence(timeout: 2), "Accepted input must be visible while its native echo is held")
+        XCTAssertTrue(sent.isHittable, "Additional input must remain visible at the latest position")
+        XCTAssertGreaterThan(sent.frame.minY, command.frame.minY, "Additional input was moved above the preceding work")
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-steer-recorded-").exists)
+        captureScreen(app, named: "Accepted additional input before native echo")
+        try simulatorFixture("release-inputs")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-steer-recorded-").waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            sentMessages.count,
+            1
+        )
+        prefixedButton(app, prefix: "turn.interrupt.").tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "3秒 作業した後に中断しました")).firstMatch
+            .waitForExistence(timeout: 15))
+        XCTAssertEqual(
+            sentMessages.count,
+            1
+        )
+        XCTAssertFalse(app.buttons["request.accept"].exists)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
+        command.tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").waitForExistence(timeout: 5))
+        XCTAssertEqual(message.value as? String, message.placeholderValue)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+    }
 }

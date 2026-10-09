@@ -71,7 +71,8 @@ extension BexLaunchUITests {
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists,
                        "Expanding one group must leave the earlier group collapsed")
         app.buttons.matching(NSPredicate(format: "label == %@", "pwd")).firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["GROUP_DETAIL_OUTPUT"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews.matching(NSPredicate(format: "value == %@", "GROUP_DETAIL_OUTPUT")).firstMatch
+            .waitForExistence(timeout: 5))
         captureScreen(app, named: "Selected command group and command details expanded")
         try simulatorFixture("release-inputs")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))

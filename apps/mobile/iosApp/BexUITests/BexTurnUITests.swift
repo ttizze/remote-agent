@@ -209,7 +209,10 @@ extension BexLaunchUITests {
         XCTAssertTrue(final.waitForExistence(timeout: 30))
         let sideID = final.identifier
         XCTAssertNotEqual(sideID, originalID)
-        XCTAssertTrue(app.staticTexts["> Needle\n\n[success] Explain this selection"].exists, app.debugDescription)
+        let sent = app.textViews.matching(NSPredicate(
+            format: "identifier == %@ AND value == %@", "message.user-text", "Needle\n[success] Explain this selection"
+        )).firstMatch
+        XCTAssertTrue(sent.exists, app.debugDescription)
         let running = app.buttons
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.interrupt.")).firstMatch
         let completed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: running)
@@ -227,7 +230,9 @@ extension BexLaunchUITests {
         let row = reopened.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(number)"]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         XCTAssertTrue(reopened.descendants(matching: .any)[sideID].waitForExistence(timeout: 20))
-        XCTAssertTrue(reopened.staticTexts["> Needle\n\n[success] Explain this selection"].exists)
+        XCTAssertTrue(reopened.textViews.matching(NSPredicate(
+            format: "identifier == %@ AND value == %@", "message.user-text", "Needle\n[success] Explain this selection"
+        )).firstMatch.exists)
     }
 
     func testSimulatorCopiesOnlySelectedMessageText() throws {
@@ -235,8 +240,11 @@ extension BexLaunchUITests {
         let text = "Needle Alpha Bravo [success]"
         try startSimulatorConversation(app, promptText: text)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
-        waitForStableFrame(app.staticTexts[text])
-        app.staticTexts[text].press(forDuration: 1.2)
+        let sent = app.textViews.matching(NSPredicate(
+            format: "identifier == %@ AND value == %@", "message.user-text", text
+        )).firstMatch
+        waitForStableFrame(sent)
+        sent.press(forDuration: 1.2)
         let fullCopy = app.buttons["コピー"]
         XCTAssertTrue(fullCopy.waitForExistence(timeout: 10)); fullCopy.tap()
         let composer = app.textFields["task.message"]
@@ -249,8 +257,8 @@ extension BexLaunchUITests {
         wait(for: [fullText], timeout: 5)
         composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count))
         XCTAssertEqual(composer.value as? String, composer.placeholderValue)
-        waitForStableFrame(app.staticTexts[text])
-        app.staticTexts[text].press(forDuration: 1.2)
+        waitForStableFrame(sent)
+        sent.press(forDuration: 1.2)
         let select = app.buttons["テキストを選択"]
         XCTAssertTrue(select.waitForExistence(timeout: 5)); select.tap()
         let selection = app.textViews["message.text-selection"]
@@ -354,43 +362,5 @@ extension BexLaunchUITests {
         let restored = reopened.descendants(matching: .any)["task.message"]
         XCTAssertTrue(restored.waitForExistence(timeout: 10))
         XCTAssertEqual(restored.value as? String, "Keep this draft")
-    }
-
-    func testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt() throws {
-        let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[approval] [deferred-steer] Hold this turn")
-        XCTAssertTrue(app.buttons["request.accept"].waitForExistence(timeout: 15))
-        let command = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        let message = app.textFields["task.message"]
-        message.tap(); message.typeText("Show this additional input immediately")
-        app.buttons["task.send"].tap()
-        let sent = app.staticTexts["Show this additional input immediately"]
-        XCTAssertTrue(sent.waitForExistence(timeout: 2), "Accepted input must be visible while its native echo is held")
-        XCTAssertTrue(sent.isHittable, "Additional input must remain visible at the latest position")
-        XCTAssertGreaterThan(sent.frame.minY, command.frame.minY, "Additional input was moved above the preceding work")
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-steer-recorded-").exists)
-        captureScreen(app, named: "Accepted additional input before native echo")
-        try simulatorFixture("release-inputs")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-steer-recorded-").waitForExistence(timeout: 10))
-        XCTAssertEqual(
-            app.staticTexts.matching(NSPredicate(format: "label == %@", "Show this additional input immediately"))
-                .count,
-            1
-        )
-        prefixedButton(app, prefix: "turn.interrupt.").tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "3秒 作業した後に中断しました")).firstMatch
-            .waitForExistence(timeout: 15))
-        XCTAssertEqual(
-            app.staticTexts.matching(NSPredicate(format: "label == %@", "Show this additional input immediately"))
-                .count,
-            1
-        )
-        XCTAssertFalse(app.buttons["request.accept"].exists)
-        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
-        command.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").waitForExistence(timeout: 5))
-        XCTAssertEqual(message.value as? String, message.placeholderValue)
-        XCTAssertFalse(app.staticTexts["notice"].exists)
     }
 }

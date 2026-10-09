@@ -34,6 +34,7 @@ class VisualizationTest {
     @Test
     fun realHostVisualizationSelectsAndReopens() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val device = UiDevice.getInstance(instrumentation)
         val base = instrumentation.targetContext
         val token = UUID.randomUUID().toString()
         val isolated =
@@ -92,10 +93,13 @@ class VisualizationTest {
                         ThreadDetailScreen(model.snapshot, model.conversation, model::perform, null, composer = {})
                 }
             }
-            val device = UiDevice.getInstance(instrumentation)
             fun verify(name: String) {
                 // UiAutomator does not advance Compose's test frame clock.
-                compose.waitUntil(20_000) { device.hasObject(By.text("01 · Git の合流")) }
+                compose.waitUntil(20_000) {
+                    // Refresh the native tree as the asynchronously loaded WebView exposes its DOM.
+                    instrumentation.uiAutomation.clearCache()
+                    device.hasObject(By.text("01 · Git の合流"))
+                }
                 compose.waitUntil(20_000) { device.hasObject(By.text("02 ブランチ＋チェックをプレビュー")) }
                 val second = device.findObject(By.text("02 ブランチ＋チェックをプレビュー"))
                 assertNotNull("The second option must be accessible in the native WebView", second)
@@ -120,7 +124,6 @@ class VisualizationTest {
                 assertNull(model.notice)
             }
         } catch (error: Throwable) {
-            val device = UiDevice.getInstance(instrumentation)
             device.takeScreenshot(File(base.getExternalFilesDir(null), "visualize-failure.png"))
             device.dumpWindowHierarchy(File(base.getExternalFilesDir(null), "visualize-failure.xml"))
             throw error
