@@ -97,6 +97,7 @@ mod tests {
                 .unwrap();
         let mut state = Snapshot::default();
         let page = crate::models::ThreadList {
+            revision: 0,
             limit: 15,
             data: vec![crate::models::Thread {
                 id: Some(id.clone()),

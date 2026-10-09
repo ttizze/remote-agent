@@ -1492,14 +1492,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn older_dispatched_list_cannot_replace_newer_notification_work() {
+    async fn older_dispatched_list_cannot_replace_newer_published_work() {
         use serde_json::json;
         let initial = Snapshot::default();
         let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
         let store = Store::new(peer, initial);
         let publications = store.publications.lock().unwrap().clone().unwrap();
-        // Dispatch publishes before its command is consumed. A notification can
-        // publish newer work on the executor before that older command arrives.
+        // Dispatch publishes before its command is consumed. Commands can arrive
+        // out of order after newer work has already been published.
         let older = apply(
             &publications,
             Event::Intent(Intent::ListSessions(op::ListSessions::new(
@@ -1508,13 +1508,9 @@ mod tests {
         );
         let newer = apply(
             &publications,
-            Event::Notification(crate::protocol::Notification::SessionRenamed {
-                session: crate::session::SessionRef::new(
-                    crate::session::ProviderKind::Claude,
-                    "changed".into(),
-                )
-                .unwrap(),
-            }),
+            Event::Intent(Intent::ListSessions(op::ListSessions::new(
+                Default::default(),
+            ))),
         );
         let mut receipts = Vec::new();
         for effects in [newer, older] {
@@ -1662,6 +1658,7 @@ mod tests {
                     [(
                         "p".into(),
                         Arc::new(crate::models::ThreadList {
+                            revision: 0,
                             data: vec![],
                             projects: vec![],
                             has_more: false,
@@ -1701,6 +1698,7 @@ mod tests {
             }),
             ("threads", |snapshot| {
                 snapshot.threads = Some(Arc::new(crate::models::ThreadList {
+                    revision: 0,
                     data: Vec::new(),
                     projects: Vec::new(),
                     has_more: false,

@@ -212,6 +212,10 @@ impl Context {
             thread
                 .metadata
                 .insert("name".into(), "Completed conversation".into());
+            self.notify(
+                "thread/name/updated",
+                &json!({"threadId":thread.metadata["id"], "threadName":thread.metadata["name"]}),
+            )?;
         }
         let id = thread.metadata["id"].as_str().unwrap();
         self.turn_event("turn/completed", id, &turn)?;

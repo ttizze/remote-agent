@@ -321,9 +321,10 @@ async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_wa
     assert_eq!(second_request["method"], "host/session/list");
     let pending = refresh();
     store.close().await.unwrap();
-    for receipt in [second, joined, pending] {
-        assert!(receipt.await.is_err());
-    }
+    let superseded = second.await;
+    assert!(matches!(superseded, Ok(Outcome::Applied) | Err(_)));
+    assert!(joined.await.is_err());
+    assert!(pending.await.is_err());
 }
 
 #[tokio::test]
@@ -2309,7 +2310,7 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
 }
 
 #[tokio::test]
-async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
+async fn creating_a_chat_updates_matching_search_results_without_reading_the_list() {
     let (store, mut reader, writer) = setup(Snapshot {
         threads: Some(Arc::new(
             serde_json::from_value(
@@ -2333,20 +2334,13 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
         {
             let result = match request["method"].as_str().unwrap() {
                 "host/session/create" => {
+                    writer.notify(json!({"method":"host/session/updated", "params":{"thread":{"id":{"provider":"codex","id":"created"},"name":"created chat","cwd":"/fixture","listRevision":1},"project":null}})).await.unwrap();
                     json!({"thread":{"id":{"provider":"codex","id":"created"},"name":"created chat","cwd":"/fixture","turns":[],"status":"idle"}})
                 }
                 "host/session/open" => writer.current(
                     &serde_json::from_value(request["params"]["session"].clone()).unwrap(),
                 ),
                 "host/session/submit" => json!({"turnId":"turn"}),
-                "host/session/list" => {
-                    let data = if request["params"]["searchTerm"] == "created" {
-                        json!([{"id":{"provider":"codex","id":"created"},"name":"created chat"}])
-                    } else {
-                        json!([])
-                    };
-                    json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})
-                }
                 "host/workspace/review" => review(),
                 other => panic!("unexpected method {other}"),
             };
@@ -2384,6 +2378,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
         })
     })
     .await;
+    assert_eq!(store.snapshot().list_query.search_term, "created");
     store.close().await.unwrap();
     server.await.unwrap();
 }

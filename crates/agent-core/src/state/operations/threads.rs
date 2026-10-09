@@ -144,6 +144,29 @@ fn merge_received(
     previous: Option<&crate::models::ThreadList>,
 ) -> crate::models::ThreadList {
     if let Some(previous) = previous {
+        // Notifications carry complete list metadata. Preserve only changes
+        // newer than this read; a later explicit refresh can remove old rows.
+        for cached in previous
+            .data
+            .iter()
+            .filter(|row| row.list_revision > threads.revision)
+        {
+            if let Some(row) = threads.data.iter_mut().find(|row| row.id == cached.id) {
+                *row = cached.clone();
+            } else {
+                threads.data.push(cached.clone());
+            }
+        }
+        let newer_projects: Vec<_> = previous
+            .projects
+            .iter()
+            .filter(|project| project.list_revision > threads.revision)
+            .cloned()
+            .collect();
+        threads
+            .projects
+            .retain(|project| !newer_projects.iter().any(|newer| newer.id == project.id));
+        threads.projects.splice(0..0, newer_projects);
         for project in &mut threads.projects {
             if let Some(old) = previous
                 .projects
@@ -218,13 +241,16 @@ impl Operation for ListProjectSessions {
         }) {
             return Vec::new();
         }
-        let output = merge_received(
+        let mut output = merge_received(
             output,
             snapshot
                 .project_threads
                 .get(&self.project_id)
                 .map(AsRef::as_ref),
         );
+        let (data, more) = page_rows(output.data, output.limit);
+        output.data = data;
+        output.has_more |= more;
         update_titles(snapshot, &output.data);
         if let Some(limit) =
             Arc::make_mut(&mut snapshot.expanded_projects).get_mut(&self.project_id)
@@ -246,13 +272,13 @@ impl Operation for ListProjectSessions {
 fn update_titles(snapshot: &mut Snapshot, summaries: &[crate::models::Thread]) {
     for summary in summaries {
         if let Some(id) = &summary.id
-            && snapshot
-                .conversations
-                .get(id)
-                .is_some_and(|thread| thread.name != summary.name)
+            && snapshot.conversations.get(id).is_some_and(|thread| {
+                thread.name != summary.name && thread.list_revision <= summary.list_revision
+            })
             && let Some(thread) = shared_mut(&mut snapshot.conversations, id)
         {
             thread.name = summary.name.clone();
+            thread.list_revision = summary.list_revision;
         }
     }
 }
@@ -357,6 +383,9 @@ impl Operation for ListSessions {
                 None => {}
             }
         }
+        threads
+            .projects
+            .truncate(snapshot.list_query.project_limit as usize);
         update_titles(snapshot, &threads.data);
         let visible: std::collections::HashSet<_> =
             threads.projects.iter().map(|p| p.id.as_str()).collect();
@@ -378,26 +407,28 @@ impl Operation for ListSessions {
             {
                 continue;
             }
-            pages.insert(
-                id.clone(),
-                Arc::new(merge_received(
-                    crate::models::ThreadList {
-                        data: threads
-                            .data
-                            .iter()
-                            .filter(|thread| thread.project_id.as_ref() == Some(id))
-                            .cloned()
-                            .collect(),
-                        projects: Vec::new(),
-                        has_more: page.has_more,
-                        has_more_projects: false,
-                        limit: page.limit,
-                        project_pages: Default::default(),
-                        provider_errors: threads.provider_errors.clone(),
-                    },
-                    pages.get(id).map(AsRef::as_ref),
-                )),
+            let mut received = merge_received(
+                crate::models::ThreadList {
+                    revision: threads.revision,
+                    data: threads
+                        .data
+                        .iter()
+                        .filter(|thread| thread.project_id.as_ref() == Some(id))
+                        .cloned()
+                        .collect(),
+                    projects: Vec::new(),
+                    has_more: page.has_more,
+                    has_more_projects: false,
+                    limit: page.limit,
+                    project_pages: Default::default(),
+                    provider_errors: threads.provider_errors.clone(),
+                },
+                pages.get(id).map(AsRef::as_ref),
             );
+            let (data, more) = page_rows(received.data, received.limit);
+            received.data = data;
+            received.has_more |= more;
+            pages.insert(id.clone(), Arc::new(received));
         }
         threads.data.retain(|thread| {
             thread
@@ -406,6 +437,9 @@ impl Operation for ListSessions {
                 .is_none_or(|id| !visible.contains(id.as_str()))
         });
         threads.project_pages.clear();
+        let (data, more) = page_rows(threads.data, threads.limit);
+        threads.data = data;
+        threads.has_more |= more;
         snapshot.threads = Some(Arc::new(threads));
         decoration
             .into_iter()
@@ -818,6 +852,12 @@ pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) {
     };
     let mut thread = incoming;
     if let Some(cached) = snapshot.conversations.get(&id)
+        && cached.list_revision > thread.list_revision
+    {
+        thread.name = cached.name.clone();
+        thread.list_revision = cached.list_revision;
+    }
+    if let Some(cached) = snapshot.conversations.get(&id)
         && let Some(turns) = crate::session::retained_history(
             cached.turns.as_deref().unwrap_or_default(),
             thread.turns.as_deref().unwrap_or_default(),
@@ -848,11 +888,6 @@ impl Operation for ForkSession {
         let id = output.thread.id.clone().expect("validated thread ID");
         let mut effects = open_thread(snapshot, output.thread, output.model);
         effects.push(Effect::execute(ReadThread::new(id)));
-        if snapshot.threads.is_some() {
-            effects.push(Effect::execute(ListSessions::new(
-                (*snapshot.list_query).clone(),
-            )));
-        }
         effects
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -979,6 +1014,102 @@ mod tests {
     }
 
     #[test]
+    fn list_and_conversation_reads_cannot_overwrite_a_newer_name_notice() {
+        let id =
+            crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "task".into())
+                .unwrap();
+        let old: crate::models::ThreadList = serde_json::from_value(serde_json::json!({"data":[{"id":id,"name":"Old","updatedAt":1}],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false,"projectPages":{}})).unwrap();
+        let mut state = Snapshot {
+            threads: Some(Arc::new(old.clone())),
+            conversations: Arc::new([(id.clone(), Arc::new(old.data[0].clone()))].into()),
+            ..Default::default()
+        };
+        let (next, effects) = super::super::super::notifications::notification(
+            &state,
+            crate::protocol::Notification::SessionRenamed {
+                session: id.clone(),
+                name: Some("New".into()),
+                revision: 2,
+            },
+        );
+        assert!(effects.is_empty());
+        state = next;
+        let (next, effects) = super::super::super::notifications::notification(
+            &state,
+            crate::protocol::Notification::SessionUpdated {
+                thread: Thread {
+                    id: Some(SessionRef::new(ProviderKind::Codex, "created".into()).unwrap()),
+                    project_id: crate::models::ProjectMembership::Assigned("new-project".into()),
+                    list_revision: 2,
+                    ..Default::default()
+                }
+                .into(),
+                project: Some(crate::models::Project {
+                    id: "new-project".into(),
+                    name: "Created project".into(),
+                    list_revision: 2,
+                    ..Default::default()
+                }),
+            },
+        );
+        assert!(effects.is_empty());
+        state = next;
+        ListSessions::new(Default::default()).apply(&mut state, old.clone());
+        assert_eq!(
+            state.threads.as_ref().unwrap().projects[0].id,
+            "new-project"
+        );
+        assert_eq!(
+            state.threads.as_ref().unwrap().data[0].name.as_deref(),
+            Some("New")
+        );
+        refresh_thread(&mut state, old.data[0].clone());
+        assert_eq!(state.conversations[&id].name.as_deref(), Some("New"));
+        let mut authoritative = old;
+        authoritative.revision = 2;
+        authoritative.data.clear();
+        ListSessions::new(Default::default()).apply(&mut state, authoritative);
+        assert!(
+            state.threads.as_ref().unwrap().data.is_empty(),
+            "later refresh can remove a deleted task"
+        );
+        assert!(
+            state.threads.as_ref().unwrap().projects.is_empty(),
+            "later refresh can remove a project"
+        );
+    }
+
+    #[test]
+    fn reconnect_retains_received_pages_and_accepts_a_restarted_host_revision() {
+        let id = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
+        let page = serde_json::from_value(serde_json::json!({"revision":99,"data":[{"id":id,"name":"Before restart","listRevision":99}],"projects":[],"limit":15,"hasMore":false,"hasMoreProjects":false,"projectPages":{}})).unwrap();
+        let snapshot = Snapshot {
+            threads: Some(Arc::new(page)),
+            ..Default::default()
+        };
+        let (connected, effects) = reduce(&snapshot, Event::Connected);
+        assert_eq!(connected.threads.as_ref().unwrap().limit, 15);
+        assert_eq!(
+            effects.len(),
+            3,
+            "status, models, and accounts only; no list read"
+        );
+        let (renamed, effects) = super::super::super::notifications::notification(
+            &connected,
+            crate::protocol::Notification::SessionRenamed {
+                session: id,
+                name: Some("After restart".into()),
+                revision: 1,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(
+            renamed.threads.as_ref().unwrap().data[0].name.as_deref(),
+            Some("After restart")
+        );
+    }
+
+    #[test]
     fn recent_pages_more_and_refresh_have_independent_read_targets_and_counts() {
         use crate::models::{ListPage, ListPart, Project, Thread, ThreadList};
         let project = |id: &str| Project {
@@ -992,6 +1123,7 @@ mod tests {
             ..Default::default()
         };
         let root = ThreadList {
+            revision: 0,
             data: (0..5).map(|i| row(&format!("p{i}"))).collect(),
             projects: (0..5).map(|i| project(&format!("p{i}"))).collect(),
             limit: 5,
@@ -1038,6 +1170,7 @@ mod tests {
         .apply(
             &mut state,
             ThreadList {
+                revision: 0,
                 data: vec![row("p0")],
                 projects: vec![],
                 limit: 25,
@@ -1059,6 +1192,7 @@ mod tests {
         more.apply(
             &mut state,
             ThreadList {
+                revision: 0,
                 data: vec![],
                 projects: (0..15).map(|i| project(&format!("p{i}"))).collect(),
                 limit: 5,
@@ -1602,6 +1736,7 @@ mod tests {
         }))
         .unwrap();
         let loaded = Arc::new(crate::models::ThreadList {
+            revision: 0,
             limit: 15,
             data: vec![crate::models::Thread {
                 id: Some(SessionRef::new(ProviderKind::Codex, "new".into()).unwrap()),

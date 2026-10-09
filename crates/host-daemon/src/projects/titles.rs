@@ -249,6 +249,7 @@ impl<'a> TitleList<'a> {
             *count <= maximum
         });
         ThreadList {
+            revision: 0,
             limit: limit as u32,
             data: self.data,
             projects,
@@ -280,12 +281,22 @@ pub(crate) fn summary(mut thread: Thread) -> Thread {
             .collect();
         thread.name = (!title.is_empty()).then_some(title);
     }
-    thread.turns = None;
-    thread.preview = None;
-    thread.history_has_more = None;
-    thread.history_limit = None;
-    thread.agent_id = None;
-    thread
+    Thread {
+        list_revision: thread.list_revision,
+        id: thread.id,
+        parent_id: thread.parent_id,
+        name: thread.name,
+        cwd: thread.cwd,
+        project_id: thread.project_id,
+        updated_at: thread.updated_at,
+        status: thread.status,
+        capabilities: thread.capabilities,
+        can_accept_direct_input: thread.can_accept_direct_input,
+        worktree_status: thread.worktree_status,
+        git_branch: thread.git_branch,
+        list_stale: thread.list_stale,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +317,38 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn list_metadata_contains_the_short_title_without_conversation_payloads() {
+        let mut native = thread("task", None);
+        native.history_cursor = Some("private history cursor".into());
+        native.history_has_more = Some(true);
+        native.history_limit = Some(25);
+        native.submissions.insert(
+            "input".into(),
+            agent_protocol::session::SubmissionDelivery::Unknown,
+        );
+        native.requests.insert(
+            "request".into(),
+            std::sync::Arc::new(agent_protocol::requests::Request {
+                id: "request".into(),
+                target: agent_protocol::requests::RequestTarget::Session,
+                delivery: agent_protocol::session::RequestDelivery::Awaiting,
+                body: agent_protocol::requests::RequestBody::Question {
+                    questions: Vec::new(),
+                },
+            }),
+        );
+        let metadata = summary(native);
+        assert_eq!(metadata.name.as_deref(), Some("First line"));
+        assert!(metadata.turns.is_none() && metadata.preview.is_none());
+        assert!(metadata.requests.is_empty() && metadata.submissions.is_empty());
+        assert!(
+            metadata.history_cursor.is_none()
+                && metadata.history_has_more.is_none()
+                && metadata.history_limit.is_none()
+        );
+    }
+
     #[test]
     fn root_list_pages_standalone_chats_without_consuming_slots_for_projects() {
         let projects = vec![project("old"), project("recent"), project("empty")];

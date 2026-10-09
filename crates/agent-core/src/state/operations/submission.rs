@@ -209,11 +209,6 @@ impl StartSubmission {
             client_user_message_id,
             draft,
         }));
-        if snapshot.threads.is_some() {
-            effects.push(Effect::execute(ListSessions::new(
-                (*snapshot.list_query).clone(),
-            )));
-        }
         effects
     }
 }

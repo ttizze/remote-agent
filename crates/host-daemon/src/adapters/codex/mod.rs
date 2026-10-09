@@ -469,8 +469,8 @@ pub(crate) fn event_change(
             change,
         }
     } else if message.method() == Some("thread/name/updated") {
-        AgentChange::Renamed(
-            SessionRef::new(
+        AgentChange::Renamed {
+            session: SessionRef::new(
                 ProviderKind::Codex,
                 params["threadId"]
                     .as_str()
@@ -478,7 +478,9 @@ pub(crate) fn event_change(
                     .into(),
             )
             .map_err(str::to_owned)?,
-        )
+            name: serde_json::from_value(params["threadName"].clone())
+                .map_err(|e| e.to_string())?,
+        }
     } else {
         return Ok(None);
     };
@@ -1112,6 +1114,26 @@ impl Agent for Codex {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_rename_notices_carry_the_name_including_a_cleared_name() {
+        for name in [Some("New name"), None] {
+            let line = serde_json::json!({"method":"thread/name/updated","params":{"threadId":"task","threadName":name}}).to_string();
+            let change =
+                super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+                    .unwrap()
+                    .unwrap();
+            let super::AgentChange::Renamed {
+                session,
+                name: received,
+            } = change
+            else {
+                panic!("name was not published")
+            };
+            assert_eq!(session.id, "task");
+            assert_eq!(received.as_deref(), name);
+        }
+    }
+
     #[test]
     fn started_subagents_publish_their_conversation_parent() {
         let line = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"parent"}}}).to_string();

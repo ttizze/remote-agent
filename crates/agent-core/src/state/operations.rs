@@ -408,3 +408,17 @@ pub(super) fn add_attachment(next: &mut Snapshot, draft_key: DraftKey, attachmen
     .attachments
     .push(attachment);
 }
+
+pub(super) fn page_rows(
+    mut rows: Vec<crate::models::Thread>,
+    limit: u32,
+) -> (Vec<crate::models::Thread>, bool) {
+    rows.sort_by(|a, b| {
+        b.updated_at
+            .unwrap_or_default()
+            .total_cmp(&a.updated_at.unwrap_or_default())
+    });
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    (rows, more)
+}

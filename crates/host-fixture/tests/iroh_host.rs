@@ -2479,15 +2479,20 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 let configured_project = project.clone();
                 std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
-                let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
+                let program = host_fixture::fixture::Config { trace: true, deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
                 let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false, None).await.unwrap();
                 let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                 let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None).await.unwrap();
+                let observer = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None).await.unwrap();
+                for client in [&store, &observer] {
+                    let mut initial = client.subscribe();
+                    while initial.borrow_and_update().threads.is_none() || !initial.borrow().operations.is_empty() { initial.changed().await.unwrap(); }
+                }
+                let list_reads = || std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap().lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).filter(|entry| entry["method"] == "thread/list").count();
+                let before = list_reads();
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                 if scoped {
-                    let mut initial = store.subscribe();
-                    while initial.borrow_and_update().threads.is_none() { initial.changed().await.unwrap(); }
                     store.dispatch(Intent::SetProjectExpanded { project_id: "project".into(), expanded: true }).await.unwrap();
                 }
                 let key = store.snapshot().navigation.draft_key.clone();
@@ -2519,6 +2524,16 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                         updates.changed().await.unwrap();
                     }
                 }).await;
+                let mut observed = observer.subscribe();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let snapshot = observed.borrow_and_update().clone();
+                        if snapshot.threads.iter().flat_map(|page| &page.data).chain(snapshot.project_threads.values().flat_map(|page| &page.data)).any(|row| row.id.as_ref() == Some(&id) && row.name.as_deref() == Some("Completed conversation")) { break; }
+                        observed.changed().await.unwrap();
+                    }
+                }).await.expect("passive client must receive metadata without a list refresh");
+                assert_eq!(list_reads(), before, "creation, submission, and rename must not fetch lists");
+                observer.close().await.unwrap();
                 store.close().await.unwrap();
                 endpoint.close().await;
                 fixture.close().await.unwrap();

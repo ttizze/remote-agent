@@ -58,6 +58,7 @@ impl ProjectStore {
             }
         }
         projects.push(Project {
+            list_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             name: root
                 .file_name()

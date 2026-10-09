@@ -34,11 +34,7 @@ pub(super) fn notification(
             .conversations
             .get(&session)
             .is_some_and(|thread| thread.parent_id.is_some());
-        let mut effects = if !child && activity_changed && !listed {
-            refresh_list(previous.connected, &previous.list_query)
-        } else {
-            Vec::new()
-        };
+        let mut effects = Vec::new();
         if previous.connected
             && !child
             && activity_changed
@@ -79,28 +75,177 @@ pub(super) fn notification(
         | Notification::Exited { .. }
         | Notification::TerminalRestored { .. }
         | Notification::TerminalDetached { .. }) => process(previous, event),
-        Notification::SessionRenamed { session } => {
-            let child = previous
-                .conversations
-                .get(&session)
-                .is_some_and(|thread| thread.parent_id.is_some());
-            let effects = if child {
-                if fleet_contains(
-                    previous.observed_agents.as_ref(),
-                    &session,
-                    &previous.conversations,
-                ) {
-                    op::refresh_agents(previous.connected, previous.observed_agents.as_ref())
-                } else {
-                    Vec::new()
-                }
-            } else {
-                refresh_list(previous.connected, &previous.list_query)
-            };
-            (previous.clone(), effects)
+        Notification::SessionRenamed {
+            session,
+            name,
+            revision,
+        } => {
+            let mut next = previous.clone();
+            next.rename_session(&session, name.as_deref(), revision);
+            (next, Vec::new())
+        }
+        Notification::SessionUpdated { thread, project } => {
+            let mut next = previous.clone();
+            next.receive_session_summary(*thread, project);
+            (next, Vec::new())
         }
         _ => (previous.clone(), Vec::new()),
     }
+}
+
+impl Snapshot {
+    fn rename_session(&mut self, session: &SessionRef, name: Option<&str>, revision: u64) {
+        if let Some(thread) = self.conversations.get(session)
+            && thread.list_revision < revision
+        {
+            let thread = Arc::make_mut(
+                Arc::make_mut(&mut self.conversations)
+                    .get_mut(session)
+                    .unwrap(),
+            );
+            thread.name = name.map(str::to_owned);
+            thread.list_revision = revision;
+        }
+        if let Some(page) = &mut self.threads
+            && let Some(data) = renamed_rows(&page.data, session, name, revision)
+        {
+            Arc::make_mut(page).data = data;
+        }
+        if self.project_threads.values().any(|page| {
+            page.data
+                .iter()
+                .any(|row| row.id.as_ref() == Some(session) && row.list_revision < revision)
+        }) {
+            for page in Arc::make_mut(&mut self.project_threads).values_mut() {
+                if let Some(data) = renamed_rows(&page.data, session, name, revision) {
+                    Arc::make_mut(page).data = data;
+                }
+            }
+        }
+    }
+    fn receive_session_summary(
+        &mut self,
+        mut thread: Thread,
+        project: Option<crate::models::Project>,
+    ) {
+        let Some(id) = thread.id.as_ref() else { return };
+        if let Some(state) = &self.task_activity
+            && let Some((_, status)) = state.statuses.iter().find(|(session, _)| session == id)
+        {
+            thread.status = *status;
+        }
+        if let Some(cached) = self.conversations.get(id)
+            && cached.list_revision <= thread.list_revision
+            && cached
+                .name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+            && thread.name.is_some()
+        {
+            let cached = Arc::make_mut(Arc::make_mut(&mut self.conversations).get_mut(id).unwrap());
+            cached.name = thread.name.clone();
+            cached.list_revision = thread.list_revision;
+        }
+        if thread.parent_id.is_some() {
+            return;
+        }
+        let inserting = thread
+            .name
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(&self.list_query.search_term.trim().to_lowercase());
+        if let Some(project) = project
+            && let Some(page) = &mut self.threads
+        {
+            let position = page.projects.iter().position(|old| old.id == project.id);
+            if (position.is_some() || inserting)
+                && position
+                    .is_none_or(|index| page.projects[index].list_revision < project.list_revision)
+            {
+                let page = Arc::make_mut(page);
+                let mut project = project;
+                if let Some(index) = position {
+                    project.favicon_png = page.projects.remove(index).favicon_png;
+                }
+                page.projects.insert(0, project);
+                page.has_more_projects |=
+                    page.projects.len() > self.list_query.project_limit as usize;
+                page.projects
+                    .truncate(self.list_query.project_limit as usize);
+            }
+        }
+        if let Some(project) = thread.project_id.as_ref() {
+            if let Some(page) = self.project_threads.get(project)
+                && let Some((data, more)) = updated_rows(&page.data, &thread, inserting, page.limit)
+            {
+                let page = Arc::make_mut(
+                    Arc::make_mut(&mut self.project_threads)
+                        .get_mut(project)
+                        .unwrap(),
+                );
+                page.data = data;
+                page.has_more |= more;
+            }
+        } else if let Some(page) = &mut self.threads
+            && let Some((data, more)) = updated_rows(&page.data, &thread, inserting, page.limit)
+        {
+            let page = Arc::make_mut(page);
+            page.data = data;
+            page.has_more |= more;
+        }
+    }
+}
+fn renamed_rows(
+    rows: &[Thread],
+    session: &SessionRef,
+    name: Option<&str>,
+    revision: u64,
+) -> Option<Vec<Thread>> {
+    let index = rows
+        .iter()
+        .position(|row| row.id.as_ref() == Some(session) && row.list_revision < revision)?;
+    let mut rows = rows.to_vec();
+    rows[index].name = name.map(str::to_owned);
+    rows[index].list_revision = revision;
+    Some(rows)
+}
+fn updated_rows(
+    rows: &[Thread],
+    thread: &Thread,
+    insert: bool,
+    limit: u32,
+) -> Option<(Vec<Thread>, bool)> {
+    let index = rows.iter().position(|row| row.id == thread.id);
+    if index.is_none() && !insert
+        || index.is_some_and(|index| rows[index].list_revision > thread.list_revision)
+    {
+        return None;
+    }
+    let mut thread = thread.clone();
+    if let Some(old) = index.map(|index| &rows[index]) {
+        // Rename notices own existing names; submission metadata may have been
+        // read before a native automatic rename.
+        thread.name = old
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .or(thread.name);
+        if old.cwd == thread.cwd {
+            thread.git_branch = old.git_branch.clone().or(thread.git_branch);
+            thread.worktree_status = old.worktree_status;
+        }
+    }
+    if index.is_some_and(|index| rows[index] == thread) {
+        return None;
+    }
+    let mut rows = rows.to_vec();
+    if let Some(index) = index {
+        rows[index] = thread;
+    } else {
+        rows.push(thread);
+    }
+    Some(operations::page_rows(rows, limit))
 }
 
 fn fleet_contains(
@@ -129,14 +274,6 @@ fn fleet_contains(
         ancestor = parent;
     }
     false
-}
-
-fn refresh_list(connected: bool, query: &ListQuery) -> Vec<Effect> {
-    if connected {
-        vec![Effect::execute(op::ListSessions::new(query.clone()))]
-    } else {
-        Vec::new()
-    }
 }
 
 fn process(previous: &Snapshot, event: crate::protocol::Notification) -> (Snapshot, Vec<Effect>) {
@@ -235,14 +372,6 @@ pub(super) fn session_update(
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(&mut next, id);
     let mut effects = details;
-    // Global Activity owns the end-of-work refresh. Commands and known
-    // agents update local state without reading the root list again.
-    if current.parent_id.is_none()
-        && matches!(&update.change, SessionChange::Item { item, .. }
-            if matches!(item.body(), crate::models::ItemBody::UserMessage { .. }))
-    {
-        effects.extend(refresh_list(previous.connected, &previous.list_query));
-    }
     if fleet_contains(
         previous.observed_agents.as_ref(),
         id,
@@ -358,7 +487,7 @@ mod tests {
                 finished: false,
             },
         );
-        assert_eq!(effects.len(), 1 + usize::from(observing));
+        assert_eq!(effects.len(), usize::from(observing));
         let (repeated, effects) = notification(
             &discovered,
             Notification::Activity {
@@ -425,9 +554,11 @@ mod tests {
                 &state,
                 Notification::SessionRenamed {
                     session: id.clone(),
+                    name: Some("Renamed".into()),
+                    revision: 1,
                 },
             );
-            assert_eq!(effects.len(), expected, "rename {id}");
+            assert!(effects.is_empty(), "rename {id} must be applied locally");
             let item = serde_json::from_value(json!({
                 "id":"spawn","status":"running","clientInputId":null,
                 "body":{"inline":{"body":{"subagent":{"tool":"spawnAgent","prompt":null,"model":null,"effort":null,"sender":id,"receivers":[session("new-agent")],"states":[],"agentId":null,"result":null}}}}
@@ -599,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn user_messages_and_renames_still_refresh_titles() {
+    fn user_messages_and_renames_do_not_read_lists() {
         let state = snapshot(ProviderKind::Codex);
         let id = state.threads.as_ref().unwrap().data[0].id.clone().unwrap();
         let item = serde_json::from_value(json!({
@@ -617,9 +748,113 @@ mod tests {
                 },
             },
         );
-        assert_eq!(effects.len(), 1);
-        let (_, effects) = notification(&state, Notification::SessionRenamed { session: id });
-        assert_eq!(effects.len(), 1);
+        assert!(effects.is_empty());
+        let (next, effects) = notification(
+            &state,
+            Notification::SessionRenamed {
+                session: id.clone(),
+                name: Some("Renamed".into()),
+                revision: 1,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(next.conversations[&id].name.as_deref(), Some("Renamed"));
+        assert_eq!(
+            next.threads.as_ref().unwrap().data[0].name.as_deref(),
+            Some("Renamed")
+        );
+        let (cleared, effects) = notification(
+            &next,
+            Notification::SessionRenamed {
+                session: id.clone(),
+                name: None,
+                revision: 2,
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(cleared.conversations[&id].name.is_none());
+        assert!(cleared.threads.as_ref().unwrap().data[0].name.is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn metadata_notices_preserve_closed_page_quota_and_newer_names(limit in prop_oneof![Just(5u32), Just(15u32), Just(25u32)]) {
+            let mut state = snapshot(ProviderKind::Codex);
+            let mut page = state.threads.as_ref().unwrap().as_ref().clone();
+            page.limit = limit;
+            page.data = (0..limit).map(|index| Thread {
+                id: Some(SessionRef::new(ProviderKind::Codex, format!("task-{index}")).unwrap()),
+                project_id: crate::models::ProjectMembership::Assigned("closed".into()),
+                name: Some(format!("Task {index}")),
+                updated_at: Some(f64::from(index)),
+                ..Default::default()
+            }).collect();
+            state.project_threads = Arc::new([("closed".into(), Arc::new(page))].into());
+            let id = state.project_threads["closed"].data[0].id.clone().unwrap();
+            let (renamed, effects) = notification(&state, Notification::SessionRenamed { session: id.clone(), name: Some("New title".into()), revision: 2 });
+            prop_assert!(effects.is_empty());
+            let (next, effects) = notification(&renamed, Notification::SessionUpdated {
+                thread: Thread { id: Some(id.clone()), project_id: crate::models::ProjectMembership::Assigned("closed".into()), name: Some("Old native name".into()), updated_at: Some(999.0), list_revision: 3, ..Default::default() }.into(), project: None,
+            });
+            prop_assert!(effects.is_empty());
+            prop_assert!(next.expanded_projects.is_empty());
+            prop_assert_eq!(next.project_threads["closed"].limit, limit);
+            prop_assert_eq!(next.project_threads["closed"].data.len(), limit as usize);
+            prop_assert!(!next.project_threads["closed"].has_more, "updating an existing row cannot invent a lookahead row");
+            prop_assert_eq!(next.project_threads["closed"].data[0].name.as_deref(), Some("New title"));
+            let (stale, effects) = notification(&next, Notification::SessionRenamed { session: id, name: Some("Stale".into()), revision: 1 });
+            prop_assert!(effects.is_empty());
+            prop_assert!(Arc::ptr_eq(&stale.project_threads, &next.project_threads));
+            let (stale, effects) = notification(&next, Notification::SessionUpdated { thread: state.project_threads["closed"].data[0].clone().into(), project: None });
+            prop_assert!(effects.is_empty());
+            prop_assert!(Arc::ptr_eq(&stale.project_threads, &next.project_threads));
+            let (added, effects) = notification(&next, Notification::SessionUpdated {
+                thread: Thread { id: Some(SessionRef::new(ProviderKind::Codex, "new".into()).unwrap()), project_id: crate::models::ProjectMembership::Assigned("closed".into()), name: Some("Created task".into()), updated_at: Some(1000.0), list_revision: 4, ..Default::default() }.into(), project: None,
+            });
+            prop_assert!(effects.is_empty());
+            prop_assert_eq!(added.project_threads["closed"].data.len(), limit as usize);
+            prop_assert!(added.project_threads["closed"].has_more);
+            prop_assert_eq!(added.project_threads["closed"].data[0].name.as_deref(), Some("Created task"));
+        }
+    }
+
+    #[test]
+    fn new_project_notice_does_not_claim_its_unreceived_page_is_loaded() {
+        let state = snapshot(ProviderKind::Codex);
+        let project = crate::models::Project {
+            id: "unread".into(),
+            name: "Unread".into(),
+            list_revision: 1,
+            ..Default::default()
+        };
+        let (next, effects) = notification(
+            &state,
+            Notification::SessionUpdated {
+                thread: Thread {
+                    id: Some(SessionRef::new(ProviderKind::Codex, "new".into()).unwrap()),
+                    project_id: crate::models::ProjectMembership::Assigned("unread".into()),
+                    list_revision: 1,
+                    ..Default::default()
+                }
+                .into(),
+                project: Some(project),
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(next.threads.as_ref().unwrap().projects[0].id, "unread");
+        assert!(!next.project_threads.contains_key("unread"));
+        let (_, effects) = reduce_intent(
+            &next,
+            Intent::SetProjectExpanded {
+                project_id: "unread".into(),
+                expanded: true,
+            },
+        );
+        assert_eq!(
+            effects.len(),
+            1,
+            "opening still reads a complete first page"
+        );
     }
 
     #[test]
@@ -631,7 +866,7 @@ mod tests {
             .unwrap();
         let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
         let subscription = snapshot.subscriptions[&parent];
-        for (session, expected_refreshes) in [(parent.clone(), 0), (child.clone(), 1)] {
+        for session in [parent.clone(), child.clone()] {
             let (next, effects) = notification(
                 &snapshot,
                 crate::protocol::Notification::Activity {
@@ -640,7 +875,7 @@ mod tests {
                     finished: false,
                 },
             );
-            assert_eq!(effects.len(), expected_refreshes);
+            assert!(effects.is_empty(), "activity alone must not read lists");
             assert!(next.activity.active[&session]);
             assert_eq!(next.navigation, snapshot.navigation);
         }

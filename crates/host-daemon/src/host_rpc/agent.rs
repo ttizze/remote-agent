@@ -209,7 +209,10 @@ pub(crate) enum AgentChange {
         native_id: Value,
     },
     SourceClosed(uuid::Uuid),
-    Renamed(SessionRef),
+    Renamed {
+        session: SessionRef,
+        name: Option<String>,
+    },
     Stopped {
         provider: agent_protocol::session::ProviderKind,
         reason: String,
@@ -234,8 +237,12 @@ impl AgentChange {
                 native_id,
             } => router.resolve_native_request(instance, &native_id),
             Self::SourceClosed(instance) => router.close_request_source(instance),
-            Self::Renamed(session) => {
-                router.broadcast(agent_protocol::protocol::Notification::SessionRenamed { session })
+            Self::Renamed { session, name } => {
+                router.broadcast(agent_protocol::protocol::Notification::SessionRenamed {
+                    session,
+                    name,
+                    revision: 0,
+                })
             }
             Self::Stopped { provider, reason } => router.fail_provider(provider, &reason),
         }

@@ -56,7 +56,16 @@ pub enum Notification {
         handle: String,
     },
     #[serde(rename = "host/session/renamed")]
-    SessionRenamed { session: crate::session::SessionRef },
+    SessionRenamed {
+        session: crate::session::SessionRef,
+        name: Option<String>,
+        revision: u64,
+    },
+    #[serde(rename = "host/session/updated")]
+    SessionUpdated {
+        thread: Box<crate::models::Thread>,
+        project: Option<crate::models::Project>,
+    },
 }
 
 pub fn encode(value: impl Serialize) -> io::Result<Vec<u8>> {

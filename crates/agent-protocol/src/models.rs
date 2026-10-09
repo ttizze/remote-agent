@@ -83,6 +83,9 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
+    /// Host list revision; newer notices survive an older in-flight read.
+    #[serde(default)]
+    pub list_revision: u64,
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default)]
@@ -195,6 +198,9 @@ pub struct ListPage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadList {
+    /// Revision captured before the Host starts reading native metadata.
+    #[serde(default)]
+    pub revision: u64,
     pub limit: u32,
     pub data: Vec<Thread>,
     pub projects: Vec<Project>,
@@ -218,6 +224,8 @@ pub struct AgentObservation {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
+    #[serde(default)]
+    pub list_revision: u64,
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,

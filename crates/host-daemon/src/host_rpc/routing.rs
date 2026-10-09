@@ -158,6 +158,7 @@ struct State {
     apns: Option<Arc<crate::apns::Apns>>,
     tasks: HashMap<SessionRef, Task>,
     task_revision: u64,
+    list_revision: u64,
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
     executions: HashMap<SessionRef, Arc<Mutex<SessionActor>>>,
@@ -828,7 +829,27 @@ impl SessionRouter {
             .filter_map(|(id, output)| output.try_send(id, frame.clone()).is_err().then_some(id))
             .collect()
     }
-    pub(crate) fn broadcast(&self, notification: Notification) {
+    pub(super) fn list_revision(&self) -> u64 {
+        lock_state(&self.state).list_revision
+    }
+    pub(crate) fn broadcast(&self, mut notification: Notification) {
+        if matches!(
+            notification,
+            Notification::SessionUpdated { .. } | Notification::SessionRenamed { .. }
+        ) {
+            let mut state = lock_state(&self.state);
+            state.list_revision += 1;
+            match &mut notification {
+                Notification::SessionUpdated { thread, project } => {
+                    thread.list_revision = state.list_revision;
+                    if let Some(project) = project {
+                        project.list_revision = state.list_revision;
+                    }
+                }
+                Notification::SessionRenamed { revision, .. } => *revision = state.list_revision,
+                _ => unreachable!(),
+            }
+        }
         let failed =
             self.broadcast_frames(protocol::encode(notification).expect("notification encodes"));
         self.close_failed(failed);

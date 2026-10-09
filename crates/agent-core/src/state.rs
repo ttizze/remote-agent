@@ -920,6 +920,34 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
         }
         Event::Connected => {
+            for page in next
+                .threads
+                .iter_mut()
+                .chain(Arc::make_mut(&mut next.project_threads).values_mut())
+            {
+                if page.revision == 0
+                    && page.data.iter().all(|row| row.list_revision == 0)
+                    && page
+                        .projects
+                        .iter()
+                        .all(|project| project.list_revision == 0)
+                {
+                    continue;
+                }
+                let page = Arc::make_mut(page);
+                page.revision = 0;
+                for row in &mut page.data {
+                    row.list_revision = 0;
+                }
+                for project in &mut page.projects {
+                    project.list_revision = 0;
+                }
+            }
+            for thread in Arc::make_mut(&mut next.conversations).values_mut() {
+                if thread.list_revision != 0 {
+                    Arc::make_mut(thread).list_revision = 0;
+                }
+            }
             next.operations = Arc::default();
             reset_session(&mut next);
             next.connected = true;
@@ -1331,6 +1359,7 @@ mod submission_tests {
                 Default::default()
             }),
             threads: Some(Arc::new(crate::models::ThreadList {
+                revision: 0,
                 data: vec![thread],
                 projects: vec![],
                 has_more: false,

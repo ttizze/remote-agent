@@ -476,6 +476,19 @@ impl HostRpcService {
             ));
         }
         response.thread = self.inner.router.overlay_execution(target, response.thread);
+        let projects = self.project_snapshot().await?;
+        describe_thread(&mut response.thread, agent.capabilities(), &projects);
+        if response
+            .thread
+            .preview
+            .as_deref()
+            .is_none_or(|preview| preview.trim().is_empty())
+        {
+            response.thread.preview = input.input.iter().find_map(|part| match part {
+                op::Input::Text { text } => Some(text.clone()),
+                _ => None,
+            });
+        }
         let running_turn = response
             .thread
             .turns
@@ -507,14 +520,37 @@ impl HostRpcService {
             }
             reload = true;
         }
-        agent
+        let receipt = agent
             .submit(
                 input,
                 route,
                 reload,
                 self.browser_config(&target.to_string())?,
             )
-            .await
+            .await?;
+        response.thread.updated_at = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+        );
+        response.thread = self.inner.router.overlay_execution(target, response.thread);
+        self.notify_session_updated(response.thread, &projects.projects);
+        Ok(receipt)
+    }
+
+    fn notify_session_updated(&self, thread: Thread, projects: &[agent_protocol::models::Project]) {
+        let project = thread
+            .project_id
+            .as_ref()
+            .and_then(|id| projects.iter().find(|project| &project.id == id))
+            .cloned();
+        self.inner
+            .router
+            .broadcast(agent_protocol::protocol::Notification::SessionUpdated {
+                thread: crate::projects::titles::summary(thread).into(),
+                project,
+            });
     }
 
     async fn answer_request(
@@ -560,8 +596,10 @@ impl HostRpcService {
                 .router
                 .retain_execution(target.clone())
                 .map_err(anyhow::Error::msg)?;
+            let revision = self.inner.router.list_revision();
             let started = std::time::Instant::now();
             let mut response = agent.open(&target.id, limit, params.include_activity).await?;
+            response.thread.list_revision = revision;
             let native_ms = started.elapsed().as_millis();
             if response.thread.id.as_ref() != Some(&target) {
                 return Err(anyhow::anyhow!("native session identity changed"));
@@ -1281,6 +1319,7 @@ impl HostRpcService {
         search: &str,
         query: crate::projects::titles::TitleQuery<'_>,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
+        let revision = self.inner.router.list_revision();
         let agents = self.agents();
         // One title walk supplies each requested quota plus lookahead.
         let (first_page_size, later_page_size) = match query {
@@ -1399,6 +1438,13 @@ impl HostRpcService {
             ));
         }
         let mut page = titles.finish();
+        page.revision = revision;
+        for thread in &mut page.data {
+            thread.list_revision = revision;
+        }
+        for project in &mut page.projects {
+            project.list_revision = revision;
+        }
         if !provider_errors.is_empty() {
             page.provider_errors = Some(provider_errors);
         }
@@ -1535,11 +1581,9 @@ impl HostRpcService {
         {
             browser.bind_scope(scope, id.to_string()).await;
         }
-        describe_thread(
-            &mut response.thread,
-            agent.capabilities(),
-            &self.project_snapshot().await?,
-        );
+        let projects = self.project_snapshot().await?;
+        describe_thread(&mut response.thread, agent.capabilities(), &projects);
+        self.notify_session_updated(response.thread.clone(), &projects.projects);
         Ok(response)
     }
 
