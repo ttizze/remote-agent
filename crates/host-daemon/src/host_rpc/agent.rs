@@ -185,6 +185,10 @@ pub(crate) trait Agent: Identity {
 }
 
 pub(crate) enum AgentChange {
+    TaskParent {
+        session: SessionRef,
+        parent: SessionRef,
+    },
     Session {
         session: SessionRef,
         change: agent_protocol::session::SessionChange,
@@ -212,6 +216,7 @@ pub(crate) struct AgentEvent {
 impl AgentChange {
     pub fn apply(self, router: &SessionRouter) -> Result<(), String> {
         match self {
+            Self::TaskParent { session, parent } => router.task_parent(session, parent),
             Self::Session { session, change } => router.session_change(&session, change),
             Self::Request {
                 session,

@@ -446,7 +446,16 @@ pub(crate) fn event_change(
         return Err("expected native notification".into());
     }
     let params: Value = message.params().map_err(|e| e.to_string())?;
-    let change = if message.method() == Some("serverRequest/resolved") {
+    let change = if message.method() == Some("thread/started") {
+        let thread = native::parse_thread(params["thread"].clone()).map_err(|e| e.to_string())?;
+        let Some(parent) = thread.parent_id else {
+            return Ok(None);
+        };
+        AgentChange::TaskParent {
+            session: thread.id.expect("native thread has an ID"),
+            parent,
+        }
+    } else if message.method() == Some("serverRequest/resolved") {
         AgentChange::Resolved {
             instance,
             native_id: params["requestId"].clone(),
@@ -1103,6 +1112,27 @@ impl Agent for Codex {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn started_subagents_publish_their_conversation_parent() {
+        let line = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"parent"}}}).to_string();
+        let change =
+            super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+                .unwrap()
+                .unwrap();
+        let super::AgentChange::TaskParent { session, parent } = change else {
+            panic!("parent was not published")
+        };
+        assert_eq!(session.id, "child");
+        assert_eq!(parent.id, "parent");
+        let root = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"root"}}})
+            .to_string();
+        assert!(
+            super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&root).unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn empty_provider_errors_keep_a_localized_recovery_message() {
         for message in ["", "  "] {

@@ -156,7 +156,7 @@ impl Outbound {
 #[derive(Default)]
 struct State {
     apns: Option<Arc<crate::apns::Apns>>,
-    tasks: HashMap<SessionRef, (TaskState, u64)>,
+    tasks: HashMap<SessionRef, Task>,
     task_revision: u64,
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
@@ -164,6 +164,13 @@ struct State {
     subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
     requests: HashMap<agent_protocol::ids::RequestId, SessionRef>,
     native_requests: HashMap<(uuid::Uuid, String), agent_protocol::ids::RequestId>,
+}
+#[derive(Default)]
+struct Task {
+    facts: Option<TaskState>,
+    parent: Option<SessionRef>,
+    // Parent discovery must not fence out an already pending read of execution facts.
+    facts_revision: u64,
 }
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
@@ -193,11 +200,41 @@ fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 fn task_display(
-    tasks: &HashMap<SessionRef, (TaskState, u64)>,
+    tasks: &HashMap<SessionRef, Task>,
 ) -> agent_protocol::live_activity::TaskActivityDisplay {
-    agent_protocol::live_activity::TaskActivitySummary::from_statuses(
-        tasks.values().map(|(task, _)| task.phase().0),
-    )
+    use agent_protocol::live_activity::TaskActivitySummary;
+    // A conversation and all of its descendants contribute one icon and one count.
+    let mut conversations: HashMap<&SessionRef, TaskActivitySummary> = HashMap::new();
+    'tasks: for (session, task) in tasks {
+        let Some(facts) = task.facts else { continue };
+        let mut root = session;
+        let mut depth = 0;
+        while let Some(parent) = tasks.get(root).and_then(|task| task.parent.as_ref()) {
+            if depth == tasks.len() {
+                continue 'tasks;
+            }
+            root = parent;
+            depth += 1;
+        }
+        let summary = conversations.entry(root).or_default();
+        match facts.phase().0 {
+            "waiting" => summary.waiting += 1,
+            "running" | "finishing" => summary.running += 1,
+            "unknown" => summary.unknown += 1,
+            _ => {}
+        }
+    }
+    TaskActivitySummary::from_statuses(conversations.values().map(|summary| {
+        if summary.waiting > 0 {
+            "waiting"
+        } else if summary.running > 0 {
+            "running"
+        } else if summary.unknown > 0 {
+            "unknown"
+        } else {
+            "finished"
+        }
+    }))
     .display()
 }
 fn publish_task_activity(
@@ -245,6 +282,30 @@ impl SessionRouter {
     pub(super) fn task_activity_revision(&self) -> u64 {
         lock_state(&self.state).task_revision
     }
+    pub(super) fn task_parent(&self, session: SessionRef, parent: SessionRef) {
+        let mut state = lock_state(&self.state);
+        if state
+            .tasks
+            .get(&session)
+            .and_then(|task| task.parent.as_ref())
+            == Some(&parent)
+        {
+            return;
+        }
+        let before = task_display(&state.tasks);
+        state.task_revision += 1;
+        let revision = state.task_revision;
+        let task = state.tasks.entry(session).or_default();
+        task.parent = Some(parent);
+        let display = task_display(&state.tasks);
+        let failed = if before != display {
+            publish_task_activity(state.apns.as_deref(), &state.sessions, revision, &display)
+        } else {
+            Vec::new()
+        };
+        drop(state);
+        self.close_failed(failed);
+    }
     pub(super) fn task_activity(
         &self,
         native: Vec<Thread>,
@@ -254,6 +315,7 @@ impl SessionRouter {
             .into_iter()
             .filter_map(|thread| {
                 let target = thread.id.clone()?;
+                let thread_parent = thread.parent_id.clone();
                 let actor = self.actor(&target);
                 let owned = lock_state(&actor);
                 let task = if owned.timeline.status
@@ -277,23 +339,38 @@ impl SessionRouter {
                 };
                 drop(owned);
                 self.prune(&target, &actor);
-                task.map(|task| (target, task))
+                task.map(|task| (target, task, thread_parent))
             })
             .collect();
         let mut state = lock_state(&self.state);
         let before = task_display(&state.tasks);
         // Provider events received while loading the list take precedence, including completion.
-        for (session, task) in tasks {
+        for (session, task, parent) in tasks {
             let previous = state.tasks.get(&session);
-            if previous.is_some_and(|(old, revision)| *revision > read_revision || old == &task)
-                || (task.phase().0 == "unknown" && !previous.is_some_and(|(old, _)| old.phase().1))
-                || (previous.is_none() && !task.phase().1)
+            // Parent identity is immutable and can arrive with an older execution read.
+            let parent = parent.or_else(|| previous.and_then(|old| old.parent.clone()));
+            let previous_facts = previous.and_then(|old| old.facts);
+            let accepts_facts = !previous.is_some_and(|old| old.facts_revision > read_revision)
+                && (task.phase().0 != "unknown" || previous_facts.is_some_and(|old| old.phase().1))
+                && (previous_facts.is_some() || task.phase().1);
+            let facts = if accepts_facts {
+                Some(task)
+            } else {
+                previous_facts
+            };
+            if previous_facts == facts
+                && previous.and_then(|old| old.parent.as_ref()) == parent.as_ref()
             {
                 continue;
             }
             state.task_revision += 1;
             let revision = state.task_revision;
-            state.tasks.insert(session, (task, revision));
+            let owned = state.tasks.entry(session).or_default();
+            owned.parent = parent;
+            if owned.facts != facts {
+                owned.facts = facts;
+                owned.facts_revision = revision;
+            }
         }
         let display = task_display(&state.tasks);
         let failed = if display != before {
@@ -1045,7 +1122,7 @@ impl SessionRouter {
             failed.extend(self.broadcast_frames(frame));
         }
         let mut state = lock_state(&self.state);
-        let previous = state.tasks.get(target).map(|(task, _)| *task);
+        let previous = state.tasks.get(target).and_then(|task| task.facts);
         let task = TaskState {
             status: if actor.timeline.status != agent_protocol::models::SessionStatus::Unknown
                 || matches!(change, SessionChange::Status { .. })
@@ -1071,7 +1148,9 @@ impl SessionRouter {
             let before = task_display(&state.tasks);
             state.task_revision += 1;
             let revision = state.task_revision;
-            state.tasks.insert(target.clone(), (task, revision));
+            let owned = state.tasks.entry(target.clone()).or_default();
+            owned.facts = Some(task);
+            owned.facts_revision = revision;
             let display = task_display(&state.tasks);
             if before != display {
                 failed.extend(publish_task_activity(
@@ -1090,6 +1169,193 @@ impl SessionRouter {
 mod tests {
     use super::*;
     use agent_protocol::models::{Item, Thread, Turn};
+
+    #[test]
+    fn subagent_work_and_requests_share_the_root_conversation_activity() {
+        use agent_protocol::{models::SessionStatus, session::RequestDelivery};
+        let router = SessionRouter::new();
+        let root = SessionRef::new(ProviderKind::Codex, "root".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let grandchild = SessionRef::new(ProviderKind::Codex, "grandchild".into()).unwrap();
+        let other = SessionRef::new(ProviderKind::Claude, "root".into()).unwrap();
+        let seed = |id: &SessionRef, parent| Thread {
+            id: Some(id.clone()),
+            parent_id: parent,
+            status: SessionStatus::Running,
+            ..Default::default()
+        };
+        let initial = router.task_activity(
+            vec![
+                seed(&root, None),
+                seed(&child, Some(root.clone())),
+                seed(&grandchild, Some(child.clone())),
+                seed(&other, None),
+            ],
+            0,
+        );
+        assert_eq!(initial.display.current.total, 2);
+        assert_eq!(initial.display.current.label, "実行中 2件");
+        for (id, body) in [
+            ("question", serde_json::json!({"question":{"questions":[]}})),
+            (
+                "approval",
+                serde_json::json!({"approval":{"kind":"command","description":"run","details":"","choices":[]}}),
+            ),
+        ] {
+            let request = serde_json::from_value(
+                serde_json::json!({"id":id,"target":"session","delivery":"awaiting","body":body}),
+            )
+            .unwrap();
+            router.session_change(&grandchild, SessionChange::Request { request });
+            let waiting = router.task_activity(Vec::new(), 0).display;
+            assert_eq!(waiting.current.total, 2);
+            assert_eq!(waiting.current.label, "確認待ち 1件 · 実行中 1件");
+            router.session_change(
+                &grandchild,
+                SessionChange::RequestDelivery {
+                    request_id: id.into(),
+                    state: RequestDelivery::Sent,
+                },
+            );
+            router.session_change(
+                &grandchild,
+                SessionChange::ResolveRequest {
+                    request_id: id.into(),
+                },
+            );
+        }
+        for target in [&root, &child, &grandchild] {
+            router.session_change(
+                target,
+                SessionChange::Status {
+                    status: SessionStatus::Idle,
+                },
+            );
+        }
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 1);
+        // Completed actors are evicted; a later child turn retains its conversation identity.
+        router.session_change(
+            &grandchild,
+            SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        );
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 2);
+        router.session_change(
+            &grandchild,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        router.session_change(
+            &other,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        assert!(!router.task_activity(Vec::new(), 0).display.ongoing);
+    }
+
+    #[test]
+    fn parent_identity_can_arrive_after_newer_task_facts_without_overwriting_them() {
+        use agent_protocol::models::SessionStatus;
+        let router = SessionRouter::new();
+        let root = SessionRef::new(ProviderKind::Codex, "root".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let revision = router.task_activity_revision();
+        for target in [&root, &child] {
+            router.session_change(
+                target,
+                SessionChange::Status {
+                    status: SessionStatus::Running,
+                },
+            );
+        }
+        let corrected = router.task_activity(
+            vec![Thread {
+                id: Some(child.clone()),
+                parent_id: Some(root.clone()),
+                status: SessionStatus::Idle,
+                ..Default::default()
+            }],
+            revision,
+        );
+        assert_eq!(corrected.display.current.total, 1);
+        router.session_change(
+            &root,
+            SessionChange::Status {
+                status: SessionStatus::Idle,
+            },
+        );
+        assert_eq!(
+            router.task_activity(Vec::new(), 0).display.current.total,
+            1,
+            "the delayed read preserved the child's newer running state"
+        );
+        let orphan = SessionRef::new(ProviderKind::Codex, "orphan".into()).unwrap();
+        router.session_change(
+            &orphan,
+            SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        );
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 2);
+        router.task_parent(orphan, root);
+        assert_eq!(router.task_activity(Vec::new(), 0).display.current.total, 1);
+    }
+
+    #[test]
+    fn invalid_parent_cycles_do_not_hang_or_create_phantom_conversations() {
+        let router = SessionRouter::new();
+        let id = |name: &str| SessionRef::new(ProviderKind::Codex, name.into()).unwrap();
+        let display = router
+            .task_activity(
+                vec![
+                    Thread {
+                        id: Some(id("root")),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                    Thread {
+                        id: Some(id("a")),
+                        parent_id: Some(id("b")),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                    Thread {
+                        id: Some(id("b")),
+                        parent_id: Some(id("a")),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                ],
+                0,
+            )
+            .display;
+        assert_eq!(display.current.total, 1);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn descendant_count_and_list_order_do_not_inflate_conversation_count(roots in 1usize..8, descendants in 0usize..24, nested in proptest::bool::ANY, reverse in proptest::bool::ANY) {
+            let router = SessionRouter::new();
+            let mut threads = Vec::new();
+            for root in 0..roots {
+                let id = SessionRef::new(ProviderKind::Codex, format!("root-{root}")).unwrap();
+                threads.push(Thread { id: Some(id.clone()), status: agent_protocol::models::SessionStatus::Running, ..Default::default() });
+                let mut parent = id.clone();
+                for child in 0..descendants {
+                    let id = SessionRef::new(ProviderKind::Codex, format!("child-{root}-{child}")).unwrap();
+                    threads.push(Thread { id: Some(id.clone()), parent_id: Some(parent.clone()), status: agent_protocol::models::SessionStatus::Running, ..Default::default() });
+                    if nested { parent = id; }
+                }
+            }
+            if reverse { threads.reverse(); }
+            let display = router.task_activity(threads, 0).display;
+            proptest::prop_assert_eq!(display.current.total, roots as u32);
+            proptest::prop_assert_eq!(display.current.icons.len(), roots);
+        }
+    }
 
     #[test]
     fn task_state_is_authoritative_without_apns_or_conversation_subscriptions() {
