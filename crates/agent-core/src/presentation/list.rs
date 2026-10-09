@@ -132,10 +132,7 @@ impl Snapshot {
                 .iter()
                 .map(|project| {
                     let page = self.project_threads.get(&project.id);
-                    let branding = page
-                        .and_then(|page| page.projects.iter().find(|p| p.id == project.id))
-                        .unwrap_or(project);
-                    let mut summary = project_summary(branding);
+                    let mut summary = project_summary(project);
                     summary.expanded = self.expanded_projects.contains_key(&project.id);
                     if summary.expanded && !self.connected && page.is_none() {
                         summary.error = Some("接続するとタスクを読み込めます".into());
@@ -219,6 +216,7 @@ mod tests {
     use crate::state::operations::Operation;
     use agent_protocol::models;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[rstest::rstest]
     #[case("remote-agent", "RA")]
@@ -308,6 +306,38 @@ mod tests {
         assert_eq!(list.projects[0].id, "known");
         assert!(list.has_more);
         assert!(!list.has_more_projects);
+    }
+
+    #[test]
+    fn returned_project_header_replaces_branding_while_preserving_loaded_tasks() {
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.expanded_projects).insert("project".into(), 5);
+        crate::state::operations::ListProjectSessions {
+            project_id: "project".into(),
+            limit: 5,
+            search_term: String::new(),
+        }
+        .apply(
+            &mut snapshot,
+            serde_json::from_value(json!({
+                "data":[{"id":{"provider":"codex","id":"task"},"projectId":"project"}],
+                "projects":[{"id":"project","name":"Old project","roots":[],"faviconPng":"BAUG"}],
+                "hasMore":false,"hasMoreProjects":false
+            }))
+            .unwrap(),
+        );
+        for icon in [Some("AQID"), None] {
+            ListSessions::new(Default::default()).apply(&mut snapshot, serde_json::from_value(json!({
+                "data":[],
+                "projects":[{"id":"project","name":"Renamed project","roots":[],"faviconPng":icon}],
+                "hasMore":false,"hasMoreProjects":false
+            })).unwrap());
+            let list = snapshot.thread_list().unwrap();
+            let project = &list.projects[0];
+            assert_eq!(project.name, "Renamed project");
+            assert_eq!(project.icon_png, icon.map(|_| vec![1, 2, 3]));
+            assert_eq!(project.threads[0].id.id, "task");
+        }
     }
 
     #[test]
