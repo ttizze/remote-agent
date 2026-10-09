@@ -128,7 +128,7 @@ extension ThreadScreen {
 }
 
 struct HistoryTopVisibility: Equatable {
-    let threadId: SessionRef
+    let threadId: SessionRef?
     let firstRowId: String?
     let visible: Bool
 }
