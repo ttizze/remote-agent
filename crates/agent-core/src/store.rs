@@ -1037,19 +1037,18 @@ async fn run(
             subscriptions.remove(&id);
         }
         for mut scheduled in std::mem::take(&mut effects) {
-            let unobserved = match &scheduled.effect.scheduling {
-                op::Scheduling::LatestTaskActivity => !generation_current(
-                    scheduled.scope.operation.as_ref(),
-                    &updates.borrow().operations,
-                ),
-                op::Scheduling::LatestProject(_) => {
-                    let snapshot = updates.borrow();
-                    !generation_current(scheduled.scope.operation.as_ref(), &snapshot.operations)
-                }
-                op::Scheduling::LatestAgents(session) => {
-                    updates.borrow().observed_agents.as_ref() != Some(session)
-                }
-                _ => false,
+            let unobserved = {
+                let snapshot = updates.borrow();
+                // Dispatch publishes before enqueueing. Newer notifications can
+                // reach the executor before an older command; never let that
+                // older work replace the latest pending read.
+                (scheduled.effect.scheduling.latest_key().is_some()
+                    && !generation_current(
+                        scheduled.scope.operation.as_ref(),
+                        &snapshot.operations,
+                    ))
+                    || matches!(&scheduled.effect.scheduling, op::Scheduling::LatestAgents(session)
+                        if snapshot.observed_agents.as_ref() != Some(session))
             };
             if unobserved {
                 updates.send_if_modified(|snapshot| {
@@ -1486,6 +1485,93 @@ impl Execution<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(dead_code)]
+    mod host_fixture {
+        include!("../tests/support/host.rs");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn older_dispatched_list_cannot_replace_newer_notification_work() {
+        use serde_json::json;
+        let initial = Snapshot::default();
+        let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
+        let store = Store::new(peer, initial);
+        let publications = store.publications.lock().unwrap().clone().unwrap();
+        // Dispatch publishes before its command is consumed. A notification can
+        // publish newer work on the executor before that older command arrives.
+        let older = apply(
+            &publications,
+            Event::Intent(Intent::ListSessions(op::ListSessions::new(
+                Default::default(),
+            ))),
+        );
+        let newer = apply(
+            &publications,
+            Event::Notification(crate::protocol::Notification::SessionRenamed {
+                session: crate::session::SessionRef::new(
+                    crate::session::ProviderKind::Claude,
+                    "changed".into(),
+                )
+                .unwrap(),
+            }),
+        );
+        let mut receipts = Vec::new();
+        for effects in [newer, older] {
+            let (complete, receipt) = oneshot::channel();
+            store
+                .commands
+                .send(Command::Dispatch(Dispatch { effects, complete }))
+                .await
+                .unwrap();
+            receipts.push(receipt);
+        }
+        let replies = async {
+            loop {
+                let request = reader.read_request().await.unwrap().unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "host/session/list" => {
+                        json!({"data":[{"id":{"provider":"claude","id":"latest"}}],
+                        "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,"projectPages":{}})
+                    }
+                    "host/taskActivity/read" => json!({"revision":0,"statuses":[],
+                        "display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                    "host/model/list" => json!({"data":[]}),
+                    "host/account/list" => json!({"accounts":[],"selected":{}}),
+                    "host/name" => json!("Fixture"),
+                    method => panic!("unexpected request: {method}"),
+                };
+                writer
+                    .reply(&request, json!({"result":result}))
+                    .await
+                    .unwrap();
+            }
+        };
+        let settled = async {
+            for receipt in receipts {
+                receipt.await.unwrap().unwrap();
+            }
+            let mut updates = store.subscribe();
+            updates
+                .wait_for(|snapshot| {
+                    snapshot.threads.as_ref().is_some_and(|page| {
+                        page.data
+                            .iter()
+                            .any(|thread| thread.id.as_ref().is_some_and(|id| id.id == "latest"))
+                    }) && !snapshot
+                        .operations
+                        .contains_key(&op::OperationKey::SessionList)
+                })
+                .await
+                .unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! { _ = settled => {}, _ = replies => unreachable!() }
+        })
+        .await
+        .expect("The newest list must finish even when an older dispatch arrives afterward");
+        store.close().await.unwrap();
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {

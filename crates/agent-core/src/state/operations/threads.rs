@@ -372,6 +372,12 @@ impl Operation for ListSessions {
         let pages = Arc::make_mut(&mut snapshot.project_threads);
         pages.retain(|id, _| visible.contains(id.as_str()));
         for (id, page) in &threads.project_pages {
+            if pages
+                .get(id)
+                .is_some_and(|current| current.limit > page.limit)
+            {
+                continue;
+            }
             pages.insert(
                 id.clone(),
                 Arc::new(merge_received(
@@ -393,12 +399,6 @@ impl Operation for ListSessions {
                 )),
             );
         }
-        Arc::make_mut(&mut snapshot.operations).retain(|key, _| match key {
-            OperationKey::ProjectList { project_id } => {
-                !threads.project_pages.contains_key(project_id)
-            }
-            _ => true,
-        });
         threads.data.retain(|thread| {
             thread
                 .project_id
@@ -1589,6 +1589,64 @@ mod tests {
                 .as_deref(),
             Some("Project task")
         );
+    }
+
+    #[test]
+    fn late_root_page_keeps_project_pagination_and_its_pending_request() {
+        let mut snapshot = Snapshot::default();
+        let page: crate::models::ThreadList = serde_json::from_value(serde_json::json!({
+            "data":[{"id":{"provider":"codex","id":"old"},"projectId":"project"}],
+            "projects":[{"id":"project","name":"Project","roots":[]}],
+            "hasMore":false,"hasMoreProjects":false,"limit":5,
+            "projectPages":{"project":{"limit":5,"hasMore":true}}
+        }))
+        .unwrap();
+        let loaded = Arc::new(crate::models::ThreadList {
+            limit: 15,
+            data: vec![crate::models::Thread {
+                id: Some(SessionRef::new(ProviderKind::Codex, "new".into()).unwrap()),
+                project_id: crate::models::ProjectMembership::Assigned("project".into()),
+                ..Default::default()
+            }],
+            projects: Vec::new(),
+            has_more: false,
+            has_more_projects: false,
+            project_pages: Default::default(),
+            provider_errors: None,
+        });
+        Arc::make_mut(&mut snapshot.project_threads).insert("project".into(), loaded.clone());
+        let key = OperationKey::ProjectList {
+            project_id: "project".into(),
+        };
+        Arc::make_mut(&mut snapshot.operations).insert(
+            key.clone(),
+            OperationState {
+                generation: 1,
+                phase: OperationPhase::Running,
+            },
+        );
+        ListSessions::new(Default::default()).apply(&mut snapshot, page.clone());
+        assert!(
+            Arc::ptr_eq(&loaded, &snapshot.project_threads["project"]),
+            "A delayed five-row root response cannot replace the fifteen-row project page"
+        );
+        assert!(
+            snapshot.operations.contains_key(&key),
+            "Only the project request can finish its own pending pagination"
+        );
+        let mut refresh = page;
+        refresh.project_pages.get_mut("project").unwrap().limit = 15;
+        ListSessions::new(Default::default()).apply(&mut snapshot, refresh);
+        assert_eq!(
+            snapshot.project_threads["project"].data[0]
+                .id
+                .as_ref()
+                .unwrap()
+                .id,
+            "old",
+            "Refreshing the same requested count must replace stale rows"
+        );
+        assert!(snapshot.operations.contains_key(&key));
     }
 
     #[test]
