@@ -4,6 +4,15 @@ use ::markdown::{
     mdast::{AlignKind, Node},
 };
 use std::{borrow::Cow, collections::HashMap};
+mod code;
+#[cfg(feature = "diagrams")]
+mod diagram;
+#[cfg(feature = "diagrams")]
+pub use diagram::{MarkdownDiagram, markdown_diagram};
+mod links;
+pub use links::{
+    MarkdownFileKind, MarkdownFileReference, markdown_display_source, markdown_file_target,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -16,6 +25,7 @@ pub enum MarkdownBlock {
         style: MarkdownStyle,
     },
     Table {
+        source: String,
         columns: Vec<MarkdownAlignment>,
         rows: Vec<Vec<MarkdownCell>>,
     },
@@ -38,6 +48,10 @@ pub struct MarkdownStyle {
     pub marker: Option<String>,
     pub code: bool,
     pub quoted: bool,
+    pub list_depth: u32,
+    pub language: Option<String>,
+    pub filename: Option<String>,
+    pub rule: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,6 +70,9 @@ pub struct MarkdownRun {
     pub code: bool,
     pub link: Option<String>,
     pub image: Option<String>,
+    pub file: Option<MarkdownFileReference>,
+    pub dark_color: Option<u32>,
+    pub light_color: Option<u32>,
 }
 
 fn parse(source: &str) -> Node {
@@ -139,7 +156,61 @@ pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
         MarkdownStyle::default(),
         &mut blocks,
     );
+    links::disambiguate(&mut blocks);
     blocks
+}
+
+/// CSV always quotes cells, including embedded delimiters, quotes and newlines.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_table_csv(rows: Vec<Vec<String>>) -> String {
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| format!("\"{}\"", cell.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// Header labels keyed by source offset for renderers that retain the original Markdown AST.
+pub fn markdown_code_headers(source: &str) -> HashMap<usize, String> {
+    fn visit(node: &Node, headers: &mut HashMap<usize, String>) {
+        if let Node::Code(code) = node
+            && let Some(position) = node.position()
+        {
+            let label = code::fence_filename(code.meta.as_deref())
+                .or_else(|| code::fence_filename(code.lang.as_deref()))
+                .or_else(|| code.lang.clone())
+                .unwrap_or_else(|| "CODE".into());
+            headers.insert(position.start.offset, label);
+        }
+        for child in node.children().into_iter().flatten() {
+            visit(child, headers);
+        }
+    }
+    let mut headers = HashMap::new();
+    visit(&parse(source), &mut headers);
+    headers
+}
+
+/// Render plain code without allowing its contents to become Markdown links or directives.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_code_block(
+    text: String,
+    language: Option<String>,
+    filename: Option<String>,
+) -> MarkdownBlock {
+    MarkdownBlock::Paragraph {
+        runs: code::highlight(&text, language.as_deref()),
+        style: MarkdownStyle {
+            code: true,
+            language,
+            filename,
+            ..Default::default()
+        },
+    }
 }
 
 fn inline(
@@ -152,6 +223,35 @@ fn inline(
         style.image = Some(url.to_owned());
         style.text = alt.to_owned();
         runs.push(style);
+        return;
+    }
+    let destination = match node {
+        Node::Link(link) => Some(link.url.as_str()),
+        Node::LinkReference(link) => definitions.get(link.identifier.as_str()).copied(),
+        _ => None,
+    };
+    if let Some(destination) = destination
+        && let Some(file) = links::file_reference(destination, false)
+    {
+        let mut label = Vec::new();
+        style.link = Some(destination.into());
+        for child in node.children().into_iter().flatten() {
+            inline(child, definitions, style.clone(), &mut label);
+        }
+        let text: String = label.iter().map(|run| run.text.as_str()).collect();
+        if !links::is_file_label(&text, &file) {
+            runs.extend(label);
+            runs.push(MarkdownRun {
+                text: " ".into(),
+                ..Default::default()
+            });
+        }
+        runs.push(MarkdownRun {
+            text: file.label.clone(),
+            link: Some(destination.into()),
+            file: Some(file),
+            ..Default::default()
+        });
         return;
     }
     match node {
@@ -167,6 +267,13 @@ fn inline(
         Node::InlineCode(code) => {
             style.code = true;
             style.text = code.value.clone();
+            if style.link.is_none() {
+                style.file = links::file_reference(&code.value, true);
+                if let Some(file) = &style.file {
+                    style.link = Some(code.value.clone());
+                    style.text = file.label.clone();
+                }
+            }
         }
         Node::Text(text) => style.text = text.value.clone(),
         Node::Break(_) => style.text = "\n".into(),
@@ -230,12 +337,19 @@ fn block(
                     cells
                 })
                 .collect();
-            blocks.push(MarkdownBlock::Table { columns, rows });
+            let position = node.position().expect("parsed table has a source position");
+            blocks.push(MarkdownBlock::Table {
+                source: source[position.start.offset..position.end.offset].into(),
+                columns,
+                rows,
+            });
             return;
         }
         Node::List(list) => {
+            let depth = style.list_depth;
             for (index, child) in list.children.iter().enumerate() {
                 let mut item_style = style.clone();
+                item_style.list_depth = depth + 1;
                 item_style.marker = Some(
                     if let Node::ListItem(item) = child
                         && let Some(checked) = item.checked
@@ -244,7 +358,7 @@ fn block(
                     } else if list.ordered {
                         format!("{}.", u64::from(list.start.unwrap_or(1)) + index as u64)
                     } else {
-                        "•".into()
+                        ["•", "◦", "▪"][depth as usize % 3].into()
                     },
                 );
                 block(child, source, definitions, item_style, blocks);
@@ -254,17 +368,18 @@ fn block(
         Node::Blockquote(_) => style.quoted = true,
         Node::Code(code) => {
             style.code = true;
+            style.language = code.lang.clone();
+            style.filename = code::fence_filename(code.meta.as_deref())
+                .or_else(|| code::fence_filename(code.lang.as_deref()));
             blocks.push(MarkdownBlock::Paragraph {
-                runs: vec![MarkdownRun {
-                    text: code.value.clone(),
-                    ..Default::default()
-                }],
+                runs: code::highlight(&code.value, code.lang.as_deref()),
                 style,
             });
             return;
         }
         Node::Heading(heading) => style.header = Some(heading.depth),
         Node::ThematicBreak(_) => {
+            style.rule = true;
             blocks.push(MarkdownBlock::Paragraph {
                 runs: vec![MarkdownRun {
                     text: "―".into(),
@@ -310,6 +425,38 @@ fn visualization_reference(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn table_copy_preserves_original_markdown_and_quotes_csv() {
+        let original = "| **太字** *斜体* ~~削除~~ | ``a`b`` |\n| :--- | ---: |\n| [資料](https://example.com) | a\\|b |";
+        let blocks = markdown_blocks(format!("before\n\n{original}\n\nafter"));
+        let MarkdownBlock::Table { source, .. } = &blocks[1] else {
+            panic!()
+        };
+        assert_eq!(source, original);
+        assert_eq!(
+            markdown_table_csv(vec![vec!["a,b".into(), "a\"b\nc".into()]]),
+            "\"a,b\",\"a\"\"b\nc\""
+        );
+    }
+
+    #[test]
+    fn fenced_metadata_nested_lists_and_rules_retain_structure() {
+        let blocks = markdown_blocks("- outer\n  - inner\n\n    continuation\n\n```rust title=\"src/hello world.rs\"\nfn main() {}\n```\n\n---".into());
+        let styles: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                MarkdownBlock::Paragraph { style, .. } => Some(style),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(styles[0].list_depth, 1);
+        assert_eq!(styles[1].list_depth, 2);
+        assert_eq!(styles[2].list_depth, 2);
+        assert!(styles[2].marker.is_none());
+        assert_eq!(styles[3].language.as_deref(), Some("rust"));
+        assert_eq!(styles[3].filename.as_deref(), Some("src/hello world.rs"));
+        assert!(styles[4].rule);
+    }
 
     #[test]
     fn visualize_reference_is_a_distinct_block() {
@@ -372,7 +519,7 @@ mod tests {
         assert_eq!(blocks.len(), 3);
         assert_eq!(paragraph_text(&blocks[0]), "Before");
         assert_eq!(paragraph_text(&blocks[2]), "After");
-        let MarkdownBlock::Table { columns, rows } = &blocks[1] else {
+        let MarkdownBlock::Table { columns, rows, .. } = &blocks[1] else {
             panic!("table flattened into prose")
         };
         assert_eq!(columns, &[MarkdownAlignment::Left; 3]);
@@ -387,7 +534,7 @@ mod tests {
     fn markdown_table_preserves_empty_cells_alignment_and_inline_semantics() {
         let source = "| Left | Center | Right |\n|:---|:---:|---:|\n| **bold** and [link][ref] | | `code` |\n| | | |\n| last | escaped \\| pipe | ~~gone~~ |\n| | | |\n\n[ref]: https://example.com\n";
         let blocks = markdown_blocks(source.into());
-        let MarkdownBlock::Table { columns, rows } = &blocks[0] else {
+        let MarkdownBlock::Table { columns, rows, .. } = &blocks[0] else {
             panic!("expected table")
         };
         assert_eq!(
@@ -424,7 +571,7 @@ mod tests {
         for (end, _) in TABLE.char_indices() {
             let blocks = markdown_blocks(TABLE[..end].into());
             for block in blocks {
-                if let MarkdownBlock::Table { columns, rows } = block {
+                if let MarkdownBlock::Table { columns, rows, .. } = block {
                     assert!(rows.iter().all(|row| row.len() == columns.len()));
                 }
             }

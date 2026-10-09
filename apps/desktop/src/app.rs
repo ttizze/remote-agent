@@ -142,6 +142,10 @@ struct MarkdownContent {
     source: SharedString,
     rendered: SharedString,
     images: Rc<[String]>,
+    code_headers: Arc<HashMap<usize, String>>,
+    diagrams: HashMap<String, Arc<RenderImage>>,
+    wrap_code: bool,
+    compact_tables: bool,
 }
 #[derive(Clone)]
 enum ConversationRow {

@@ -16,8 +16,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -67,7 +67,8 @@ internal fun ThreadDetailScreen(
 ) {
     val threadId = snapshot.navigation().threadId
     val listState = rememberLazyListState()
-    var activityExpansion by remember(threadId) { mutableStateOf(emptyMap<String, ActivityExpansion>()) }
+    var activityExpansion by
+        remember(threadId) { mutableStateOf(emptyMap<String, ActivityExpansion>()) }
     var following by remember(threadId) { mutableStateOf(true) }
     LaunchedEffect(scrollToTopRequest) {
         if (scrollToTopRequest > 0) {
@@ -87,16 +88,17 @@ internal fun ThreadDetailScreen(
                 threadId?.let(snapshot::conversation)?.historyNotice()?.let { notice ->
                     item(key = "history:read-state") { Text(notice) }
                 }
-                val renderRow: @Composable (ConversationRowContent) -> Unit = { content ->
+                val renderRow: @Composable (ConversationRow) -> Unit = { row ->
                     ConversationContent(
-                        content,
+                        row,
                         threadId,
                         snapshot.navigation().cwd,
                         perform,
                         activityHeader = { activity ->
                             ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
                                 activityExpansion = activityExpansion + (activity.id to choice)
-                                if (choice.expanded) activity.loadItems?.let { perform(Intent.LoadTurnItems(it)) {} }
+                                if (choice.expanded)
+                                    activity.loadItems?.let { perform(Intent.LoadTurnItems(it)) {} }
                             }
                         },
                     )
@@ -128,7 +130,10 @@ private fun BoxScope.LatestMessageButton(
                 }
             },
             colors =
-                IconButtonDefaults.filledIconButtonColors(containerColor = Color.DarkGray, contentColor = Color.White),
+                IconButtonDefaults.filledIconButtonColors(
+                    containerColor = Color.DarkGray,
+                    contentColor = Color.White,
+                ),
             modifier =
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp).semantics {
                     contentDescription = "最新のメッセージへ"
@@ -142,7 +147,7 @@ private fun BoxScope.LatestMessageButton(
 private fun LazyListScope.conversationRows(
     rows: List<ConversationRow>,
     activityExpansion: Map<String, ActivityExpansion>,
-    render: @Composable (ConversationRowContent) -> Unit,
+    render: @Composable (ConversationRow) -> Unit,
 ) {
     var expanded = false
     rows.forEach { row ->
@@ -151,30 +156,54 @@ private fun LazyListScope.conversationRows(
             expanded = activityIsExpanded(content.activity, activityExpansion[content.activity.id])
         }
         if (content !is ConversationRowContent.Activity || expanded) {
-            item(key = row.id) { render(content) }
+            item(key = row.id) { render(row) }
         }
     }
 }
 
 @Composable
 private fun ConversationContent(
-    content: ConversationRowContent,
+    row: ConversationRow,
     threadId: dev.remoteagent.core.SessionRef?,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
-    when (content) {
-        is ConversationRowContent.User -> ThreadMessageCard(content.item, true, cwd, perform)
-        is ConversationRowContent.Response -> ThreadMessageCard(content.item, false, cwd, perform)
+    val timestampMs = row.timestampMs
+    when (val content = row.content) {
+        is ConversationRowContent.User ->
+            ThreadMessageCard(content.item, true, cwd, perform, timestampMs)
+        is ConversationRowContent.Response ->
+            ThreadMessageCard(
+                content.item,
+                false,
+                cwd,
+                perform,
+                timestampMs,
+                content.changes,
+                loadChanges = { content.changeDetails.forEach { perform(Intent.ReadItem(it)) {} } },
+                fork =
+                    if (threadId != null && content.forkTurnId != null)
+                        ({
+                            perform(
+                                Intent.ForkSession(
+                                    dev.remoteagent.core.ForkSession(threadId, content.forkTurnId)
+                                )
+                            ) {}
+                        })
+                    else null,
+            )
         is ConversationRowContent.Activity ->
-            ThreadActivityCard(content.item) { itemId ->
-                if (threadId != null) perform(Intent.ReadItem(ReadItem(threadId, content.turnId, itemId))) {}
+            ThreadActivityCard(content.item, cwd, perform) { itemId ->
+                if (threadId != null)
+                    perform(Intent.ReadItem(ReadItem(threadId, content.turnId, itemId))) {}
             }
         is ConversationRowContent.ActivityHeader -> activityHeader(content.activity)
         is ConversationRowContent.PendingRequest ->
             RequestCard(content.request) { answer, complete ->
-                perform(Intent.Respond(Respond(content.request.id, answer))) { complete(it.exceptionOrNull()?.message) }
+                perform(Intent.Respond(Respond(content.request.id, answer))) {
+                    complete(it.exceptionOrNull()?.message)
+                }
             }
         is ConversationRowContent.Error -> {
             Text(content.error.title, style = MaterialTheme.typography.labelLarge)
@@ -183,7 +212,10 @@ private fun ConversationContent(
         }
         is ConversationRowContent.InProgress ->
             Button(
-                onClick = { if (threadId != null) perform(Intent.Interrupt(Interrupt(threadId, content.turnId))) {} }
+                onClick = {
+                    if (threadId != null)
+                        perform(Intent.Interrupt(Interrupt(threadId, content.turnId))) {}
+                }
             ) {
                 Text("停止")
             }
@@ -197,8 +229,15 @@ private fun ActivityHeader(
     toggle: (ActivityExpansion) -> Unit,
 ) {
     val expanded = activityIsExpanded(activity, choice)
-    TextButton(onClick = { if (activity.activityCanCollapse) toggle(ActivityExpansion(activity.status, !expanded)) }) {
-        Text(activity.activitySummary + if (activity.activityCanCollapse) if (expanded) " ⌄" else " ›" else "")
+    TextButton(
+        onClick = {
+            if (activity.activityCanCollapse) toggle(ActivityExpansion(activity.status, !expanded))
+        }
+    ) {
+        Text(
+            activity.activitySummary +
+                if (activity.activityCanCollapse) if (expanded) " ⌄" else " ›" else ""
+        )
     }
 }
 
@@ -212,7 +251,8 @@ internal fun ThreadComposer(
     val navigation = snapshot.navigation()
     val draft = snapshot.draft(navigation.draftKey)
     var sending by remember { mutableStateOf(false) }
-    val inputUnavailable = navigation.threadId?.let(snapshot::conversation)?.inputUnavailableReason()
+    val inputUnavailable =
+        navigation.threadId?.let(snapshot::conversation)?.inputUnavailableReason()
     Column(Modifier.padding(12.dp)) {
         inputUnavailable?.let { Text(it) }
         DraftAttachments(draft.attachments, navigation.draftKey, perform)
@@ -224,7 +264,15 @@ internal fun ThreadComposer(
         }
         OutlinedTextField(
             draft.text,
-            { perform(Intent.EditComposer(navigation.draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())) {} },
+            {
+                perform(
+                    Intent.EditComposer(
+                        navigation.draftKey,
+                        it,
+                        it.toByteArray(Charsets.UTF_8).size.toUInt(),
+                    )
+                ) {}
+            },
             Modifier.fillMaxWidth(),
             label = { Text("メッセージ") },
             minLines = 2,
@@ -235,7 +283,9 @@ internal fun ThreadComposer(
                 onClick = {
                     sending = true
                     onSend()
-                    perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString())) { sending = false }
+                    perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString())) {
+                        sending = false
+                    }
                 },
                 enabled =
                     snapshot.modelProviderForDraft(navigation.draftKey) != null &&
@@ -280,7 +330,8 @@ internal fun ConversationHeader(title: String?, showThreads: () -> Unit, scrollT
         Button(onClick = showThreads) { Text("タスク一覧") }
         TextButton(
             onClick = scrollToTop,
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+            colors =
+                ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
             modifier = Modifier.semantics { contentDescription = "会話の先頭へ" },
         ) {
             Text(title?.ifEmpty { "タスク" } ?: "チャット")
@@ -303,20 +354,24 @@ private fun ObserveFollowing(
         }
     }
     LaunchedEffect(snapshot, following, older) {
-        val hasMore = snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
+        val hasMore =
+            snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
         snapshotFlow {
-            val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
-            shouldLoadHistory(
-                hasMore,
-                older == null || snapshot.error() != null,
-                viewportHeight > 0 &&
-                    listState.firstVisibleItemIndex == 0 &&
-                    listState.firstVisibleItemScrollOffset <
-                        viewportHeight * HISTORY_PREFETCH_FRACTION,
-                !listState.canScrollForward,
-                following,
-            )
-        }.collect { needed -> if (needed) older?.invoke() }
+                val viewportHeight =
+                    listState.layoutInfo.viewportEndOffset -
+                        listState.layoutInfo.viewportStartOffset
+                shouldLoadHistory(
+                    hasMore,
+                    older == null || snapshot.error() != null,
+                    viewportHeight > 0 &&
+                        listState.firstVisibleItemIndex == 0 &&
+                        listState.firstVisibleItemScrollOffset <
+                            viewportHeight * HISTORY_PREFETCH_FRACTION,
+                    !listState.canScrollForward,
+                    following,
+                )
+            }
+            .collect { needed -> if (needed) older?.invoke() }
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to !listState.canScrollForward }

@@ -40,7 +40,7 @@ struct ConversationPresentation: Sendable {
             var items: [String: ConversationItem] = [:]
             let projected = turn.conversationRows().map { row in
                 let item: ConversationItem? = switch row.content {
-                case let .user(source), let .response(source, _), let .activity(source, _):
+                case let .user(source), let .response(source, _, _, _), let .activity(source, _):
                     Self.item(source, id: row.id, previous: cached, next: &items)
                 default: nil
                 }

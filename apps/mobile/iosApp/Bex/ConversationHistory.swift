@@ -23,15 +23,22 @@ extension ThreadScreen {
     func nativeConversationRow(_ row: ConversationRow, item: ConversationItem?) -> some View {
         switch (row.content, item) {
         case let (.user, item?):
-            userMessageRow(item)
+            userMessageRow(item, timestampMs: row.timestampMs)
                 .padding(
                     .top,
                     16
                 )
-        case (let .response(_, turnId), let item?):
-            ThreadMessageRow(item: item, isUser: false, media: model.mediaAccess, selection: selectionActions,
-                             fork: turnId
-                                 .map { id in { complete in model.forkAndOpen(through: id, completion: complete) } })
+        case (let .response(_, turnId, changes, changeDetails), let item?):
+            ThreadMessageRow(
+                item: item,
+                isUser: false,
+                media: model.mediaAccess,
+                selection: selectionActions,
+                timestampMs: row.timestampMs, changes: changes,
+                loadChanges: { changeDetails.forEach { model.perform(.readItem($0)) } },
+                fork: turnId
+                    .map { id in { complete in model.forkAndOpen(through: id, completion: complete) } }
+            )
         case let (.activityHeader(activity), _): activityHeader(activity)
         case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
         case let (.pendingRequest(request), _): ThreadRequestRow(request: request) { answer, complete in model.respond(
@@ -44,12 +51,13 @@ extension ThreadScreen {
         }
     }
 
-    func userMessageRow(_ item: ConversationItem) -> some View {
+    func userMessageRow(_ item: ConversationItem, timestampMs: UInt64? = nil) -> some View {
         ThreadMessageRow(
             item: item,
             isUser: true,
             media: model.mediaAccess,
             selection: selectionActions,
+            timestampMs: timestampMs,
             restoreUnknown: { model.restoreUnknownSubmission($0) },
             discardUnknown: { model.discardUnknownSubmission($0) }
         )

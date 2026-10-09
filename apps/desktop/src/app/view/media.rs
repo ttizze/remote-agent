@@ -143,26 +143,188 @@ impl Desktop {
             let (rendered, images) =
                 agent_core::presentation::markdown::markdown_without_images(source);
             let source: SharedString = source.to_owned().into();
-            let rendered = if images.is_empty() {
-                source.clone()
-            } else {
-                rendered.into_owned().into()
-            };
+            let rendered: SharedString =
+                agent_core::presentation::markdown::markdown_display_source(&rendered).into();
+            let code_headers = Arc::new(agent_core::presentation::markdown::markdown_code_headers(
+                &rendered,
+            ));
+            let (wrap_code, compact_tables) = self
+                .markdown_cache
+                .get(&id)
+                .map_or((false, false), |cached| {
+                    (cached.wrap_code, cached.compact_tables)
+                });
             self.markdown_cache.insert(
                 id.clone(),
                 MarkdownContent {
                     source,
                     rendered,
                     images: images.into(),
+                    code_headers,
+                    diagrams: HashMap::new(),
+                    wrap_code,
+                    compact_tables,
                 },
             );
         }
         let cached = &self.markdown_cache[&id];
         let images = cached.images.clone();
         let view = cx.entity().downgrade();
+        let wrap_code = cached.wrap_code;
+        let compact_tables = cached.compact_tables;
+        let headers = cached.code_headers.clone();
+        let wrap_view = view.clone();
+        let table_view = view.clone();
+        let code_key = id.clone();
+        let table_key = id.clone();
+        let diagram_key = id.clone();
+        let diagram_view = view.clone();
+        let mut code_style = gpui_kit::StyleRefinement::default()
+            .pt(px(44.))
+            .border_1()
+            .border_color(cx.theme().border);
+        code_style.overflow.x = Some(gpui_kit::Overflow::Scroll);
+        code_style.text.white_space = Some(if wrap_code {
+            gpui_kit::WhiteSpace::Normal
+        } else {
+            gpui_kit::WhiteSpace::Nowrap
+        });
+        let mut table_cell = gpui_kit::StyleRefinement::default();
+        table_cell.text.white_space = Some(if compact_tables {
+            gpui_kit::WhiteSpace::Nowrap
+        } else {
+            gpui_kit::WhiteSpace::Normal
+        });
+        let mut table_style = gpui_kit::StyleRefinement::default();
+        table_style.overflow.x = Some(gpui_kit::Overflow::Scroll);
+        let style = gpui_kit::component::text::TextViewStyle::default()
+            .code_block(code_style)
+            .table(table_style)
+            .table_cell(table_cell);
         let mut body = v_flex().gap_3().w_full().child(
             TextView::markdown(SharedString::from(id), cached.rendered.clone())
                 .selectable(true)
+                .markdown_block_parser(|node, context| {
+                    let original = context.node_source(node)?;
+                    let diagram = agent_core::presentation::markdown::markdown_diagram(original)?;
+                    Some(
+                        gpui_kit::base::text::MarkdownNode::new("mermaid", diagram.clone())
+                            .text(diagram.source)
+                            .markdown(original.to_owned()),
+                    )
+                })
+                .markdown_block_renderer("mermaid", move |node, _, cx| {
+                    diagram_view
+                        .update(cx, |view, cx| view.markdown_diagram(&diagram_key, node, cx))
+                        .unwrap_or_else(|_| div().into_any_element())
+                })
+                .style(style)
+                .selection_format(gpui_kit::component::text::SelectionFormat::Source)
+                .code_block_actions(move |block, _, _| {
+                    let text = block.code().to_string();
+                    let label = block
+                        .span
+                        .and_then(|span| headers.get(&span.start))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            block.lang().unwrap_or_else(|| "CODE".into()).to_string()
+                        });
+                    let wrap_view = wrap_view.clone();
+                    let code_key = code_key.clone();
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(220.))
+                                .text_ellipsis()
+                                .text_xs()
+                                .child(label),
+                        )
+                        .child(
+                            Button::new("wrap-code")
+                                .label(if wrap_code {
+                                    "折り返し解除"
+                                } else {
+                                    "折り返し"
+                                })
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    let _ = wrap_view.update(cx, |view, cx| {
+                                        if let Some(cached) = view.markdown_cache.get_mut(&code_key)
+                                        {
+                                            cached.wrap_code = !cached.wrap_code;
+                                        }
+                                        view.remeasure_item(&code_key);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("copy-code")
+                                .icon(IconName::Copy)
+                                .small()
+                                .ghost()
+                                .tooltip("コードをコピー")
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+                                }),
+                        )
+                })
+                .table_actions(move |table, _, _| {
+                    let table_view = table_view.clone();
+                    let table_key = table_key.clone();
+                    let markdown = table.markdown.clone();
+                    let mut rows = vec![table.headers.clone()];
+                    rows.extend(table.rows.clone());
+                    let csv = agent_core::presentation::markdown::markdown_table_csv(rows);
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("wrap-table")
+                                .label(if compact_tables {
+                                    "セルを折り返す"
+                                } else {
+                                    "セルをコンパクトに表示"
+                                })
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    let _ = table_view.update(cx, |view, cx| {
+                                        if let Some(cached) =
+                                            view.markdown_cache.get_mut(&table_key)
+                                        {
+                                            cached.compact_tables = !cached.compact_tables;
+                                        }
+                                        view.remeasure_item(&table_key);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("copy-markdown")
+                                .label("Markdownをコピー")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        markdown.clone(),
+                                    ))
+                                }),
+                        )
+                        .child(
+                            Button::new("copy-csv")
+                                .label("CSVをコピー")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(csv.clone()))
+                                }),
+                        )
+                })
                 .on_link_click(move |url, _, _, cx| {
                     let _ = view.update(cx, |s, cx| s.open_conversation_link(url, cx));
                 }),

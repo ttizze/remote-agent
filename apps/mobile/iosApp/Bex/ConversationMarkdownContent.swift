@@ -14,6 +14,8 @@ enum ConversationMarkdownContent {
         let blocks: [Block]
         let tableRows: [[[Block]]]
         var visualizationPath: String?
+        var tableMarkdown: String?
+        var tableCSV: String?
 
         var image: Block? {
             blocks.first.flatMap { $0.imageURL == nil ? nil : $0 }
@@ -25,9 +27,13 @@ enum ConversationMarkdownContent {
     }
 
     nonisolated static func parse(_ text: String) -> [Part] {
+        parts(markdownBlocks(source: text))
+    }
+
+    nonisolated static func parts(_ sourceBlocks: [MarkdownBlock]) -> [Part] {
         var result: [Part] = []
         var paragraphs: [Block] = []
-        for block in markdownBlocks(source: text) {
+        for block in sourceBlocks {
             switch block {
             case let .paragraph(runs, style):
                 paragraphs.append(contentsOf: blocks(runs, style: style, startingID: paragraphs.count))
@@ -35,16 +41,20 @@ enum ConversationMarkdownContent {
                 appendParts(paragraphs, to: &result)
                 paragraphs.removeAll(keepingCapacity: true)
                 result.append(Part(id: result.count, blocks: [], tableRows: [], visualizationPath: path))
-            case let .table(columns, rows):
+            case let .table(source, columns, rows):
                 appendParts(paragraphs, to: &result)
                 paragraphs.removeAll(keepingCapacity: true)
                 let cells = rows.map { cells in
                     cells.enumerated().map { column, cell in
                         blocks(cell.runs, style: MarkdownStyle(alignment: columns[column],
-                                                               header: nil, marker: nil, code: false, quoted: false))
+                                                               header: nil, marker: nil, code: false, quoted: false,
+                                                               listDepth: 0, language: nil, filename: nil, rule: false))
                     }
                 }
-                result.append(Part(id: result.count, blocks: [], tableRows: cells))
+                result.append(Part(id: result.count, blocks: [], tableRows: cells,
+                                   tableMarkdown: source,
+                                   tableCSV: markdownTableCsv(rows: rows
+                                       .map { $0.map { $0.runs.map(\.text).joined() } })))
             }
         }
         appendParts(paragraphs, to: &result)

@@ -242,12 +242,9 @@ impl Desktop {
                         let rendered = match part {
                             MessagePart::Image { .. } => continue,
                             MessagePart::Text { text } if text.is_empty() => continue,
-                            MessagePart::Text { text } => TextView::markdown(
-                                SharedString::from(format!("{id}-{i}")),
-                                literal(text),
-                            )
-                            .selectable(true)
-                            .into_any_element(),
+                            MessagePart::Text { text } => {
+                                self.markdown(format!("{id}-{i}"), text, cx)
+                            }
                             MessagePart::Attachment { name, path }
                             | MessagePart::Invocation { name, path } => {
                                 let path = path.clone();
@@ -273,13 +270,11 @@ impl Desktop {
                     }
                 } else {
                     has_body = !text.as_deref().unwrap_or_default().is_empty();
-                    body = body.child(
-                        TextView::markdown(
-                            SharedString::from(id.clone()),
-                            literal(text.as_deref().unwrap_or_default()),
-                        )
-                        .selectable(true),
-                    );
+                    body = body.child(self.markdown(
+                        id.clone(),
+                        text.as_deref().unwrap_or_default(),
+                        cx,
+                    ));
                 }
                 let body = self.user_message_content(
                     body,
@@ -296,7 +291,11 @@ impl Desktop {
                 user_message_row(&id, text, body, timestamp, edit).into_any_element()
             }
             agent_protocol::items::ItemBody::CommandExecution {
-                command, exit_code, ..
+                command,
+                output,
+                cwd,
+                exit_code,
+                ..
             } => {
                 let label = title.expect("command has a title");
                 let toggle = id.clone();
@@ -318,9 +317,16 @@ impl Desktop {
                     .text_color(rgb(appearance::MUTED)),
                 );
                 if expanded {
-                    let output = projected.expanded_body();
                     let copied = output.clone();
-                    let content = format!("$ {}\n\n{output}", command);
+                    if let Some(cwd) = cwd {
+                        body = body.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(appearance::MUTED))
+                                .child(format!("cwd: {cwd}")),
+                        );
+                    }
+                    body = body.child(Self::activity_text(format!("command-{id}"), command, "sh"));
                     body = body
                         .child(
                             h_flex()
@@ -343,7 +349,7 @@ impl Desktop {
                                         }),
                                 ),
                         )
-                        .child(Self::activity_text(format!("output-{id}"), &content, ""))
+                        .child(Self::activity_text(format!("output-{id}"), &output, ""))
                         .child(
                             div()
                                 .text_sm()
@@ -410,6 +416,30 @@ impl Desktop {
                     }
                 }
                 body.into_any_element()
+            }
+            agent_protocol::items::ItemBody::Plan { text } => {
+                let copied = text.clone();
+                let content = self.markdown(id.clone(), text, cx);
+                v_flex()
+                    .gap_2()
+                    .w_full()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_md()
+                    .child(
+                        h_flex().justify_between().child("計画").child(
+                            Button::new(format!("copy-plan-{id}"))
+                                .icon(IconName::Copy)
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                                }),
+                        ),
+                    )
+                    .child(content)
+                    .into_any_element()
             }
             _ => {
                 let toggle = id.clone();
@@ -522,13 +552,99 @@ impl Desktop {
                 ConversationRowContent::Error { error } => {
                     body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
                 }
-                ConversationRowContent::Response { item, fork_turn_id } => {
+                ConversationRowContent::Response {
+                    item,
+                    fork_turn_id,
+                    changes,
+                    change_details,
+                } => {
                     body = body.child(self.projected_item(item, turn, cx));
+                    if !changes.is_empty() {
+                        let key = format!("response-changes-{}", item.data.id);
+                        let expanded = self.expanded_items.contains(&key);
+                        let toggle = key.clone();
+                        let item_id = item.data.id.clone();
+                        let details = change_details.clone();
+                        let mut summary = v_flex().gap_1().child("変更ファイル");
+                        for file in changes {
+                            summary = summary.child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .child(file.path.clone()),
+                                    )
+                                    .child(review_counts(file.additions, file.deletions)),
+                            );
+                        }
+                        body = body.child(
+                            Button::new(key.clone())
+                                .child(summary)
+                                .w_full()
+                                .ghost()
+                                .accessibility_label("変更ファイルの差分を開く")
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    toggle_set(&mut view.expanded_items, &toggle);
+                                    if view.expanded_items.contains(&toggle) {
+                                        for detail in &details {
+                                            view.dispatch(Intent::ReadItem(detail.clone()));
+                                        }
+                                    }
+                                    view.remeasure_item(&item_id);
+                                    view.pause_tail();
+                                    cx.notify();
+                                })),
+                        );
+                        if expanded {
+                            for (index, file) in changes.iter().enumerate() {
+                                body = body.child(div().text_sm().child(file.path.clone()));
+                                if file.rows.is_empty() {
+                                    body = body.child(
+                                        div().text_sm().child("差分はまだ取得されていません"),
+                                    );
+                                } else {
+                                    let patch = file
+                                        .rows
+                                        .iter()
+                                        .map(|row| row.text.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    body = body.child(Self::diff(
+                                        &mut self.diffs,
+                                        format!("{key}-{index}"),
+                                        &patch,
+                                        cx,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     if item.data.kind == "agent" {
                         let text = item.data.body.clone().expect("assistant message has text");
                         body = body.child(
                             h_flex()
                                 .gap_2()
+                                .children(
+                                    row.timestamp_ms
+                                        .and_then(|time| {
+                                            i64::try_from(time)
+                                                .ok()
+                                                .and_then(chrono::DateTime::from_timestamp_millis)
+                                        })
+                                        .map(|time| {
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(appearance::MUTED))
+                                                .child(
+                                                    time.with_timezone(&chrono::Local)
+                                                        .format("%H:%M")
+                                                        .to_string(),
+                                                )
+                                        }),
+                                )
                                 .child(
                                     Button::new(format!("copy-{}", item.data.id))
                                         .icon(IconName::Copy)

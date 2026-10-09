@@ -13,7 +13,7 @@ anyhow.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true, features = ["rt"] }
-agent-core = { path = "../../crates/agent-core" }
+agent-core = { path = "../../crates/agent-core", features = ["diagrams"] }
 host-daemon = { path = "../../crates/host-daemon" }
 directories = "6"
 rfd = "0.17.2"

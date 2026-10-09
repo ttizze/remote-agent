@@ -10,6 +10,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [features]
 bindings = ["dep:uniffi", "dep:zeroize"]
+diagrams = ["dep:mermaid-rs-renderer"]
 
 [dependencies]
 agent-protocol = { path = "../agent-protocol" }
@@ -26,6 +27,10 @@ tokio-stream = { version = "0.1", default-features = false }
 thiserror.workspace = true
 scopeguard = "1.2"
 markdown = "=1.0.0"
+url.workspace = true
+percent-encoding = "2.3"
+syntect = { version = "=5.3.0", default-features = false, features = ["default-fancy"] }
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false, optional = true }
 base64.workspace = true
 
 [dev-dependencies]

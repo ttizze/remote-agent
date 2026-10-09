@@ -8,7 +8,8 @@ struct ConversationMarkdown: View {
     let blocks: [ConversationMarkdownContent.Part]
     let media: ConversationMediaAccess
     let selection: ConversationSelectionActions
-    @ScaledMetric(relativeTo: .body) private var tableColumnWidth = 220.0
+    @ScaledMetric(relativeTo: .body) private var tableColumnWidth = 160.0
+    var textIdentifier: String = "message.assistant-text"
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
     @State private var previewDirectory: URL?
@@ -25,7 +26,12 @@ struct ConversationMarkdown: View {
                 } else if part.isCode {
                     ConversationMarkdownCodeBlock(part: part, selection: selection)
                 } else {
-                    AssistantSelectableText(blocks: part.blocks, actions: selection)
+                    AssistantSelectableText(
+                        blocks: part.blocks,
+                        actions: selection,
+                        cwd: media.cwd,
+                        identifier: textIdentifier
+                    )
                 }
             }
             if let linkError {
@@ -94,30 +100,45 @@ struct ConversationMarkdown: View {
 
     private func table(_ part: ConversationMarkdownContent.Part) -> some View {
         let rows = part.tableRows
-        return ScrollView(.horizontal) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(rows.indices, id: \.self) { row in
-                    HStack(alignment: .top, spacing: 0) {
-                        ForEach(rows[row].indices, id: \.self) { column in
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(rows[row][column]) { block in
-                                    if let url = block.imageURL {
-                                        image(block, url: url)
-                                    } else {
-                                        AssistantSelectableText(blocks: [block], actions: selection)
+        return VStack(alignment: .trailing, spacing: 6) {
+            Menu {
+                Button("Markdownをコピー") { UIPasteboard.general.string = part.tableMarkdown }
+                Button("CSVをコピー") { UIPasteboard.general.string = part.tableCSV }
+            } label: {
+                Image(systemName: "doc.on.doc").foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("表をコピー")
+            ScrollView(.horizontal) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows.indices, id: \.self) { row in
+                        HStack(alignment: .top, spacing: 0) {
+                            ForEach(rows[row].indices, id: \.self) { column in
+                                VStack(alignment: .leading, spacing: 0) {
+                                    ForEach(rows[row][column]) { block in
+                                        if let url = block.imageURL {
+                                            image(block, url: url)
+                                        } else {
+                                            AssistantSelectableText(
+                                                blocks: [block],
+                                                actions: selection,
+                                                cwd: media.cwd,
+                                                identifier: textIdentifier
+                                            )
+                                        }
                                     }
                                 }
+                                .frame(width: tableColumnWidth)
+                                .padding(10)
+                                .accessibilityIdentifier("markdown.cell.\(part.id).\(row).\(column)")
                             }
-                            .frame(width: tableColumnWidth)
-                            .padding(10)
-                            .accessibilityIdentifier("markdown.cell.\(part.id).\(row).\(column)")
                         }
+                        .background(row == 0 ? Color(UIColor.secondarySystemBackground) : Color.clear)
+                        Divider()
                     }
-                    .background(row == 0 ? Color(UIColor.secondarySystemBackground) : Color.clear)
-                    Divider()
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(UIColor.separator), lineWidth: 0.5))
             }
-            .overlay(Rectangle().stroke(Color(UIColor.separator), lineWidth: 0.5))
         }
     }
 }
@@ -126,6 +147,7 @@ private struct ConversationMarkdownCodeBlock: View {
     let part: ConversationMarkdownContent.Part
     let selection: ConversationSelectionActions
     @State private var copied = false
+    @State private var wrapped = false
 
     private var text: String {
         part.blocks
@@ -135,28 +157,53 @@ private struct ConversationMarkdownCodeBlock: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
+                if let filename = part.blocks.first?.style.filename {
+                    Label(filename, systemImage: "doc.text").lineLimit(1).truncationMode(.middle)
+                } else {
+                    Text((part.blocks.first?.style.language ?? "CODE").uppercased())
+                }
                 Spacer(minLength: 0)
+                Button { wrapped.toggle() } label: {
+                    Image(systemName: wrapped ? "text.alignleft" : "arrow.right.to.line")
+                }
+                .accessibilityLabel(wrapped ? "コードの折り返しを解除" : "コードを折り返す")
                 Button {
                     UIPasteboard.general.string = text
                     copied = true
                 } label: {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                 }
-                .font(.system(size: 19))
+                .font(.system(size: 16))
                 .foregroundColor(.secondary)
                 .buttonStyle(.plain)
                 .accessibilityLabel(copied ? "コピーしました" : "コードをコピー")
                 .accessibilityIdentifier("markdown.code.copy.\(part.id)")
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 4)
-            ScrollView(.horizontal) {
-                AssistantSelectableText(blocks: part.blocks, actions: selection)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(12)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            Divider()
+            if wrapped {
+                AssistantSelectableText(blocks: part.blocks, actions: selection).padding(12)
+            } else {
+                ScrollView(.horizontal) {
+                    AssistantSelectableText(blocks: part.blocks, actions: selection)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(12)
+                }
             }
         }
         .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(UIColor.separator), lineWidth: 0.5))
+        .task(id: copied) {
+            if copied {
+                try? await Task.sleep(for: .milliseconds(1200))
+                if !Task.isCancelled {
+                    copied = false
+                }
+            }
+        }
     }
 }

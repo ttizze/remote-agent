@@ -412,6 +412,34 @@ iPhone uses a
 temporary download and a Quick Look sheet with an explicit close action;
 closing the sheet removes the temporary copy.
 
+The October 9, 2026 display update follows T3 Code's chat conventions, audited
+against source commit `9b0df1358f9f9c3277bcb33777c2435b88ee75c4` and the installed
+Nightly app. Human messages use Markdown too. Core classifies workspace links,
+keeps explanatory labels beside short file labels, disambiguates identical
+basenames by the shortest distinct parent, and retains line/column references.
+Native inline file attachments participate in surrounding text selection; copying
+them produces their original Markdown link, and copying a path uses the resolved
+Host path. Android previews use authenticated Host downloads and remove temporary
+copies on dismissal, including cancellation while downloading.
+
+Code preserves language, optional filename and source text. Native syntax colors
+come from core; desktop retains GPUI highlighting. Code headers expose copy and
+wrapping controls. Tables expose original Markdown and quoted CSV copying;
+desktop also exposes compact/wrapped cells. Desktop Mermaid blocks offer diagram,
+source and enlarged views through public GPUI block extensions. Incomplete,
+invalid, unsupported or oversized diagrams remain selectable code. Native mobile
+keeps Mermaid as code, matching T3's native renderer.
+
+Completed answers expose reported changed files and known addition/deletion
+counts. Opening the card requests only deferred file-change items; these are the
+provider's reported edits, rather than a newly read workspace diff. Work remains
+collapsed until explicitly opened. Expanded native work renders command/output,
+exit status, JSON arguments/results, search links and diffs from core. Answer
+copy, completion time and supported fork actions remain outside collapsed work.
+Acceptance: core `presentation::markdown`, `presentation::body`, and
+`response_metadata_updates_after_deferred_edits_are_loaded`; existing desktop
+selection and history assertions remain unchanged.
+
 ## Requests and approvals
 
 Pending server requests are part of the live conversation state, even though
