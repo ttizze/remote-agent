@@ -205,34 +205,35 @@ fn task_display(
     use agent_protocol::live_activity::TaskActivitySummary;
     // A conversation and all of its descendants contribute one icon and one count.
     let mut conversations: HashMap<&SessionRef, TaskActivitySummary> = HashMap::new();
-    'tasks: for (session, task) in tasks {
+    for (session, task) in tasks {
         let Some(facts) = task.facts else { continue };
+        let contribution = TaskActivitySummary::from_statuses([facts.phase().0]);
+        if contribution == TaskActivitySummary::default() {
+            continue;
+        }
         let mut root = session;
         let mut depth = 0;
         while let Some(parent) = tasks.get(root).and_then(|task| task.parent.as_ref()) {
             if depth == tasks.len() {
-                continue 'tasks;
+                // Invalid ancestry cannot certify that known work has finished.
+                root = session;
+                break;
             }
             root = parent;
             depth += 1;
         }
         let summary = conversations.entry(root).or_default();
-        match facts.phase().0 {
-            "waiting" => summary.waiting += 1,
-            "running" | "finishing" => summary.running += 1,
-            "unknown" => summary.unknown += 1,
-            _ => {}
-        }
+        summary.waiting += contribution.waiting;
+        summary.running += contribution.running;
+        summary.unknown += contribution.unknown;
     }
     TaskActivitySummary::from_statuses(conversations.values().map(|summary| {
         if summary.waiting > 0 {
             "waiting"
         } else if summary.running > 0 {
             "running"
-        } else if summary.unknown > 0 {
-            "unknown"
         } else {
-            "finished"
+            "unknown"
         }
     }))
     .display()
@@ -1305,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_parent_cycles_do_not_hang_or_create_phantom_conversations() {
+    fn invalid_parent_cycles_preserve_known_work_without_hanging() {
         let router = SessionRouter::new();
         let id = |name: &str| SessionRef::new(ProviderKind::Codex, name.into()).unwrap();
         let display = router
@@ -1332,7 +1333,8 @@ mod tests {
                 0,
             )
             .display;
-        assert_eq!(display.current.total, 1);
+        assert_eq!(display.current.total, 3);
+        assert!(display.ongoing);
     }
 
     proptest::proptest! {
