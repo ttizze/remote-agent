@@ -334,6 +334,23 @@ pub(super) fn disambiguate(blocks: &mut [MarkdownBlock]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[rstest::rstest]
+    #[case("src/main.rs", "src/main.rs", None, None)]
+    #[case("src/main.rs:0", "src/main.rs:0", None, None)]
+    #[case("src/main.rs:4294967296", "src/main.rs:4294967296", None, None)]
+    #[case("src/main.rs:12", "src/main.rs", Some(12), None)]
+    #[case("src/main.rs:12:3", "src/main.rs", Some(12), Some(3))]
+    #[case("src/main.rs:0:3", "src/main.rs:0", Some(3), None)]
+    #[case("src/main.rs:12:0", "src/main.rs:12:0", None, None)]
+    fn positions_require_positive_u32_values(
+        #[case] source: &str,
+        #[case] path: &str,
+        #[case] line: Option<u32>,
+        #[case] column: Option<u32>,
+    ) {
+        assert_eq!(position(source), (path, line, column));
+    }
+
     #[test]
     fn filename_positions_are_not_uri_schemes_or_web_hosts() {
         let file = markdown_file_target("Makefile:12:3".into(), "/workspace".into()).unwrap();
