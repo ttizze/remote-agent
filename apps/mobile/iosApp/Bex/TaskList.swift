@@ -295,10 +295,6 @@ private struct ThreadListRow: View {
         "\(thread.id.provider == .codex ? "codex" : "claude"):\(thread.id.id)"
     }
 
-    private var accessibilityPrefix: String {
-        indented ? "tasks.project" : "tasks"
-    }
-
     var body: some View {
         Button(action: open) {
             HStack(spacing: 10) {
@@ -306,11 +302,11 @@ private struct ThreadListRow: View {
                 Spacer()
                 if thread.active {
                     ProgressView().controlSize(.small)
-                        .accessibilityIdentifier("\(accessibilityPrefix).running.\(accessibilityID)")
+                        .accessibilityIdentifier("tasks.running.\(accessibilityID)")
                 } else if thread.unread {
                     Circle().fill(Color.white).frame(width: 8, height: 8)
                         .accessibilityLabel("完了・未確認")
-                        .accessibilityIdentifier("\(accessibilityPrefix).completed.\(accessibilityID)")
+                        .accessibilityIdentifier("tasks.completed.\(accessibilityID)")
                 }
                 if let status = thread.worktreeStatus {
                     let unmerged = status == .unmerged
@@ -320,14 +316,14 @@ private struct ThreadListRow: View {
                         .foregroundStyle(unmerged ? .orange : .purple)
                         .accessibilityLabel(unmerged ? "main に未反映の変更あり" : "main にマージ済み")
                         .accessibilityIdentifier(
-                            "\(accessibilityPrefix).\(unmerged ? "unmerged" : "merged").\(accessibilityID)"
+                            "tasks.\(unmerged ? "unmerged" : "merged").\(accessibilityID)"
                         )
                 }
             }
             .padding(.leading, indented ? 40 : 0)
             .contentShape(Rectangle())
         }
-        .accessibilityIdentifier("\(accessibilityPrefix).row.\(accessibilityID)")
+        .accessibilityIdentifier("tasks.row.\(accessibilityID)")
         .accessibilityValue(thread.active ? "実行中" : thread.unread ? "完了・未確認" : "")
         .taskListRowStyle()
     }

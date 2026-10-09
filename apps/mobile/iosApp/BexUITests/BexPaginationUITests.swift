@@ -22,29 +22,29 @@ extension BexLaunchUITests {
         scrollToListElement(project, in: app)
         XCTAssertEqual(project.value as? String, "閉じています")
         project.tap()
-        let newest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-16"]
+        let newest = app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-16"]
         XCTAssertTrue(newest.waitForExistence(timeout: 15))
-        let lastInitial = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-12"]
+        let lastInitial = app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-12"]
         scrollToListElement(lastInitial, in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-11"]
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-11"]
             .exists)
         let more = app.buttons["tasks.project.pagination-project-16.more"]
         scrollToListElement(more, in: app)
         more.tap()
         scrollToEarlierListElement(project, in: app, attempts: 30)
         scrollToListElement(
-            app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-6"],
+            app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-6"],
             in: app
         )
         scrollToListElement(more, in: app)
         more.tap()
         scrollToEarlierListElement(project, in: app, attempts: 30)
         scrollToListElement(
-            app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-1"],
+            app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-1"],
             in: app
         )
         XCTAssertFalse(more.exists)
-        let oldest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-1"]
+        let oldest = app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-16-1"]
         assertExpandedProjectSurvivesNavigation(app, project: project, oldest: oldest, more: more)
         assertOtherProjectRemainsAtInitialPage(in: app)
         XCTAssertFalse(app.staticTexts["notice"].exists)
@@ -70,12 +70,12 @@ extension BexLaunchUITests {
         XCTAssertEqual(otherProject.value as? String, "閉じています")
         otherProject.tap()
         let otherLastInitial = app
-            .descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-12"]
+            .descendants(matching: .any)["tasks.row.codex:pagination-project-thread-15-12"]
         scrollToListElement(otherLastInitial, in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"]
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-15-11"]
             .exists)
         scrollToListElement(app.buttons["tasks.project.pagination-project-15.more"], in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"]
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.row.codex:pagination-project-thread-15-11"]
             .exists)
     }
 
