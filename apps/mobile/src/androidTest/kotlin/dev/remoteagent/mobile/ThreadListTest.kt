@@ -60,9 +60,10 @@ class ThreadListTest {
                         list,
                         snapshot.listQuery(),
                         false,
+                        { intent ->
+                            if (intent is Intent.ReadThread) opened.add(intent.v1.threadId)
+                        },
                         {},
-                        {},
-                        { opened.add((it as Intent.ReadThread).v1.threadId) },
                     )
                 }
             }

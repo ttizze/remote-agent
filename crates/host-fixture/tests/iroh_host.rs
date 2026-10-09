@@ -2515,7 +2515,6 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                     }
                 }).await;
                 store.close().await.unwrap();
-                drop(store);
                 endpoint.close().await;
                 fixture.close().await.unwrap();
                 assert!(reflected.is_ok(), "completed conversation and title did not appear automatically (worktree={automatic}, scoped={scoped})");

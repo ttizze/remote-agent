@@ -9,22 +9,10 @@ import UniformTypeIdentifiers
 
 /// Host paths always use the authenticated transfer; never read a Host path from the phone's filesystem.
 func conversationFileURL(_ source: String, cwd: String) throws -> URL {
-    var source = source
-    if let line = source.range(of: ":[0-9]+$", options: .regularExpression) {
-        source.removeSubrange(line)
-    }
-    let base = URL(fileURLWithPath: cwd, isDirectory: true)
-    guard let url = URL(string: source, relativeTo: base)?.absoluteURL,
-          url.isFileURL,
-          (url.host?.isEmpty ?? true) || url.host == "localhost",
-          var components = URLComponents(url: url, resolvingAgainstBaseURL: true)
-    else {
+    guard let target = markdownFileTarget(source: source, cwd: cwd) else {
         throw URLError(.unsupportedURL)
     }
-    components.fragment = nil
-    components.query = nil
-    guard let resolved = components.url else { throw URLError(.badURL) }
-    return resolved
+    return URL(fileURLWithPath: target.path)
 }
 
 extension SessionImage {

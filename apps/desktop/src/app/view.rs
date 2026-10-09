@@ -1,6 +1,7 @@
 mod agents;
 mod composer;
 mod conversation;
+mod markdown_diagram;
 mod media;
 mod model_settings;
 mod onboarding;
@@ -123,19 +124,9 @@ fn review_counts(additions: Option<u64>, deletions: Option<u64>) -> AnyElement {
 }
 
 fn conversation_file_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
-    let source = source
-        .rsplit_once(':')
-        .filter(|(_, line)| !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()))
-        .map_or(source, |(path, _)| path);
-    let base = url::Url::from_directory_path(cwd).map_err(|_| "作業フォルダが不正です")?;
-    let mut url = base.join(source).map_err(|e| e.to_string())?;
-    if url.scheme() != "file" {
-        return Err("未対応のリンクです".into());
-    }
-    url.set_fragment(None);
-    url.set_query(None);
-    url.to_file_path()
-        .map_err(|_| "ファイルパスが不正です".into())
+    agent_core::presentation::markdown::markdown_file_target(source.into(), cwd.into())
+        .map(|file| PathBuf::from(file.path))
+        .ok_or_else(|| "ファイルパスが不正です".into())
 }
 
 impl Render for Desktop {

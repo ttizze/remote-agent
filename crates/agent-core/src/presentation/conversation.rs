@@ -52,6 +52,7 @@ pub struct RenderedTurn {
 pub struct ConversationRow {
     pub id: String,
     pub content: ConversationRowContent,
+    pub timestamp_ms: Option<u64>,
 }
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -75,6 +76,8 @@ pub enum ConversationRowContent {
     Response {
         item: Arc<RenderedItem>,
         fork_turn_id: Option<agent_protocol::ids::TurnId>,
+        changes: Vec<super::diff::WorkspaceDiffFile>,
+        change_details: Vec<crate::state::operations::ReadItem>,
     },
     InProgress {
         turn_id: agent_protocol::ids::TurnId,
@@ -171,6 +174,14 @@ pub struct RenderedItem {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl RenderedItem {
+    pub fn detail_blocks(&self) -> Vec<super::markdown::MarkdownBlock> {
+        match &self.source {
+            ItemSource::Native(item) => body::detail_blocks(item),
+            ItemSource::Pending(..) => {
+                super::markdown::markdown_blocks(self.data.body.clone().unwrap_or_default())
+            }
+        }
+    }
     pub fn expanded_body(&self) -> String {
         match &self.source {
             ItemSource::Native(item) => body::expanded_body(item),
@@ -351,6 +362,7 @@ pub fn project_conversation(
         })
         .map(|source| ConversationRow {
             id: format!("request:{}", source.id),
+            timestamp_ms: None,
             content: ConversationRowContent::PendingRequest {
                 request: Box::new(request(source)),
             },
@@ -449,7 +461,30 @@ fn render_turn(
         let occurrence = occurrences.entry(id.clone()).or_insert(0usize);
         let id = format!("{id}:occurrence:{occurrence}");
         *occurrence += 1;
-        rows.push(ConversationRow { id, content });
+        let started = source.started_at_ms.or_else(|| {
+            source
+                .started_at
+                .filter(|seconds| {
+                    seconds.is_finite() && *seconds >= 0. && *seconds < u64::MAX as f64 / 1000.
+                })
+                .map(|seconds| (seconds * 1000.) as u64)
+        });
+        let timestamp_ms = match &content {
+            User { item } if item.data.native_id.is_some() => started,
+            Response { .. } if source.status != models::TurnStatus::Running => {
+                source.completed_at_ms.or_else(|| {
+                    started
+                        .zip(source.duration_ms)
+                        .and_then(|(start, duration)| start.checked_add(duration))
+                })
+            }
+            _ => None,
+        };
+        rows.push(ConversationRow {
+            id,
+            content,
+            timestamp_ms,
+        });
     };
     for segment in project_items(&source, order.len(), metadata) {
         let segment = &segment;
@@ -521,9 +556,42 @@ fn render_turn(
                     turn_id: source.id.clone(),
                 });
             } else {
+                let changes = if !in_progress && segment.last && responses.peek().is_none() {
+                    body::changed_files(native.iter().flat_map(|item| match item.body() {
+                        models::ItemBody::FileChange { changes, .. } => changes.as_slice(),
+                        _ => &[],
+                    }))
+                } else {
+                    Vec::new()
+                };
+                let change_details = if changes.is_empty() {
+                    Vec::new()
+                } else {
+                    session
+                        .into_iter()
+                        .flat_map(|thread_id| {
+                            native
+                                .iter()
+                                .filter(|item| {
+                                    item.is_deferred()
+                                        && matches!(
+                                            item.body(),
+                                            models::ItemBody::FileChange { .. }
+                                        )
+                                })
+                                .map(|item| crate::state::operations::ReadItem {
+                                    thread_id: thread_id.clone(),
+                                    turn_id: source.id.clone(),
+                                    item_id: item.id.clone(),
+                                })
+                        })
+                        .collect()
+                };
                 push(Response {
                     item,
                     fork_turn_id: can_fork.then(|| source.id.clone()),
+                    changes,
+                    change_details,
                 });
             }
         }
@@ -797,6 +865,65 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn response_metadata_updates_after_deferred_edits_are_loaded() {
+        let mut snapshot = fixture();
+        let session = agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "thread".into(),
+        };
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.conversations)
+                .get_mut(&session)
+                .unwrap(),
+        );
+        let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
+        turn.started_at_ms = Some(1_000);
+        turn.duration_ms = Some(5_000);
+        turn.status = models::TurnStatus::Completed;
+        let edit: models::Item = serde_json::from_value(json!({"id":"edit","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"src/a.rs","kind":"add","diff":"@@ -0,0 +1 @@\n+new","proposal":null}],"output":""}}}}})).unwrap();
+        let mut deferred = edit.clone();
+        deferred.defer();
+        let items = turn.items.as_mut().unwrap();
+        let index = items.len() - 1;
+        items.insert(index, Arc::new(deferred));
+        let projection = project_snapshot(snapshot.clone(), None);
+        let rows = projection.turns[1].conversation_rows();
+        assert_eq!(rows[0].timestamp_ms, Some(1_000));
+        let response = rows.last().unwrap();
+        assert_eq!(response.timestamp_ms, Some(6_000));
+        let ConversationRowContent::Response {
+            changes,
+            change_details,
+            ..
+        } = &response.content
+        else {
+            panic!()
+        };
+        assert_eq!(changes[0].path, "src/a.rs");
+        assert_eq!(changes[0].additions, None);
+        assert_eq!(change_details.len(), 1);
+        assert_eq!(change_details[0].item_id.as_str(), "edit");
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.conversations)
+                .get_mut(&session)
+                .unwrap(),
+        );
+        let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
+        turn.items.as_mut().unwrap()[index] = Arc::new(edit);
+        let loaded = project_snapshot(snapshot, Some(&projection));
+        let rows = loaded.turns[1].conversation_rows();
+        let ConversationRowContent::Response {
+            changes,
+            change_details,
+            ..
+        } = &rows.last().unwrap().content
+        else {
+            panic!()
+        };
+        assert_eq!(changes[0].additions, Some(1));
+        assert!(change_details.is_empty());
+    }
     fn project_snapshot(
         snapshot: Snapshot,
         previous: Option<&Arc<RenderedConversation>>,
@@ -977,7 +1104,7 @@ mod tests {
         let completed = project_snapshot(snapshot, Some(&rendered));
         let rows = completed.turns[1].conversation_rows();
         assert!(
-            matches!(&rows.last().unwrap().content, ConversationRowContent::Response { item, fork_turn_id: Some(id) } if id.as_str() == "live" && item.data.native_id.as_deref() == Some("stream"))
+            matches!(&rows.last().unwrap().content, ConversationRowContent::Response { item, fork_turn_id: Some(id), .. } if id.as_str() == "live" && item.data.native_id.as_deref() == Some("stream"))
         );
         assert!(rows.iter().any(|row| row.id == accepted_id));
         for row in rows {

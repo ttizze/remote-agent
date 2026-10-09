@@ -134,6 +134,7 @@ pub fn expanded_body(item: &Item) -> String {
     match item.body() {
         WireBody::UserMessage { text, content } => message(text.as_deref(), content),
         WireBody::AssistantText { text, .. } => text.clone(),
+        WireBody::Plan { text } => text.clone(),
         WireBody::Reasoning { content, summary } => {
             if summary.is_empty() { content } else { summary }.join("\n")
         }
@@ -177,10 +178,222 @@ pub fn expanded_body(item: &Item) -> String {
     }
 }
 
+/// Accumulate reported edits in source order without inventing statistics for deferred diffs.
+pub(super) fn changed_files<'a>(
+    changes: impl Iterator<Item = &'a crate::models::FileChange>,
+) -> Vec<super::diff::WorkspaceDiffFile> {
+    let mut files: Vec<super::diff::WorkspaceDiffFile> = Vec::new();
+    for change in changes {
+        let rows = change.diff.as_deref().map(super::diff::parse);
+        let additions = rows
+            .as_ref()
+            .map(|rows| rows.iter().filter(|row| row.kind == "+").count() as u64);
+        let deletions = rows
+            .as_ref()
+            .map(|rows| rows.iter().filter(|row| row.kind == "-").count() as u64);
+        let index = files
+            .iter()
+            .position(|file| file.path == change.path)
+            .unwrap_or_else(|| {
+                files.push(super::diff::WorkspaceDiffFile {
+                    path: change.path.clone(),
+                    additions: Some(0),
+                    deletions: Some(0),
+                    rows: Vec::new(),
+                });
+                files.len() - 1
+            });
+        let file = &mut files[index];
+        file.additions = file
+            .additions
+            .zip(additions)
+            .and_then(|(total, count)| total.checked_add(count));
+        file.deletions = file
+            .deletions
+            .zip(deletions)
+            .and_then(|(total, count)| total.checked_add(count));
+        file.rows.extend(rows.into_iter().flatten().filter(|row| {
+            row.kind != "F" && !(row.kind == "M" && super::diff::is_file_metadata(&row.text))
+        }));
+    }
+    files
+}
+
+/// Native detail views consume typed Markdown blocks; output never becomes executable markup.
+pub(super) fn detail_blocks(item: &Item) -> Vec<super::markdown::MarkdownBlock> {
+    use super::markdown::{markdown_blocks, markdown_code_block};
+    let code = |text: &str, language: Option<&str>, label: &str| {
+        markdown_code_block(text.into(), language.map(str::to_owned), Some(label.into()))
+    };
+    match item.body() {
+        WireBody::CommandExecution {
+            command,
+            cwd,
+            output,
+            exit_code,
+        } => {
+            let mut blocks = vec![code(command, Some("sh"), "コマンド")];
+            if let Some(cwd) = cwd {
+                blocks.extend(markdown_blocks(format!("作業フォルダ: `{cwd}/`")));
+            }
+            if !output.is_empty() {
+                blocks.push(code(output, None, "出力"));
+            }
+            if let Some(exit_code) = exit_code {
+                blocks.extend(markdown_blocks(format!("終了コード: **{exit_code}**")));
+            }
+            blocks
+        }
+        WireBody::FileChange { changes, output } => {
+            let mut blocks = Vec::new();
+            for change in changes {
+                blocks.extend(markdown_blocks(format!(
+                    "[{}](<{}>)",
+                    change.path,
+                    change.path.replace('>', "%3E")
+                )));
+                if let Some(diff) = &change.diff {
+                    blocks.push(code(diff, Some("diff"), "差分"));
+                }
+                if let Some(proposal) = &change.proposal {
+                    blocks.push(code(
+                        &serde_json::to_string_pretty(proposal).expect("proposal serializes"),
+                        Some("json"),
+                        "提案",
+                    ));
+                }
+            }
+            if !output.is_empty() {
+                blocks.push(code(output, None, "出力"));
+            }
+            blocks
+        }
+        WireBody::Plan { text } => markdown_blocks(text.clone()),
+        WireBody::ToolCall {
+            arguments,
+            result,
+            error,
+            content,
+            ..
+        } => {
+            let mut blocks = Vec::new();
+            if !arguments.is_null() {
+                blocks.push(code(
+                    &serde_json::to_string_pretty(arguments).expect("arguments serialize"),
+                    Some("json"),
+                    "入力",
+                ));
+            }
+            if let Some(result) = result {
+                blocks.push(code(
+                    &serde_json::to_string_pretty(result).expect("result serializes"),
+                    Some("json"),
+                    "結果",
+                ));
+            }
+            if let Some(error) = error {
+                blocks.push(code(
+                    &serde_json::to_string_pretty(error).expect("error serializes"),
+                    Some("json"),
+                    "エラー",
+                ));
+            }
+            for content in content {
+                match content {
+                    agent_protocol::requests::ToolContent::Text { text } => {
+                        blocks.extend(markdown_blocks(text.clone()))
+                    }
+                    agent_protocol::requests::ToolContent::Image { data_url } => {
+                        blocks.push(super::markdown::MarkdownBlock::Paragraph {
+                            runs: vec![super::markdown::MarkdownRun {
+                                text: "ツールの画像".into(),
+                                image: Some(data_url.clone()),
+                                ..Default::default()
+                            }],
+                            style: Default::default(),
+                        })
+                    }
+                }
+            }
+            blocks
+        }
+        WireBody::WebSearch { query, action } => {
+            let mut blocks = markdown_blocks(format!("検索: **{}**", query.replace('*', "\\*")));
+            let url = match action {
+                Some(
+                    crate::models::WebSearchAction::OpenPage { url }
+                    | crate::models::WebSearchAction::Find { url, .. },
+                ) => url.as_ref(),
+                _ => None,
+            };
+            if let Some(url) = url {
+                blocks.extend(markdown_blocks(format!("<{url}>")));
+            }
+            if let Some(action) = action {
+                blocks.push(code(
+                    &serde_json::to_string_pretty(action).expect("action serializes"),
+                    Some("json"),
+                    "検索操作",
+                ));
+            }
+            blocks
+        }
+        _ => vec![code(&expanded_body(item), Some("json"), "詳細")],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    #[test]
+    fn reported_edits_keep_order_and_unknown_statistics() {
+        let changes: Vec<crate::models::FileChange> = serde_json::from_value(json!([
+            {"path":"src/a.rs", "kind":"add", "diff":"--- /dev/null\n+++ b/src/a.rs\n@@ -0,0 +1 @@\n+one"},
+            {"path":"src/b.rs", "kind":"add", "diff":null},
+            {"path":"src/a.rs", "kind":{"update":{"movePath":null}}, "diff":"@@ -1 +1 @@\n-one\n+two"}
+        ])).unwrap();
+        let files = changed_files(changes.iter());
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/a.rs", "src/b.rs"]
+        );
+        assert_eq!((files[0].additions, files[0].deletions), (Some(2), Some(1)));
+        assert_eq!((files[1].additions, files[1].deletions), (None, None));
+        assert!(files[0].rows.iter().all(|row| !row.text.starts_with("+++")));
+    }
+
+    #[test]
+    fn command_details_keep_output_literal_and_syntax_information() {
+        let item: Item = serde_json::from_value(json!({"id":"cmd","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"echo hi","cwd":"/workspace","output":"**literal**\n[link](https://example.com)","exitCode":2}}}}})).unwrap();
+        let blocks = detail_blocks(&item);
+        let super::super::markdown::MarkdownBlock::Paragraph { style, .. } = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(style.language.as_deref(), Some("sh"));
+        let output = blocks
+            .iter()
+            .find_map(|block| match block {
+                super::super::markdown::MarkdownBlock::Paragraph { runs, style }
+                    if style.filename.as_deref() == Some("出力") =>
+                {
+                    Some(runs)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            output
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            "**literal**\n[link](https://example.com)"
+        );
+        assert!(output.iter().all(|run| run.link.is_none() && !run.strong));
+    }
     #[rstest::rstest]
     #[case::named_fields(
         json!([{"path":"/a.txt","kind":{"update":{"movePath":null}},"diff":"-old\n+new"}, {"path":"/b.txt","kind":"add","diff":"+second"}]),

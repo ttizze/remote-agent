@@ -284,7 +284,7 @@ private struct WorkspaceDiffScreen: View {
     }
 }
 
-private struct WorkspaceDiffCard: View {
+struct WorkspaceDiffCard: View {
     let file: WorkspaceDiffFile
     @State private var expanded = true
 

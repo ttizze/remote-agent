@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -449,19 +450,20 @@ internal fun RemoteAgentApp(
                         PairingScreen(model.busy, model::pair, model::showHosts, requestQrScan)
                     model.screen == Screen.Hosts ->
                         ProfilesScreen(model.profiles, model::selectProfile) { model.screen = Screen.Pairing }
-                    model.screen == Screen.Threads ->
+                    model.screen == Screen.Threads -> Box(Modifier.weight(1f)) {
                         ThreadListScreen(
                             model.list,
                             model.snapshot.listQuery(),
                             model.loadingThreads,
-                            { model.perform(it) },
-                            model::showHosts,
                             { intent ->
-                                model.screen = Screen.Conversation
+                                if (intent is Intent.NewChat || intent is Intent.ReadThread) {
+                                    model.screen = Screen.Conversation
+                                }
                                 model.perform(intent)
                             },
-                            Modifier.weight(1f),
+                            model::showHosts,
                         )
+                    }
                     else -> ConversationPane(model)
                 }
             }

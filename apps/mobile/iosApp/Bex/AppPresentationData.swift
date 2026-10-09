@@ -33,7 +33,7 @@ final class ConversationItem: Sendable {
     init(_ source: RenderedItem) {
         self.source = source
         data = source.presentation()
-        markdown = data.kind != "user" && !data.collapsible ? data.body
+        markdown = !data.collapsible ? data.body
             .map(ConversationMarkdownContent.parse) ?? [] : []
     }
 }

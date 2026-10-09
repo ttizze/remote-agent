@@ -56,8 +56,6 @@ internal fun ThreadListScreen(
     loadingThreads: Boolean,
     perform: (Intent) -> Unit,
     showHosts: () -> Unit,
-    openConversation: (Intent) -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     val threads = list?.threads.orEmpty()
     var search by remember { mutableStateOf("") }
@@ -66,57 +64,73 @@ internal fun ThreadListScreen(
     LaunchedEffect(search) {
         kotlinx.coroutines.delay(SEARCH_DEBOUNCE_MILLIS)
         if (currentQuery.searchTerm != search)
-            dispatch(Intent.ListSessions(ListSessions(query = currentQuery.copy(searchTerm = search))))
+            dispatch(
+                Intent.ListSessions(ListSessions(query = currentQuery.copy(searchTerm = search)))
+            )
     }
     LazyColumn(
-        modifier.fillMaxSize(),
+        Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item {
-            Row {
-                Button(onClick = showHosts) { Text("PC一覧") }
-                Button(onClick = { perform(Intent.ListSessions(ListSessions(query = query))) }) { Text("更新") }
-            }
-            OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
-        }
+        item { ThreadSearchHeader(search, { search = it }, query, perform, showHosts) }
         list?.notice?.let { notice -> item { Text(notice) } }
-        item {
-            Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
-        }
-        projectThreads(list, openConversation, perform)
+        item { Text("プロジェクト", style = MaterialTheme.typography.headlineSmall) }
+        projectThreads(list, perform)
         if (list?.hasMoreProjects == true)
             item {
                 TextButton(
                     onClick = { perform(Intent.ExpandProjects) },
                     enabled = !loadingThreads,
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (loadingThreads) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text("もっとプロジェクトを表示")
-                    }
+                    LoadingLabel("もっとプロジェクトを表示", loadingThreads)
                 }
             }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("チャット", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = { openConversation(Intent.NewChat("")) }) { Text("新規") }
+                TextButton(onClick = { perform(Intent.NewChat("")) }) { Text("新規") }
             }
         }
-        items(threads, key = { "chat:${it.id.listKey}" }) { SummaryRow(it, openConversation) }
+        items(threads, key = { "chat:${it.id.listKey}" }) { SummaryRow(it, perform) }
         if (list?.hasMore == true)
             item {
                 TextButton(
                     onClick = { perform(Intent.ExpandThreadList(null)) },
                     enabled = !loadingThreads,
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (loadingThreads) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text("もっと見る")
-                    }
+                    LoadingLabel("もっと見る", loadingThreads)
                 }
             }
         if (list != null && threads.isEmpty()) item { Text("チャットがありません。") }
+    }
+}
+
+@Composable
+private fun ThreadSearchHeader(
+    search: String,
+    setSearch: (String) -> Unit,
+    query: ListQuery,
+    perform: (Intent) -> Unit,
+    showHosts: () -> Unit,
+) {
+    Row {
+        Button(onClick = showHosts) { Text("PC一覧") }
+        Button(onClick = { perform(Intent.ListSessions(ListSessions(query = query))) }) {
+            Text("更新")
+        }
+    }
+    OutlinedTextField(search, setSearch, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
+}
+
+@Composable
+private fun LoadingLabel(label: String, loading: Boolean) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        Text(label)
     }
 }
 
@@ -136,7 +150,8 @@ private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit
                 painterResource(if (unmerged) R.drawable.ic_diff else R.drawable.ic_merge),
                 if (unmerged) "main に未反映の変更あり" else "main にマージ済み",
                 Modifier.padding(start = 8.dp).size(18.dp),
-                tint = if (unmerged) Color(UNMERGED_COLOR_ARGB) else MaterialTheme.colorScheme.tertiary,
+                tint =
+                    if (unmerged) Color(UNMERGED_COLOR_ARGB) else MaterialTheme.colorScheme.tertiary,
             )
         }
     }
@@ -148,17 +163,15 @@ private const val UNMERGED_COLOR_ARGB = 0xFFFB923C
 private val SessionRef.listKey: String
     get() = "session:$provider:$id"
 
-private fun LazyListScope.projectThreads(
-    list: ThreadList?,
-    openConversation: (Intent) -> Unit,
-    perform: (Intent) -> Unit,
-) {
+private fun LazyListScope.projectThreads(list: ThreadList?, perform: (Intent) -> Unit) {
     val projects = list?.projects.orEmpty()
     projects.forEach { project ->
         item(key = "project:${project.id}") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(
-                    Modifier.weight(1f).clickable { perform(Intent.SetProjectExpanded(project.id, !project.expanded)) },
+                    Modifier.weight(1f).clickable {
+                        perform(Intent.SetProjectExpanded(project.id, !project.expanded))
+                    },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
@@ -166,45 +179,49 @@ private fun LazyListScope.projectThreads(
                     Text(project.name, style = MaterialTheme.typography.titleMedium)
                 }
                 TextButton(
-                    onClick = { openConversation(Intent.NewChat(project.roots.firstOrNull()?.path.orEmpty())) }
+                    onClick = {
+                        perform(Intent.NewChat(project.roots.firstOrNull()?.path.orEmpty()))
+                    }
                 ) {
                     Text("新規")
                 }
             }
         }
         if (project.expanded) {
-            if (project.loading && !project.hasMore) item(key = "loading:${project.id}") {
-                CircularProgressIndicator(Modifier.size(18.dp))
-            }
+            if (project.loading && !project.hasMore)
+                item(key = "loading:${project.id}") {
+                    CircularProgressIndicator(Modifier.size(18.dp))
+                }
             project.error?.let { message ->
                 item(key = "error:${project.id}") {
                     Text(message)
-                    TextButton(onClick = { perform(Intent.RefreshProject(project.id)) }) { Text("再試行") }
-                }
-            }
-            items(project.threads, key = { "project:${project.id}:${it.id.listKey}" }) {
-                SummaryRow(it, openConversation)
-            }
-            if (project.hasMore) item(key = "more:${project.id}") {
-                TextButton(
-                    onClick = { perform(Intent.ExpandThreadList(project.id)) },
-                    enabled = !project.loading,
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (project.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Text("もっと見る")
+                    TextButton(onClick = { perform(Intent.RefreshProject(project.id)) }) {
+                        Text("再試行")
                     }
                 }
             }
+            items(project.threads, key = { "project:${project.id}:${it.id.listKey}" }) {
+                SummaryRow(it, perform)
+            }
+            if (project.hasMore)
+                item(key = "more:${project.id}") {
+                    TextButton(
+                        onClick = { perform(Intent.ExpandThreadList(project.id)) },
+                        enabled = !project.loading,
+                    ) {
+                        LoadingLabel("もっと見る", project.loading)
+                    }
+                }
         }
     }
 }
 
 @Composable
 private fun ProjectIcon(png: ByteArray?, monogram: String, colorRgb: UInt) {
-    val bitmap = remember(png) {
-        png?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
-    }
+    val bitmap =
+        remember(png) {
+            png?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+        }
     val color = Color(colorRgb.toInt()).copy(alpha = 1f)
     val modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)).clearAndSetSemantics {}
     if (bitmap != null) {

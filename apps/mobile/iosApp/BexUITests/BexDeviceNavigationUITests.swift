@@ -207,7 +207,7 @@ extension BexLaunchUITests {
         }
         let firstTask = app
             .descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.project.row."))
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
             .firstMatch
         XCTAssertTrue(
             firstTask.waitForExistence(timeout: 30),

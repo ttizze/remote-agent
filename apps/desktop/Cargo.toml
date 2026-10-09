@@ -13,11 +13,13 @@ anyhow.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true, features = ["rt"] }
-agent-core = { path = "../../crates/agent-core" }
+agent-core = { path = "../../crates/agent-core", features = ["diagrams"] }
 host-daemon = { path = "../../crates/host-daemon" }
 directories = "6"
 rfd = "0.17.2"
 gpui-kit = { version = "=0.6.0", features = ["tree-sitter-languages"] }
+# Keep GPUI icons inside development bundles as well as release bundles.
+rust-embed = { version = "8.12", features = ["debug-embed"] }
 gpui-http = { package = "gpui-pre-reqwest-client", version = "0.3.4" }
 gpui-wry = "=0.6.0"
 wry = { package = "lb-wry", version = "0.53.3" }

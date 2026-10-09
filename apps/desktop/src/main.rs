@@ -81,6 +81,37 @@ impl AssetSource for DesktopAssets {
         Ok(paths)
     }
 }
+
+#[cfg(test)]
+mod asset_tests {
+    use super::DesktopAssets;
+    use gpui_kit::{
+        AssetSource,
+        component::{IconName, IconNamed},
+    };
+    use std::borrow::Cow;
+
+    #[test]
+    fn standard_icons_are_embedded_in_development_bundles() {
+        for icon in [
+            IconName::Search,
+            IconName::Settings,
+            IconName::Plus,
+            IconName::Folder,
+            IconName::PanelLeftClose,
+            IconName::PanelRightOpen,
+            IconName::ArrowUp,
+        ] {
+            let path = icon.path();
+            let bytes = DesktopAssets.load(&path).unwrap().unwrap();
+            assert!(
+                matches!(bytes, Cow::Borrowed(_)),
+                "{path} must not require the build machine's files"
+            );
+            assert!(!bytes.is_empty());
+        }
+    }
+}
 struct MainWindow(Option<WindowHandle<Root>>);
 impl Global for MainWindow {}
 
