@@ -26,7 +26,8 @@ extension BexLaunchUITests {
         XCTAssertTrue(newest.waitForExistence(timeout: 15))
         let lastInitial = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-12"]
         scrollToListElement(lastInitial, in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-11"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-11"]
+            .exists)
         let more = app.buttons["tasks.project.pagination-project-16.more"]
         scrollToListElement(more, in: app)
         more.tap()
@@ -44,6 +45,14 @@ extension BexLaunchUITests {
         )
         XCTAssertFalse(more.exists)
         let oldest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-1"]
+        assertExpandedProjectSurvivesNavigation(app, project: project, oldest: oldest, more: more)
+        assertOtherProjectRemainsAtInitialPage(in: app)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        captureScreen(app, named: "Only the selected project's titles expanded and retained after returning")
+    }
+
+    private func assertExpandedProjectSurvivesNavigation(_ app: XCUIApplication, project: XCUIElement,
+                                                         oldest: XCUIElement, more: XCUIElement) {
         oldest.tap()
         XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-16-1"]
             .waitForExistence(timeout: 15))
@@ -53,6 +62,9 @@ extension BexLaunchUITests {
         XCTAssertEqual(project.value as? String, "開いています")
         scrollToListElement(oldest, in: app)
         XCTAssertFalse(more.exists)
+    }
+
+    private func assertOtherProjectRemainsAtInitialPage(in app: XCUIApplication) {
         let otherProject = app.buttons["tasks.project.pagination-project-15"]
         scrollToListElement(otherProject, in: app)
         XCTAssertEqual(otherProject.value as? String, "閉じています")
@@ -65,8 +77,6 @@ extension BexLaunchUITests {
         scrollToListElement(app.buttons["tasks.project.pagination-project-15.more"], in: app)
         XCTAssertFalse(app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-15-11"]
             .exists)
-        XCTAssertFalse(app.staticTexts["notice"].exists)
-        captureScreen(app, named: "Only the selected project's titles expanded and retained after returning")
     }
 
     func testSimulatorPaginatesRecentProjectsAndUnassignedChats() throws {

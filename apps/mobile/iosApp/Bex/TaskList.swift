@@ -74,7 +74,7 @@ struct ThreadsScreen: View {
                     }
                     .taskListRowStyle()
                     if project.expanded {
-                        if project.loading && !project.hasMore {
+                        if project.loading, !project.hasMore {
                             ProgressView().taskListRowStyle()
                         }
                         if let error = project.error {
@@ -98,10 +98,10 @@ struct ThreadsScreen: View {
                                     Text("もっと見る")
                                 }
                             }
-                                .padding(.leading, 40)
-                                .disabled(project.loading)
-                                .accessibilityIdentifier("tasks.project.\(project.id).more")
-                                .taskListRowStyle()
+                            .padding(.leading, 40)
+                            .disabled(project.loading)
+                            .accessibilityIdentifier("tasks.project.\(project.id).more")
+                            .taskListRowStyle()
                         }
                     }
                 }
@@ -120,9 +120,9 @@ struct ThreadsScreen: View {
                             Text("もっとプロジェクトを表示")
                         }
                     }
-                        .disabled(model.loadingThreads)
-                        .accessibilityIdentifier("tasks.projects.more")
-                        .taskListRowStyle()
+                    .disabled(model.loadingThreads)
+                    .accessibilityIdentifier("tasks.projects.more")
+                    .taskListRowStyle()
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -159,9 +159,9 @@ struct ThreadsScreen: View {
                             Text("もっと見る")
                         }
                     }
-                        .disabled(model.loadingThreads)
-                        .accessibilityIdentifier("tasks.chats.more")
-                        .taskListRowStyle()
+                    .disabled(model.loadingThreads)
+                    .accessibilityIdentifier("tasks.chats.more")
+                    .taskListRowStyle()
                 }
             } header: {
                 Text("チャット")
