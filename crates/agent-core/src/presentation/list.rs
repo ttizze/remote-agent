@@ -77,6 +77,8 @@ pub struct ThreadSummary {
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadList {
+    pub loading_projects: bool,
+    pub loading_chats: bool,
     pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<ProjectSummary>,
@@ -127,6 +129,16 @@ impl Snapshot {
         Some(ThreadList {
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: summaries,
+            loading_projects: self.operation_running(
+                crate::state::operations::OperationKey::SessionPage {
+                    part: crate::models::ListPart::Projects,
+                },
+            ),
+            loading_chats: self.operation_running(
+                crate::state::operations::OperationKey::SessionPage {
+                    part: crate::models::ListPart::Chats,
+                },
+            ),
             projects: list
                 .projects
                 .iter()
@@ -137,11 +149,12 @@ impl Snapshot {
                     if summary.expanded && !self.connected && page.is_none() {
                         summary.error = Some("接続するとタスクを読み込めます".into());
                     }
-                    if let Some(operation) =
-                        self.operations
-                            .get(&crate::state::operations::OperationKey::ProjectList {
+                    if summary.expanded
+                        && let Some(operation) = self.operations.get(
+                            &crate::state::operations::OperationKey::ProjectList {
                                 project_id: project.id.clone(),
-                            })
+                            },
+                        )
                     {
                         match &operation.phase {
                             crate::state::operations::OperationPhase::Running => {
@@ -254,7 +267,7 @@ mod tests {
             threads: Some(std::sync::Arc::new(
                 serde_json::from_value(json!({
                     "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
-                    "hasMore":false,"hasMoreProjects":false,}))
+                    "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}))
                 .unwrap(),
             )),
             ..Default::default()
@@ -292,7 +305,7 @@ mod tests {
                     {"id":{"provider":"codex","id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
-                 "hasMore":true,"hasMoreProjects":false, }))
+                 "hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
             .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
@@ -314,17 +327,12 @@ mod tests {
     fn returned_project_header_replaces_branding_while_preserving_loaded_tasks() {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.expanded_projects).insert("project".into(), 5);
-        crate::state::operations::ListProjectSessions {
-            project_id: "project".into(),
-            limit: 5,
-            search_term: String::new(),
-        }
-        .apply(
+        ListSessions::new(Default::default()).apply(
             &mut snapshot,
             serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"task"},"projectId":"project"}],
                 "projects":[{"id":"project","name":"Old project","roots":[],"faviconPng":"BAUG"}],
-                "hasMore":false,"hasMoreProjects":false
+                "hasMore":false,"hasMoreProjects":false,"projectPages":{"project":{"limit":5,"hasMore":false}},"limit":5
             }))
             .unwrap(),
         );
@@ -332,8 +340,20 @@ mod tests {
             ListSessions::new(Default::default()).apply(&mut snapshot, serde_json::from_value(json!({
                 "data":[],
                 "projects":[{"id":"project","name":"Renamed project","roots":[],"faviconPng":icon}],
-                "hasMore":false,"hasMoreProjects":false
+                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
             })).unwrap());
+            crate::state::operations::ReadListDecorations {
+                scope: agent_protocol::operations::ListDecorationScope::Root { part: None },
+                project_ids: vec!["project".into()],
+                threads: vec![],
+            }
+            .apply(
+                &mut snapshot,
+                agent_protocol::operations::ListDecorations {
+                    icons: [("project".into(), icon.map(str::to_owned))].into(),
+                    statuses: vec![],
+                },
+            );
             let list = snapshot.thread_list().unwrap();
             let project = &list.projects[0];
             assert_eq!(project.name, "Renamed project");
@@ -346,7 +366,7 @@ mod tests {
     fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
         let mut snapshot = Snapshot::default();
         let page = |data, errors| {
-            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
+            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,"providerErrors":errors})).unwrap()
         };
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
@@ -415,7 +435,7 @@ mod tests {
         }
         let page: models::ThreadList = serde_json::from_value(json!({
             "data":[thread], "projects":[],
-            "hasMore":false,"hasMoreProjects":false, }))
+            "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
         .unwrap();
         ListSessions::new(Default::default()).apply(&mut snapshot, page);
         let restored: Snapshot =

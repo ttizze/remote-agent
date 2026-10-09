@@ -29,14 +29,20 @@ impl Snapshot {
             && Arc::ptr_eq(&self.project_threads, &other.project_threads)
             && Arc::ptr_eq(&self.archived_scopes, &other.archived_scopes)
             && self.connected == other.connected
-            && self
-                .operations
-                .get(&crate::state::operations::OperationKey::SessionList)
-                .map(|state| &state.phase)
-                == other
-                    .operations
-                    .get(&crate::state::operations::OperationKey::SessionList)
-                    .map(|state| &state.phase)
+            && [
+                crate::state::operations::OperationKey::SessionList,
+                crate::state::operations::OperationKey::SessionPage {
+                    part: crate::models::ListPart::Projects,
+                },
+                crate::state::operations::OperationKey::SessionPage {
+                    part: crate::models::ListPart::Chats,
+                },
+            ]
+            .iter()
+            .all(|key| {
+                self.operations.get(key).map(|state| &state.phase)
+                    == other.operations.get(key).map(|state| &state.phase)
+            })
             && self.threads.as_ref().is_none_or(|list| {
                 list.projects.iter().all(|project| {
                     let key = crate::state::operations::OperationKey::ProjectList {
@@ -274,7 +280,7 @@ mod tests {
         };
         initial.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
-                "data":[], "projects":[{"id":"old","name":"Archive","roots":[]}], "hasMore":true,"hasMoreProjects":false
+                "data":[], "projects":[{"id":"old","name":"Archive","roots":[]}], "hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":5
             }))
             .unwrap(),
         ));
@@ -350,7 +356,7 @@ mod tests {
         assert!(!failed.list_unchanged(Arc::new(loading)));
         let mut loaded = failed.clone();
         ListProjectSessions { project_id: "old".into(), limit: 5, search_term: String::new() }.apply(&mut loaded, serde_json::from_value(serde_json::json!({
-            "data":[{"id":{"provider":"codex","id":"old-task"},"name":"Old task","projectId":"old","status":"running"}], "projects":[], "hasMore":false,"hasMoreProjects":false
+            "data":[{"id":{"provider":"codex","id":"old-task"},"name":"Old task","projectId":"old","status":"running"}], "projects":[], "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
         })).unwrap());
         Arc::make_mut(&mut loaded.operations).remove(&key);
         let project = &loaded.thread_list().unwrap().projects[0];

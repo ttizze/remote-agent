@@ -81,9 +81,9 @@ internal fun ThreadListScreen(
             item {
                 TextButton(
                     onClick = { perform(Intent.ExpandProjects) },
-                    enabled = !loadingThreads,
+                    enabled = !loadingThreads && !list.loadingProjects,
                 ) {
-                    LoadingLabel("もっとプロジェクトを表示", loadingThreads)
+                    LoadingLabel("もっとプロジェクトを表示", list.loadingProjects)
                 }
             }
         item {
@@ -97,9 +97,9 @@ internal fun ThreadListScreen(
             item {
                 TextButton(
                     onClick = { perform(Intent.ExpandThreadList(null)) },
-                    enabled = !loadingThreads,
+                    enabled = !loadingThreads && !list.loadingChats,
                 ) {
-                    LoadingLabel("もっと見る", loadingThreads)
+                    LoadingLabel("もっと見る", list.loadingChats)
                 }
             }
         if (list != null && threads.isEmpty()) item { Text("チャットがありません。") }

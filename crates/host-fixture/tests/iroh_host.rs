@@ -909,6 +909,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                         store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
                         if project {
                             store.dispatch(Intent::SetProjectExpanded { project_id: "default".into(), expanded: true }).await.unwrap();
+                            store.dispatch(Intent::ListSessions(op::ListSessions::new((*store.snapshot().list_query).clone()))).await.unwrap();
                             loop {
                                 if updates.borrow_and_update().project_threads.get("default").is_some_and(|page| page.data.iter().any(|thread| thread.id.as_ref() == Some(&id))) { break; }
                                 updates.changed().await.unwrap();
@@ -1597,7 +1598,9 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             start.elapsed().as_millis()
         );
         assert!(bytes < 16 * 1024);
-        assert_eq!(first.data.len(), 5);
+        assert_eq!(first.data.len(), 30);
+        assert_eq!(first.project_pages.len(), 5);
+        assert!(first.project_pages.values().all(|page| page.limit == 5 && page.has_more));
         assert_eq!(first.projects.len(), 5);
         assert!(first.has_more);
         assert!(first.has_more_projects);
@@ -1605,12 +1608,13 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             first
                 .data
                 .iter()
+                .filter(|thread| thread.project_id.is_none())
                 .map(|thread| thread.id.as_ref().unwrap().id.as_str())
                 .collect::<Vec<_>>(),
             ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]
         );
         assert!(first.data.iter().all(|thread| {
-            thread.project_id.is_none() && thread.turns.is_none() && thread.preview.is_none()
+            thread.turns.is_none() && thread.preview.is_none()
         }));
         assert_eq!(
             first
@@ -1677,10 +1681,12 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
                 limit: 5,
                 project_limit: 5,
                 search_term: "Project 01".into(),
+                ..Default::default()
             }))
             .await
             .unwrap();
-        assert!(found.data.is_empty(), "root searches keep project contents scoped");
+        assert_eq!(found.data.len(), 5);
+        assert!(found.data.iter().all(|thread| thread.project_id.as_deref() == Some("project-1")));
         assert_eq!(found.projects.len(), 1);
         assert_eq!(found.projects[0].id, "project-1");
         assert!(!found.has_more);
@@ -1718,7 +1724,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             .call(&rpc::ListSessions::new(query))
             .await
             .unwrap();
-        assert_eq!(nested.data.len(), 5, "root titles do not acquire descendants");
+        assert_eq!(nested.data.len(), 30, "initial pages do not acquire descendants");
         assert!(nested.has_more);
         assert!(nested.data.iter().all(|thread| thread.parent_id.is_none()));
         assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
@@ -1818,13 +1824,13 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         .await;
         assert!(
             ids.iter().all(|id| {
-                !listed["data"]
+                listed["data"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .any(|thread| thread["id"] == *id)
             }),
-            "root title lists defer project task rows to the scoped endpoint"
+            "initial title lists include the recent project page"
         );
         for id in &chat_ids {
             let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("chat must remain in the list after restart");
@@ -2986,6 +2992,20 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
     use agent_core::state::Snapshot;
     use agent_core::store::Store;
     use agent_protocol::models::WorktreeStatus::{Merged, Unmerged};
+    async fn wait_decorations(store: &Store) {
+        let mut updates = store.subscribe();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            let key = agent_core::state::operations::OperationKey::ListDecorations {
+                scope: rpc::ListDecorationScope::Root { part: None },
+            };
+            assert!(snapshot.operation_error(key.clone()).is_none());
+            if !snapshot.operation_running(key) {
+                return;
+            }
+            updates.changed().await.unwrap();
+        }
+    }
     fn git(cwd: &Path, args: &[&str]) -> String {
         let result = std::process::Command::new("git")
             .current_dir(cwd)
@@ -3106,6 +3126,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 )))
                 .await
                 .unwrap();
+            wait_decorations(&store).await;
             let snapshot = store.snapshot();
             let list = snapshot.thread_list().unwrap();
             for (index, id) in ids.iter().enumerate() {
@@ -3125,6 +3146,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             )))
             .await
             .unwrap();
+        wait_decorations(&store).await;
         assert_eq!(
             store
                 .snapshot()
@@ -3139,6 +3161,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
         );
         std::fs::remove_dir(checkout.join("nested")).unwrap();
         store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        wait_decorations(&store).await;
         assert_eq!(store.snapshot().thread_list().unwrap().threads.iter().find(|row| row.id == ids[1]).unwrap().worktree_status, None);
         std::fs::create_dir(checkout.join("nested")).unwrap();
         git(&checkout, &["checkout", "--detach"]);
@@ -3148,6 +3171,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             )))
             .await
             .unwrap();
+        wait_decorations(&store).await;
         assert_eq!(
             store
                 .snapshot()
@@ -3180,6 +3204,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 _ => {}
             }
             store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            wait_decorations(&store).await;
             let snapshot = store.snapshot();
             let list = snapshot.thread_list().unwrap();
             for (index, id) in ids.iter().enumerate() {

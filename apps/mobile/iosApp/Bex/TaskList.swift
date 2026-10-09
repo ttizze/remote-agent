@@ -114,13 +114,13 @@ struct ThreadsScreen: View {
                         model.perform(.expandProjects)
                     } label: {
                         HStack(spacing: 8) {
-                            if model.loadingThreads {
+                            if model.list?.loadingProjects == true {
                                 ProgressView().controlSize(.mini)
                             }
                             Text("もっとプロジェクトを表示")
                         }
                     }
-                    .disabled(model.loadingThreads)
+                    .disabled(model.loadingThreads || model.list?.loadingProjects == true)
                     .accessibilityIdentifier("tasks.projects.more")
                     .taskListRowStyle()
                 }
@@ -153,13 +153,13 @@ struct ThreadsScreen: View {
                         model.expandTaskList()
                     } label: {
                         HStack(spacing: 8) {
-                            if model.loadingThreads {
+                            if model.list?.loadingChats == true {
                                 ProgressView().controlSize(.mini)
                             }
                             Text("もっと見る")
                         }
                     }
-                    .disabled(model.loadingThreads)
+                    .disabled(model.loadingThreads || model.list?.loadingChats == true)
                     .accessibilityIdentifier("tasks.chats.more")
                     .taskListRowStyle()
                 }

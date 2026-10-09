@@ -199,9 +199,9 @@ fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn task_display(
+fn task_groups(
     tasks: &HashMap<SessionRef, Task>,
-) -> agent_protocol::live_activity::TaskActivityDisplay {
+) -> HashMap<&SessionRef, agent_protocol::live_activity::TaskActivitySummary> {
     use agent_protocol::live_activity::TaskActivitySummary;
     // A conversation and all of its descendants contribute one icon and one count.
     let mut conversations: HashMap<&SessionRef, TaskActivitySummary> = HashMap::new();
@@ -227,31 +227,59 @@ fn task_display(
         summary.running += contribution.running;
         summary.unknown += contribution.unknown;
     }
-    TaskActivitySummary::from_statuses(conversations.values().map(|summary| {
-        if summary.waiting > 0 {
-            "waiting"
-        } else if summary.running > 0 {
-            "running"
-        } else {
-            "unknown"
-        }
-    }))
+    conversations
+}
+fn task_display(
+    groups: &HashMap<&SessionRef, agent_protocol::live_activity::TaskActivitySummary>,
+) -> agent_protocol::live_activity::TaskActivityDisplay {
+    agent_protocol::live_activity::TaskActivitySummary::from_statuses(groups.values().map(
+        |summary| {
+            if summary.waiting > 0 {
+                "waiting"
+            } else if summary.running > 0 {
+                "running"
+            } else {
+                "unknown"
+            }
+        },
+    ))
     .display()
+}
+fn task_activity_state(
+    revision: u64,
+    tasks: &HashMap<SessionRef, Task>,
+) -> agent_protocol::live_activity::TaskActivityState {
+    let mut statuses: std::collections::BTreeMap<_, _> = tasks
+        .iter()
+        .filter_map(|(id, task)| Some((id.clone(), task.facts?.session_status())))
+        .collect();
+    let groups = task_groups(tasks);
+    for (root, summary) in &groups {
+        statuses.insert(
+            (*root).clone(),
+            if summary.running + summary.waiting > 0 {
+                agent_protocol::models::SessionStatus::Running
+            } else {
+                agent_protocol::models::SessionStatus::Unknown
+            },
+        );
+    }
+    agent_protocol::live_activity::TaskActivityState {
+        revision,
+        display: task_display(&groups),
+        statuses: statuses.into_iter().collect(),
+    }
 }
 fn publish_task_activity(
     apns: Option<&crate::apns::Apns>,
     sessions: &HashMap<SessionId, Outbound>,
-    revision: u64,
-    display: &agent_protocol::live_activity::TaskActivityDisplay,
+    state: &agent_protocol::live_activity::TaskActivityState,
 ) -> Vec<SessionId> {
     if let Some(apns) = apns {
-        apns.update(display.clone());
+        apns.update(state.display.clone());
     }
     let frame = protocol::encode(Notification::TaskActivity {
-        state: agent_protocol::live_activity::TaskActivityState {
-            revision,
-            display: display.clone(),
-        },
+        state: state.clone(),
     })
     .expect("task activity encodes");
     sessions
@@ -293,17 +321,12 @@ impl SessionRouter {
         {
             return;
         }
-        let before = task_display(&state.tasks);
         state.task_revision += 1;
         let revision = state.task_revision;
         let task = state.tasks.entry(session).or_default();
         task.parent = Some(parent);
-        let display = task_display(&state.tasks);
-        let failed = if before != display {
-            publish_task_activity(state.apns.as_deref(), &state.sessions, revision, &display)
-        } else {
-            Vec::new()
-        };
+        let activity = task_activity_state(revision, &state.tasks);
+        let failed = publish_task_activity(state.apns.as_deref(), &state.sessions, &activity);
         drop(state);
         self.close_failed(failed);
     }
@@ -344,7 +367,7 @@ impl SessionRouter {
             })
             .collect();
         let mut state = lock_state(&self.state);
-        let before = task_display(&state.tasks);
+        let before = state.task_revision;
         // Provider events received while loading the list take precedence, including completion.
         for (session, task, parent) in tasks {
             let previous = state.tasks.get(&session);
@@ -373,20 +396,11 @@ impl SessionRouter {
                 owned.facts_revision = revision;
             }
         }
-        let display = task_display(&state.tasks);
-        let failed = if display != before {
-            publish_task_activity(
-                state.apns.as_deref(),
-                &state.sessions,
-                state.task_revision,
-                &display,
-            )
+        let result = task_activity_state(state.task_revision, &state.tasks);
+        let failed = if state.task_revision != before {
+            publish_task_activity(state.apns.as_deref(), &state.sessions, &result)
         } else {
             Vec::new()
-        };
-        let result = agent_protocol::live_activity::TaskActivityState {
-            revision: state.task_revision,
-            display,
         };
         drop(state);
         self.close_failed(failed);
@@ -403,12 +417,11 @@ impl SessionRouter {
             .get(&connection)
             .filter(|output| output.alive.load(Relaxed))
             .ok_or("connection is closed")?;
-        state
-            .apns
-            .as_ref()
-            .ok_or("APNs is unavailable")?
-            .register(&principal.principal, params, task_display(&state.tasks))
-            .map_err(str::to_owned)
+        state.apns.as_ref().ok_or("APNs is unavailable")?.register(
+            &principal.principal,
+            params,
+            task_display(&task_groups(&state.tasks)),
+        )
     }
     pub(crate) fn new() -> Self {
         Self {
@@ -1146,21 +1159,17 @@ impl SessionRouter {
         if previous != Some(task)
             && (task.phase().0 != "unknown" || previous.is_some_and(|task| task.phase().1))
         {
-            let before = task_display(&state.tasks);
             state.task_revision += 1;
             let revision = state.task_revision;
             let owned = state.tasks.entry(target.clone()).or_default();
             owned.facts = Some(task);
             owned.facts_revision = revision;
-            let display = task_display(&state.tasks);
-            if before != display {
-                failed.extend(publish_task_activity(
-                    state.apns.as_deref(),
-                    &state.sessions,
-                    state.task_revision,
-                    &display,
-                ));
-            }
+            let activity = task_activity_state(state.task_revision, &state.tasks);
+            failed.extend(publish_task_activity(
+                state.apns.as_deref(),
+                &state.sessions,
+                &activity,
+            ));
         }
         drop(state);
         actor.release();
@@ -1477,7 +1486,8 @@ mod tests {
             id: "task".into(),
         };
         let params = RegisterLiveActivity {
-            activity_id: "activity".into(),
+            activity_id: Some("activity".into()),
+            allow_start: false,
             token: vec![1; 32],
             environment: PushEnvironment::Sandbox,
         };

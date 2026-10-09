@@ -39,7 +39,7 @@ mod task_activity_tests {
                 let request = reader.read_request().await.unwrap().unwrap();
                 let result = match request["method"].as_str().unwrap() {
                     "host/taskActivity/read" => { activity = Some(request); continue; }
-                    "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false}),
+                    "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
                     method => panic!("unexpected bootstrap method {method}"),
@@ -52,7 +52,7 @@ mod task_activity_tests {
             }
             store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
             let display = agent_protocol::live_activity::TaskActivitySummary { running: 1, ..Default::default() }.display();
-            writer.reply(&activity.unwrap(), json!({"result":{"revision":1,"display":display}})).await.unwrap();
+            writer.reply(&activity.unwrap(), json!({"result":{"revision":1,"statuses":[],"display":display}})).await.unwrap();
             while store.snapshot().task_activity.is_none() { updates.changed().await.unwrap(); }
             assert_eq!(store.snapshot().task_activity.as_ref().unwrap().display.current.total, 1);
             tokio::time::timeout(std::time::Duration::from_secs(5), store.dispatch(Intent::ReadTaskActivity(ReadTaskActivity {})))
@@ -89,7 +89,7 @@ impl Operation for UnregisterLiveActivity {
     rpc_operation!();
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::LiveActivity {
-            activity_id: self.activity_id.clone(),
+            activity_id: Some(self.activity_id.clone()),
         })
     }
 }

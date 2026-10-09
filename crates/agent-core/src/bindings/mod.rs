@@ -119,7 +119,7 @@ impl AgentStore {
         &self,
         connection: Connection,
         reuse: bool,
-    ) -> Result<(), AgentError> {
+    ) -> Result<bool, AgentError> {
         let started = std::time::Instant::now();
         self.resume_connection(started, async {
             let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
@@ -147,7 +147,7 @@ impl AgentStore {
         &self,
         started: std::time::Instant,
         connection: impl Future<Output = Result<crate::diagnostics::ConnectionPerformance, AgentError>>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<bool, AgentError> {
         let attempt = identifier();
         self.trace.activate();
         self.trace
@@ -176,9 +176,10 @@ impl AgentStore {
             performance.connection_id,
             u64::from(performance.reused),
         );
+        let reused = performance.reused;
         self.store.record_connection_performance(performance);
         self.trace.activate();
-        Ok(())
+        Ok(reused)
     }
 
     async fn connection_endpoint(
@@ -263,12 +264,24 @@ impl AgentStore {
     }
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
-        self.connect_recording(connection, false).await
+        self.connect_recording(connection, false).await.map(|_| ())
     }
 
     /// Foreground recovery reuses a responsive session and the endpoint identity.
-    pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
+    pub async fn resume(&self, connection: Connection) -> Result<bool, AgentError> {
         self.connect_recording(connection, true).await
+    }
+    /// Platform network monitors supply changes; transport recovery stays in Core.
+    pub async fn network_changed(&self) {
+        let endpoint = self
+            .endpoint
+            .lock()
+            .await
+            .as_ref()
+            .map(|cached| cached.endpoint.clone());
+        if let Some(endpoint) = endpoint {
+            endpoint.network_change().await;
+        }
     }
     /// Platform lifecycle boundaries only; shared transport measurements stay in Core.
     pub fn record_connection_event(&self, phase: ConnectionPhase, value: u64) {
@@ -472,7 +485,7 @@ mod tests {
                 invitation: None, use_relays: false,
             };
             let cached = crate::state::Snapshot {
-                list_query: Arc::new(crate::models::ListQuery { limit: 60, project_limit: 5, search_term: "retained search".into() }),
+                list_query: Arc::new(crate::models::ListQuery { limit: 60, project_limit: 5, search_term: "retained search".into(), ..Default::default() }),
                 navigation: Arc::new(crate::state::Navigation { thread_id: Some(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), ..Default::default() }),
                 ..Default::default()
             };
@@ -509,7 +522,7 @@ mod tests {
                     assert!(requests.insert(request["method"].as_str().unwrap().to_owned(), request).is_none());
                 }
                 writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
-                writer.reply(&requests["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
+                writer.reply(&requests["host/taskActivity/read"], json!({"result":{"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
                 let list = &requests["host/session/list"];
                 assert_eq!(list["params"]["limit"], 60);
                 assert_eq!(list["params"]["searchTerm"], "retained search");
@@ -518,7 +531,7 @@ mod tests {
                 // Finish the conversation before the lists; no reload invalidates another.
                 writer.reply(open, json!({"result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
                 writer.reply(&requests["host/model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
-                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"hasMore":false,"hasMoreProjects":false,}})).await.unwrap();
+                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
             };
@@ -590,8 +603,8 @@ mod tests {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
                             "host/account/list" => json!({"accounts":[],"selected":{}}),
-                            "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
-                            "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+                            "host/taskActivity/read" => json!({"revision":u64::from(text == "after"),"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                            "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
                             "host/model/list" => json!({"data":[],"nextCursor":null}),
                             method => panic!("unexpected request: {method}"),
@@ -610,7 +623,7 @@ mod tests {
                             // transport without waiting for the normal 30-second deadline.
                             let (next, mut next_reader, next_writer) = scoped_incoming(&host, &trust).await;
                             let mut reads = 0;
-                            while reads < 4 + usize::from(selected) {
+                            while reads < 2 + usize::from(selected) {
                                 let request = next_reader.read_request().await.unwrap().unwrap();
                                 reads += usize::from(request["method"] != "host/diagnostics/connection");
                                 next_writer.reply(&request, response(&request, "after")).await.unwrap();
@@ -624,8 +637,6 @@ mod tests {
                                 let (candidate, mut candidate_reader, candidate_writer) = host_fixture::accept(incoming).await;
                                 let check = candidate_reader.read_request().await.unwrap().unwrap();
                                 assert_eq!(check["method"], "host/session/scope");
-                                let initial = candidate_reader.read_request().await.unwrap().unwrap();
-                                assert_eq!(initial["method"], "host/session/list");
                                 candidate_writer.reply(&check, json!({"error":{"code":"request_failed","message":"candidate rejected"}})).await.unwrap();
                                 assert!(!matches!(candidate_reader.read_request().await, Ok(Some(_))), "failed replacement must close before old connection succeeds");
                                 candidate.close();
@@ -653,13 +664,13 @@ mod tests {
                             .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
                         eprintln!("foreground mode={mode} selected={selected} elapsed_ms={}", started.elapsed().as_millis());
                         if mode == "error" { assert!(resumed.is_err()); } else {
-                            resumed.unwrap();
+                            assert_eq!(resumed.unwrap(), !silent);
                         }
                         if mode != "error" { loop {
                             let ready = {
                                 let snapshot = updates.borrow_and_update();
-                                snapshot.threads.as_ref().is_some_and(|list| list.data.iter().any(|thread| thread.name.as_deref() == Some("after")))
-                                    && (!selected || item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after"))
+                                snapshot.task_activity.as_ref().is_some_and(|state| state.revision == 1)
+                                    && (!silent || !selected || item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after"))
                             };
                             if ready { break; }
                             updates.changed().await.unwrap();
@@ -755,7 +766,7 @@ mod tests {
         // must still complete synchronously after the connection becomes ready.
         assert!(matches!(
             futures_util::poll!(&mut resume),
-            std::task::Poll::Ready(Ok(()))
+            std::task::Poll::Ready(Ok(false))
         ));
         assert!(store.snapshot().connected());
         drop(resume);
@@ -847,8 +858,6 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(check["method"], "host/session/scope");
-        let initial = candidate_reader.read_request().await.unwrap().unwrap();
-        assert_eq!(initial["method"], "host/session/list");
         tokio::time::timeout(Duration::from_millis(500), store.disconnect())
             .await
             .unwrap()
@@ -868,7 +877,7 @@ mod tests {
                     .unwrap(),
                 Ok(Some(_))
             ),
-            "cancellation must close the speculative session and its pipelined read"
+            "cancellation must close the speculative session"
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(1100), host.accept())
@@ -883,6 +892,72 @@ mod tests {
         next.close();
         first.close().await;
         replacement.close().await;
+        host.close().await;
+    }
+
+    #[tokio::test]
+    async fn unresponsive_setup_expires_and_the_same_endpoint_can_retry() {
+        let identity = Identity::generate();
+        let trust = crate::transport::Trust {
+            allowed: [identity.node_id()].into(),
+            ..Default::default()
+        };
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let endpoint = Endpoint::bind(identity, Relays::Disabled).await.unwrap();
+        let ticket = host.local_ticket();
+        let store = Arc::new(crate::store::Store::offline(Snapshot::default()));
+        let connecting = tokio::spawn({
+            let store = store.clone();
+            let endpoint = endpoint.clone();
+            let ticket = ticket.clone();
+            async move { store.reconnect(&endpoint, &ticket, None).await }
+        });
+        let incoming = host
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .authorize(&trust)
+            .unwrap();
+        let (incoming, mut reader, _writer) = host_fixture::accept(incoming).await;
+        let scope = reader.read_request().await.unwrap().unwrap();
+        assert_eq!(scope["method"], "host/session/scope");
+        let result = tokio::time::timeout(Duration::from_secs(12), connecting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                result,
+                Err(crate::transport::TransportError::Peer(
+                    crate::peer::PeerError::RequestTimeout { .. }
+                ))
+            ),
+            "unexpected setup result: {result:?}"
+        );
+        assert!(!store.snapshot().connected);
+        assert!(
+            !matches!(reader.read_request().await, Ok(Some(_))),
+            "deadline closes the pending session"
+        );
+        let (retried, (next, next_reader, next_writer)) =
+            tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::join!(
+                    store.resume(&endpoint, &ticket),
+                    scoped_incoming(&host, &trust)
+                )
+            })
+            .await
+            .unwrap();
+        retried.unwrap();
+        assert!(store.snapshot().connected);
+        store.close().await.unwrap();
+        drop((next_reader, next_writer));
+        next.close();
+        incoming.close();
+        endpoint.close().await;
         host.close().await;
     }
 
@@ -909,17 +984,17 @@ mod tests {
                     let mut withheld = Some(withheld);
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
-                        while requests.len() < (1 + usize::from(selected) + 3 * usize::from(round == 0)) {
+                        while requests.len() < (2 + usize::from(selected) + 2 * usize::from(round == 0)) {
                             let request = reader.read_request().await.unwrap().expect("refresh must retain the existing stream");
                             requests.push(request);
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
-                                "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+                                "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
                                 "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[]}}}),
                                 "host/account/list" if round == 0 => json!({"accounts":[],"selected":{}}),
                                 "host/model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
-                                "host/taskActivity/read" if round == 0 => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                                "host/taskActivity/read" => json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
                             if round == 2 && selected && request["method"] == "host/session/open" { pending.push(request); continue; }

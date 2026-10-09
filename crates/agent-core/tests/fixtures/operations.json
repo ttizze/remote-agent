@@ -42,7 +42,9 @@
             "hasMoreProjects": false,
             "opaque": {
               "a": 1
-            }
+            },
+            "projectPages": {},
+            "limit": 5
           }
         }
       }
@@ -73,7 +75,9 @@
       "hasMoreProjects": false,
       "opaque": {
         "a": 1
-      }
+      },
+      "projectPages": {},
+      "limit": 5
     }
   },
   {
@@ -119,7 +123,9 @@
             "hasMoreProjects": false,
             "opaque": {
               "a": 1
-            }
+            },
+            "projectPages": {},
+            "limit": 5
           }
         }
       }
@@ -150,7 +156,9 @@
       "hasMoreProjects": false,
       "opaque": {
         "a": 1
-      }
+      },
+      "projectPages": {},
+      "limit": 5
     }
   },
   {

@@ -202,13 +202,19 @@ pub enum StalePolicy {
 pub enum OperationKey {
     TaskActivity,
     LiveActivity {
-        activity_id: String,
+        activity_id: Option<String>,
     },
     TurnItems {
         session: crate::session::SessionRef,
         turn: agent_protocol::ids::TurnId,
     },
+    ListDecorations {
+        scope: agent_protocol::operations::ListDecorationScope,
+    },
     SessionList,
+    SessionPage {
+        part: crate::models::ListPart,
+    },
     ProjectList {
         project_id: String,
     },
@@ -267,12 +273,18 @@ pub struct OperationState {
     pub phase: OperationPhase,
 }
 
+impl OperationKey {
+    pub(crate) fn list(part: Option<crate::models::ListPart>) -> Self {
+        part.map_or(Self::SessionList, |part| Self::SessionPage { part })
+    }
+}
+
 #[derive(Debug)]
 pub enum Scheduling {
     Concurrent,
     Control,
     LatestTaskActivity,
-    LatestList(crate::models::ListQuery),
+    LatestList(Option<crate::models::ListPart>),
     LatestAgents(crate::session::SessionRef),
     LatestProject(String),
     LatestReview,
@@ -283,7 +295,7 @@ impl Scheduling {
     pub(crate) fn latest_key(&self) -> Option<OperationKey> {
         match self {
             Self::LatestTaskActivity => Some(OperationKey::TaskActivity),
-            Self::LatestList(_) => Some(OperationKey::SessionList),
+            Self::LatestList(part) => Some(OperationKey::list(*part)),
             Self::LatestProject(project_id) => Some(OperationKey::ProjectList {
                 project_id: project_id.clone(),
             }),

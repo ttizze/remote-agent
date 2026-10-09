@@ -135,7 +135,7 @@ async fn saturated_dictation_preparations_leave_complete_recording_transcription
 }
 
 #[tokio::test]
-async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_navigation() {
+async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navigation() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
         Default::default(),
@@ -144,14 +144,10 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     assert_eq!(first_request["method"], "host/session/list");
     let navigation_epoch = store.snapshot().epoch;
     let mut receipts = Vec::new();
-    for index in 0..40 {
-        receipts.push(if index == 10 || index == 20 {
-            store.dispatch(Intent::ExpandThreadList { project_id: None })
-        } else {
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(
-                (*store.snapshot().list_query).clone(),
-            )))
-        });
+    for _ in 0..40 {
+        receipts.push(store.dispatch(Intent::ListSessions(op::ListSessions::new(
+            (*store.snapshot().list_query).clone(),
+        ))));
     }
     assert_eq!(
         store.snapshot().epoch,
@@ -161,12 +157,14 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     let id = SessionRef::new(ProviderKind::Codex, "selected".to_owned()).unwrap();
     let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())));
     assert_eq!(store.snapshot().navigation.thread_id.as_ref(), Some(&id));
-    let open_request = read(&mut reader).await;
+    let open_request = read_after_status(&mut reader, &writer).await;
     assert_eq!(
         open_request["method"], "host/session/open",
         "refreshes must not fan out while the first list is pending"
     );
-    receipts.push(store.dispatch(Intent::ExpandThreadList { project_id: None }));
+    receipts.push(store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        (*store.snapshot().list_query).clone(),
+    ))));
     writer
         .reply(
             &open_request,
@@ -179,7 +177,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
         store.snapshot().subscriptions.contains_key(&id),
         "expanding projects must retain the in-flight conversation subscription"
     );
-    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"hasMore":false,"hasMoreProjects":false}})).await.unwrap();
+    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}})).await.unwrap();
     first.await.unwrap();
     assert!(
         store
@@ -191,15 +189,18 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
             .is_empty(),
         "an older query must not replace the expanded list"
     );
-    let latest = read(&mut reader).await;
+    let latest = read_after_status(&mut reader, &writer).await;
     assert_eq!(latest["method"], "host/session/list");
-    assert_eq!(latest["params"]["limit"], 35);
+    assert_eq!(latest["params"]["limit"], 5);
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            read_after_status(&mut reader, &writer)
+        )
+        .await
+        .is_err()
     );
-    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"hasMore":false,"hasMoreProjects":false}})).await.unwrap();
+    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}})).await.unwrap();
     for receipt in receipts {
         receipt.await.unwrap();
     }
@@ -215,7 +216,7 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
     )));
     let request = read(&mut reader).await;
     store.dispatch(Intent::ShowThreadList).await.unwrap();
-    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"hasMore":false,"hasMoreProjects":false}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}})).await.unwrap();
     refresh.await.unwrap();
     assert_eq!(
         store.snapshot().threads.as_ref().unwrap().projects[0].id,
@@ -249,7 +250,7 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
     writer
         .reply(
             &list_request,
-            json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false}}),
+            json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}}),
         )
         .await
         .unwrap();
@@ -263,7 +264,7 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
         store.snapshot().workspace.review.is_none(),
         "an obsolete directory must not publish its diff"
     );
-    let latest = read(&mut reader).await;
+    let latest = read_after_status(&mut reader, &writer).await;
     assert_eq!(latest["method"], "host/workspace/review");
     assert_eq!(latest["params"], json!({"cwd":"/latest/39"}));
     let mut current_review = review();
@@ -304,7 +305,7 @@ async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_wa
     let joined = refresh();
     // This independent RPC is also a barrier: the queued refreshes were admitted.
     let models = store.dispatch(Intent::LoadModels(op::LoadModels {}));
-    let model_request = read(&mut reader).await;
+    let model_request = read_after_status(&mut reader, &writer).await;
     assert_eq!(model_request["method"], "host/model/list");
     writer
         .reply(
@@ -316,7 +317,7 @@ async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_wa
     models.await.unwrap();
     writer.reply(&request, json!({"error":{"code":"provider_failed","message":"list failed","delivery":"notSent"}})).await.unwrap();
     assert!(first.await.is_err());
-    let second_request = read(&mut reader).await;
+    let second_request = read_after_status(&mut reader, &writer).await;
     assert_eq!(second_request["method"], "host/session/list");
     let pending = refresh();
     store.close().await.unwrap();
@@ -422,14 +423,12 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    for _ in 0..4
+    for _ in 0..1
+        + usize::from(snapshot.threads.is_none())
+        + usize::from(snapshot.models.is_empty())
+        + usize::from(snapshot.account.accounts.is_none())
         + usize::from(selected.is_some())
         + usize::from(!cwd.is_empty())
-        + snapshot
-            .account
-            .accounts
-            .as_ref()
-            .map_or(0, |accounts| accounts.accounts.len())
     {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
@@ -438,7 +437,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
                 .as_ref()
                 .map(|threads| json!(threads))
                 .unwrap_or_else(
-                    || json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+                    || json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
                 ),
             "host/account/list" => snapshot
                 .account
@@ -448,7 +447,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
                 .unwrap_or_else(|| json!({"accounts":[],"selected":{}})),
             "host/account/usage" => json!({"windows":[],"fetchedAt":1,"error":null}),
             "host/taskActivity/read" => {
-                json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
             }
             "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
             "host/session/open" => {
@@ -480,7 +479,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     }
     wait_for(&store, |current| {
         current.threads.is_some()
-            && !Arc::ptr_eq(&current.models, &snapshot.models)
+            && current.task_activity.is_some()
             && (cwd.is_empty() || current.workspace.review.is_some())
     })
     .await;
@@ -492,6 +491,18 @@ async fn read(reader: &mut host_fixture::Reader) -> host_fixture::Request {
         .unwrap()
         .unwrap()
         .unwrap()
+}
+async fn read_after_status(
+    reader: &mut host_fixture::Reader,
+    writer: &host_fixture::Writer,
+) -> host_fixture::Request {
+    loop {
+        let request = read(reader).await;
+        if request["method"] != "host/taskActivity/read" {
+            return request;
+        }
+        writer.reply(&request, json!({"result":{"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
+    }
 }
 fn review() -> Value {
     json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":""})
@@ -531,7 +542,7 @@ async fn read_after_reviews(
             writer
                 .reply(
                     &request,
-                    json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}}),
+                    json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
                 )
                 .await
                 .unwrap();
@@ -1832,7 +1843,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         initial.threads = Some(Arc::new(
             serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/listed","name":"Selected task"}],
-                "projects":[],"hasMore":false,"hasMoreProjects":false,}))
+                "projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}))
             .unwrap(),
         ));
         Arc::make_mut(&mut initial.drafts).insert(
@@ -1888,7 +1899,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
             "Keep this draft"
         );
         assert_eq!(loaded_text(&selected), cached.then_some("old"));
-        let request = read(&mut reader).await;
+        let request = read_after_status(&mut reader, &writer).await;
         assert_eq!(request["method"], "host/session/open");
         writer
             .reply(&request, json!({"result":{"thread":thread("latest")}}))
@@ -1901,7 +1912,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
             .reply(
                 &list_request,
                 json!({"result":{
-                "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}}),
+                "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
             )
             .await
             .unwrap();
@@ -2049,7 +2060,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
             .unwrap(),
         ),
     );
-    initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"hasMore":false,"hasMoreProjects":false,})).unwrap()));
+    initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})).unwrap()));
     let (store, mut reader, mut writer) = setup(initial).await;
     writer.notify(json!({"method":"fixture/session/change","session":{"provider":"codex","id":"thread"},"change":{"turn":{"turn":{"id":"completed","status":"completed"},"completed":true}}})).await.unwrap();
     wait_for(&store, |snapshot| {
@@ -2060,8 +2071,8 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
     })
     .await;
     let refresh = read(&mut reader).await;
-    assert_eq!(refresh["method"], "host/session/list");
-    // Sending must not wait for the catalogue refresh to complete.
+    assert_eq!(refresh["method"], "host/session/decorations/read");
+    // Sending must not wait for the decoration refresh to complete.
     store
         .dispatch(Intent::SetDraft {
             thread_id: SessionRef {
@@ -2119,7 +2130,7 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
             ..Default::default()
         })));
         let requested = store.snapshot();
-        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"hasMore":false,"hasMoreProjects":false,});
+        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,});
         writer
         .reply(&old_request, if failure {
             json!({"error":{"code":"provider_failed","message":"old search failed","delivery":"notSent"}})
@@ -2302,7 +2313,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
     let (store, mut reader, writer) = setup(Snapshot {
         threads: Some(Arc::new(
             serde_json::from_value(
-                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
             )
             .unwrap(),
         )),
@@ -2334,7 +2345,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                     } else {
                         json!([])
                     };
-                    json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,})
+                    json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})
                 }
                 "host/workspace/review" => review(),
                 other => panic!("unexpected method {other}"),
@@ -2557,7 +2568,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
                 let result = if opening["method"] == "host/workspace/review" {
                     review()
                 } else {
-                    json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,})
+                    json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})
                 };
                 writer
                     .reply(&opening, json!({"result":result}))
@@ -2797,7 +2808,7 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
 }
 
 #[tokio::test]
-async fn initial_titles_overlap_scope_verification_without_publishing_unverified_or_old_queries() {
+async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() {
     use agent_protocol::models::ListQuery;
     use agent_transport::transport::Endpoint;
     use agent_transport::transport::Identity;
@@ -2824,17 +2835,11 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
             let (session, mut reader, writer) = host_fixture::accept(incoming).await;
             let scope = read(&mut reader).await;
             assert_eq!(scope["method"], "host/session/scope");
-            // Deliberately withhold the scope reply: the old serial implementation
-            // cannot send this request and times out here.
-            let initial = read(&mut reader).await;
-            assert_eq!(initial["method"], "host/session/list");
-            assert_eq!(initial["params"]["limit"], 5);
+            assert!(tokio::time::timeout(Duration::from_millis(40), reader.read_request()).await.is_err(),
+                "an unverified candidate must not load titles");
             assert!(!store.snapshot().connected);
             assert!(store.snapshot().threads.is_none());
-            let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"hasMore":false,"hasMoreProjects":false,}});
-            if matches!(mode, "changed-query" | "rejected") {
-                writer.reply(&initial, titles("old")).await.unwrap();
-            }
+            let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}});
             if mode == "changed-query" {
                 let _ = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery { search_term: "new query".into(), ..Default::default() }))).await;
             }
@@ -2847,27 +2852,23 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
             } else {
                 connected.unwrap();
-                if mode != "changed-query" {
-                    // A slow title response must not delay readiness or duplicate
-                    // the read already sent before verification.
-                    assert!(store.snapshot().connected);
-                    assert!(store.snapshot().threads.is_none());
-                    writer.reply(&initial, titles("fresh")).await.unwrap();
-                } else {
-                    let current = read(&mut reader).await;
-                    assert_eq!(current["method"], "host/session/list");
-                    assert_eq!(current["params"]["searchTerm"], "new query");
-                    writer.reply(&current, titles("fresh")).await.unwrap();
+                assert!(store.snapshot().connected);
+                assert!(store.snapshot().threads.is_none());
+                for _ in 0..4 {
+                    let request = read(&mut reader).await;
+                    let result = match request["method"].as_str().unwrap() {
+                        "host/session/list" => {
+                            assert_eq!(request["params"]["limit"], 5);
+                            assert_eq!(request["params"]["searchTerm"], if mode == "changed-query" { "new query" } else { "" });
+                            titles("fresh")["result"].clone()
+                        }
+                        "host/model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/account/list" => json!({"accounts":[],"selected":{}}),
+                        "host/taskActivity/read" => json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                        method => panic!("unexpected bootstrap: {method}"),
+                    };
+                    writer.reply(&request, json!({"result": result})).await.unwrap();
                 }
-                let models = read(&mut reader).await;
-                assert_eq!(models["method"], "host/model/list");
-                writer.reply(&models, json!({"result":{"data":[],"nextCursor":null}})).await.unwrap();
-                let accounts = read(&mut reader).await;
-                assert_eq!(accounts["method"], "host/account/list");
-                writer.reply(&accounts, json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
-                let activity = read(&mut reader).await;
-                assert_eq!(activity["method"], "host/taskActivity/read");
-                writer.reply(&activity, json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
                 wait_for(&store, |state| state.threads.is_some()).await;
                 assert_eq!(store.snapshot().threads.as_ref().unwrap().data[0].id.as_ref().map(|session| session.id.as_str()), Some("fresh"));
             }
@@ -3002,18 +3003,19 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 session.close();
             }
             if let Some((session, mut reader, writer)) = replacement {
-                for _ in 0..4 {
+                for _ in 0..2 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
-                        "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+                        "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                        "host/taskActivity/read" => json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
                     writer.reply(&request, json!({"result":result})).await.unwrap();
                 }
-                wait_for(&store, |state| state.threads.as_ref().is_some_and(|threads| threads.data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("replacement")))).await;
+                wait_for(&store, |state| state.task_activity.is_some()).await;
+                assert!(store.snapshot().threads.as_ref().unwrap().data.is_empty());
                 assert!(store.snapshot().connected);
                 assert!(store.snapshot().error.is_none());
                 store.close().await.unwrap();
@@ -3385,12 +3387,12 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
         let request = read(&mut reader).await;
         pending.insert(request["method"].as_str().unwrap().to_owned(), request);
     }
-    writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
+    writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
     writer
         .reply(
             &pending["host/session/list"],
             json!({"result":{
-        "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}}),
+        "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
         )
         .await
         .unwrap();
@@ -3478,7 +3480,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
             "host/taskActivity/read",
-            json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+            json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
         ),
         (
             "host/model/list",
@@ -3486,7 +3488,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ),
         (
             "host/session/list",
-            json!({"data":[{"id":{"provider":"codex","id":"listed"}}],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+            json!({"data":[{"id":{"provider":"codex","id":"listed"}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
         ),
     ] {
         writer
@@ -3573,10 +3575,10 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             async move {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
-                        "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}),
+                        "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
-                        "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                        "host/taskActivity/read" => json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                         "host/session/open" => {
                             let a = request["params"]["session"]["id"] == "A";
                             json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"id":{"provider":"codex","id":if a {"A"} else {"B"}},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":if a {json!({"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}})} else {json!({"inline":{"body":{"assistantText":{"text":"B prefix","phase":"unknown"}}}})}}]}]}}})
@@ -4293,11 +4295,11 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
         let request = read(&mut reader).await;
         pending.insert(request["method"].as_str().unwrap().to_owned(), request);
     }
-    writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
+    writer.reply(&pending["host/taskActivity/read"], json!({"result":{"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
     writer
         .reply(
             &pending["host/session/list"],
-            json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,}}),
+            json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
         )
         .await
         .unwrap();

@@ -131,7 +131,7 @@ mod tests {
             let snapshot = Arc::make_mut(&mut desktop.snapshot);
             snapshot.threads = Some(Arc::new(serde_json::from_value(serde_json::json!({
                 "data":[{"id":{"provider":"codex","id":"parent"},"name":"Parent"}],
-                "projects":[],"hasMore":false,"hasMoreProjects":false,})).unwrap()));
+                "projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})).unwrap()));
             Arc::make_mut(&mut snapshot.conversations).insert(
                 agent_protocol::session::SessionRef { provider: parent.provider, id:"child".into() },
                 Arc::new(serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"parent"},"name":"Review","status":"running"})).unwrap())

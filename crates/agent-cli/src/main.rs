@@ -72,6 +72,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 limit: *limit,
                 project_limit: ListQuery::default().project_limit,
                 search_term: search.clone(),
+                ..Default::default()
             })
         }
         Command::Send { thread_id, .. } => {

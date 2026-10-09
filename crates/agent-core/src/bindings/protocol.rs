@@ -6,6 +6,12 @@ use agent_protocol::permissions::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
 #[uniffi::remote(Enum)]
+enum ListDecorationScope {
+    Root { part: Option<ListPart> },
+    Project { project_id: String },
+    Task { session: SessionRef },
+}
+#[uniffi::remote(Enum)]
 enum PushEnvironment {
     Sandbox,
     Production,
@@ -14,7 +20,8 @@ enum PushEnvironment {
 struct ReadTaskActivity {}
 #[uniffi::remote(Record)]
 struct RegisterLiveActivity {
-    pub activity_id: String,
+    pub activity_id: Option<String>,
+    pub allow_start: bool,
     pub token: Vec<u8>,
     pub environment: PushEnvironment,
 }
@@ -92,11 +99,18 @@ struct ServiceTier {
 struct ReasoningEffort {
     pub reasoning_effort: String,
 }
+#[uniffi::remote(Enum)]
+enum ListPart {
+    Projects,
+    Chats,
+}
 #[uniffi::remote(Record)]
 struct ListQuery {
+    pub part: Option<ListPart>,
     pub limit: u32,
     pub project_limit: u32,
     pub search_term: String,
+    pub project_limits: Option<std::collections::HashMap<String, u32>>,
 }
 #[uniffi::remote(Record)]
 struct FileList {

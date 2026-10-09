@@ -95,6 +95,7 @@ pub struct Thread {
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub worktree_status: Option<WorktreeStatus>,
+    pub git_branch: Option<String>,
     #[serde(default)]
     pub status: SessionStatus,
     pub turns: Option<Vec<Arc<Turn>>>,
@@ -185,13 +186,22 @@ pub struct ThreadResponse {
     pub thread: Thread,
     pub model: Option<ModelRef>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPage {
+    pub limit: u32,
+    pub has_more: bool,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadList {
+    pub limit: u32,
     pub data: Vec<Thread>,
     pub projects: Vec<Project>,
     pub has_more: bool,
     pub has_more_projects: bool,
+    /// Project pages included in this response, with their own lookahead result.
+    pub project_pages: BTreeMap<String, ListPage>,
     #[serde(default)]
     #[serde(with = "crate::protocol::json")]
     pub provider_errors: Option<Map<String, Value>>,
@@ -249,12 +259,21 @@ pub struct ServiceTier {
 pub struct ReasoningEffort {
     pub reasoning_effort: String,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ListPart {
+    Projects,
+    Chats,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ListQuery {
+    pub part: Option<ListPart>,
     pub limit: u32,
     pub project_limit: u32,
     pub search_term: String,
+    /// None requests the first five recent project pages; an explicit map reads
+    /// only those projects, leaving closed pages and root pagination untouched.
+    pub project_limits: Option<std::collections::HashMap<String, u32>>,
 }
 impl Default for ListQuery {
     fn default() -> Self {
@@ -262,6 +281,8 @@ impl Default for ListQuery {
             limit: 5,
             project_limit: 5,
             search_term: String::new(),
+            project_limits: None,
+            part: None,
         }
     }
 }

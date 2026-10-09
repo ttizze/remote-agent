@@ -423,7 +423,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ListProjectSessions,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListProjectSessions,
         ListAgents, AddProject, CreateSession,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
@@ -526,6 +526,16 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
         }
 
+        Intent::ListSessions(mut operation) => {
+            let refresh = operation.query.search_term == previous.list_query.search_term;
+            if let Err(error) = op::Operation::prepare(&mut operation, &mut next) {
+                next.error = Some(error);
+                return (next, Vec::new());
+            }
+            let mut effects = vec![Effect::execute(operation)];
+            if refresh && next.connected { effects.push(Effect::execute(op::ReadTaskActivity {})); }
+            return (next, effects);
+        }
         Intent::RefreshProject { project_id } => {
             let Some(limit) = previous.expanded_projects.get(&project_id).copied() else {
                 return (next, Vec::new());
@@ -539,7 +549,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::SetProjectExpanded { project_id, expanded } => {
             if !expanded {
                 Arc::make_mut(&mut next.expanded_projects).remove(&project_id);
-                Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
             } else if !previous.expanded_projects.contains_key(&project_id) {
                 if previous.threads.as_ref().is_none_or(|page| {
                     !page.projects.iter().any(|project| project.id == project_id)
@@ -547,7 +556,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     return (next, Vec::new());
                 }
                 let page = previous.project_threads.get(&project_id);
-                let limit = page.map_or(5, |page| u32::try_from(page.data.len()).unwrap_or(u32::MAX).max(5));
+                let limit = page.map_or(5, |page| page.limit);
                 Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), limit);
                 if page.is_none() && next.connected {
                     return prepare(previous, next, op::ListProjectSessions {
@@ -573,12 +582,14 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
             let mut query = (*previous.list_query).clone();
             query.limit = query.limit.saturating_add(10);
-            return prepare(previous, next, op::PageSessions { query });
+            query.part = Some(crate::models::ListPart::Chats);
+            return prepare(previous, next, op::ListSessions::new(query));
         }
         Intent::ExpandProjects => {
             let mut query = (*previous.list_query).clone();
             query.project_limit = query.project_limit.saturating_add(10);
-            return prepare(previous, next, op::PageSessions { query });
+            query.part = Some(crate::models::ListPart::Projects);
+            return prepare(previous, next, op::ListSessions::new(query));
         }
 
         Intent::ShowThreadList => {
@@ -915,12 +926,18 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.task_activity = None;
             next.error = None;
             next.list_query = Arc::new((*next.list_query).clone().for_connection());
-            let mut effects = vec![
-                Effect::execute(op::ListSessions::new((*next.list_query).clone())),
-                Effect::execute(op::LoadModels {}),
-                Effect::execute(op::ListAccounts {}),
-                Effect::execute(op::ReadTaskActivity {}),
-            ];
+            let mut effects = vec![Effect::execute(op::ReadTaskActivity {})];
+            if next.threads.is_none() {
+                effects.push(Effect::execute(op::ListSessions::new(
+                    (*next.list_query).clone(),
+                )));
+            }
+            if next.models.is_empty() {
+                effects.push(Effect::execute(op::LoadModels {}));
+            }
+            if next.account.accounts.is_none() {
+                effects.push(Effect::execute(op::ListAccounts {}));
+            }
             effects.extend(op::refresh_agents(
                 next.connected,
                 next.observed_agents.as_ref(),
@@ -1318,6 +1335,8 @@ mod submission_tests {
                 projects: vec![],
                 has_more: false,
                 has_more_projects: false,
+                limit: 5,
+                project_pages: Default::default(),
                 provider_errors: None,
             })),
             drafts: Arc::new(

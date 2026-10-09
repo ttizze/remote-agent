@@ -300,6 +300,35 @@ pub struct ListProjectSessions {
     pub search_term: String,
 }
 
+/// Values already obtained by the title read; decorating them must not list
+/// provider sessions or read conversation bodies again.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ListDecorationScope {
+    Root {
+        part: Option<crate::models::ListPart>,
+    },
+    Project {
+        project_id: String,
+    },
+    Task {
+        session: crate::session::SessionRef,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadListDecorations {
+    pub scope: ListDecorationScope,
+    pub project_ids: Vec<String>,
+    pub threads: Vec<(crate::session::SessionRef, String, Option<String>)>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDecorations {
+    pub icons: std::collections::BTreeMap<String, Option<String>>,
+    pub statuses: Vec<(
+        crate::session::SessionRef,
+        Option<crate::models::WorktreeStatus>,
+    )>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListAgents {

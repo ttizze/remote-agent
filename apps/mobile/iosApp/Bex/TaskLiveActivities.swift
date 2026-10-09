@@ -37,6 +37,15 @@ final class TaskLiveActivities {
     private var tokenObservers: [String: Task<Void, Never>] = [:]
     private var stateObservers: [String: Task<Void, Never>] = [:]
     private var tokens: [String: Data] = [:]
+    private var startTokenObserver: Task<Void, Never>?
+    private var activityObserver: Task<Void, Never>?
+    private struct StartRegistration: Equatable {
+        let hostID: String
+        let token: Data
+        let allow: Bool
+    }
+
+    private var startRegistration: StartRegistration?
     private struct Input: Equatable {
         let hostID: String?
         let foreground: Bool
@@ -47,8 +56,11 @@ final class TaskLiveActivities {
     private var pending: Input?
     private var previous: Input?
     private var worker: Task<Void, Never>?
-    // User dismissal lasts until this host's active task set becomes empty.
-    private var started = Set<String>()
+    /// User dismissal lasts until this host's active task set becomes empty.
+    private var started = Set(UserDefaults.standard.stringArray(forKey: "taskActivityStartedHosts") ?? []) {
+        didSet { UserDefaults.standard.set(Array(started), forKey: "taskActivityStartedHosts") }
+    }
+
     fileprivate let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "dev.remoteagent.mobile.ios",
         category: "LiveActivity"
@@ -56,10 +68,40 @@ final class TaskLiveActivities {
 
     init() {
         (requests, output) = AsyncStream.makeStream()
+        startTokenObserver = Task { [weak self] in
+            for await token in Activity<TaskActivityAttributes>.pushToStartTokenUpdates {
+                guard !Task.isCancelled, let self else { break }
+                if let input = pending ?? previous {
+                    registerStartToken(
+                        hostID: input.hostID,
+                        token: token,
+                        connected: input.connected,
+                        foreground: input.foreground
+                    )
+                }
+            }
+        }
+        activityObserver = Task { [weak self] in
+            for await activity in Activity<TaskActivityAttributes>.activityUpdates {
+                guard !Task.isCancelled, let self else { break }
+                let duplicate = Activity<TaskActivityAttributes>.activities.contains {
+                    $0.id != activity.id && $0.attributes.hostID == activity.attributes.hostID
+                        && ($0.activityState == .active || $0.activityState == .stale)
+                        && tokenObservers[$0.id] != nil
+                }
+                if duplicate {
+                    await activity.end(nil, dismissalPolicy: .immediate)
+                } else {
+                    started.insert(activity.attributes.hostID); observe(activity)
+                }
+            }
+        }
     }
 
     deinit {
         output.finish()
+        startTokenObserver?.cancel()
+        activityObserver?.cancel()
         for observer in tokenObservers.values {
             observer.cancel()
         }
@@ -69,6 +111,15 @@ final class TaskLiveActivities {
     }
 
     func resendTokens(hostID: String) {
+        startRegistration = nil
+        if let input = pending ?? previous {
+            registerStartToken(
+                hostID: hostID,
+                token: Activity<TaskActivityAttributes>.pushToStartToken,
+                connected: input.connected,
+                foreground: input.foreground
+            )
+        }
         for activity in Activity<TaskActivityAttributes>.activities where activity.attributes.hostID == hostID {
             if let token = tokens[activity.id] {
                 register(activity, token: token)
@@ -76,15 +127,28 @@ final class TaskLiveActivities {
         }
     }
 
+    private func registerStartToken(hostID: String?, token: Data?, connected: Bool, foreground: Bool) {
+        guard connected, let hostID, let token else { return }
+        let allow = !foreground && ActivityAuthorizationInfo().areActivitiesEnabled
+        let registration = StartRegistration(hostID: hostID, token: token, allow: allow)
+        guard startRegistration != registration else { return }
+        startRegistration = registration
+        output.yield(.intent(hostID: hostID, intent: .registerLiveActivity(RegisterLiveActivity(
+            activityId: nil, allowStart: allow, token: token, environment: pushEnvironment
+        ))))
+    }
+
+    private var pushEnvironment: PushEnvironment {
+        Bundle.main.object(forInfoDictionaryKey: "BexAPNSEnvironment") as? String == "production"
+            ? .production : .sandbox
+    }
+
     private func register(_ activity: Activity<TaskActivityAttributes>, token: Data) {
         tokens[activity.id] = token
         logger.info("Registering Live Activity push token (\(token.count, privacy: .public) bytes)")
-        let environment: PushEnvironment = Bundle.main
-            .object(forInfoDictionaryKey: "BexAPNSEnvironment") as? String == "production"
-            ? .production : .sandbox
         output.yield(.intent(hostID: activity.attributes.hostID,
                              intent: .registerLiveActivity(RegisterLiveActivity(
-                                 activityId: activity.id, token: token, environment: environment
+                                 activityId: activity.id, allowStart: false, token: token, environment: pushEnvironment
                              ))))
     }
 
@@ -165,6 +229,12 @@ final class TaskLiveActivities {
     }
 
     private func apply(_ input: Input) async {
+        registerStartToken(
+            hostID: input.hostID,
+            token: Activity<TaskActivityAttributes>.pushToStartToken,
+            connected: input.connected,
+            foreground: input.foreground
+        )
         for activity in Activity<TaskActivityAttributes>.activities
             where activity.activityState == .active || activity.activityState == .stale {
             observe(activity)
@@ -237,7 +307,11 @@ extension BexAppViewModel {
                     }
                 } catch {
                     liveActivities.logger.error("Live Activity push registration failed")
-                    // Registration retries with the current token after reconnecting.
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(5))
+                        guard let self, snapshot.connected(), selectedProfileId == hostID else { return }
+                        liveActivities.resendTokens(hostID: hostID)
+                    }
                 }
             }
         }

@@ -98,10 +98,13 @@ extension BexAppViewModel {
     }
 
     func showThreadList() {
-        screen = .threads; perform(.showThreadList); refreshTaskList()
+        screen = .threads; perform(.showThreadList)
     }
 
     func refreshTaskList() {
+        if !isConnected {
+            connect(); return
+        }
         guard !loadingThreads else { return }
         notice = nil
         perform(.listSessions(ListSessions(query: snapshot.listQuery())))

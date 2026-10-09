@@ -304,10 +304,15 @@ impl Desktop {
                     cx.notify();
                 },
             ));
-            if loading_session_list {
+            if list.as_ref().is_some_and(|page| page.loading_projects) {
                 more = more.suffix(|_, _| spinner::Spinner::new().small());
             }
-            projects.push(more.disable(loading_session_list).into());
+            projects.push(
+                more.disable(
+                    loading_session_list || list.as_ref().is_some_and(|page| page.loading_projects),
+                )
+                .into(),
+            );
         }
         let mut chats: Vec<SidebarRow> = list
             .as_ref()
@@ -324,10 +329,15 @@ impl Desktop {
                     s.dispatch(Intent::ExpandThreadList { project_id: None });
                     cx.notify();
                 }));
-            if loading_session_list {
+            if list.as_ref().is_some_and(|page| page.loading_chats) {
                 more = more.suffix(|_, _| spinner::Spinner::new().small());
             }
-            chats.push(more.disable(loading_session_list).into());
+            chats.push(
+                more.disable(
+                    loading_session_list || list.as_ref().is_some_and(|page| page.loading_chats),
+                )
+                .into(),
+            );
         }
         Sidebar::new("desktop-sidebar")
             .header(
@@ -521,7 +531,7 @@ mod tests {
             snapshot.threads = Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
                     "data":[], "projects":[{"id":"brand", "name":"remote-agent", "roots":[]}],
-                     "hasMore":false,"hasMoreProjects":false, }))
+                     "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
                 .unwrap(),
             ));
             Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
@@ -632,7 +642,7 @@ mod tests {
                     "data":[{"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"first"},"name":"Child task","status":"running"},
                             {"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
                             {"id":{"provider":"codex","id":"second"},"name":"Second task","worktreeStatus":"merged"}],
-                    "projects":[],"hasMore":false,"hasMoreProjects":false,}))
+                    "projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}))
                 .unwrap(),
             )),
             ..Default::default()

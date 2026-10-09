@@ -111,13 +111,18 @@ impl HostRpcService {
             .await;
         let mut native = Vec::new();
         let mut successful = false;
+        let mut complete = self.inner.startup_errors.is_empty();
         for result in listings {
             if let Ok(Ok(pages)) = result {
-                successful |= pages
+                let fresh = pages
                     .iter()
                     .flatten()
                     .all(|summary| summary.thread.list_stale != Some(true));
+                successful |= fresh;
+                complete &= fresh;
                 native.extend(pages.into_iter().flatten().map(|summary| summary.thread));
+            } else {
+                complete = false;
             }
         }
         let state = self.inner.router.task_activity(native, revision);
@@ -127,13 +132,21 @@ impl HostRpcService {
                 "タスクの状態を取得できません。",
             ));
         }
+        if complete && let Some(apns) = self.inner.router.apns() {
+            apns.activate(state.display.clone());
+        }
         Ok(state)
     }
 
-    pub async fn enable_apns(&self, path: &std::path::Path, host_name: &str) -> anyhow::Result<()> {
+    pub async fn enable_apns(
+        &self,
+        path: &std::path::Path,
+        host_name: &str,
+        host_id: &str,
+    ) -> anyhow::Result<()> {
         self.inner
             .router
-            .set_apns(crate::apns::Apns::load(path, host_name).await?);
+            .set_apns(crate::apns::Apns::load(path, host_name, host_id).await?);
         Ok(())
     }
     pub fn new(backends: impl IntoIterator<Item = Backend>, projects: ProjectStore) -> Self {
@@ -684,7 +697,6 @@ impl HostRpcService {
                     .apns()
                     .is_some_and(|apns| apns.environment() == params.environment);
                 if enabled {
-                    self.read_task_activity().await?;
                     self.inner
                         .router
                         .register_live_activity(session, params)
@@ -892,6 +904,7 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("project_add_failed", error))?)
             .into(),
+            Call::ReadListDecorations(params) => self.list_decorations(params).await?.into(),
             Call::ListSessions(params) => {
                 let started = std::time::Instant::now();
                 let result = self
@@ -900,6 +913,8 @@ impl HostRpcService {
                         crate::projects::titles::TitleQuery::Root {
                             limit: params.query.limit,
                             project_limit: params.query.project_limit,
+                            project_limits: params.query.project_limits.as_ref(),
+                            part: params.query.part,
                             searching: !params.query.search_term.trim().is_empty(),
                         },
                     )
@@ -1267,12 +1282,25 @@ impl HostRpcService {
         query: crate::projects::titles::TitleQuery<'_>,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
         let agents = self.agents();
-        // Keep the common root request to one lookahead-sized read. Assigned
-        // rows do not consume the standalone-chat quota, so widen only a
-        // follow-up page when the first read proves more native rows are needed.
+        // One title walk supplies each requested quota plus lookahead.
         let (first_page_size, later_page_size) = match query {
-            crate::projects::titles::TitleQuery::Root { limit, .. } => {
-                (limit.max(1).saturating_add(1).min(100), 100)
+            crate::projects::titles::TitleQuery::Root {
+                limit,
+                project_limits,
+                part,
+                ..
+            } => {
+                let chats = if part == Some(agent_protocol::models::ListPart::Projects) {
+                    0
+                } else {
+                    limit.max(1).saturating_add(1)
+                };
+                let projects = project_limits.map_or(30, |limits| {
+                    limits.values().fold(0u32, |sum, limit| {
+                        sum.saturating_add(limit.max(&1).saturating_add(1))
+                    })
+                });
+                ((chats.saturating_add(projects)).clamp(1, 100), 100)
             }
             crate::projects::titles::TitleQuery::Project { .. } => (100, 100),
         };
@@ -1307,7 +1335,6 @@ impl HostRpcService {
             .as_object()
             .cloned()
             .unwrap_or_default();
-        let mut branches = std::collections::HashMap::new();
         let successful = listings.iter().any(|(_, _, _, head)| head.is_ok());
         while let Some(newest) = listings
             .iter()
@@ -1340,15 +1367,10 @@ impl HostRpcService {
             }
             group.sort_by(|(a, _), (b, _)| a.thread.id.cmp(&b.thread.id));
             for (summary, capabilities) in group {
-                let branch = summary.branch;
-                let id = summary.thread.id.clone();
                 let mut thread = summary.thread;
+                thread.git_branch = summary.branch;
                 describe_thread(&mut thread, capabilities, &snapshot);
-                if titles.push(thread)
-                    && let (Some(id), Some(branch)) = (id, branch)
-                {
-                    branches.insert(id, branch);
-                }
+                titles.push(thread);
                 if titles.done() {
                     break;
                 }
@@ -1376,51 +1398,68 @@ impl HostRpcService {
                 serde_json::to_value(provider_errors)?,
             ));
         }
-        let roots_ms = started.elapsed().as_millis();
         let mut page = titles.finish();
-        let mut projects = std::mem::take(&mut page.projects);
-        let icons = tokio::task::spawn_blocking(move || {
-            for project in &mut projects {
-                project.favicon_png = project.roots.iter().find_map(|root| {
-                    crate::projects::icons::resolve(std::path::Path::new(&root.path))
-                });
-            }
-            projects
-        });
-        let sources: Vec<_> = page
-            .data
-            .iter()
-            .map(|thread| {
-                let cwd = thread.cwd.as_ref()?;
-                let mapping = snapshot.worktree_mapping(std::path::Path::new(cwd));
-                Some(crate::worktrees::StatusSource {
-                    cwd: cwd.clone(),
-                    checkout: mapping.map(|(checkout, _)| checkout.to_owned()),
-                    repository: mapping.map(|(_, repository)| repository.to_owned()),
-                    branch: thread.id.as_ref().and_then(|id| branches.remove(id)),
-                })
-            })
-            .collect();
-        let (projects, statuses) = tokio::join!(
-            icons,
-            crate::worktrees::directory_statuses(sources.iter().flatten().cloned().collect())
-        );
-        page.projects =
-            projects.map_err(|error| Failure::new("project_icons_unavailable", error))?;
-        let statuses = statuses.map_err(|error| Failure::new("worktree_status_failed", error))?;
-        for (thread, source) in page.data.iter_mut().zip(sources) {
-            thread.worktree_status = source
-                .as_ref()
-                .and_then(|source| statuses.get(source))
-                .copied();
-        }
         if !provider_errors.is_empty() {
             page.provider_errors = Some(provider_errors);
         }
         tracing::info!(target: "bex", operation = "host.thread.list.stages",
-            message = %format_args!("roots_ms={roots_ms} decoration_ms={} titles={}",
-                started.elapsed().as_millis() - roots_ms, page.data.len()));
+            message = %format_args!("roots_ms={} titles={}", started.elapsed().as_millis(), page.data.len()));
         Ok(page)
+    }
+
+    async fn list_decorations(
+        &self,
+        params: &op::ReadListDecorations,
+    ) -> Result<op::ListDecorations, Failure> {
+        let snapshot = self.project_snapshot().await?;
+        let projects: Vec<_> = snapshot
+            .projects
+            .iter()
+            .filter(|project| params.project_ids.contains(&project.id))
+            .cloned()
+            .collect();
+        let icons = tokio::task::spawn_blocking(move || {
+            projects
+                .into_iter()
+                .map(|project| {
+                    let icon = project.roots.iter().find_map(|root| {
+                        crate::projects::icons::resolve(std::path::Path::new(&root.path))
+                    });
+                    (project.id, icon)
+                })
+                .collect()
+        });
+        let sources: Vec<_> = params
+            .threads
+            .iter()
+            .map(|(id, cwd, branch)| {
+                let mapping = snapshot.worktree_mapping(std::path::Path::new(cwd));
+                (
+                    id.clone(),
+                    crate::worktrees::StatusSource {
+                        cwd: cwd.clone(),
+                        checkout: mapping.map(|(checkout, _)| checkout.to_owned()),
+                        repository: mapping.map(|(_, repository)| repository.to_owned()),
+                        branch: branch.clone(),
+                    },
+                )
+            })
+            .collect();
+        let (icons, statuses) = tokio::join!(
+            icons,
+            crate::worktrees::directory_statuses(
+                sources.iter().map(|(_, source)| source.clone()).collect()
+            )
+        );
+        let icons = icons.map_err(|error| Failure::new("project_icons_unavailable", error))?;
+        let statuses = statuses.map_err(|error| Failure::new("worktree_status_failed", error))?;
+        Ok(op::ListDecorations {
+            icons,
+            statuses: sources
+                .into_iter()
+                .map(|(id, source)| (id, statuses.get(&source).copied()))
+                .collect(),
+        })
     }
 
     async fn create_session(
@@ -1506,6 +1545,31 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
+            if self.inner.router.apns().is_some() {
+                let owner = Arc::downgrade(&self.inner);
+                tokio::spawn(async move {
+                    let mut delay = 1;
+                    loop {
+                        let Some(inner) = owner.upgrade() else { break };
+                        let service = Self { inner };
+                        let Some(apns) = service.inner.router.apns() else {
+                            break;
+                        };
+                        if apns.is_ready() {
+                            break;
+                        }
+                        let _ = service.read_task_activity().await;
+                        if apns.is_ready() {
+                            break;
+                        }
+                        drop(apns);
+                        drop(service);
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                        delay = (delay * 2).min(60);
+                    }
+                });
+            }
+
             for (_, agent) in self.agents() {
                 if let Some(mut events) = agent.event_stream() {
                     let router = self.inner.router.clone();
@@ -1642,7 +1706,8 @@ mod tests {
         );
         let connection = service.open_session();
         let mut params = RegisterLiveActivity {
-            activity_id: "activity".into(),
+            activity_id: Some("activity".into()),
+            allow_start: false,
             token: vec![1; 32],
             environment: PushEnvironment::Sandbox,
         };
@@ -2227,7 +2292,31 @@ mod tests {
                 let Response::Success { result } = reply else {
                     panic!("task list failed: {reply:?}")
                 };
-                assert!(result.data.is_empty());
+                assert_eq!(result.data.len(), 1);
+                assert!(result.data[0].turns.is_none() && result.data[0].preview.is_none());
+                let decoration = op::ReadListDecorations {
+                    scope: op::ListDecorationScope::Root { part: None },
+                    project_ids: result
+                        .projects
+                        .iter()
+                        .map(|project| project.id.clone())
+                        .collect(),
+                    threads: Vec::new(),
+                };
+                let decorated = service
+                    .dispatch(session.id(), &Call::ReadListDecorations(decoration))
+                    .await
+                    .unwrap();
+                let Response::Success { result: decorated } = agent_protocol::protocol::decode::<
+                    Response<op::ListDecorations>,
+                >(&decorated.initial)
+                .unwrap() else {
+                    panic!("decoration failed")
+                };
+                let mut result = result;
+                for project in &mut result.projects {
+                    project.favicon_png = decorated.icons[&project.id].clone();
+                }
                 assert_eq!(result.projects.len(), (project_limit as usize).min(6));
                 assert_eq!(result.has_more_projects, project_limit == 5);
                 let project_id = result.projects[0].id.clone();

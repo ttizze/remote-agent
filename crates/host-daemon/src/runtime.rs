@@ -84,7 +84,11 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         ProjectStore::new(directory.join("bex-worktrees.json")),
     );
     service
-        .enable_apns(&directory.join("bex-apns.json"), &config.name)
+        .enable_apns(
+            &directory.join("bex-apns.json"),
+            &config.name,
+            &endpoint.node_id().to_string(),
+        )
         .await
         .context("cannot initialize Live Activity notifications")?;
     #[cfg(unix)]

@@ -13,6 +13,7 @@ pub struct ReadTaskActivity {}
 pub struct TaskActivityState {
     pub revision: u64,
     pub display: TaskActivityDisplay,
+    pub statuses: Vec<(crate::session::SessionRef, crate::models::SessionStatus)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +26,8 @@ pub enum PushEnvironment {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterLiveActivity {
-    pub activity_id: String,
+    pub activity_id: Option<String>,
+    pub allow_start: bool,
     #[serde(with = "crate::protocol::bytes")]
     pub token: Vec<u8>,
     pub environment: PushEnvironment,
@@ -42,8 +44,10 @@ impl std::fmt::Debug for RegisterLiveActivity {
 }
 impl RegisterLiveActivity {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.activity_id.is_empty()
-            || self.activity_id.len() > 128
+        if self
+            .activity_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 128)
             || self.token.is_empty()
             || self.token.len() > 256
         {
@@ -177,6 +181,15 @@ pub struct TaskState {
     pub latest: Option<TurnStatus>,
 }
 impl TaskState {
+    pub fn session_status(self) -> crate::models::SessionStatus {
+        use crate::models::SessionStatus;
+        match self.phase().0 {
+            "running" | "finishing" | "waiting" => SessionStatus::Running,
+            "unknown" => SessionStatus::Unknown,
+            _ => SessionStatus::Idle,
+        }
+    }
+
     pub fn phase(self) -> (&'static str, bool) {
         use crate::models::SessionStatus;
         if self.waiting {
@@ -373,7 +386,7 @@ mod tests {
         #[test]
         fn registration_bounds_are_enforced(activity in ".{0,140}", token in proptest::collection::vec(proptest::num::u8::ANY, 0..270)) {
             let valid = !activity.is_empty() && activity.len() <= 128 && !token.is_empty() && token.len() <= 256;
-            let params = RegisterLiveActivity { activity_id: activity, token, environment:PushEnvironment::Sandbox };
+            let params = RegisterLiveActivity { activity_id: Some(activity), allow_start: false, token, environment:PushEnvironment::Sandbox };
             proptest::prop_assert_eq!(params.validate().is_ok(), valid);
         }
     }

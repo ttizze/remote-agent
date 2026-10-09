@@ -34,11 +34,29 @@ pub(super) fn notification(
             .conversations
             .get(&session)
             .is_some_and(|thread| thread.parent_id.is_some());
-        let mut effects = if !child && activity_changed && (!listed || !active) {
+        let mut effects = if !child && activity_changed && !listed {
             refresh_list(previous.connected, &previous.list_query)
         } else {
             Vec::new()
         };
+        if previous.connected
+            && !child
+            && activity_changed
+            && !active
+            && listed
+            && let Some(thread) = previous
+                .listed_threads()
+                .find(|thread| thread.id.as_ref() == Some(&session))
+            && let Some(cwd) = &thread.cwd
+        {
+            effects.push(Effect::execute(op::ReadListDecorations {
+                scope: agent_protocol::operations::ListDecorationScope::Task {
+                    session: session.clone(),
+                },
+                project_ids: Vec::new(),
+                threads: vec![(session.clone(), cwd.clone(), thread.git_branch.clone())],
+            }));
+        }
         if activity_changed && !listed && !previous.conversations.contains_key(&session) {
             effects.extend(op::refresh_agents(
                 previous.connected,
@@ -311,7 +329,7 @@ mod tests {
         Snapshot {
             connected: true,
             threads: Some(Arc::new(serde_json::from_value(json!({
-                "data":[{"id":parent,"name":"Task","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"hasMore":false,"hasMoreProjects":false,})).unwrap())),
+                "data":[{"id":parent,"name":"Task","cwd":"/fixture","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})).unwrap())),
             subscriptions: Arc::new([(parent.clone(), subscription)].into()),
             conversations: Arc::new([(parent.clone(), Arc::new(crate::models::Thread {
                 id: Some(parent.clone()),
@@ -431,7 +449,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn activity_updates_refresh_once_per_run_and_preserve_cached_rows(
+        fn activity_updates_only_decorate_once_per_run_and_preserve_cached_rows(
             claude in any::<bool>(),
             connected in any::<bool>(),
             selected in any::<bool>(),
@@ -440,6 +458,7 @@ mod tests {
         ) {
             let mut state = snapshot(if claude { ProviderKind::Claude } else { ProviderKind::Codex });
             state.connected = connected;
+            Arc::make_mut(state.threads.as_mut().unwrap()).data[0].cwd = Some("/fixture".into());
             let id = state.threads.as_ref().unwrap().data[0].id.clone().unwrap();
             if selected {
                 Arc::make_mut(&mut state.navigation).thread_id = Some(id.clone());
@@ -495,6 +514,7 @@ mod tests {
     #[case::claude(ProviderKind::Claude)]
     fn streamed_commands_and_known_agents_do_not_reload_titles(#[case] provider: ProviderKind) {
         let mut state = snapshot(provider);
+        Arc::make_mut(state.threads.as_mut().unwrap()).data[0].cwd = Some("/fixture".into());
         let id = state.threads.as_ref().unwrap().data[0].id.clone().unwrap();
         let subscription = state.subscriptions[&id];
         let child = SessionRef::new(provider, "child".into()).unwrap();

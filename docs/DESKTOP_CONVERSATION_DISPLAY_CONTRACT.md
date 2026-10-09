@@ -63,44 +63,44 @@ hydration must not change this default.
 
 ## History pagination and refresh
 
-- The initial list shows up to five project headers first, followed by the latest
-  five standalone chats. Project tasks never appear again in the standalone chat
-  section. More project headers adds ten headers; more chats adds another recent
-  window. The Host does not fill project task pages or scan old tasks to prove
-  that a small project is complete. Native timestamp ties are ordered within the
-  requested root window; they never require exhausting old pages.
-- Opening an unread project loads its first five root titles independently. More
-  adds ten titles only to that project. Closing it removes its read target and
-  ignores late replies, preserving the received page for reopening without a
-  read. Search and storage changes clear those pages. Project pages use the same
-  title search as the root list. Matching
-  projects expand automatically while searching, with five titles loaded
-  independently per visible project. Project loading and failure stay local to
-  that section; the chat list remains usable and its loading indicator does not
-  wait for project reads.
-- More controls keep their existing rows visible while loading, show a spinner,
-  and prevent repeated pagination for that list. Project headers and standalone
-  chats share one root-list loading state; each project's task page has its own.
-  Root pagination preserves already loaded project pages instead of refetching
-  them.
-- The Host reads task activity from loaded provider sessions and its owned
-  executions, without listing archived titles or reading conversation bodies.
-  This metadata refresh is independent of task navigation and never holds a
-  root-list receipt or turns its failure into a whole-list error.
-- Recent limits, search and project expansion are not persisted. Reopening
-  restores five standalone chat titles and closed projects. Live navigation and
-  reconnection retain the current selection; the root list publishes before open
-  projects refresh.
-- While a list refresh is running, coalesce further refreshes into one follow-up
-  using the latest query. A reply for that query remains valid after task
-  navigation; a reply for an older search or display limit must not replace it.
-  List publication must preserve the selected task and draft.
-- Known tasks update running and unread state directly from activity notices.
-  Refresh the list when work becomes inactive to read current Git state and
-  metadata, and when discovering sessions or receiving user messages or renames.
-  Repeated activity notices, individual command completions, and updates to
-  already-known subagents must not trigger additional list reads. Turn updates
-  use the Host's global activity notice for the end-of-work list refresh.
+- Initial loading returns the latest five project headers, up to five root task
+  titles for each of those projects, and five standalone chat titles. Titles
+  contain no conversation bodies. Icons and Git status arrive separately and
+  do not hold the list's loading state.
+- Opening a received project or returning to the list performs no list read.
+  Opening an unread older project reads its first five titles. Collapse retains
+  its page and lets an in-flight read finish. Search and Host changes clear pages.
+  Searching expands matching visible projects; child matches identify the project
+  but remain absent from its displayed root rows.
+- More adds ten only to the selected list: project headers, standalone chats, or
+  one project's task page. Received rows remain visible, other pages remain intact,
+  and only the selected More control spins. Added older project contents remain
+  unread until opened. Preserve requested counts, including short or empty pages.
+- Manual list refresh reads headers, chats, and open project pages at their current
+  counts, and independently synchronizes authoritative task status. Closed received
+  project pages remain available without another read.
+- Foreground resume verifies or replaces the connection and always synchronizes
+  task status. Received lists, model catalogs and accounts are retained. A live
+  selected conversation keeps its subscription; replacement restores subscriptions.
+  Connection establishment performs no speculative list read. Setup has a deadline
+  and cancellation closes the candidate without losing a healthy existing session.
+  Platform network changes notify shared transport; a foreground phone retries a
+  disconnected Host when networking becomes available.
+- The Host reads task activity from loaded provider sessions and its owned executions,
+  without listing archived titles or reading conversation bodies. Status and Live
+  Activity do not depend on visible pages. Children roll up into their root's active
+  state. Older reads cannot replace newer notifications.
+- Host-owned APNs registrations survive phone disconnection and Host restart.
+  Restored delivery waits for native task rehydration. Retry transient failures with
+  the latest state, discard invalid tokens, and retain permission and dismissal
+  decisions for push-to-start. Idle state permits a subsequent task set to start.
+- Coalesce repeated requests for the same list scope. Discard obsolete search and
+  superseded replies, while retaining replies across task navigation. Publishing
+  list data preserves the selected task and draft.
+- Known task status and unread state update directly. Completion refreshes only that
+  task's Git decoration; discovery, changed user messages and renames refresh titles.
+  Repeated status notices, command output and known subagent updates do not reread
+  the list.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.

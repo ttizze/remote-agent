@@ -85,26 +85,38 @@ impl Connection {
         endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
         invitation: Option<uuid::Uuid>,
-        list_query: crate::models::ListQuery,
     ) -> Result<(Self, String, ConnectionPerformance), crate::transport::TransportError> {
-        let started = std::time::Instant::now();
-        let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| session.close());
-        let transport_ms = started.elapsed().as_millis() as u64;
-        let started = std::time::Instant::now();
-        let (peer, events) = session
-            .open_peer(std::time::Duration::from_secs(30), 64)
-            .await?;
-        if let Some(invitation) = invitation {
-            peer.call(&Pair { invitation }).await?;
-        }
-        let (scope, ()) = tokio::try_join!(
-            read_storage_scope(&peer),
-            peer.start_initial_list(list_query.for_connection()),
-        )?;
+        let (session, peer, events, scope, transport_ms, verification_ms) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let started = std::time::Instant::now();
+                let session =
+                    scopeguard::guard(endpoint.connect(ticket).await?, |session| session.close());
+                let transport_ms = started.elapsed().as_millis() as u64;
+                let started = std::time::Instant::now();
+                let (peer, events) = session
+                    .open_peer(std::time::Duration::from_secs(30), 64)
+                    .await?;
+                if let Some(invitation) = invitation {
+                    peer.call(&Pair { invitation }).await?;
+                }
+                let scope = read_storage_scope(&peer).await?;
+                Ok::<_, crate::transport::TransportError>((
+                    scopeguard::ScopeGuard::into_inner(session),
+                    peer,
+                    events,
+                    scope,
+                    transport_ms,
+                    started.elapsed().as_millis() as u64,
+                ))
+            })
+            .await
+            .map_err(|_| PeerError::RequestTimeout {
+                method: "host/connect".into(),
+            })??;
         let (route, rtt_ms) = peer.connection_path();
         let performance = ConnectionPerformance {
             transport_ms,
-            verification_ms: started.elapsed().as_millis() as u64,
+            verification_ms,
             route,
             rtt_ms,
             resolution_ms: session.resolution_ms(),
@@ -115,7 +127,7 @@ impl Connection {
             Self {
                 peer: Arc::new(peer),
                 events,
-                session: Some(scopeguard::ScopeGuard::into_inner(session)),
+                session: Some(session),
             },
             format!("{}:{scope}", ticket.node_id()),
             performance,
@@ -381,6 +393,7 @@ impl Store {
         };
         let guard = attempt.clone().drop_guard();
         let setup = async {
+            endpoint.network_change().await;
             let (complete, receiver) = oneshot::channel();
             self.commands
                 .try_send(Command::ResumePeer {
@@ -391,13 +404,8 @@ impl Store {
                 .map_err(command_error)?;
             let reusable = receiver.await.unwrap_or(None);
             let replacement = async {
-                let (connection, scope, performance) = Connection::open(
-                    endpoint,
-                    ticket,
-                    None,
-                    (*self.snapshot().list_query).clone(),
-                )
-                .await?;
+                let (connection, scope, performance) =
+                    Connection::open(endpoint, ticket, None).await?;
                 Ok::<_, crate::transport::TransportError>((Some((connection, scope)), performance))
             };
             let (prepared, performance) = if let Some(peer) = reusable {
@@ -450,19 +458,12 @@ impl Store {
             };
             let Some((connection, storage_scope)) = prepared else {
                 let snapshot = self.snapshot();
-                if let Some(thread_id) = &snapshot.observed_agents {
-                    drop(self.dispatch(Intent::ListAgents(op::ListAgents {
-                        thread_id: thread_id.clone(),
-                    })));
+                if let Some(id) = &snapshot.navigation.thread_id
+                    && !snapshot.subscriptions.contains_key(id)
+                {
+                    drop(self.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))));
                 }
-                if let Some(id) = &snapshot.navigation.thread_id {
-                    drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
-                }
-                drop(self.dispatch(Intent::ListSessions(op::ListSessions::new(
-                    (*snapshot.list_query).clone(),
-                ))));
                 drop(self.dispatch(Intent::ReadTaskActivity(op::ReadTaskActivity {})));
-                drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
                 return Ok(performance);
             };
             let disconnected = {
@@ -513,13 +514,8 @@ impl Store {
             disconnected
                 .await
                 .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            let (connection, scope, performance) = Connection::open(
-                endpoint,
-                ticket,
-                invitation,
-                (*self.snapshot().list_query).clone(),
-            )
-            .await?;
+            let (connection, scope, performance) =
+                Connection::open(endpoint, ticket, invitation).await?;
             self.attach_connection(connection, scope, attempt.clone())
                 .await?;
             Ok::<_, crate::transport::TransportError>(performance)
@@ -802,8 +798,9 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
         // Dispatch and completion share this lock. List results and failures
         // belong to their query; view work belongs to the navigation epoch.
         let current = match &completed.scheduling {
-            op::Scheduling::LatestList(query) => query == snapshot.list_query.as_ref(),
-            op::Scheduling::LatestProject(_) | op::Scheduling::LatestTaskActivity => {
+            op::Scheduling::LatestList(_)
+            | op::Scheduling::LatestProject(_)
+            | op::Scheduling::LatestTaskActivity => {
                 generation_current(completed.scope.operation.as_ref(), &snapshot.operations)
             }
             _ => completed
@@ -1045,13 +1042,9 @@ async fn run(
                     scheduled.scope.operation.as_ref(),
                     &updates.borrow().operations,
                 ),
-                op::Scheduling::LatestProject(project_id) => {
+                op::Scheduling::LatestProject(_) => {
                     let snapshot = updates.borrow();
-                    !snapshot.expanded_projects.contains_key(project_id)
-                        || !generation_current(
-                            scheduled.scope.operation.as_ref(),
-                            &snapshot.operations,
-                        )
+                    !generation_current(scheduled.scope.operation.as_ref(), &snapshot.operations)
                 }
                 op::Scheduling::LatestAgents(session) => {
                     updates.borrow().observed_agents.as_ref() != Some(session)
@@ -1566,6 +1559,7 @@ mod tests {
             ("task_activity", |snapshot| {
                 snapshot.task_activity =
                     Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
+                        statuses: Vec::new(),
                         revision: 1,
                         display: agent_protocol::live_activity::TaskActivitySummary {
                             running: 1,
@@ -1586,6 +1580,8 @@ mod tests {
                             projects: vec![],
                             has_more: false,
                             has_more_projects: false,
+                            limit: 5,
+                            project_pages: Default::default(),
                             provider_errors: None,
                         }),
                     )]
@@ -1623,6 +1619,8 @@ mod tests {
                     projects: Vec::new(),
                     has_more: false,
                     has_more_projects: false,
+                    limit: 5,
+                    project_pages: Default::default(),
 
                     provider_errors: None,
                 }))

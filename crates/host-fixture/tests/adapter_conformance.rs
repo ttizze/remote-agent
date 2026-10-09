@@ -915,19 +915,21 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .collect::<Vec<_>>(),
         ["project-2", "project-1", "project-0"]
     );
-    assert_eq!(listing.data.len(), 5);
+    assert_eq!(listing.data.len(), 20);
     assert!(
         listing
             .data
             .iter()
-            .all(|thread| thread.project_id.is_none())
+            .filter(|thread| thread.project_id.is_none())
+            .count()
+            == 5
     );
     assert!(!listing.has_more_projects);
     assert!(listing.has_more);
     assert_eq!(
         page_reads(),
-        7,
-        "assigned rows require only one widened follow-up page"
+        6,
+        "initial project and chat pages share one native title walk"
     );
     let expanded = local
         .peer
@@ -957,7 +959,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(expanded.has_more);
     assert_eq!(
         page_reads(),
-        14,
+        13,
         "project expansion reads only its own title page, never other sections"
     );
     let empty_projects: Vec<_> = (0..6)
@@ -990,8 +992,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     }
     assert_eq!(
         page_reads(),
-        before_empty + 2,
-        "initial and expanded empty headers each need only one native page"
+        before_empty + 42,
+        "empty prefetched project pages are certified by exhausting titles without reading bodies"
     );
     local.close().await;
     host.close().await.unwrap();

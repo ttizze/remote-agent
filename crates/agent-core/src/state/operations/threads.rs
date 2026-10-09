@@ -27,45 +27,71 @@ pub use agent_protocol::operations::ListAgents;
 pub use agent_protocol::operations::ListProjectSessions;
 pub use agent_protocol::operations::ListSessions;
 
-/// A root-list page fetch keeps already loaded project pages intact. It shares
-/// the wire operation and loading slot with a regular root refresh, while its
-/// application semantics remain owned by this Core operation.
-#[derive(Debug)]
-pub(crate) struct PageSessions {
-    pub(crate) query: crate::models::ListQuery,
+pub use agent_protocol::operations::ReadListDecorations;
+
+fn decorations(
+    scope: agent_protocol::operations::ListDecorationScope,
+    projects: &[crate::models::Project],
+    threads: &[crate::models::Thread],
+) -> Option<Effect> {
+    let project_ids: Vec<_> = projects
+        .iter()
+        .filter(|project| !project.roots.is_empty())
+        .map(|project| project.id.clone())
+        .collect();
+    let threads: Vec<_> = threads
+        .iter()
+        .filter_map(|thread| {
+            Some((
+                thread.id.clone()?,
+                thread.cwd.clone()?,
+                thread.git_branch.clone(),
+            ))
+        })
+        .collect();
+    (!project_ids.is_empty() || !threads.is_empty()).then(|| {
+        Effect::execute(ReadListDecorations {
+            scope,
+            project_ids,
+            threads,
+        })
+    })
 }
 
-impl Operation for PageSessions {
-    no_input!();
-    type Output = crate::models::ThreadList;
-
+impl Operation for ReadListDecorations {
+    rpc_operation!();
+    const BACKGROUND: bool = true;
     fn key(&self) -> Option<OperationKey> {
-        Some(OperationKey::SessionList)
+        Some(OperationKey::ListDecorations {
+            scope: self.scope.clone(),
+        })
     }
-
-    fn scheduling(&self) -> Scheduling {
-        Scheduling::LatestList(self.query.clone())
-    }
-
-    async fn run(
-        &self,
-        _: Self::Input,
-        context: &mut Execution<'_>,
-    ) -> Result<Self::Output, PeerError> {
-        context
-            .call(&agent_protocol::operations::ListSessions::new(
-                self.query.clone(),
-            ))
-            .await
-    }
-
-    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        prepare_list_sessions(snapshot, &self.query);
-        Ok(())
-    }
-
-    fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
-        apply_root_list(snapshot, threads, false)
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        if let Some(list) = &mut snapshot.threads {
+            for project in &mut Arc::make_mut(list).projects {
+                if let Some(icon) = output.icons.get(&project.id) {
+                    project.favicon_png = icon.clone();
+                }
+            }
+        }
+        for (id, status) in output.statuses {
+            let source = self.threads.iter().find(|(source, _, _)| source == &id);
+            for list in Arc::make_mut(&mut snapshot.project_threads)
+                .values_mut()
+                .chain(snapshot.threads.iter_mut())
+            {
+                for thread in &mut Arc::make_mut(list).data {
+                    if thread.id.as_ref() == Some(&id)
+                        && source.is_some_and(|(_, cwd, branch)| {
+                            thread.cwd.as_ref() == Some(cwd) && &thread.git_branch == branch
+                        })
+                    {
+                        thread.worktree_status = status;
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 }
 
@@ -113,10 +139,28 @@ impl Operation for ListAgents {
     }
 }
 
-fn merge_unavailable(
+fn merge_received(
     mut threads: crate::models::ThreadList,
     previous: Option<&crate::models::ThreadList>,
 ) -> crate::models::ThreadList {
+    if let Some(previous) = previous {
+        for project in &mut threads.projects {
+            if let Some(old) = previous
+                .projects
+                .iter()
+                .find(|old| old.id == project.id && old.roots == project.roots)
+            {
+                project.favicon_png = old.favicon_png.clone();
+            }
+        }
+        for thread in &mut threads.data {
+            if let Some(old) = previous.data.iter().find(|old| {
+                old.id == thread.id && old.cwd == thread.cwd && old.git_branch == thread.git_branch
+            }) {
+                thread.worktree_status = old.worktree_status;
+            }
+        }
+    }
     if let Some(errors) = threads.provider_errors.as_ref()
         && let Some(previous) = previous
     {
@@ -166,10 +210,15 @@ impl Operation for ListProjectSessions {
         Scheduling::LatestProject(self.project_id.clone())
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        if snapshot.expanded_projects.get(&self.project_id) != Some(&self.limit) {
+        if snapshot.threads.as_ref().is_none_or(|list| {
+            !list
+                .projects
+                .iter()
+                .any(|project| project.id == self.project_id)
+        }) {
             return Vec::new();
         }
-        let output = merge_unavailable(
+        let output = merge_received(
             output,
             snapshot
                 .project_threads
@@ -177,8 +226,20 @@ impl Operation for ListProjectSessions {
                 .map(AsRef::as_ref),
         );
         update_titles(snapshot, &output.data);
+        if let Some(limit) =
+            Arc::make_mut(&mut snapshot.expanded_projects).get_mut(&self.project_id)
+        {
+            *limit = output.limit;
+        }
+        let effect = decorations(
+            agent_protocol::operations::ListDecorationScope::Project {
+                project_id: self.project_id.clone(),
+            },
+            &[],
+            &output.data,
+        );
         Arc::make_mut(&mut snapshot.project_threads).insert(self.project_id, Arc::new(output));
-        Vec::new()
+        effect.into_iter().collect()
     }
 }
 
@@ -197,87 +258,174 @@ fn update_titles(snapshot: &mut Snapshot, summaries: &[crate::models::Thread]) {
 }
 
 impl Operation for ListSessions {
+    type Input = crate::models::ListQuery;
+    type Output = crate::models::ThreadList;
     fn key(&self) -> Option<OperationKey> {
-        Some(OperationKey::SessionList)
+        Some(OperationKey::list(self.query.part))
     }
-    rpc_operation!();
     fn scheduling(&self) -> Scheduling {
-        Scheduling::LatestList(self.query.clone())
+        Scheduling::LatestList(self.query.part)
+    }
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        let mut query = self.query.clone();
+        if query.project_limits.is_none() && !snapshot.project_threads.is_empty() {
+            query.project_limits = Some(
+                snapshot
+                    .expanded_projects
+                    .iter()
+                    .map(|(id, limit)| (id.clone(), *limit))
+                    .collect(),
+            );
+        }
+        Ok(query)
+    }
+    async fn run(
+        &self,
+        query: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        context.call(&Self::new(query)).await
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        prepare_list_sessions(snapshot, &self.query);
+        snapshot.error = None;
+        if snapshot.list_query.search_term != self.query.search_term {
+            snapshot.expanded_projects = Arc::default();
+            snapshot.project_threads = Arc::default();
+            self.query.project_limits = None;
+            Arc::make_mut(&mut snapshot.operations).retain(|key, _| {
+                !matches!(
+                    key,
+                    OperationKey::ProjectList { .. }
+                        | OperationKey::SessionPage { .. }
+                        | OperationKey::ListDecorations { .. }
+                )
+            });
+        } else {
+            let paging = self.query.limit > snapshot.list_query.limit
+                || self.query.project_limit > snapshot.list_query.project_limit;
+            self.query.project_limits = paging.then(Default::default);
+            if !paging {
+                self.query.part = None;
+            }
+        }
+        let mut retained = self.query.clone();
+        retained.project_limits = None;
+        retained.part = None;
+        snapshot.list_query = Arc::new(retained);
         Ok(())
     }
     fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
-        apply_root_list(snapshot, threads, true)
-    }
-}
+        let current = &snapshot.list_query;
+        if self.query.search_term != current.search_term
+            || (self.query.part != Some(crate::models::ListPart::Projects)
+                && self.query.limit != current.limit)
+            || (self.query.part != Some(crate::models::ListPart::Chats)
+                && self.query.project_limit != current.project_limit)
+        {
+            return Vec::new();
+        }
 
-fn prepare_list_sessions(snapshot: &mut Snapshot, query: &crate::models::ListQuery) {
-    snapshot.error = None;
-    if snapshot.list_query.search_term != query.search_term {
-        snapshot.expanded_projects = Arc::default();
-        snapshot.project_threads = Arc::default();
-        Arc::make_mut(&mut snapshot.operations)
-            .retain(|key, _| !matches!(key, OperationKey::ProjectList { .. }));
-    }
-    snapshot.list_query = Arc::new(query.clone());
-}
-
-fn apply_root_list(
-    snapshot: &mut Snapshot,
-    threads: crate::models::ThreadList,
-    refresh_open_projects: bool,
-) -> Vec<Effect> {
-    let threads = merge_unavailable(threads, snapshot.threads.as_deref());
-    update_titles(snapshot, &threads.data);
-    let visible: std::collections::HashSet<_> =
-        threads.projects.iter().map(|p| p.id.as_str()).collect();
-    let searching = !snapshot.list_query.search_term.trim().is_empty();
-    let expanded = Arc::make_mut(&mut snapshot.expanded_projects);
-    expanded.retain(|id, _| visible.contains(id.as_str()));
-    let mut projects_to_refresh = Vec::new();
-    if searching {
-        for id in &visible {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
-                expanded.entry((*id).to_owned())
-            {
-                entry.insert(5);
-                if !refresh_open_projects {
-                    projects_to_refresh.push(((*id).to_owned(), 5));
+        let mut threads = merge_received(threads, snapshot.threads.as_deref());
+        let projects: Vec<_> = threads
+            .projects
+            .iter()
+            .filter(|project| {
+                self.query.part != Some(crate::models::ListPart::Projects)
+                    || snapshot.threads.as_ref().is_none_or(|previous| {
+                        !previous.projects.iter().any(|old| old.id == project.id)
+                    })
+            })
+            .cloned()
+            .collect();
+        let decoration = decorations(
+            agent_protocol::operations::ListDecorationScope::Root {
+                part: self.query.part,
+            },
+            &projects,
+            &threads.data,
+        );
+        if let Some(previous) = snapshot.threads.as_ref() {
+            match self.query.part {
+                Some(crate::models::ListPart::Projects) => {
+                    threads.data = previous.data.clone();
+                    threads.has_more = previous.has_more;
                 }
+                Some(crate::models::ListPart::Chats) => {
+                    threads.projects = previous.projects.clone();
+                    threads.has_more_projects = previous.has_more_projects;
+                }
+                None => {}
             }
         }
-    }
-    Arc::make_mut(&mut snapshot.project_threads).retain(|id, _| visible.contains(id.as_str()));
-    Arc::make_mut(&mut snapshot.operations).retain(|key, _| match key {
-        OperationKey::ProjectList { project_id } => {
-            snapshot.expanded_projects.contains_key(project_id)
+        update_titles(snapshot, &threads.data);
+        let visible: std::collections::HashSet<_> =
+            threads.projects.iter().map(|p| p.id.as_str()).collect();
+        Arc::make_mut(&mut snapshot.expanded_projects)
+            .retain(|id, _| visible.contains(id.as_str()));
+        if !snapshot.list_query.search_term.trim().is_empty() {
+            for id in &visible {
+                Arc::make_mut(&mut snapshot.expanded_projects)
+                    .entry((*id).to_owned())
+                    .or_insert(5);
+            }
         }
-        _ => true,
-    });
-    snapshot.threads = Some(Arc::new(threads));
-    if !snapshot.connected {
-        return Vec::new();
+        let pages = Arc::make_mut(&mut snapshot.project_threads);
+        pages.retain(|id, _| visible.contains(id.as_str()));
+        for (id, page) in &threads.project_pages {
+            pages.insert(
+                id.clone(),
+                Arc::new(merge_received(
+                    crate::models::ThreadList {
+                        data: threads
+                            .data
+                            .iter()
+                            .filter(|thread| thread.project_id.as_ref() == Some(id))
+                            .cloned()
+                            .collect(),
+                        projects: Vec::new(),
+                        has_more: page.has_more,
+                        has_more_projects: false,
+                        limit: page.limit,
+                        project_pages: Default::default(),
+                        provider_errors: threads.provider_errors.clone(),
+                    },
+                    pages.get(id).map(AsRef::as_ref),
+                )),
+            );
+        }
+        Arc::make_mut(&mut snapshot.operations).retain(|key, _| match key {
+            OperationKey::ProjectList { project_id } => {
+                !threads.project_pages.contains_key(project_id)
+            }
+            _ => true,
+        });
+        threads.data.retain(|thread| {
+            thread
+                .project_id
+                .as_ref()
+                .is_none_or(|id| !visible.contains(id.as_str()))
+        });
+        threads.project_pages.clear();
+        snapshot.threads = Some(Arc::new(threads));
+        decoration
+            .into_iter()
+            .chain(
+                snapshot
+                    .expanded_projects
+                    .iter()
+                    .filter(|(id, _)| {
+                        snapshot.connected && !snapshot.project_threads.contains_key(*id)
+                    })
+                    .map(|(id, limit)| {
+                        Effect::execute(ListProjectSessions {
+                            project_id: id.clone(),
+                            limit: *limit,
+                            search_term: snapshot.list_query.search_term.clone(),
+                        })
+                    }),
+            )
+            .collect()
     }
-    if refresh_open_projects {
-        projects_to_refresh.extend(
-            snapshot
-                .expanded_projects
-                .iter()
-                .map(|(id, limit)| (id.clone(), *limit)),
-        );
-    }
-    projects_to_refresh
-        .into_iter()
-        .map(|(id, limit)| {
-            Effect::execute(ListProjectSessions {
-                project_id: id,
-                limit,
-                search_term: snapshot.list_query.search_term.clone(),
-            })
-        })
-        .collect()
 }
 
 pub use agent_protocol::operations::ReadItem;
@@ -830,6 +978,137 @@ mod tests {
         include!("../../../tests/support/host.rs");
     }
 
+    #[test]
+    fn recent_pages_more_and_refresh_have_independent_read_targets_and_counts() {
+        use crate::models::{ListPage, ListPart, Project, Thread, ThreadList};
+        let project = |id: &str| Project {
+            id: id.into(),
+            name: id.into(),
+            ..Default::default()
+        };
+        let row = |id: &str| Thread {
+            id: Some(SessionRef::new(ProviderKind::Codex, id.into()).unwrap()),
+            project_id: crate::models::ProjectMembership::Assigned(id.into()),
+            ..Default::default()
+        };
+        let root = ThreadList {
+            data: (0..5).map(|i| row(&format!("p{i}"))).collect(),
+            projects: (0..5).map(|i| project(&format!("p{i}"))).collect(),
+            limit: 5,
+            has_more: false,
+            has_more_projects: true,
+            project_pages: (0..5)
+                .map(|i| {
+                    (
+                        format!("p{i}"),
+                        ListPage {
+                            limit: 5,
+                            has_more: false,
+                        },
+                    )
+                })
+                .collect(),
+            provider_errors: None,
+        };
+        let mut state = Snapshot {
+            connected: true,
+            ..Default::default()
+        };
+        assert!(
+            ListSessions::new(Default::default())
+                .apply(&mut state, root)
+                .is_empty()
+        );
+        assert_eq!(state.project_threads.len(), 5);
+        assert!(state.threads.as_ref().unwrap().data.is_empty());
+        let (mut state, effects) = reduce_intent(
+            &state,
+            Intent::SetProjectExpanded {
+                project_id: "p0".into(),
+                expanded: true,
+            },
+        );
+        assert!(effects.is_empty(), "initial pages are already received");
+        let received = state.project_threads["p1"].clone();
+        ListProjectSessions {
+            project_id: "p0".into(),
+            limit: 25,
+            search_term: String::new(),
+        }
+        .apply(
+            &mut state,
+            ThreadList {
+                data: vec![row("p0")],
+                projects: vec![],
+                limit: 25,
+                has_more: false,
+                has_more_projects: false,
+                project_pages: Default::default(),
+                provider_errors: None,
+            },
+        );
+        let mut query = (*state.list_query).clone();
+        query.project_limit = 15;
+        query.part = Some(ListPart::Projects);
+        let mut more = ListSessions::new(query);
+        more.prepare(&mut state).unwrap();
+        assert_eq!(
+            more.capture(&state).unwrap().project_limits,
+            Some(Default::default())
+        );
+        more.apply(
+            &mut state,
+            ThreadList {
+                data: vec![],
+                projects: (0..15).map(|i| project(&format!("p{i}"))).collect(),
+                limit: 5,
+                has_more: false,
+                has_more_projects: true,
+                project_pages: Default::default(),
+                provider_errors: None,
+            },
+        );
+        assert!(Arc::ptr_eq(&received, &state.project_threads["p1"]));
+        assert!(!state.project_threads.contains_key("p14"));
+        let mut refresh = ListSessions::new((*state.list_query).clone());
+        refresh.prepare(&mut state).unwrap();
+        assert_eq!(
+            refresh.capture(&state).unwrap().project_limits,
+            Some([("p0".into(), 25)].into())
+        );
+        let (state, _) = reduce_intent(
+            &state,
+            Intent::SetProjectExpanded {
+                project_id: "p0".into(),
+                expanded: false,
+            },
+        );
+        let (state, effects) = reduce_intent(
+            &state,
+            Intent::SetProjectExpanded {
+                project_id: "p0".into(),
+                expanded: true,
+            },
+        );
+        assert!(effects.is_empty());
+        assert_eq!(
+            state.expanded_projects["p0"], 25,
+            "short pages preserve their requested count"
+        );
+        let (_, effects) = reduce_intent(
+            &state,
+            Intent::SetProjectExpanded {
+                project_id: "p14".into(),
+                expanded: true,
+            },
+        );
+        assert_eq!(
+            effects.len(),
+            1,
+            "only an unread older project needs its first page"
+        );
+    }
+
     #[tokio::test]
     async fn project_reads_survive_task_navigation_and_report_failure_only_in_their_section() {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -851,14 +1130,14 @@ mod tests {
             let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
             let store = crate::store::Store::new(peer, initial);
             let page =
-                json!({"data":[],"projects":[{"id":"old","name":"Old","roots":[]}],"hasMore":true,"hasMoreProjects":false});
+                json!({"data":[],"projects":[{"id":"old","name":"Old","roots":[]}],"hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":5});
             for _ in 0..4 {
                 let request = read(&mut reader).await;
                 let result = match request["method"].as_str().unwrap() {
                     "host/session/list" => page.clone(),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
-                    "host/taskActivity/read" => json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
+                    "host/taskActivity/read" => json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
                     method => panic!("unexpected {method}"),
                 };
                 writer
@@ -870,7 +1149,7 @@ mod tests {
             while {
                 let snapshot = updates.borrow_and_update();
                 snapshot.threads.is_none()
-                    || snapshot.operations.keys().any(|key| !matches!(key, OperationKey::ProjectList { .. }))
+                    || snapshot.operations.keys().any(|key| !matches!(key, OperationKey::ProjectList { .. } | OperationKey::SessionPage { .. } | OperationKey::ListDecorations { .. }))
             } {
                 updates.changed().await.unwrap();
             }
@@ -981,14 +1260,14 @@ mod tests {
         };
         let (peer, mut reader, writer) = host_fixture::connect(&snapshot).await;
         let store = crate::store::Store::new(peer, snapshot);
-        let empty_list = json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false});
+        let empty_list = json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5});
         for _ in 0..5 {
             let request = read(&mut reader).await;
             let result = match request["method"].as_str().unwrap() {
                 "host/session/list" => empty_list.clone(),
                 "host/account/list" => json!({"accounts":[],"selected":{}}),
                 "host/taskActivity/read" => {
-                    json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                    json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
                 }
                 "host/model/list" => json!({"data":[],"nextCursor":null}),
                 "host/session/open" => json!({"thread":{"id":parent}}),
@@ -1047,7 +1326,11 @@ mod tests {
             store.snapshot().agent_panel().is_empty(),
             "a superseded fleet response must not publish stale rows"
         );
-        let latest = read(&mut reader).await;
+        let mut latest = read(&mut reader).await;
+        if latest["method"] == "host/taskActivity/read" {
+            writer.reply(&latest, json!({"result":{"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}})).await.unwrap();
+            latest = read(&mut reader).await;
+        }
         assert_eq!(latest["method"], "host/session/agents");
         store
             .dispatch(Intent::WatchAgents { thread_id: None })
@@ -1107,12 +1390,14 @@ mod tests {
     #[case(0)]
     #[case(5)]
     #[case(15)]
-    fn project_disclosure_keeps_received_rows_and_discards_late_replies(#[case] count: usize) {
+    fn project_disclosure_keeps_received_rows_and_finishes_reads_while_closed(
+        #[case] count: usize,
+    ) {
         let root = |title: &str| {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
                 "data":[{"id":{"provider":"codex","id":title},"name":title}],
                 "projects":[{"id":"old","name":"Old","roots":[]}],
-                "hasMore":false,"hasMoreProjects":false
+                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":count.max(5) as u32
             }))
             .unwrap()
         };
@@ -1120,7 +1405,7 @@ mod tests {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
                 "data":(0..count).map(|index| serde_json::json!({"id":{"provider":"codex","id":format!("{title}-{index}")},"projectId":"old","name":title})).collect::<Vec<_>>(),
                 "projects":[{"id":"old","name":"Old","roots":[]}],
-                "hasMore":false,"hasMoreProjects":false
+                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":count.max(5) as u32
             }))
             .unwrap()
         };
@@ -1188,7 +1473,13 @@ mod tests {
             search_term: String::new(),
         }
         .apply(&mut closed, project("late-task"));
-        assert!(Arc::ptr_eq(&received, &closed.project_threads["old"]));
+        assert!(!Arc::ptr_eq(&received, &closed.project_threads["old"]));
+        assert!(
+            closed.project_threads["old"]
+                .data
+                .iter()
+                .all(|row| row.name.as_deref() == Some("late-task"))
+        );
         assert!(closed.thread_list().unwrap().projects[0].threads.is_empty());
         let (reopened, effects) = reduce_intent(
             &closed,
@@ -1221,7 +1512,7 @@ mod tests {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
                 "data":[],
                 "projects":[{"id":"matching","name":"Matching","roots":[]}],
-                "hasMore":false,"hasMoreProjects":false
+                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
             }))
             .unwrap()
         };
@@ -1252,7 +1543,7 @@ mod tests {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
                 "data":[{"id":{"provider":"codex","id":title},"name":title}],
                 "projects":[{"id":"project","name":"Project","roots":[]}],
-                "hasMore":false,"hasMoreProjects":false
+                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
             }))
             .unwrap()
         };
@@ -1260,7 +1551,7 @@ mod tests {
             serde_json::from_value::<crate::models::ThreadList>(serde_json::json!({
                 "data":[{"id":{"provider":"codex","id":"project-task"},"projectId":"project","name":"Project task"}],
                 "projects":[{"id":"project","name":"Project","roots":[]}],
-                "hasMore":true,"hasMoreProjects":false
+                "hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":5
             }))
             .unwrap()
         };
@@ -1289,8 +1580,7 @@ mod tests {
             reduce_intent(&opened, Intent::ExpandThreadList { project_id: None });
         assert_eq!(effects.len(), 1);
         let root_query = (*paginating.list_query).clone();
-        let root_effects =
-            PageSessions { query: root_query }.apply(&mut paginating, root_page("next"));
+        let root_effects = ListSessions::new(root_query).apply(&mut paginating, root_page("next"));
         assert!(root_effects.is_empty());
         assert!(Arc::ptr_eq(&loaded, &paginating.project_threads["project"]));
         assert_eq!(
@@ -1307,7 +1597,7 @@ mod tests {
         let id = SessionRef::new(ProviderKind::Codex, "old".into()).unwrap();
         let page: crate::models::ThreadList = serde_json::from_value(serde_json::json!({
             "data":[{"id":id,"projectId":"p","cwd":"/old-project","status":"running","canAcceptDirectInput":false}],
-            "projects":[{"id":"p","name":"P","roots":[]}],"hasMore":false,"hasMoreProjects":false,
+            "projects":[{"id":"p","name":"P","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,
         })).unwrap();
         let mut snapshot = Snapshot {
             connected: true,

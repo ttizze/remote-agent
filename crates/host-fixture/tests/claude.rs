@@ -145,12 +145,6 @@ async fn completed(
 }
 
 async fn listed(store: &Store, id: &agent_protocol::session::SessionRef) -> Arc<Snapshot> {
-    store
-        .dispatch(Intent::ListSessions(op::ListSessions::new(
-            Default::default(),
-        )))
-        .await
-        .unwrap();
     if let Some(project_id) = store.snapshot().conversations[id].project_id.as_ref() {
         store
             .dispatch(Intent::SetProjectExpanded {
@@ -160,6 +154,12 @@ async fn listed(store: &Store, id: &agent_protocol::session::SessionRef) -> Arc<
             .await
             .unwrap();
     }
+    store
+        .dispatch(Intent::ListSessions(op::ListSessions::new(
+            Default::default(),
+        )))
+        .await
+        .unwrap();
     until(store, |snapshot| {
         snapshot.thread_list().is_some_and(|list| {
             list.threads

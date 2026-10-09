@@ -61,7 +61,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 Some("host/model/list") => json!({"data":[],"nextCursor":null}),
                 Some("host/account/list") => json!({"accounts":[], "selected":{}}),
                 Some("host/taskActivity/read") => {
-                    json!({"revision":0,"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                    json!({"revision":0,"statuses":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
                 }
                 Some("host/session/list") => {
                     lists += 1;
@@ -72,13 +72,13 @@ async fn exercise(command: &[&str], expected: Value) {
                     };
                     assert_eq!(
                         request["params"],
-                        json!({"limit":limit,"projectLimit":5,"searchTerm":search})
+                        json!({"limit":limit,"projectLimit":5,"searchTerm":search,"part":null,"projectLimits":null})
                     );
                     if mode == "list" {
                         assert!(!handled);
                         handled = true;
                     }
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5})
                 }
                 Some("host/session/open") => {
                     reads += 1;
@@ -162,7 +162,7 @@ async fn exercise(command: &[&str], expected: Value) {
 async fn cli_lists_over_iroh() {
     exercise(
         &["list", "--limit", "11", "--search", "CLI search"],
-        json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false}),
+        json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
     )
     .await;
 }

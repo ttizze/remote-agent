@@ -347,8 +347,6 @@
     ],
     "hasMore": false,
     "hasMoreProjects": false,
-
-
     "projects": [
       {
         "id": "workspace",
@@ -360,6 +358,8 @@
         ],
         "metadata": {}
       }
-    ]
+    ],
+    "projectPages": {},
+    "limit": 5
   }
 }
