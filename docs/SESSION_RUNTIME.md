@@ -71,6 +71,13 @@ is visible; fleet observations contain identity, parent, name and status without
 history, icons or Git work. Worktree safety checks use the separate all-session
 scope so active child sessions still prevent removal.
 
+System task activity counts root conversations, matching the title list. The Host
+groups loaded sessions by their parent chain and publishes one shared display to
+native clients and APNs. Descendant work keeps its root active; an unanswered
+question or approval anywhere in that tree makes its single icon waiting. Parent
+identity survives execution-cache eviction and can be learned from a delayed read
+without overwriting newer task facts.
+
 Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong
 to `adapters/codex/`. Clients request normalized history pages; core joins
