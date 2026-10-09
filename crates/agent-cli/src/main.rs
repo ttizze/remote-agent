@@ -70,6 +70,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::List { limit, search } => {
             snapshot.list_query = Arc::new(ListQuery {
                 limit: *limit,
+                project_limit: ListQuery::default().project_limit,
                 search_term: search.clone(),
             })
         }

@@ -318,6 +318,9 @@ extension ThreadScreen {
                             }
                         }
                     }
+                    if model.list?.hasMoreProjects == true {
+                        Button("さらにプロジェクトを読み込む") { model.perform(.expandProjects) }
+                    }
                 } label: {
                     Text(project?
                         .name ?? (directory.isEmpty ? "チャット" : URL(fileURLWithPath: directory).lastPathComponent))

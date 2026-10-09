@@ -1585,6 +1585,7 @@ mod tests {
                             data: vec![],
                             projects: vec![],
                             has_more: false,
+                            has_more_projects: false,
                             provider_errors: None,
                         }),
                     )]
@@ -1621,6 +1622,7 @@ mod tests {
                     data: Vec::new(),
                     projects: Vec::new(),
                     has_more: false,
+                    has_more_projects: false,
 
                     provider_errors: None,
                 }))

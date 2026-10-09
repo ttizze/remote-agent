@@ -39,6 +39,7 @@
               }
             ],
             "hasMore": true,
+            "hasMoreProjects": false,
             "opaque": {
               "a": 1
             }
@@ -69,6 +70,7 @@
         }
       ],
       "hasMore": true,
+      "hasMoreProjects": false,
       "opaque": {
         "a": 1
       }
@@ -114,6 +116,7 @@
               }
             ],
             "hasMore": true,
+            "hasMoreProjects": false,
             "opaque": {
               "a": 1
             }
@@ -144,6 +147,7 @@
         }
       ],
       "hasMore": true,
+      "hasMoreProjects": false,
       "opaque": {
         "a": 1
       }

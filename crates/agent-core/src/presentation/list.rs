@@ -81,6 +81,7 @@ pub struct ThreadList {
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<ProjectSummary>,
     pub has_more: bool,
+    pub has_more_projects: bool,
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
@@ -119,7 +120,10 @@ impl Snapshot {
             &self.activity.active,
             &self.activity.unread,
             &project_ids,
-        );
+        )
+        .into_iter()
+        .filter(|thread| thread.project_id.is_none())
+        .collect();
         Some(ThreadList {
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: summaries,
@@ -170,6 +174,7 @@ impl Snapshot {
                 })
                 .collect(),
             has_more: list.has_more,
+            has_more_projects: list.has_more_projects,
         })
     }
 }
@@ -249,7 +254,7 @@ mod tests {
             threads: Some(std::sync::Arc::new(
                 serde_json::from_value(json!({
                     "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
-                    "hasMore":false,}))
+                    "hasMore":false,"hasMoreProjects":false,}))
                 .unwrap(),
             )),
             ..Default::default()
@@ -257,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_list_excludes_subagents_without_hiding_forks_or_other_providers() {
+    fn conversation_list_excludes_subagents_and_project_tasks_at_root() {
         let snapshot = snapshot_list(json!([
             {"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"}},
             {"id":{"provider":"claude","id":"child"}},
@@ -271,11 +276,11 @@ mod tests {
             .map(|thread| (thread.id.provider, thread.id.id.as_str()))
             .collect();
         use crate::session::ProviderKind::{Claude, Codex};
-        assert_eq!(rows, [(Claude, "child"), (Codex, "root"), (Codex, "fork")]);
+        assert_eq!(rows, [(Claude, "child"), (Codex, "fork")]);
     }
 
     #[test]
-    fn list_preserves_order_and_only_exposes_known_project_membership() {
+    fn list_keeps_only_standalone_chats_at_root_and_exposes_known_membership() {
         let mut snapshot = Snapshot::default();
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
@@ -287,7 +292,7 @@ mod tests {
                     {"id":{"provider":"codex","id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
-                 "hasMore":true, }))
+                 "hasMore":true,"hasMoreProjects":false, }))
             .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
@@ -298,22 +303,18 @@ mod tests {
             .collect();
         assert_eq!(
             memberships,
-            vec![
-                ("assigned", Some("known")),
-                ("missing", None),
-                ("chat", None),
-                ("unknown", None)
-            ]
+            vec![("missing", None), ("chat", None), ("unknown", None)]
         );
         assert_eq!(list.projects[0].id, "known");
         assert!(list.has_more);
+        assert!(!list.has_more_projects);
     }
 
     #[test]
     fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
         let mut snapshot = Snapshot::default();
         let page = |data, errors| {
-            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"providerErrors":errors})).unwrap()
+            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
         };
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
@@ -382,7 +383,7 @@ mod tests {
         }
         let page: models::ThreadList = serde_json::from_value(json!({
             "data":[thread], "projects":[],
-            "hasMore":false, }))
+            "hasMore":false,"hasMoreProjects":false, }))
         .unwrap();
         ListSessions::new(Default::default()).apply(&mut snapshot, page);
         let restored: Snapshot =

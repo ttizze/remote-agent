@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Show the latest 30 root tasks first on desktop, iPhone and Android. Load older project titles only when expanded, keep their loading and failures independent, and refresh only open projects after publishing recent results. Stop scanning old pages to fill small projects or finish timestamp ties, page Claude transcript metadata before reading it, and fetch child-agent metadata only for the visible fleet. Read task activity from loaded provider sessions independently of recent titles, without walking archived history. Advance the binary protocol for the new scoped list requests; Host and clients use the same revision.
+- Restore project and standalone chat grouping on desktop, iPhone and Android, with five items initially and ten more per request. Resolve icons for all returned project headers, including empty projects, and preserve search behavior. Host and clients use the updated binary protocol together.
+- Show loading progress on pagination controls while retaining visible rows. Preserve open project pages during root pagination, skip old-title scans for empty project headers, and enlarge follow-up native title reads to reduce repeated requests.
 
 - Show iPhone task status on the Lock Screen and Dynamic Island with Live Activities. Share task-state decisions with Host APNs updates, retain authenticated update-token registrations while the phone is disconnected, and open the matching PC/task when tapped. Configure an external APNs `.p8` key for background delivery; stale updates remain visible without falsely completing tasks.
 

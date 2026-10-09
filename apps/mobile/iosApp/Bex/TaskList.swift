@@ -8,6 +8,7 @@ struct ThreadsScreen: View {
 
     var body: some View {
         let projects = model.list?.projects ?? []
+        let chats = model.list?.threads ?? []
         List {
             if let notice = model.list?.notice {
                 BexNotice(text: notice).taskListRowStyle()
@@ -31,22 +32,6 @@ struct ThreadsScreen: View {
                 }
                 .listSectionSeparator(.hidden)
             }
-
-            Section {
-                if model.threadLoadState == .ready, (model.list?.threads ?? []).isEmpty {
-                    Text("タスクがありません").font(.subheadline).foregroundColor(.secondary)
-                        .accessibilityIdentifier("tasks.empty").taskListRowStyle()
-                }
-                ForEach(model.list?.threads ?? [], id: \.id) { thread in
-                    ThreadListRow(thread: thread) { model.openThread(thread.id) }
-                }
-                if model.list?.hasMore == true {
-                    Button("もっと見る") { model.expandTaskList() }
-                        .disabled(model.loadingThreads).accessibilityIdentifier("tasks.recent.more").taskListRowStyle()
-                }
-            } header: {
-                Text("最近のタスク").font(.title3.weight(.semibold)).textCase(nil).foregroundColor(.primary)
-            }.listSectionSeparator(.hidden)
 
             Section {
                 Text("プロジェクト")
@@ -89,7 +74,7 @@ struct ThreadsScreen: View {
                     }
                     .taskListRowStyle()
                     if project.expanded {
-                        if project.loading {
+                        if project.loading && !project.hasMore {
                             ProgressView().taskListRowStyle()
                         }
                         if let error = project.error {
@@ -103,13 +88,41 @@ struct ThreadsScreen: View {
                             ThreadListRow(thread: thread, indented: true) { model.openThread(thread.id) }
                         }
                         if project.hasMore {
-                            Button("もっと見る") { model.expandTaskList(projectId: project.id) }
+                            Button {
+                                model.expandTaskList(projectId: project.id)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if project.loading {
+                                        ProgressView().controlSize(.mini)
+                                    }
+                                    Text("もっと見る")
+                                }
+                            }
                                 .padding(.leading, 40)
                                 .disabled(project.loading)
                                 .accessibilityIdentifier("tasks.project.\(project.id).more")
                                 .taskListRowStyle()
                         }
                     }
+                }
+                .listSectionSeparator(.hidden)
+            }
+
+            if model.list?.hasMoreProjects == true {
+                Section {
+                    Button {
+                        model.perform(.expandProjects)
+                    } label: {
+                        HStack(spacing: 8) {
+                            if model.loadingThreads {
+                                ProgressView().controlSize(.mini)
+                            }
+                            Text("もっとプロジェクトを表示")
+                        }
+                    }
+                        .disabled(model.loadingThreads)
+                        .accessibilityIdentifier("tasks.projects.more")
+                        .taskListRowStyle()
                 }
                 .listSectionSeparator(.hidden)
             }
@@ -123,6 +136,41 @@ struct ThreadsScreen: View {
                 }
                 .listSectionSeparator(.hidden)
             }
+
+            Section {
+                if model.threadLoadState == .ready, chats.isEmpty {
+                    Text("チャットがありません")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .accessibilityIdentifier("tasks.empty")
+                        .taskListRowStyle()
+                } else {
+                    ForEach(chats, id: \.id) { thread in
+                        ThreadListRow(thread: thread) { model.openThread(thread.id) }
+                    }
+                    if model.list?.hasMore == true {
+                        Button {
+                            model.expandTaskList()
+                        } label: {
+                            HStack(spacing: 8) {
+                                if model.loadingThreads {
+                                    ProgressView().controlSize(.mini)
+                                }
+                                Text("もっと見る")
+                            }
+                        }
+                            .disabled(model.loadingThreads)
+                            .accessibilityIdentifier("tasks.chats.more")
+                            .taskListRowStyle()
+                    }
+                }
+            } header: {
+                Text("チャット")
+                    .font(.title3.weight(.semibold))
+                    .textCase(nil)
+                    .foregroundColor(.primary)
+            }
+            .listSectionSeparator(.hidden)
         }
         .onChange(of: model.threadLoadState) { _, state in
             if state == .ready {

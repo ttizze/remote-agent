@@ -39,7 +39,7 @@ class ThreadListTest {
                     {"id":{"provider":"claude","id":"pending-unread"},"name":"Pending unread worktree","worktreeStatus":"unmerged"},
                     {"id":{"provider":"claude","id":"running"},"name":"Claude conversation"}
                 ],
-                "projects":[],"hasMore":false}"""
+                "projects":[],"hasMore":false,"hasMoreProjects":false}"""
                     ),
                 )
                 .put(
@@ -59,6 +59,7 @@ class ThreadListTest {
                     ThreadListScreen(
                         list,
                         snapshot.listQuery(),
+                        false,
                         {},
                         {},
                         { opened.add((it as Intent.ReadThread).v1.threadId) },

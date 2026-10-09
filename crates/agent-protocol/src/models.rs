@@ -191,6 +191,7 @@ pub struct ThreadList {
     pub data: Vec<Thread>,
     pub projects: Vec<Project>,
     pub has_more: bool,
+    pub has_more_projects: bool,
     #[serde(default)]
     #[serde(with = "crate::protocol::json")]
     pub provider_errors: Option<Map<String, Value>>,
@@ -252,12 +253,14 @@ pub struct ReasoningEffort {
 #[serde(default, rename_all = "camelCase")]
 pub struct ListQuery {
     pub limit: u32,
+    pub project_limit: u32,
     pub search_term: String,
 }
 impl Default for ListQuery {
     fn default() -> Self {
         Self {
-            limit: 30,
+            limit: 5,
+            project_limit: 5,
             search_term: String::new(),
         }
     }
@@ -265,7 +268,10 @@ impl Default for ListQuery {
 impl ListQuery {
     pub fn for_connection(mut self) -> Self {
         if self.limit == 0 {
-            self.limit = 30;
+            self.limit = 5;
+        }
+        if self.project_limit == 0 {
+            self.project_limit = 5;
         }
         self
     }

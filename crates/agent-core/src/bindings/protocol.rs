@@ -95,6 +95,7 @@ struct ReasoningEffort {
 #[uniffi::remote(Record)]
 struct ListQuery {
     pub limit: u32,
+    pub project_limit: u32,
     pub search_term: String,
 }
 #[uniffi::remote(Record)]

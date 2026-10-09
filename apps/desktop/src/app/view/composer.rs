@@ -117,6 +117,7 @@ impl Desktop {
                 };
                 let state = owner.read(cx);
                 let selected_directory = state.snapshot.selected_directory();
+                let list = state.snapshot.thread_list();
                 let unassigned = entity.clone();
                 menu = menu.item(
                     PopupMenuItem::new("チャット")
@@ -128,9 +129,7 @@ impl Desktop {
                             });
                         }),
                 );
-                for project in state
-                    .snapshot
-                    .threads
+                for project in list
                     .as_ref()
                     .map(|page| page.projects.as_slice())
                     .unwrap_or_default()
@@ -154,6 +153,17 @@ impl Desktop {
                                 }),
                         );
                     }
+                }
+                if list.as_ref().is_some_and(|page| page.has_more_projects) {
+                    let target = entity.clone();
+                    menu = menu.item(PopupMenuItem::new("さらにプロジェクトを読み込む").on_click(
+                        move |_, _, cx| {
+                            let _ = target.update(cx, |s, cx| {
+                                s.dispatch(Intent::ExpandProjects);
+                                cx.notify();
+                            });
+                        },
+                    ));
                 }
                 if state.remote.is_none() {
                     let target = entity.clone();

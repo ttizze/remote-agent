@@ -768,13 +768,16 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     };
     let listing = local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            limit: 5,
+            ..Default::default()
+        }))
         .await
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(listing.data.len(), 30);
+    assert_eq!(listing.data.len(), 5);
     assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
-    assert_eq!(listing.data[29].id.as_ref().unwrap().id, "page-1971");
+    assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
     assert!(listing.has_more);
     assert!(listing.provider_errors.is_none());
     assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
@@ -855,11 +858,14 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     std::fs::write(&fixture, serde_json::to_vec(&tied).unwrap()).unwrap();
     let listing = local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            limit: 5,
+            ..Default::default()
+        }))
         .await
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(listing.data.len(), 30);
+    assert_eq!(listing.data.len(), 5);
     assert!(
         listing
             .data
@@ -894,7 +900,11 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     std::fs::write(&fixture, serde_json::to_vec(&scoped).unwrap()).unwrap();
     let listing = local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            limit: 5,
+            project_limit: 5,
+            ..Default::default()
+        }))
         .await
         .unwrap();
     assert_eq!(
@@ -905,7 +915,14 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .collect::<Vec<_>>(),
         ["project-2", "project-1", "project-0"]
     );
-    assert_eq!(listing.data.len(), 30);
+    assert_eq!(listing.data.len(), 5);
+    assert!(
+        listing
+            .data
+            .iter()
+            .all(|thread| thread.project_id.is_none())
+    );
+    assert!(!listing.has_more_projects);
     assert!(listing.has_more);
     assert_eq!(
         page_reads(),
@@ -923,6 +940,14 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .unwrap();
     assert_eq!(expanded.data.len(), 150);
     assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "scoped-1400");
+    assert_eq!(
+        expanded
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<Vec<_>>(),
+        ["project-0"]
+    );
     assert!(
         expanded
             .data

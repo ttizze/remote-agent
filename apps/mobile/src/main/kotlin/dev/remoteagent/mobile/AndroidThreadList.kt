@@ -53,6 +53,7 @@ import dev.remoteagent.core.WorktreeStatus
 internal fun ThreadListScreen(
     list: ThreadList?,
     query: ListQuery,
+    loadingThreads: Boolean,
     perform: (Intent) -> Unit,
     showHosts: () -> Unit,
     openConversation: (Intent) -> Unit,
@@ -81,17 +82,41 @@ internal fun ThreadListScreen(
         }
         list?.notice?.let { notice -> item { Text(notice) } }
         item {
+            Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
+        }
+        projectThreads(list, openConversation, perform)
+        if (list?.hasMoreProjects == true)
+            item {
+                TextButton(
+                    onClick = { perform(Intent.ExpandProjects) },
+                    enabled = !loadingThreads,
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (loadingThreads) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("もっとプロジェクトを表示")
+                    }
+                }
+            }
+        item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("最近のタスク", style = MaterialTheme.typography.titleMedium)
+                Text("チャット", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { openConversation(Intent.NewChat("")) }) { Text("新規") }
             }
         }
-        items(threads, key = { "recent:${it.id.listKey}" }) { SummaryRow(it, openConversation) }
+        items(threads, key = { "chat:${it.id.listKey}" }) { SummaryRow(it, openConversation) }
         if (list?.hasMore == true)
-            item { TextButton(onClick = { perform(Intent.ExpandThreadList(null)) }) { Text("もっと見る") } }
-        item { Text("プロジェクト", style = MaterialTheme.typography.headlineSmall) }
-        projectThreads(list, openConversation, perform)
-        if (list != null && threads.isEmpty()) item { Text("タスクがありません。") }
+            item {
+                TextButton(
+                    onClick = { perform(Intent.ExpandThreadList(null)) },
+                    enabled = !loadingThreads,
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (loadingThreads) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("もっと見る")
+                    }
+                }
+            }
+        if (list != null && threads.isEmpty()) item { Text("チャットがありません。") }
     }
 }
 
@@ -148,7 +173,7 @@ private fun LazyListScope.projectThreads(
             }
         }
         if (project.expanded) {
-            if (project.loading) item(key = "loading:${project.id}") {
+            if (project.loading && !project.hasMore) item(key = "loading:${project.id}") {
                 CircularProgressIndicator(Modifier.size(18.dp))
             }
             project.error?.let { message ->
@@ -164,7 +189,12 @@ private fun LazyListScope.projectThreads(
                 TextButton(
                     onClick = { perform(Intent.ExpandThreadList(project.id)) },
                     enabled = !project.loading,
-                ) { Text("もっと見る") }
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (project.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("もっと見る")
+                    }
+                }
             }
         }
     }

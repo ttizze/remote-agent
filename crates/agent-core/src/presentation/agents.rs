@@ -257,7 +257,7 @@ mod tests {
         snapshot.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
             "data":data.into_iter().filter(|thread| thread.parent_id.is_none()).collect::<Vec<_>>(),
-            "projects":[],  "hasMore":false, }))
+            "projects":[],  "hasMore":false,"hasMoreProjects":false, }))
             .unwrap(),
         ));
         snapshot

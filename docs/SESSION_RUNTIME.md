@@ -45,19 +45,28 @@ Codex and Claude Code are the supported providers.
 
 ## Provider boundaries
 
-The current transport ALPN is `remote-agent/streams/7`; Host and clients must use
-the same request layout. The task list reads the newest 30 root titles with one lookahead, then stops.
-Project headers come from the Host-owned registry; old project contents are not
-part of initial completion. `host/project/sessions` reads the selected project's
-five titles on expansion, adding ten only on explicit pagination. Core owns open
-projects, applies their results separately and drops reads and late replies on
-collapse. Fresh recent rows can prove a project's page without another RPC.
-Project reads start after recent publication on resume and never hold its loading
-state. Icons and Git status are resolved only for returned tasks and their projects.
+The current transport ALPN is `remote-agent/streams/8`; Host and clients must use
+the same request layout. The task list reads the newest five standalone chats with
+one lookahead and returns up to five project headers; project tasks never appear
+in the standalone chat section. More project headers and more chats are separate
+pages, with ten added per explicit request. `host/project/sessions` reads the
+selected project's five titles on expansion, adding ten only on explicit
+pagination. Core owns open projects, applies their results separately and drops
+reads and late replies on collapse. Root rows do not prove a project's page, so
+project expansion always owns its scoped read. Project reads start after root
+publication on resume and never hold its loading state. Icons and Git status are
+resolved for every returned project header and task.
+Non-search root reads stop at the standalone-chat lookahead, ordering encountered
+projects first and filling remaining headers from the registry. Empty project
+headers do not require scans of old titles. The first provider page stays small;
+follow-up pages use up to 100 title summaries to avoid many small native requests
+when assigned tasks precede standalone chats.
 Claude pages candidates by the same native file modification time already used
 for ordering, decoding only requested transcript metadata; search can continue
-through older candidates. Root title reads exclude native children, including
-search. Desktop observes `host/session/agents` only while the selected fleet panel
+through older candidates. Unfiltered root title reads exclude native children.
+Codex search includes native child summaries so matching project headers remain
+discoverable; Core filters those child rows from the displayed task list. Claude
+keeps its historical root-only provider list. Desktop observes `host/session/agents` only while the selected fleet panel
 is visible; fleet observations contain identity, parent, name and status without
 history, icons or Git work. Worktree safety checks use the separate all-session
 scope so active child sessions still prevent removal.

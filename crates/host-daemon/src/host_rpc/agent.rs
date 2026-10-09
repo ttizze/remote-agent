@@ -38,19 +38,25 @@ pub(crate) struct SubmissionState {
     pub needs_reload: bool,
 }
 
-/// Consume native pages with one cursor policy, preserving earlier pages if a
-/// later read fails. Callers decide whether partial results are useful.
+/// Preserve healthy pages on a later failure and reject repeated cursors.
+/// Filtered lists can widen follow-up reads without enlarging the first page.
 pub(crate) fn session_pages<'a>(
     agent: &'a dyn Agent,
     search: &'a str,
     scope: SessionListScope<'a>,
-    limit: u32,
+    first_limit: u32,
+    later_limit: u32,
 ) -> impl Stream<Item = Result<Vec<SessionSummary>, Failure>> + 'a {
     futures_util::stream::try_unfold(
         Some((None, std::collections::HashSet::new())),
         move |state| async move {
             let Some((cursor, mut seen)) = state else {
                 return Ok(None);
+            };
+            let limit = if cursor.is_none() {
+                first_limit
+            } else {
+                later_limit
             };
             let page = Agent::list(agent, search, cursor, scope, limit).await?;
             let next = page.next_cursor.filter(|cursor| !cursor.is_empty());

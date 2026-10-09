@@ -423,7 +423,8 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ListProjectSessions, ListAgents, AddProject, CreateSession,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ListProjectSessions,
+        ListAgents, AddProject, CreateSession,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -540,16 +541,12 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 return (next, Vec::new());
             }
             if expanded {
-                let Some(recent) = previous.threads.as_ref().filter(|page| {
-                    page.projects.iter().any(|project| project.id == project_id)
-                }) else {
-                    return (next, Vec::new());
-                };
-                Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), 5);
-                if let Some(page) = op::project_page(recent, &project_id, 5) {
-                    Arc::make_mut(&mut next.project_threads).insert(project_id, Arc::new(page));
+                if previous.threads.as_ref().is_none_or(|page| {
+                    !page.projects.iter().any(|project| project.id == project_id)
+                }) {
                     return (next, Vec::new());
                 }
+                Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), 5);
                 let effects = if next.connected {
                     vec![Effect::execute(op::ListProjectSessions {
                         project_id,
@@ -572,13 +569,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 };
                 let limit = limit.saturating_add(10);
                 Arc::make_mut(&mut next.expanded_projects).insert(project_id.clone(), limit);
-                if let Some(page) = previous.threads.as_ref().and_then(|recent| {
-                    op::project_page(recent, &project_id, limit)
-                }) {
-                    Arc::make_mut(&mut next.project_threads).insert(project_id.clone(), Arc::new(page));
-                    Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
-                    return (next, Vec::new());
-                }
                 return prepare(previous, next, op::ListProjectSessions {
                     project_id,
                     limit,
@@ -586,8 +576,13 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 });
             }
             let mut query = (*previous.list_query).clone();
-            query.limit = query.limit.saturating_add(30);
-            return prepare(previous, next, op::ListSessions { query });
+            query.limit = query.limit.saturating_add(10);
+            return prepare(previous, next, op::PageSessions { query });
+        }
+        Intent::ExpandProjects => {
+            let mut query = (*previous.list_query).clone();
+            query.project_limit = query.project_limit.saturating_add(10);
+            return prepare(previous, next, op::PageSessions { query });
         }
 
         Intent::ShowThreadList => {
@@ -1326,6 +1321,7 @@ mod submission_tests {
                 data: vec![thread],
                 projects: vec![],
                 has_more: false,
+                has_more_projects: false,
                 provider_errors: None,
             })),
             drafts: Arc::new(

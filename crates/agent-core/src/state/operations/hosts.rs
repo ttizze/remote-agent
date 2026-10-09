@@ -39,7 +39,7 @@ mod task_activity_tests {
                 let request = reader.read_request().await.unwrap().unwrap();
                 let result = match request["method"].as_str().unwrap() {
                     "host/taskActivity/read" => { activity = Some(request); continue; }
-                    "host/session/list" => json!({"data":[],"projects":[],"hasMore":false}),
+                    "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false}),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
                     method => panic!("unexpected bootstrap method {method}"),

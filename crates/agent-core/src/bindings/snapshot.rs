@@ -29,6 +29,14 @@ impl Snapshot {
             && Arc::ptr_eq(&self.project_threads, &other.project_threads)
             && Arc::ptr_eq(&self.archived_scopes, &other.archived_scopes)
             && self.connected == other.connected
+            && self
+                .operations
+                .get(&crate::state::operations::OperationKey::SessionList)
+                .map(|state| &state.phase)
+                == other
+                    .operations
+                    .get(&crate::state::operations::OperationKey::SessionList)
+                    .map(|state| &state.phase)
             && self.threads.as_ref().is_none_or(|list| {
                 list.projects.iter().all(|project| {
                     let key = crate::state::operations::OperationKey::ProjectList {
@@ -266,7 +274,7 @@ mod tests {
         };
         initial.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
-                "data":[], "projects":[{"id":"old","name":"Archive","roots":[]}], "hasMore":true
+                "data":[], "projects":[{"id":"old","name":"Archive","roots":[]}], "hasMore":true,"hasMoreProjects":false
             }))
             .unwrap(),
         ));
@@ -280,6 +288,20 @@ mod tests {
             },
         );
         assert!(unrelated.list_unchanged(Arc::new(initial.clone())));
+        let mut root_loading = initial.clone();
+        Arc::make_mut(&mut root_loading.operations).insert(
+            OperationKey::SessionList,
+            OperationState {
+                generation: 1,
+                phase: OperationPhase::Running,
+            },
+        );
+        assert!(!root_loading.list_unchanged(Arc::new(initial.clone())));
+        assert!(root_loading.list_unchanged(Arc::new(root_loading.clone())));
+        let loading = root_loading.clone();
+        Arc::make_mut(&mut root_loading.operations).clear();
+        assert!(!root_loading.list_unchanged(Arc::new(loading)));
+        assert!(root_loading.list_unchanged(Arc::new(initial.clone())));
         let (opened, _) = crate::state::reduce(
             &initial,
             Event::Intent(Intent::SetProjectExpanded {
@@ -328,7 +350,7 @@ mod tests {
         assert!(!failed.list_unchanged(Arc::new(loading)));
         let mut loaded = failed.clone();
         ListProjectSessions { project_id: "old".into(), limit: 5, search_term: String::new() }.apply(&mut loaded, serde_json::from_value(serde_json::json!({
-            "data":[{"id":{"provider":"codex","id":"old-task"},"name":"Old task","projectId":"old","status":"running"}], "projects":[], "hasMore":false
+            "data":[{"id":{"provider":"codex","id":"old-task"},"name":"Old task","projectId":"old","status":"running"}], "projects":[], "hasMore":false,"hasMoreProjects":false
         })).unwrap());
         Arc::make_mut(&mut loaded.operations).remove(&key);
         let project = &loaded.thread_list().unwrap().projects[0];

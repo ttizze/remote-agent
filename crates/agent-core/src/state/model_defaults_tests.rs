@@ -50,7 +50,7 @@ fn scoped_fixture() -> Snapshot {
         }),
         threads: Some(Arc::new(
             serde_json::from_value(json!({
-                "data": [],  "hasMore":false,  "projects": [
+                "data": [],  "hasMore":false,"hasMoreProjects":false,  "projects": [
                     {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}]},
                     {"id":"inner", "name":"Inner", "roots":[{"path":"/repo/nested"}]},
                     {"id":"windows", "name":"Windows", "roots":[{"path":"C:\\repo"}]}

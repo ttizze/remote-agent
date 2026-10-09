@@ -103,7 +103,7 @@ impl HostRpcService {
             futures_util::future::join_all(agents.into_iter().map(|(_, agent)| async move {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    session_pages(agent.as_ref(), "", SessionListScope::Loaded, 100)
+                    session_pages(agent.as_ref(), "", SessionListScope::Loaded, 100, 100)
                         .try_collect::<Vec<_>>(),
                 )
                 .await
@@ -897,8 +897,9 @@ impl HostRpcService {
                 let result = self
                     .host_title_list(
                         &params.query.search_term,
-                        crate::projects::titles::TitleQuery::Recent {
+                        crate::projects::titles::TitleQuery::Root {
                             limit: params.query.limit,
+                            project_limit: params.query.project_limit,
                             searching: !params.query.search_term.trim().is_empty(),
                         },
                     )
@@ -913,6 +914,7 @@ impl HostRpcService {
                     crate::projects::titles::TitleQuery::Project {
                         id: &params.project_id,
                         limit: params.limit,
+                        searching: !params.search_term.trim().is_empty(),
                     },
                 )
                 .await?
@@ -924,6 +926,7 @@ impl HostRpcService {
                     agent.as_ref(),
                     "",
                     SessionListScope::Descendants(&params.thread_id.id),
+                    100,
                     100,
                 )
                 .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
@@ -1078,7 +1081,7 @@ impl HostRpcService {
         }
         let mut threads = Vec::new();
         for (_, agent) in self.agents() {
-            let pages = session_pages(agent.as_ref(), "", SessionListScope::All, 100);
+            let pages = session_pages(agent.as_ref(), "", SessionListScope::All, 100, 100);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
@@ -1264,22 +1267,35 @@ impl HostRpcService {
         query: crate::projects::titles::TitleQuery<'_>,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
         let agents = self.agents();
-        let page_size = match query {
-            crate::projects::titles::TitleQuery::Recent { limit, .. } => {
-                limit.max(1).saturating_add(1).min(100)
+        // Keep the common root request to one lookahead-sized read. Assigned
+        // rows do not consume the standalone-chat quota, so widen only a
+        // follow-up page when the first read proves more native rows are needed.
+        let (first_page_size, later_page_size) = match query {
+            crate::projects::titles::TitleQuery::Root { limit, .. } => {
+                (limit.max(1).saturating_add(1).min(100), 100)
             }
-            crate::projects::titles::TitleQuery::Project { .. } => 100,
+            crate::projects::titles::TitleQuery::Project { .. } => (100, 100),
         };
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
             futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
-                let mut threads =
-                    session_pages(agent.as_ref(), search, SessionListScope::Roots, page_size)
-                        .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
-                        .try_flatten()
-                        .boxed();
+                let scope = if search.trim().is_empty() {
+                    SessionListScope::Roots
+                } else {
+                    SessionListScope::All
+                };
+                let mut threads = session_pages(
+                    agent.as_ref(),
+                    search,
+                    scope,
+                    first_page_size,
+                    later_page_size,
+                )
+                .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                .try_flatten()
+                .boxed();
                 let head = next_title(&mut threads, deadline).await;
                 (*provider, agent.capabilities(), threads, head)
             }))
@@ -1300,8 +1316,8 @@ impl HostRpcService {
             .max_by(f64::total_cmp)
         {
             // Never scan additional pages merely to exhaust a timestamp tie in
-            // the recent window. Order ties within the requested window by ID.
-            let maximum = titles.remaining_recent().unwrap_or(usize::MAX);
+            // the requested root window. Order ties within that window by ID.
+            let maximum = titles.remaining_chats().unwrap_or(usize::MAX).max(1);
             let mut group = Vec::new();
             for (_, capabilities, threads, head) in &mut listings {
                 while group.len() < maximum
@@ -1324,18 +1340,29 @@ impl HostRpcService {
             }
             group.sort_by(|(a, _), (b, _)| a.thread.id.cmp(&b.thread.id));
             for (summary, capabilities) in group {
+                let branch = summary.branch;
+                let id = summary.thread.id.clone();
                 let mut thread = summary.thread;
-                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
-                    branches.insert(id.clone(), branch);
-                }
                 describe_thread(&mut thread, capabilities, &snapshot);
-                titles.push(thread);
-                if titles.complete() {
+                if titles.push(thread)
+                    && let (Some(id), Some(branch)) = (id, branch)
+                {
+                    branches.insert(id, branch);
+                }
+                if titles.done() {
                     break;
                 }
             }
-            if titles.complete() {
+            if titles.done() {
                 break;
+            }
+            // A group can fill its allowance with assigned rows that are not
+            // retained. Continue that provider only if the visible page still
+            // needs rows; do not start another read after its lookahead.
+            for (_, _, threads, head) in &mut listings {
+                if matches!(head, Ok(None)) {
+                    *head = next_title(threads, deadline).await;
+                }
             }
         }
         for (provider, _, _, head) in listings {
@@ -1351,20 +1378,9 @@ impl HostRpcService {
         }
         let roots_ms = started.elapsed().as_millis();
         let mut page = titles.finish();
-        let mut visible_projects: std::collections::HashSet<_> = page
-            .data
-            .iter()
-            .filter_map(|thread| thread.project_id.as_ref().cloned())
-            .collect();
-        if let crate::projects::titles::TitleQuery::Project { id, .. } = query {
-            visible_projects.insert(id.to_owned());
-        }
         let mut projects = std::mem::take(&mut page.projects);
         let icons = tokio::task::spawn_blocking(move || {
             for project in &mut projects {
-                if !visible_projects.contains(&project.id) {
-                    continue;
-                }
                 project.favicon_png = project.roots.iter().find_map(|root| {
                     crate::projects::icons::resolve(std::path::Path::new(&root.path))
                 });
@@ -2154,20 +2170,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_list_delivers_project_branding_to_core_and_refreshes_removed_icons() {
+    async fn task_list_refreshes_branding_for_all_project_headers() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("remote-agent");
+        let workspaces = std::iter::once(workspace.clone())
+            .chain((0..5).map(|index| root.path().join(format!("empty-project-{index}"))))
+            .collect::<Vec<_>>();
         let native = root.path().join("native");
-        std::fs::create_dir(&workspace).unwrap();
+        for workspace in &workspaces {
+            std::fs::create_dir(workspace).unwrap();
+            std::fs::write(workspace.join("favicon.svg"),
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
+        }
         let transcript = native.join("projects/p");
         std::fs::create_dir_all(&transcript).unwrap();
         let id = "12345678-1234-4234-8234-123456789abc";
         std::fs::write(transcript.join(format!("{id}.jsonl")),serde_json::json!({"type":"user","sessionId":id,"cwd":dunce::canonicalize(&workspace).unwrap(),"message":{"content":"Branding task"}}).to_string()+"\n").unwrap();
-        std::fs::write(workspace.join("favicon.svg"),
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
         let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
-        projects.register(&workspace).await.unwrap();
+        for workspace in &workspaces {
+            projects.register(workspace).await.unwrap();
+        }
         let claude = crate::adapters::Claude::load(
             root.path().join("does-not-exist"),
             root.path().join("state"),
@@ -2183,36 +2206,76 @@ mod tests {
             projects,
         );
         let session = service.open_session();
-        let call = agent_protocol::protocol::Call::ListSessions(
-            agent_protocol::operations::ListSessions {
-                query: Default::default(),
-            },
-        );
         for has_icon in [true, false] {
             if !has_icon {
-                std::fs::remove_file(workspace.join("favicon.svg")).unwrap();
+                for workspace in &workspaces {
+                    std::fs::remove_file(workspace.join("favicon.svg")).unwrap();
+                }
             }
-            let response = service.dispatch(session.id(), &call).await.unwrap();
-            let reply = agent_protocol::protocol::decode::<
-                Response<agent_protocol::models::ThreadList>,
-            >(&response.initial)
-            .unwrap();
-            let Response::Success { result } = reply else {
-                panic!("task list failed: {reply:?}")
-            };
-            let snapshot = agent_core::state::Snapshot {
-                threads: Some(Arc::new(result)),
-                ..Default::default()
-            };
-            let list = snapshot.thread_list().unwrap();
-            assert_eq!(list.projects.len(), 1);
-            let project = &list.projects[0];
-            assert_eq!(project.monogram, "RA");
-            assert_eq!(project.icon_png.is_some(), has_icon);
-            if let Some(png) = &project.icon_png {
-                let image = image::load_from_memory(png).unwrap().into_rgba8();
-                assert_eq!(image.dimensions(), (64, 64));
-                assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
+            for project_limit in [5, 15] {
+                let call = Call::ListSessions(op::ListSessions {
+                    query: agent_protocol::models::ListQuery {
+                        project_limit,
+                        ..Default::default()
+                    },
+                });
+                let response = service.dispatch(session.id(), &call).await.unwrap();
+                let reply = agent_protocol::protocol::decode::<
+                    Response<agent_protocol::models::ThreadList>,
+                >(&response.initial)
+                .unwrap();
+                let Response::Success { result } = reply else {
+                    panic!("task list failed: {reply:?}")
+                };
+                assert!(result.data.is_empty());
+                assert_eq!(result.projects.len(), (project_limit as usize).min(6));
+                assert_eq!(result.has_more_projects, project_limit == 5);
+                let project_id = result.projects[0].id.clone();
+                let response = service
+                    .dispatch(
+                        session.id(),
+                        &Call::ListProjectSessions(op::ListProjectSessions {
+                            project_id: project_id.clone(),
+                            limit: 5,
+                            search_term: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                let Response::Success { result: page } = agent_protocol::protocol::decode::<
+                    Response<agent_protocol::models::ThreadList>,
+                >(&response.initial)
+                .unwrap() else {
+                    panic!("project list failed")
+                };
+                let snapshot = agent_core::state::Snapshot {
+                    threads: Some(Arc::new(result)),
+                    expanded_projects: Arc::new([(project_id.clone(), 5)].into()),
+                    project_threads: Arc::new([(project_id, Arc::new(page))].into()),
+                    ..Default::default()
+                };
+                let list = snapshot.thread_list().unwrap();
+                assert_eq!(list.projects.len(), (project_limit as usize).min(6));
+                assert!(list.threads.is_empty());
+                assert_eq!(list.projects[0].threads.len(), 1);
+                assert_eq!(
+                    list.projects[0].threads[0].project_id.as_ref(),
+                    Some(&list.projects[0].id)
+                );
+                assert!(
+                    list.projects[1..]
+                        .iter()
+                        .all(|project| project.threads.is_empty())
+                );
+                assert_eq!(list.projects[0].monogram, "RA");
+                for project in &list.projects {
+                    assert_eq!(project.icon_png.is_some(), has_icon, "{}", project.name);
+                    if let Some(png) = &project.icon_png {
+                        let image = image::load_from_memory(png).unwrap().into_rgba8();
+                        assert_eq!(image.dimensions(), (64, 64));
+                        assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
+                    }
+                }
             }
         }
     }

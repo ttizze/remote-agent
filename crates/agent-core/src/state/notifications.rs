@@ -311,7 +311,7 @@ mod tests {
         Snapshot {
             connected: true,
             threads: Some(Arc::new(serde_json::from_value(json!({
-                "data":[{"id":parent,"name":"Task","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"hasMore":false,})).unwrap())),
+                "data":[{"id":parent,"name":"Task","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"hasMore":false,"hasMoreProjects":false,})).unwrap())),
             subscriptions: Arc::new([(parent.clone(), subscription)].into()),
             conversations: Arc::new([(parent.clone(), Arc::new(crate::models::Thread {
                 id: Some(parent.clone()),

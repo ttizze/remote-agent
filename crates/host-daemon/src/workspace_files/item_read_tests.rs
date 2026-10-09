@@ -113,7 +113,7 @@ impl Fixture {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => {
-                            json!({"data":[],"projects":[],"hasMore":false,})
+                            json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,})
                         }
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/taskActivity/read" => {

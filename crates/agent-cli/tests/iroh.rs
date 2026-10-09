@@ -68,17 +68,17 @@ async fn exercise(command: &[&str], expected: Value) {
                     let (limit, search) = if mode == "list" {
                         (11, "CLI search")
                     } else {
-                        (30, "")
+                        (5, "")
                     };
                     assert_eq!(
                         request["params"],
-                        json!({"limit":limit,"searchTerm":search})
+                        json!({"limit":limit,"projectLimit":5,"searchTerm":search})
                     );
                     if mode == "list" {
                         assert!(!handled);
                         handled = true;
                     }
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false})
                 }
                 Some("host/session/open") => {
                     reads += 1;
@@ -160,7 +160,11 @@ async fn exercise(command: &[&str], expected: Value) {
 }
 #[tokio::test]
 async fn cli_lists_over_iroh() {
-    exercise(&["list", "--limit", "11", "--search", "CLI search"],json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,})).await;
+    exercise(
+        &["list", "--limit", "11", "--search", "CLI search"],
+        json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false}),
+    )
+    .await;
 }
 #[tokio::test]
 async fn cli_sends_over_iroh() {

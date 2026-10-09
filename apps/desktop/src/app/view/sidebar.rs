@@ -228,6 +228,9 @@ impl Desktop {
 
     fn conversation_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
         let list = self.snapshot.thread_list();
+        let loading_session_list = self
+            .snapshot
+            .operation_running(op::OperationKey::SessionList);
         let mut projects = Vec::new();
         for project in list
             .as_ref()
@@ -260,7 +263,7 @@ impl Desktop {
                 {
                     projects.push(button.into());
                 }
-                if project.loading {
+                if project.loading && !project.has_more {
                     projects.push(SidebarMenuItem::new("読み込み中…").into());
                 }
                 if let Some(error) = &project.error {
@@ -278,21 +281,34 @@ impl Desktop {
                     );
                 }
                 if project.has_more {
-                    projects.push(
-                        SidebarMenuItem::new("もっと表示する")
-                            .icon(Icon::empty().size_4())
-                            .on_click(cx.listener(move |s, _, _, cx| {
-                                s.dispatch(Intent::ExpandThreadList {
-                                    project_id: Some(id.clone()),
-                                });
-                                cx.notify();
-                            }))
-                            .into(),
-                    );
+                    let mut more = SidebarMenuItem::new("もっと表示する")
+                        .icon(Icon::empty().size_4())
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.dispatch(Intent::ExpandThreadList {
+                                project_id: Some(id.clone()),
+                            });
+                            cx.notify();
+                        }));
+                    if project.loading {
+                        more = more.suffix(|_, _| spinner::Spinner::new().small());
+                    }
+                    projects.push(more.disable(project.loading).into());
                 }
             }
         }
-        let mut recent: Vec<SidebarRow> = list
+        if list.as_ref().is_some_and(|page| page.has_more_projects) {
+            let mut more = SidebarMenuItem::new("もっとプロジェクトを表示").on_click(cx.listener(
+                |s, _, _, cx| {
+                    s.dispatch(Intent::ExpandProjects);
+                    cx.notify();
+                },
+            ));
+            if loading_session_list {
+                more = more.suffix(|_, _| spinner::Spinner::new().small());
+            }
+            projects.push(more.disable(loading_session_list).into());
+        }
+        let mut chats: Vec<SidebarRow> = list
             .as_ref()
             .map(|page| {
                 page.threads
@@ -302,14 +318,15 @@ impl Desktop {
             })
             .unwrap_or_default();
         if list.as_ref().is_some_and(|page| page.has_more) {
-            recent.push(
-                SidebarMenuItem::new("もっと表示する")
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        s.dispatch(Intent::ExpandThreadList { project_id: None });
-                        cx.notify();
-                    }))
-                    .into(),
-            );
+            let mut more =
+                SidebarMenuItem::new("もっと表示する").on_click(cx.listener(|s, _, _, cx| {
+                    s.dispatch(Intent::ExpandThreadList { project_id: None });
+                    cx.notify();
+                }));
+            if loading_session_list {
+                more = more.suffix(|_, _| spinner::Spinner::new().small());
+            }
+            chats.push(more.disable(loading_session_list).into());
         }
         Sidebar::new("desktop-sidebar")
             .header(
@@ -346,12 +363,6 @@ impl Desktop {
                     ),
             )
             .child(SidebarSection {
-                label: "最近のタスク",
-                menu: recent,
-                collapsed: false,
-                add_project: None,
-            })
-            .child(SidebarSection {
                 label: "プロジェクト",
                 menu: projects,
                 collapsed: false,
@@ -359,6 +370,12 @@ impl Desktop {
                     cx.entity().downgrade(),
                     self.snapshot.connected && self.remote.is_none(),
                 )),
+            })
+            .child(SidebarSection {
+                label: "チャット",
+                menu: chats,
+                collapsed: false,
+                add_project: None,
             })
             .footer(
                 h_flex()
@@ -503,7 +520,7 @@ mod tests {
             snapshot.threads = Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
                     "data":[], "projects":[{"id":"brand", "name":"remote-agent", "roots":[]}],
-                     "hasMore":false, }))
+                     "hasMore":false,"hasMoreProjects":false, }))
                 .unwrap(),
             ));
             Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
@@ -614,7 +631,7 @@ mod tests {
                     "data":[{"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"first"},"name":"Child task","status":"running"},
                             {"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
                             {"id":{"provider":"codex","id":"second"},"name":"Second task","worktreeStatus":"merged"}],
-                    "projects":[],"hasMore":false,}))
+                    "projects":[],"hasMore":false,"hasMoreProjects":false,}))
                 .unwrap(),
             )),
             ..Default::default()
