@@ -475,11 +475,18 @@ fn auth(args: &[String]) {
     let file = home.join("fixture-auth.json");
     match args.get(1).map(String::as_str) {
         Some("status") => {
+            if home.join("invalid-auth-status").exists() {
+                println!("unavailable");
+                std::process::exit(1);
+            }
             let value = fs::read(&file)
                 .ok()
                 .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())
                 .unwrap_or(json!({"loggedIn":false,"authMethod":"none"}));
             println!("{value}");
+            if value["loggedIn"] == false {
+                std::process::exit(1);
+            }
         }
         Some("login") => {
             assert!(args.iter().any(|arg| arg == "--claudeai"));
@@ -496,6 +503,9 @@ fn auth(args: &[String]) {
             fs::write(file, serde_json::to_vec(&json!({"loggedIn":true,"authMethod":"claude.ai","email":"claude@example.invalid","subscriptionType":"max"})).unwrap()).unwrap();
         }
         Some("logout") => {
+            if home.join("fail-auth-logout").exists() {
+                std::process::exit(1);
+            }
             let _ = fs::remove_file(file);
         }
         _ => panic!("unexpected auth command"),

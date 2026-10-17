@@ -423,17 +423,32 @@ impl Accounts {
     }
 
     pub(super) async fn cancel(&mut self) -> Result<(), String> {
-        if let Some(mut login) = self.login.take() {
+        if let Some(login) = self.login.as_mut() {
             login.process.input.take();
             let _ = login.process.child.wait().await;
             // A completion can race cancellation; let the CLI remove its credentials.
             let mut process = Cli::start(&self.program, &login.home, &["auth", "logout"], None)?;
             if !process.finish().await?.0 {
-                return Err("Claude の認証手続きを破棄できません。".into());
+                // A failed logout is harmless only when the CLI explicitly confirms
+                // there are no credentials. Keep the login available for retry on
+                // every other failure, including an unreadable status response.
+                let mut status = Cli::start(
+                    &self.program,
+                    &login.home,
+                    &["auth", "status", "--json"],
+                    None,
+                )?;
+                let (_, output) = status.finish().await?;
+                let value: Value = serde_json::from_slice(&output)
+                    .map_err(|_| "Claude の認証状態を読み取れません。")?;
+                if value["loggedIn"] != false {
+                    return Err("Claude の認証手続きを破棄できません。".into());
+                }
             }
-            tokio::fs::remove_dir_all(login.home)
+            tokio::fs::remove_dir_all(&login.home)
                 .await
                 .map_err(|_| "Claude の一時設定を削除できません。")?;
+            self.login = None;
         }
         Ok(())
     }

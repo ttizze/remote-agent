@@ -1573,6 +1573,66 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_cancel_recovers_from_logout_failure_only_when_logged_out() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        for status in [
+            json!({"loggedIn": false}),
+            json!({"loggedIn": true}),
+            json!({}),
+            json!(null),
+        ] {
+            store
+                .dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
+                    provider: ProviderKind::Claude,
+                }))
+                .await
+                .unwrap();
+            let login = store.snapshot().account.login.clone().unwrap();
+            let profile = root
+                .path()
+                .join("claude/accounts")
+                .join(login.login_id.strip_prefix("claude:").unwrap());
+            std::fs::write(profile.join("fail-auth-logout"), "").unwrap();
+            std::fs::write(profile.join("fixture-auth.json"), status.to_string()).unwrap();
+            if status.is_null() {
+                std::fs::write(profile.join("invalid-auth-status"), "").unwrap();
+            }
+            let cancel = || {
+                Intent::CancelAccountLogin(op::CancelAccountLogin {
+                    provider: ProviderKind::Claude,
+                    id: login.login_id.clone(),
+                })
+            };
+            let result = store.dispatch(cancel()).await;
+            if status["loggedIn"] == false {
+                result.unwrap();
+            } else {
+                assert!(result.is_err(), "unconfirmed cleanup must fail");
+                assert!(
+                    profile.exists(),
+                    "retain the profile until credentials are removed"
+                );
+                std::fs::remove_file(profile.join("fail-auth-logout")).unwrap();
+                store.dispatch(cancel()).await.unwrap();
+            }
+            assert!(
+                !profile.exists(),
+                "successful cancellation removes the profile, including after retry"
+            );
+            store.dispatch(cancel()).await.unwrap();
+        }
+        drop(store);
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires BEX_LIVE_CLAUDE_PROGRAM; starts and cancels an isolated login, never performs inference"]
 async fn live_claude_account_login_url_and_cancellation() {
     let program = std::env::var_os("BEX_LIVE_CLAUDE_PROGRAM").expect("set BEX_LIVE_CLAUDE_PROGRAM");
