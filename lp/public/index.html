@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bex — どこでも、これひとつで。</title>
+<meta name="description" content="bexは、あなたのコンピューターで動くCodexとClaude Codeを、Mac・iPhone・Android・CLIから操作するアプリです。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://getbex.dev/">
+<meta property="og:title" content="bex — Your coding agents, anywhere.">
+<meta property="og:description" content="Run Codex and Claude Code on your own computer, and steer them from your Mac, iPhone, Android or the command line. どこでも、これひとつで。">
+<meta property="og:image" content="https://getbex.dev/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="bex — Your coding agents, anywhere.">
+<meta name="twitter:description" content="Run Codex and Claude Code on your own computer, and steer them from anywhere.">
+<meta name="twitter:image" content="https://getbex.dev/og.jpg">
+<meta name="theme-color" content="#0a0b0c">
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><img src="/assets/icon.png" alt="" width="28" height="28"><span>bex</span></a>
+    <nav class="links">
+      <a href="#demo" data-i="nav.screens">画面</a>
+      <a href="https://github.com/ttizze/remote-agent/blob/main/README.md" data-i="cta.docs">ドキュメント</a>
+    </nav>
+    <div class="nav-r">
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="ja">JA</button><button type="button" data-lang="en">EN</button>
+      </div>
+      <a class="btn btn-sm" href="#download" data-i="cta.download.short">ダウンロード</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap hero-in">
+      <h1 data-i="hero.title">どこでも、<br class="sp">これひとつで。</h1>
+      <p class="lead" data-i="hero.lead">CodexとClaude Codeを、ひとつのアプリで。<br>PCでもスマホでも、同じ開発の続きを。</p>
+      <div class="dl-hero" data-dl-hero>
+        <div class="ctas dl-desk">
+          <a class="btn" data-dl-primary href="#download">ダウンロード</a>
+          <a class="btn btn-ghost" href="https://github.com/ttizze/remote-agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-4 1.5-4-2-6-2.5m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1-.3-3.4 1.3a11.6 11.6 0 0 0-6 0C6.8 2.3 5.8 2.6 5.8 2.6a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4.4 9c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg><span data-i="cta.github">GitHubで見る</span></a>
+        </div>
+        <div class="dl-more dl-desk">
+          <button type="button" class="dl-toggle" data-dl-toggle aria-expanded="false"><span></span><i>⌃</i></button>
+          <div class="dl-menu" data-dl-menu hidden></div>
+        </div>
+        <div class="dl-mob">
+          <a class="btn btn-big" data-dl-mob="android" href="https://github.com/TooriG/remote-agent/releases/download/android-preview-3/bex-android-preview.apk">Androidで使う</a>
+          <a class="btn btn-big" data-dl-mob="ios" href="#download"></a>
+          <a class="also" href="#download"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/></svg><span data-i="dl.also">macOS・Windows・Linuxにも対応</span></a>
+          <a class="also gh" href="https://github.com/ttizze/remote-agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-4 1.5-4-2-6-2.5m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1-.3-3.4 1.3a11.6 11.6 0 0 0-6 0C6.8 2.3 5.8 2.6 5.8 2.6a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4.4 9c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg><span data-i="cta.github">GitHubで見る</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="demo" class="sec demo"><div class="wrap">
+    <div class="visually-hidden" data-i="demo.eyebrow">SEE BEX IN ACTION</div>
+    <h2 class="visually-hidden" data-i="demo.title">使い方を、動画で。</h2>
+    <p class="visually-hidden" data-i="demo.sub">エージェントを選んで、変更を確認。外出先からの承認まで、ひとつのアプリで。</p>
+    <div class="demo-tabs" role="tablist" aria-label="BEX demo">
+<button id="demo-tab-agents" role="tab" type="button" aria-controls="demo-panel-agents" aria-selected="true" tabindex="0" data-i="demo.tab0">エージェントを選ぶ</button><button id="demo-tab-changes" role="tab" type="button" aria-controls="demo-panel-changes" aria-selected="false" tabindex="-1" data-i="demo.tab1">変更を確認する</button><button id="demo-tab-mobile" role="tab" type="button" aria-controls="demo-panel-mobile" aria-selected="false" tabindex="-1" data-i="demo.tab2">スマホから承認</button></div><div class="demo-stage"><div id="demo-panel-agents" role="tabpanel" aria-labelledby="demo-tab-agents" tabindex="0"><video src="/demos/agents.mp4" poster="/demos/agents.jpg" width="1280" height="720" muted loop playsinline controls preload="metadata" aria-label="BEX usage demo"><a href="/demos/agents.mp4" data-i="demo.fallback">動画を開く</a></video></div><div id="demo-panel-changes" role="tabpanel" aria-labelledby="demo-tab-changes" tabindex="0" hidden><video data-src="/demos/changes.mp4" poster="/demos/changes.jpg" width="1280" height="720" muted loop playsinline controls preload="none" aria-label="BEX usage demo"><a href="/demos/changes.mp4" data-i="demo.fallback">動画を開く</a></video></div><div id="demo-panel-mobile" role="tabpanel" aria-labelledby="demo-tab-mobile" tabindex="0" hidden><video data-src="/demos/mobile.mp4" poster="/demos/mobile.jpg" width="1280" height="720" muted loop playsinline controls preload="none" aria-label="BEX usage demo"><a href="/demos/mobile.mp4" data-i="demo.fallback">動画を開く</a></video></div></div><p class="demo-note" data-i="demo.note">操作を再現したデモ · サンプルデータ</p></div></section>
+
+  <section id="features" class="sec"><div class="wrap">
+    <h2 data-i="f.title">開発を、どこからでも。</h2>
+    <div class="benefits">
+      <article><img class="benefit-visual" src="/assets/ui/agents.webp" alt="" width="1536" height="1024" loading="lazy" decoding="async"><h3 data-i="simple.agents.title">Codexも、Claude Codeも。</h3><p data-i="simple.agents.body">いつものアカウントで、ひとつのアプリから。</p></article>
+      <article><img class="benefit-visual" src="/assets/ui/mobile.webp" alt="" width="1536" height="1024" loading="lazy" decoding="async"><h3 data-i="simple.mobile.title">スマホから、続きを。</h3><p data-i="simple.mobile.body">同じ会話を開いて、指示も承認もその場で。</p></article>
+      <article><img class="benefit-visual" src="/assets/ui/local.webp" alt="" width="1536" height="1024" loading="lazy" decoding="async"><h3 data-i="simple.local.title">作業は、あなたのPCで。</h3><p data-i="simple.local.body">コードは手元に。端末間の通信は暗号化。</p></article>
+    </div>
+    <p class="visual-note" data-i="visual.note">画像は機能・操作を伝えるためのUIイメージです。</p>
+    <div class="product-strengths">
+      <article><h3 data-i="strength.native.title">軽快な、ネイティブアプリ。</h3><p data-i="strength.native.body">デスクトップにはRustとGPUIを採用。変わっていない表示を再利用し、余分な処理を抑えます。</p></article>
+      <article><h3 data-i="strength.connection.title">切れても、続きを。</h3><p data-i="strength.connection.body">端末の接続が切れても、PC上の実行は継続。再接続すると、最新の状態から再開できます。</p></article>
+    </div>
+  </div></section>
+
+  <section id="how" class="sec sec-alt">
+    <div class="wrap">
+      <h2 data-i="h.title">つなげるだけで、始められる。</h2>
+      <ol class="steps">
+        <li>
+          <img class="step-visual" src="/assets/ui/launch.webp" alt="" width="1536" height="1024" loading="lazy" decoding="async">
+          <h3 data-i="h1.t">PCで開く</h3>
+          <p data-i="h1.d">作業するPCでbexを起動。</p>
+        </li>
+        <li>
+          <img class="step-visual" src="/assets/ui/pair.webp" alt="" width="1536" height="1024" loading="lazy" decoding="async">
+          <h3 data-i="h2.t">QRコードで接続</h3>
+          <p data-i="h2.d">スマホで「PCを追加」を選び、コードを読み取る。</p>
+        </li>
+        <li>
+          <img class="step-visual" src="/assets/ui/resume.webp" alt="" width="1536" height="1024" loading="lazy" decoding="async">
+          <h3 data-i="h3.t">どこからでも再開</h3>
+          <p data-i="h3.d">同じ会話を開いて、そのまま続きを。</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="download" class="sec sec-alt">
+    <div class="wrap">
+      <h2 data-i="dl.title">bexをダウンロード</h2>
+      <div class="dl-grid" data-dl-grid></div>
+      <p class="dl-note" data-i="dl.note">WindowsはZIPを展開して起動。Git・Node.js・利用するエージェントが必要です。</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <div class="brand"><img src="/assets/icon.png" alt="" width="22" height="22"><span>bex</span></div>
+    <nav>
+      <a href="https://github.com/ttizze/remote-agent">GitHub</a>
+      <a href="https://github.com/ttizze/remote-agent/releases" data-i="ft.releases">リリース</a>
+      <a href="https://github.com/ttizze/remote-agent/blob/main/docs/PRIVACY.md" data-i="ft.privacy">プライバシー</a>
+    </nav>
+    <p class="note" data-i="ft.note">Codex・Claude Codeは各社の製品です。bexは両社と提携していません。</p>
+  </div>
+</footer>
+
+<script src="/i18n.js"></script>
+<script src="/download.js"></script>
+<script src="/demo.js"></script>
+</body>
+</html>

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -11,10 +12,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +25,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+
+private const val LOCAL_NETWORK_PERMISSION_API = 37
 
 class MainActivity : ComponentActivity() {
     private val model: AndroidAppModel by viewModels {
@@ -39,7 +43,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         localNetworkGranted =
-            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+            !requiresLocalNetworkPermission(Build.VERSION.SDK_INT) ||
+                checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -55,29 +60,34 @@ class MainActivity : ComponentActivity() {
                 val requestQrScan = rememberAndroidQrScanner(this)
                 RemoteAgentApp(activity = this, model = model, requestQrScan = requestQrScan)
             } else {
-                MaterialTheme {
-                    Column(Modifier.safeDrawingPadding().padding(24.dp)) {
-                        Text("同じネットワークのPCへ接続するには、付近のデバイスへのアクセスを許可してください。")
-                        Button(onClick = { requestNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {
-                            Text("許可して接続")
-                        }
-                        Text("拒否した場合は再試行するか、設定で許可できます。インターネット経由の接続も選べます。")
-                        Button(
-                            onClick = {
-                                startActivity(
-                                    Intent(
-                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                        Uri.parse("package:$packageName"),
-                                    )
-                                )
+                BexTheme {
+                    Surface(Modifier.fillMaxSize()) {
+                        Column(Modifier.safeDrawingPadding().padding(24.dp)) {
+                            Text("同じネットワークのPCへ接続するには、付近のデバイスへのアクセスを許可してください。")
+                            Button(onClick = { requestNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {
+                                Text("許可して接続")
                             }
-                        ) {
-                            Text("アプリの設定を開く")
+                            Text("拒否した場合は再試行するか、設定で許可できます。インターネット経由の接続も選べます。")
+                            Button(
+                                onClick = {
+                                    startActivity(
+                                        Intent(
+                                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.parse("package:$packageName"),
+                                        )
+                                    )
+                                }
+                            ) {
+                                Text("アプリの設定を開く")
+                            }
+                            Button(onClick = { continueOverInternet = true }) { Text("インターネット経由で接続") }
                         }
-                        Button(onClick = { continueOverInternet = true }) { Text("インターネット経由で接続") }
                     }
                 }
             }
         }
     }
 }
+
+/** Local-network runtime permission exists only from Android 17 onward. */
+internal fun requiresLocalNetworkPermission(sdk: Int): Boolean = sdk >= LOCAL_NETWORK_PERMISSION_API

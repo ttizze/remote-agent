@@ -123,6 +123,7 @@ contracts! {
     RenameSession, "host/session/rename" => (op::RenameSession, m::Empty) [clone],
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
+    CodexCli, "host/codex/cli" => (op::CodexCliRequest, op::CodexCliStatus) [clone],
 }
 
 #[cfg(test)]

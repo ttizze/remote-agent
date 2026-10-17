@@ -13,6 +13,9 @@ pub struct ProjectSummary {
     pub icon_png: Option<Vec<u8>>,
     pub monogram: String,
     pub icon_color: u32,
+    pub pinned: bool,
+    pub section: Option<String>,
+    pub chats_archived: bool,
     pub expanded: bool,
     pub loading: bool,
     pub error: Option<String>,
@@ -59,6 +62,9 @@ fn project_summary(project: &Project) -> ProjectSummary {
             .and_then(|png| base64::engine::general_purpose::STANDARD.decode(png).ok()),
         monogram,
         icon_color: COLORS[index],
+        pinned: false,
+        section: None,
+        chats_archived: false,
         expanded: false,
         loading: false,
         error: None,
@@ -82,6 +88,7 @@ pub struct ThreadList {
     pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<ProjectSummary>,
+    pub hidden_projects: Vec<ProjectSummary>,
     pub has_more: bool,
     pub has_more_projects: bool,
 }
@@ -126,6 +133,18 @@ impl Snapshot {
         .into_iter()
         .filter(|thread| thread.project_id.is_none())
         .collect();
+        let mut projects = list
+            .projects
+            .iter()
+            .filter(|p| !self.project_preference(&p.id).is_some_and(|p| p.hidden))
+            .collect::<Vec<_>>();
+        projects.sort_by_key(|p| {
+            let prefs = self.project_preference(&p.id);
+            (
+                prefs.is_none_or(|p| !p.pinned),
+                prefs.and_then(|p| p.section.clone()).unwrap_or_default(),
+            )
+        });
         Some(ThreadList {
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: summaries,
@@ -139,12 +158,32 @@ impl Snapshot {
                     part: crate::models::ListPart::Chats,
                 },
             ),
-            projects: list
+            hidden_projects: list
                 .projects
                 .iter()
+                .filter(|p| self.project_preference(&p.id).is_some_and(|p| p.hidden))
+                .map(|p| {
+                    let mut summary = project_summary(p);
+                    if let Some(name) = self.project_preference(&p.id).and_then(|p| p.name.clone())
+                    {
+                        summary.name = name;
+                    }
+                    summary
+                })
+                .collect(),
+            projects: projects
+                .into_iter()
                 .map(|project| {
                     let page = self.project_threads.get(&project.id);
                     let mut summary = project_summary(project);
+                    if let Some(prefs) = self.project_preference(&project.id) {
+                        if let Some(name) = &prefs.name {
+                            summary.name = name.clone();
+                        }
+                        summary.pinned = prefs.pinned;
+                        summary.section = prefs.section.clone();
+                        summary.chats_archived = prefs.archived_before.is_some();
+                    }
                     summary.expanded = self.expanded_projects.contains_key(&project.id);
                     if summary.expanded && !self.connected && page.is_none() {
                         summary.error = Some("接続するとタスクを読み込めます".into());
@@ -169,7 +208,12 @@ impl Snapshot {
                         && let Some(page) = page
                     {
                         summary.threads = thread_summaries(
-                            &page.data,
+                            &page
+                                .data
+                                .iter()
+                                .filter(|t| self.project_chat_visible(&project.id, t))
+                                .cloned()
+                                .collect::<Vec<_>>(),
                             &self.activity.active,
                             &self.activity.unread,
                             &project_ids,

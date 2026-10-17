@@ -1561,9 +1561,9 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             threads.push(json!({"id":format!("chat-{index}"),"cwd":directory.path().join("unassigned"),"name":format!("Chat {index:02}"),"updatedAt":index}));
         }
         threads.extend([
-            json!({"id":"explicit","projectId":"native-project-other","cwd":directory.path().join("project-3"),"name":"Explicit assignment","updatedAt":90000}),
+            json!({"id":"explicit","projectId":"project-3","cwd":directory.path().join("outside-native-roots"),"name":"Explicit assignment","updatedAt":90000}),
             json!({"id":"projectless","projectId":null,"cwd":directory.path().join("bex-chats"),"name":"Explicit chat","updatedAt":90001}),
-            json!({"id":"worktree","projectId":"native-project-other","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
+            json!({"id":"worktree","projectId":"project-5","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
         ]);
         let rollout = directory.path().join("external-rollout.jsonl");
         std::fs::write(&rollout, "initial\n").unwrap();
@@ -1572,7 +1572,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         external["status"] = json!({"type":"notLoaded"});
         external["path"] = json!(rollout);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
+        std::fs::write(directory.path().join("projects-fixture.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
         let checkout = directory.path().join("worktree");
         std::fs::write(directory.path().join("bex-worktrees.json"), json!({"workspaceRoots":{checkout.to_str().unwrap():directory.path().join("project-5")}}).to_string()).unwrap();
         let program = host_fixture::fixture::Config { trace: true, stream_delay_ms: 5, ..Default::default() }
@@ -1744,6 +1744,56 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         mobile.close().await;
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_a_conversation_in_a_codex_project_persists_native_membership() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let project = root.join("native-project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        root.join("projects-fixture.json"),
+        json!([
+            {"id":"codex-project", "name":"Codex project", "roots":[{"path":project}]}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let fixture = start_host(&root).await;
+    let local = fixture.local().await.unwrap();
+    let created = local
+        .peer
+        .call(&op::CreateSession {
+            provider: ProviderKind::Codex,
+            cwd: Some(project.to_str().unwrap().into()),
+            model: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        created.response.thread.project_id.as_deref(),
+        Some("codex-project")
+    );
+    let id = created.response.thread.id.unwrap();
+    let opened = local
+        .peer
+        .request::<agent_protocol::session::OpenedSession>(
+            &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                session: id,
+                limit: 5,
+                include_activity: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        opened.response.thread.project_id.as_deref(),
+        Some("codex-project")
+    );
+    assert!(!root.join("bex-projects.json").exists());
+    local.close().await;
+    fixture.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

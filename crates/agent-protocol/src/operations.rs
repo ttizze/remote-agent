@@ -44,6 +44,20 @@ macro_rules! rpc_method {
 pub use crate::rpc_method;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexCliRequest {
+    pub update: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexCliStatus {
+    pub running: bool,
+    pub version: Option<String>,
+    pub restart_required: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pair {
     pub invitation: uuid::Uuid,
 }

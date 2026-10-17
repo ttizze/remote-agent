@@ -479,6 +479,10 @@ impl Desktop {
                 .into_any_element(),
             Panel::SideChat => tool_view(self.side_chat.as_ref()),
             Panel::Terminal => tool_view(self.terminal.as_ref()),
+            #[cfg(target_os = "windows")]
+            Panel::Browser if self.browser_initialization.is_some() => {
+                div().p_4().child("ブラウザを起動中…").into_any_element()
+            }
             Panel::Browser => tool_view(self.browser.as_ref()),
         };
         v_flex()

@@ -7,6 +7,7 @@ use std::{
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
     pub(crate) projects: Vec<Project>,
+    pub(crate) native_project_ids: std::collections::HashSet<String>,
     pub(super) resolved_roots: HashMap<String, PathBuf>,
     pub(super) worktree_roots: HashMap<String, String>,
     pub(super) chat_directory: Option<PathBuf>,

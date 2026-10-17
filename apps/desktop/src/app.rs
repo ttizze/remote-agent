@@ -39,6 +39,13 @@ use std::{
     sync::Arc,
 };
 
+struct ProjectEditor {
+    id: String,
+    scope: String,
+    name: Entity<InputState>,
+    section: Entity<InputState>,
+}
+
 enum OperationCompletion {
     Busy,
     Composer(u64),
@@ -202,6 +209,7 @@ pub(crate) struct Desktop {
     editor_path: Option<String>,
     editor_revision: u64,
     editor_pending: Option<u64>,
+    project_editor: Option<ProjectEditor>,
     search: Entity<InputState>,
     path: Entity<InputState>,
     model_panel: ModelPanel,
@@ -231,6 +239,8 @@ pub(crate) struct Desktop {
     side_chat: Option<Entity<Desktop>>,
     terminal: Option<Entity<crate::terminal::Terminal>>,
     browser: Option<Entity<crate::browser::Browser>>,
+    #[cfg(target_os = "windows")]
+    browser_initialization: Option<Task<()>>,
     dictation: Option<Dictation>,
     review_expanded: bool,
     source_paths: Vec<String>,
@@ -489,6 +499,7 @@ impl Desktop {
             editor_path: None,
             editor_revision: 0,
             editor_pending: None,
+            project_editor: None,
             search,
             path,
             model_panel: ModelPanel::Models,
@@ -518,6 +529,8 @@ impl Desktop {
             side_chat: None,
             terminal: None,
             browser: None,
+            #[cfg(target_os = "windows")]
+            browser_initialization: None,
             dictation: None,
             review_expanded: false,
             source_paths: Vec::new(),
@@ -1459,6 +1472,22 @@ impl Desktop {
                 ));
                 Ok(())
             }
+            #[cfg(target_os = "windows")]
+            Panel::Browser if self.browser.is_none() && self.browser_initialization.is_none() => {
+                let owner = cx.entity().downgrade();
+                crate::browser::Browser::start(window, cx, move |result, _, cx| {
+                    let _ = owner.update(cx, |s, cx| {
+                        s.browser_initialization = None;
+                        match result {
+                            Ok(view) => s.browser = Some(view),
+                            Err(error) => s.set_error(error),
+                        }
+                        cx.notify();
+                    });
+                })
+                .map(|task| self.browser_initialization = Some(task))
+            }
+            #[cfg(not(target_os = "windows"))]
             Panel::Browser if self.browser.is_none() => crate::browser::Browser::new(
                 wry::WebViewBuilder::new(),
                 #[cfg(target_os = "macos")]

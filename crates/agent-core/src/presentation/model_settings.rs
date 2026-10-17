@@ -42,6 +42,15 @@ pub struct ModelQuickControls {
     pub fast: bool,
     pub toggle_fast_to: Option<String>,
     pub fast_service_tier: Option<String>,
+    pub speed_choices: Vec<ModelSpeedChoice>,
+}
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelSpeedChoice {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub selected: bool,
 }
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -159,6 +168,7 @@ impl Snapshot {
             Some(provider),
             &self.models,
             !self.model_errors.is_empty(),
+            self.allows_custom_codex_models(),
         );
         quick_controls(
             self.models
@@ -204,6 +214,31 @@ impl Snapshot {
             .collect()
     }
 
+    pub(crate) fn allows_custom_codex_models(&self) -> bool {
+        crate::state::allows_custom_codex_models(self.account.accounts.as_deref())
+    }
+
+    /// A recommended picker catalog is not an exhaustive allowlist of Codex IDs.
+    pub fn custom_model_choice(
+        &self,
+        provider: Option<ProviderKind>,
+        query: &str,
+    ) -> Option<ModelRef> {
+        let id = query.trim();
+        (self.allows_custom_codex_models()
+            && provider == Some(ProviderKind::Codex)
+            && !id.is_empty()
+            && !id.chars().any(char::is_whitespace)
+            && !self
+                .models
+                .iter()
+                .any(|model| model.model.provider == ProviderKind::Codex && model.model.id == id))
+        .then(|| ModelRef {
+            provider: ProviderKind::Codex,
+            id: id.into(),
+        })
+    }
+
     pub fn model_for_provider(
         &self,
         thread_id: crate::state::DraftKey,
@@ -229,6 +264,7 @@ impl Snapshot {
             Some(provider),
             &self.models,
             !self.model_errors.is_empty(),
+            self.allows_custom_codex_models(),
         );
         model.cloned()
     }
@@ -303,13 +339,39 @@ fn quick_controls(
         .unwrap_or_default()
         .iter()
         .find(|tier| tier.fast);
-    let fast = fast_tier.is_some_and(|fast| fast.id == tier);
+    let fast = model
+        .service_tiers
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|speed| speed.fast && speed.id == tier);
+    let mut speed_choices = vec![ModelSpeedChoice {
+        id: "default".into(),
+        label: "通常".into(),
+        description: None,
+        selected: tier == "default",
+    }];
+    speed_choices.extend(
+        model
+            .service_tiers
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|speed| speed.id != "default")
+            .map(|speed| ModelSpeedChoice {
+                id: speed.id.clone(),
+                label: speed.name.clone().unwrap_or_else(|| speed.id.clone()),
+                description: speed.description.clone(),
+                selected: speed.id == tier,
+            }),
+    );
     ModelQuickControls {
         efforts,
         effort,
         effort_level,
         fast,
         fast_service_tier: fast_tier.map(|tier| tier.id.clone()),
+        speed_choices,
         toggle_fast_to: fast_tier.map(|tier| {
             if fast {
                 "default".into()
@@ -325,6 +387,41 @@ mod tests {
     use super::*;
     use crate::state::Draft;
     use std::sync::Arc;
+
+    #[test]
+    fn speed_choices_preserve_native_multipliers_and_select_each_tier() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id":"model","model":{"provider":"codex","id":"model"},"displayName":"Model",
+            "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}],
+            "serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage","fast":true},
+                {"id":"ultrafast","name":"Ultrafast","description":"Fastest processing","fast":true}]
+        })).unwrap();
+        for id in ["default", "priority", "ultrafast"] {
+            let controls = quick_controls(Some(&model), Some("low"), Some(id));
+            assert_eq!(
+                controls
+                    .speed_choices
+                    .iter()
+                    .filter(|choice| choice.selected)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                controls
+                    .speed_choices
+                    .iter()
+                    .find(|choice| choice.selected)
+                    .unwrap()
+                    .id,
+                id
+            );
+            assert_eq!(controls.fast, id != "default");
+            assert_eq!(
+                controls.speed_choices[1].description.as_deref(),
+                Some("2x speed, increased usage")
+            );
+        }
+    }
 
     #[test]
     fn automatic_provider_uses_catalog_defaults_and_speed_uses_metadata() {

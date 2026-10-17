@@ -471,6 +471,28 @@ Acceptance: core `presentation::markdown`, `presentation::body`, and
 `response_metadata_updates_after_deferred_edits_are_loaded`; existing desktop
 selection and history assertions remain unchanged.
 
+## Desktop picker, projects and attachments
+
+Desktop attachment thumbnails open the image gallery. Their visible remove
+control has an occluding hitbox and consumes its click: removing an attachment
+preserves the draft text and never opens the gallery beneath the control.
+
+ChatGPT-authenticated Codex uses the native account's model catalog. A configured
+ID alone does not establish access: unsupported saved selections return to the
+native default on catalog/account refresh. Exact custom IDs and configured-model
+fallbacks remain available for API-key accounts. Incomplete catalog reads preserve
+saved choices. Effort and service-tier options come from the provider; the Host
+does not invent capabilities for a configured ID.
+
+The Host reads Codex projects through `project/list`, retaining native project
+IDs, names, roots and explicit conversation assignments. When a conversation has
+no native assignment, its working directory determines its project; unrelated
+directories and the Host's standalone chat directory stay unassigned.
+BEX-only registered roots remain available. This reads native state
+without editing `.codex-global-state.json`.
+Starting a conversation in a native project passes its project ID to Codex, so
+the assignment survives reopening in either client.
+
 ## Requests and approvals
 
 Pending server requests are part of the live conversation state, even though
@@ -690,11 +712,17 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
   choices. A catalog refresh must not silently switch to another provider.
 - The model picker has a left vertical Codex/Claude icon rail and no title or
   close button. New conversations can switch agents; an existing conversation's
-  agent stays fixed. Account identity and weekly remaining quota appear above
+  agent stays fixed. Desktop shows the Codex/Claude names beside their icons,
+  explains the fixed agent in an existing conversation, and offers a new-chat
+  button retaining the selected directory. New drafts explain that either agent
+  can be selected. Account identity and weekly remaining quota appear above
   the model list in the right column. Reasoning and speed sit below it on one
   line, with icons and values instead of visible headings; accessible labels
   retain their meaning. iPhone dismisses the sheet by swiping down; desktop
   retains native popover dismissal.
+- Desktop speed menus list the provider's available service tiers and preserve
+  their reported descriptions, including speed multipliers and usage notes.
+  A selected accelerated tier remains selected independently of other tiers.
 - Model settings store a separate model, reasoning and speed preset for each
   provider, plus an independent model for new chats. Changing one selection must
   not overwrite the others. New chats use the selected model and that provider's

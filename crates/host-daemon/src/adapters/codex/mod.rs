@@ -1,6 +1,7 @@
 //! Codex native protocol boundary: execution operations, one shared process,
 //! ordered request completion, native cursors and deferred item reads.
 pub(crate) mod accounts;
+mod cli;
 mod composer;
 pub(crate) mod native;
 mod permissions;
@@ -71,6 +72,7 @@ fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) ->
 }
 
 pub struct Codex {
+    cli: cli::Updater,
     accounts: Arc<tokio::sync::Mutex<Option<crate::adapters::codex::accounts::Accounts>>>,
     list_access: tokio::sync::Semaphore,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
@@ -104,7 +106,8 @@ impl Codex {
             tracing::error!(target: "bex", operation = "host.codex", message = %error);
         }
         let available = process.is_ok();
-        let adapter = Self::new(process);
+        let mut adapter = Self::new(process);
+        adapter.cli = cli::Updater::new(config.clone());
         if available && let Err(error) = adapter.enable_accounts(account_directory, config).await {
             tracing::error!(target: "bex", operation = "host.codex.accounts", message = %error);
         }
@@ -123,6 +126,7 @@ impl Codex {
                     .unwrap_or_default()
             });
         Self {
+            cli: cli::Updater::new(Config::default()),
             accounts: Arc::default(),
             list_access: tokio::sync::Semaphore::new(4),
             restoration_error: tokio::sync::watch::channel(None).0,
@@ -316,7 +320,22 @@ fn native_failure(native: &serde_json::value::RawValue) -> Failure {
             .map(str::to_owned)
             .or_else(|| value["code"].as_i64().map(|code| code.to_string()));
     }
-    let mut failure = Failure::unknown("provider_failed", &execution.message);
+    // A different app-server owns this rollout. Never steal its writer or
+    // silently fork the user's conversation; the client can explicitly fork.
+    let writer_busy = execution.provider_code.as_deref() == Some("-32600")
+        && execution.message.starts_with("thread ")
+        && execution.message.ends_with(" already has an active writer");
+    let mut failure = Failure::unknown(
+        if writer_busy {
+            "thread_in_use"
+        } else {
+            "provider_failed"
+        },
+        &execution.message,
+    );
+    if writer_busy {
+        failure.message = agent_protocol::error::THREAD_IN_USE_MESSAGE.into();
+    }
     failure.execution = Some(Box::new(execution));
     failure
 }
@@ -612,6 +631,9 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
+    async fn codex_cli(&self, update: bool) -> Result<op::CodexCliStatus, Failure> {
+        Ok(self.cli.request(update).await)
+    }
     fn data_recipient(&self) -> &'static str {
         "OpenAI"
     }
@@ -839,6 +861,26 @@ impl Agent for Codex {
         )
         .await
     }
+    async fn create_in_project(
+        &self,
+        cwd: &str,
+        model: Option<&str>,
+        browser: Option<Value>,
+        project: Option<&str>,
+    ) -> Result<ThreadResponse, Failure> {
+        let Some(project) = project else {
+            return self.create(cwd, model, browser).await;
+        };
+        self.thread_response(
+            "thread/start",
+            &with_browser_config(
+                serde_json::json!({"cwd":cwd,"model":model,"projectId":project}),
+                browser,
+            ),
+        )
+        .await
+    }
+
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
         if let Some(error) = self.restoration_error.borrow().as_ref() {
             return Err(Failure::new("account_unavailable", error));
@@ -916,16 +958,62 @@ impl Agent for Codex {
         .await
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let page: Page<Value> = self.request("model/list", params).await?;
+        let config: Result<Value, _> = self
+            .request("config/read", &serde_json::json!({"includeLayers":false}))
+            .await;
+        let configured = config
+            .as_ref()
+            .ok()
+            .and_then(|value| value["config"]["model"].as_str());
+        let page: Page<Value> = self.request("model/list", &serde_json::json!({"limit":params.limit,"cursor":params.cursor,"includeHidden":true})).await?;
+        let mut data = page
+            .data
+            .into_iter()
+            .filter(|value| value["hidden"] != true || value["model"].as_str() == configured)
+            .map(native::parse_model)
+            .collect::<Result<Vec<_>, _>>()?;
+        if params.cursor.is_none() {
+            if let Ok(config) = config {
+                let account: Result<Value, _> = self
+                    .request("account/read", &serde_json::json!({"refreshToken":false}))
+                    .await;
+                let account_type = account
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value["account"]["type"].as_str());
+                native::include_configured_model(&mut data, &config["config"], account_type);
+            }
+        }
         Ok(op::ModelPage {
-            data: page
-                .data
-                .into_iter()
-                .map(native::parse_model)
-                .collect::<Result<_, _>>()?,
+            data,
             next_cursor: page.next_cursor,
             provider_errors: None,
         })
+    }
+
+    async fn projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {
+        let mut projects = Vec::new();
+        let mut cursor = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let page: Page<agent_protocol::models::Project> = self
+                .request(
+                    "project/list",
+                    &serde_json::json!({"limit":100,"cursor":cursor}),
+                )
+                .await?;
+            projects.extend(page.data);
+            cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
+            let Some(next) = &cursor else {
+                return Ok(projects);
+            };
+            if !seen.insert(next.clone()) {
+                return Err(Failure::new(
+                    "invalid_project_list",
+                    "project list cursor repeated",
+                ));
+            }
+        }
     }
 
     async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
@@ -1152,6 +1240,22 @@ mod tests {
             super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&root).unwrap())
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn writer_conflicts_have_a_distinct_recovery_code() {
+        let raw = serde_json::value::to_raw_value(&serde_json::json!({
+            "code": -32600,
+            "message": "thread example already has an active writer"
+        }))
+        .unwrap();
+        let failure = super::native_failure(&raw).before_submission();
+        assert_eq!(failure.code, "thread_in_use");
+        assert_eq!(failure.delivery, agent_protocol::error::Delivery::NotSent);
+        assert_eq!(
+            failure.execution.unwrap().provider_code.as_deref(),
+            Some("-32600")
         );
     }
 

@@ -1,4 +1,9 @@
 mod executable;
+
+/// Resolve exactly the executable used when starting an App Server.
+pub fn resolve_executable(program: &std::path::Path) -> Result<PathBuf, Error> {
+    executable::resolve(program)
+}
 mod platform;
 
 use std::{env, io, path::PathBuf, process::Stdio, time::Duration};

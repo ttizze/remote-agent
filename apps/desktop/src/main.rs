@@ -101,7 +101,7 @@ fn open_main_window(cx: &mut App) {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("bex".into()),
-                    appears_transparent: true,
+                    appears_transparent: !cfg!(target_os = "windows"),
                     traffic_light_position: Some(point(
                         px(14.),
                         px((WINDOW_HEADER_HEIGHT - 14.) / 2.),
@@ -110,6 +110,8 @@ fn open_main_window(cx: &mut App) {
                 ..Default::default()
             },
             |window, cx| {
+                #[cfg(target_os = "windows")]
+                appearance::style_native_titlebar(window);
                 let desktop = cx.new(|cx| app::Desktop::new(app::Mode::Main, window, cx));
                 cx.new(|cx| Root::new(desktop, window, cx))
             },
@@ -120,6 +122,13 @@ fn open_main_window(cx: &mut App) {
 }
 
 fn main() {
+    // GPUI's DirectComposition target is above child HWNDs, hiding WebView2
+    // behind the app surface. Use its HWND swap-chain renderer for embedding.
+    // Set this before any runtime or platform threads can read the environment.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1");
+    }
     #[cfg(target_os = "macos")]
     let _ = std::thread::Builder::new()
         .name("microphone-prepare".into())

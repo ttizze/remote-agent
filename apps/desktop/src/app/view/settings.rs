@@ -10,6 +10,7 @@ impl Desktop {
         }
         self.account_sign_out = None;
         self.refresh_accounts_and_models();
+        self.dispatch(Intent::ManageCodexCli(op::ManageCodexCli { update: false }));
         self.worktree_removal = None;
         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
         self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));

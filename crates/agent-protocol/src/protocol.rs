@@ -126,7 +126,7 @@ results! {
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
     Submission(crate::operations::SubmissionReceipt),
-    Unit(()), Text(String)
+    Unit(()), Text(String), CodexCli(crate::operations::CodexCliStatus)
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response<T = Body> {

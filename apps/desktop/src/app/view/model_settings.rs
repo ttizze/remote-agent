@@ -385,6 +385,39 @@ impl Desktop {
                 .child("エージェントを選択してください。")
                 .into_any_element();
         };
+        if manage && provider == ProviderKind::Codex {
+            let cli = self.snapshot.account.codex_cli.as_deref();
+            let updating = self.snapshot.operation_running(op::OperationKey::CodexCli);
+            let mut controls = v_flex().gap_2()
+                .child(div().font_semibold().child("Codex CLI"))
+                .child(cli.and_then(|status| status.version.clone()).unwrap_or_else(|| "バージョン未確認".into()))
+                .child(div().text_sm().text_color(rgb(appearance::MUTED))
+                    .child("選択中の環境のCLIを更新します。更新後は実行中の会話が終わってからHostを再起動してください。モデル一覧は再接続時に再取得します。"))
+                .child(h_flex().gap_2()
+                    .child(self.button("codex-cli-update", if updating { "確認・更新中…" } else { "最新版に更新" }, cx, |s, _, _| {
+                        s.dispatch(Intent::ManageCodexCli(op::ManageCodexCli { update: true }));
+                    }).disabled(disabled || updating).debug_selector(|| "codex-cli-update".into()))
+                    .child(self.button("codex-cli-refresh", "状態を確認", cx, |s, _, _| {
+                        s.dispatch(Intent::ManageCodexCli(op::ManageCodexCli { update: false }));
+                        s.refresh_accounts_and_models();
+                    }).disabled(disabled || updating)));
+            if let Some(cli) = cli {
+                if cli.restart_required {
+                    controls = controls.child(
+                        "更新が完了しました。新しいCLIを使用するにはHostを再起動してください。",
+                    );
+                }
+                if let Some(error) = &cli.error {
+                    controls = controls.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xff8e86))
+                            .child(error.clone()),
+                    );
+                }
+            }
+            body = body.child(controls);
+        }
         if self.snapshot.account.login.is_some() {
             body = body.child(self.account_login_controls(None, cx));
         } else {
@@ -862,7 +895,7 @@ impl Desktop {
             || !self.snapshot.connected
             || self.snapshot.account.login.is_some();
         let mut agents = v_flex()
-            .w(px(52.))
+            .w(px(112.))
             .flex_shrink_0()
             .gap_2()
             .pr_2()
@@ -874,6 +907,7 @@ impl Desktop {
         ] {
             agents = agents.child(
                 Button::new(format!("model-agent-{label}"))
+                    .label(label)
                     .icon(
                         if value == ProviderKind::Claude {
                             Icon::default()
@@ -885,7 +919,7 @@ impl Desktop {
                         .size(px(24.)),
                     )
                     .ghost()
-                    .w(px(44.))
+                    .w(px(104.))
                     .h(px(44.))
                     .rounded(px(8.))
                     .selected(provider == Some(value))
@@ -893,7 +927,11 @@ impl Desktop {
                         button.bg(rgb(appearance::SELECTED))
                     })
                     .accessibility_label(label)
-                    .tooltip(label)
+                    .tooltip(if self.selected().is_some() {
+                        "この会話のエージェントは固定です。別のエージェントは新しい会話で選べます。"
+                    } else {
+                        label
+                    })
                     .debug_selector(move || format!("model-agent-{label}"))
                     .disabled(disabled || self.selected().is_some())
                     .on_click(cx.listener(move |s, _, window, cx| {
@@ -910,6 +948,52 @@ impl Desktop {
                         }
                         cx.notify();
                     })),
+            );
+        }
+        if let Some(session) = self.selected() {
+            let label = match session.provider {
+                ProviderKind::Codex => "Codex",
+                ProviderKind::Claude => "Claude",
+            };
+            body = body.child(
+                v_flex()
+                    .id("model-agent-locked-notice")
+                    .debug_selector(|| "model-agent-locked-notice".into())
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(8.))
+                    .bg(rgb(appearance::RAISED))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(format!("この会話は{label}を使用しています")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(appearance::MUTED))
+                            .child("別のエージェントは、新しい会話で選べます。"),
+                    )
+                    .child(
+                        Button::new("model-new-chat")
+                            .label("新しい会話でエージェントを選ぶ")
+                            .accessibility_label("新しい会話でエージェントを選ぶ")
+                            .debug_selector(|| "model-new-chat".into())
+                            .disabled(disabled)
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                let cwd = s.snapshot.selected_directory();
+                                s.model_provider = None;
+                                s.new_chat(cwd, window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        } else {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(appearance::MUTED))
+                    .child("CodexまたはClaudeを選んで会話を始められます。"),
             );
         }
         let account = self
@@ -978,6 +1062,9 @@ impl Desktop {
                     .large()
                     .aria_label("モデルを検索"),
             );
+        let custom_model = self
+            .snapshot
+            .custom_model_choice(provider, &self.model_search.read(cx).value());
         let models = self
             .snapshot
             .models_matching(provider, self.model_search.read(cx).value().to_string());
@@ -985,7 +1072,7 @@ impl Desktop {
             .id("model-catalog")
             .max_h(px(264.))
             .overflow_y_scroll();
-        if models.is_empty() {
+        if models.is_empty() && custom_model.is_none() {
             list = list.child("利用可能なモデルがありません");
         }
         for model in models {
@@ -1031,6 +1118,23 @@ impl Desktop {
                                 )
                             }),
                     ),
+            );
+        }
+        if let Some(model) = custom_model {
+            let label = format!("モデルIDを指定: {}", model.id);
+            list = list.child(
+                Button::new("custom-model-choice")
+                    .debug_selector(|| "custom-model-choice".into())
+                    .label(label)
+                    .ghost()
+                    .w_full()
+                    .disabled(disabled)
+                    .on_click(cx.listener(move |s, _, _, _| {
+                        s.dispatch(Intent::SelectModel {
+                            thread_id: s.draft_key().clone(),
+                            model: model.clone(),
+                        });
+                    })),
             );
         }
         body = body
@@ -1083,10 +1187,15 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> AnyElement {
         let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
-        let (Some(next), Some(tier)) = (controls.toggle_fast_to, controls.fast_service_tier) else {
+        let (Some(next), Some(_)) = (controls.toggle_fast_to, controls.fast_service_tier) else {
             return div().into_any_element();
         };
         let fast = controls.fast;
+        let selected_speed = controls.speed_choices.iter().find(|choice| choice.selected);
+        let speed_label = selected_speed.map_or("通常".to_owned(), |choice| choice.label.clone());
+        let speed_tooltip = selected_speed
+            .and_then(|choice| choice.description.clone())
+            .unwrap_or_else(|| speed_label.clone());
         let label = if fast {
             "Fast：オン"
         } else {
@@ -1096,7 +1205,7 @@ impl Desktop {
             .icon(fast_icon(fast))
             .ghost()
             .accessibility_label(label)
-            .tooltip(label)
+            .tooltip(speed_tooltip)
             .debug_selector(move || id.into())
             .h(px(44.))
             .text_color(if fast {
@@ -1113,16 +1222,19 @@ impl Desktop {
         if expanded {
             let entity = cx.entity().downgrade();
             button
-                .label(if fast { "高速" } else { "通常" })
+                .label(speed_label)
                 .child(Icon::new(IconName::ChevronDown).size(px(14.)))
                 .dropdown_menu_with_anchor(Anchor::BottomRight, move |mut menu, _, _| {
-                    for (value, label) in [("default".to_owned(), "通常"), (tier.clone(), "高速")]
-                    {
+                    for choice in &controls.speed_choices {
+                        let value = choice.id.clone();
+                        let label = choice.description.as_ref().map_or_else(
+                            || choice.label.clone(),
+                            |description| format!("{} · {}", choice.label, description),
+                        );
                         let entity = entity.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(label)
-                                .checked((value != "default") == fast)
-                                .on_click(move |_, _, cx| {
+                        menu =
+                            menu.item(PopupMenuItem::new(label).checked(choice.selected).on_click(
+                                move |_, _, cx| {
                                     let _ = entity.update(cx, |s, cx| {
                                         s.dispatch(Intent::SelectServiceTier {
                                             thread_id: s.draft_key().clone(),
@@ -1130,8 +1242,8 @@ impl Desktop {
                                         });
                                         cx.notify();
                                     });
-                                }),
-                        );
+                                },
+                            ));
                     }
                     menu
                 })
@@ -1363,6 +1475,7 @@ mod tests {
                 <= window.debug_bounds("model-effort").unwrap().left()
         );
         assert!(window.debug_bounds("model-choice-gpt").is_some());
+        assert!(window.debug_bounds("model-agent-locked-notice").is_none());
         let model = window.debug_bounds("model-choice-gpt").unwrap();
         let effort = window.debug_bounds("model-picker-effort").unwrap();
         let speed = window.debug_bounds("model-picker-speed").unwrap();
@@ -1439,6 +1552,11 @@ mod tests {
         });
         window.run_until_parked();
         let claude = window.debug_bounds("model-agent-Claude").unwrap();
+        let notice = window.debug_bounds("model-agent-locked-notice").unwrap();
+        let new_chat = window.debug_bounds("model-new-chat").unwrap();
+        let summary = window.debug_bounds("model-account-summary").unwrap();
+        assert!(notice.bottom() <= summary.top());
+        assert!(new_chat.bottom() <= notice.bottom());
         window.simulate_click(claude.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
         assert!(window.debug_bounds("model-choice-gpt").is_some());

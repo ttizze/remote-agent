@@ -134,6 +134,8 @@ pub struct HostManagement {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccountState {
+    #[serde(skip)]
+    pub codex_cli: Option<Arc<agent_protocol::operations::CodexCliStatus>>,
     pub accounts: Option<Arc<agent_protocol::operations::Accounts>>,
     #[serde(skip)]
     pub login: Option<Arc<agent_protocol::operations::AccountLogin>>,
@@ -208,6 +210,9 @@ pub struct TerminalView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    /// Device-owned organization, scoped by Host storage identity and native project ID.
+    #[serde(default)]
+    pub project_preferences: Arc<BTreeMap<String, BTreeMap<String, ProjectPreferences>>>,
     #[serde(skip)]
     pub operations: Arc<BTreeMap<operations::OperationKey, operations::OperationState>>,
     #[serde(skip)]
@@ -351,6 +356,8 @@ impl Snapshot {
 
 mod notifications;
 use notifications::notification;
+pub mod projects;
+pub use projects::ProjectPreferences;
 pub mod operations;
 pub use operations::Intent;
 use operations::add_attachment;
@@ -418,7 +425,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     prepare_operations!(intent, previous, next, [
         ReadTaskActivity, RegisterLiveActivity, UnregisterLiveActivity,
         ReadPermissionSettings, UpdatePermissionSettings,
-        ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
+        ManageCodexCli, ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
@@ -546,6 +553,31 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 search_term: previous.list_query.search_term.clone(),
             });
         }
+        Intent::SetProjectPinned { project_id, pinned } => projects::update(&mut next, &project_id, |p| p.pinned = pinned),
+        Intent::EditProject { project_id, name, section } => {
+            let name = name.trim();
+            let section = section.trim();
+            if name.is_empty() || name.chars().count() > 100 || section.chars().count() > 60 {
+                next.error = Some("表示名は1〜100文字、セクションは60文字以内で入力してください".into());
+            } else {
+                projects::update(&mut next, &project_id, |p| {
+                    p.name = Some(name.into());
+                    p.section = (!section.is_empty()).then(|| section.into());
+                });
+            }
+        }
+        Intent::SetProjectSection { project_id, section } => {
+            let section = section.trim();
+            if section.chars().count() <= 60 {
+                projects::update(&mut next, &project_id, |p| p.section = (!section.is_empty()).then(|| section.into()));
+            }
+        }
+        Intent::SetProjectHidden { project_id, hidden } => projects::update(&mut next, &project_id, |p| p.hidden = hidden),
+        Intent::ArchiveProjectChats { project_id, before } => projects::archive(&mut next, &project_id, before),
+        Intent::RestoreProjectChats { project_id } => projects::update(&mut next, &project_id, |p| {
+            p.archived_before = None;
+            p.archived_ids.clear();
+        }),
         Intent::SetProjectExpanded { project_id, expanded } => {
             if !expanded {
                 Arc::make_mut(&mut next.expanded_projects).remove(&project_id);
@@ -615,7 +647,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 if provider.is_some() && !previous.models.is_empty() {
                     let (model, effort, tier) = supported_settings(
                         draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
-                        provider, &previous.models, !previous.model_errors.is_empty(),
+                        provider, &previous.models, !previous.model_errors.is_empty(), previous.allows_custom_codex_models(),
                     );
                     let settings = (model.cloned(), effort.map(str::to_owned), tier.map(str::to_owned));
                     (draft.model, draft.effort, draft.service_tier) = settings;
@@ -760,7 +792,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 _ => unreachable!(),
             };
             if !previous.models.is_empty() {
-                let (model, effort, tier) = supported_settings(draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(), None, &previous.models, !previous.model_errors.is_empty());
+                let (model, effort, tier) = supported_settings(draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(), None, &previous.models, !previous.model_errors.is_empty(), previous.allows_custom_codex_models());
                 let settings = (
                     model.cloned(),
                     effort.map(str::to_owned),
@@ -960,9 +992,9 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     (*next.list_query).clone(),
                 )));
             }
-            if next.models.is_empty() {
-                effects.push(Effect::execute(op::LoadModels {}));
-            }
+            // The Host catalog can change while a mobile client is backgrounded.
+            // Keep cached choices visible until the fresh catalog arrives.
+            effects.push(Effect::execute(op::LoadModels {}));
             if next.account.accounts.is_none() {
                 effects.push(Effect::execute(op::ListAccounts {}));
             }
@@ -1072,6 +1104,24 @@ fn clear_session_status(thread: &mut Thread) {
     }
 }
 
+pub(crate) fn allows_custom_codex_models(
+    accounts: Option<&agent_protocol::operations::Accounts>,
+) -> bool {
+    let Some(accounts) = accounts else {
+        return true;
+    };
+    let provider = crate::session::ProviderKind::Codex;
+    let account = accounts.selected.get(&provider).and_then(|id| {
+        accounts
+            .accounts
+            .iter()
+            .find(|account| account.provider == provider && &account.id == id)
+    });
+    account
+        .and_then(|account| account.plan_type.as_deref())
+        .is_none_or(|plan| plan == "API key")
+}
+
 pub(crate) fn normalized_model_drafts(
     drafts: &Arc<BTreeMap<DraftKey, Arc<Draft>>>,
     models: &[crate::models::Model],
@@ -1079,6 +1129,7 @@ pub(crate) fn normalized_model_drafts(
     selected_accounts: Option<&std::collections::HashMap<crate::session::ProviderKind, String>>,
     active_draft: &DraftKey,
     provider_defaults: &HashMap<crate::session::ProviderKind, ProviderModelDefaults>,
+    allow_custom_codex: bool,
 ) -> Arc<BTreeMap<DraftKey, Arc<Draft>>> {
     let mut next = drafts.clone();
     for (key, previous) in drafts.iter() {
@@ -1117,6 +1168,7 @@ pub(crate) fn normalized_model_drafts(
             Some(provider),
             models,
             !errors.is_empty(),
+            allow_custom_codex,
         );
         if (model, effort, tier)
             != (
@@ -1141,13 +1193,20 @@ pub(crate) fn supported_settings<'a>(
     default_provider: Option<crate::session::ProviderKind>,
     models: &'a [Model],
     catalog_incomplete: bool,
+    allow_custom_codex: bool,
 ) -> (
     Option<&'a crate::models::ModelRef>,
     Option<&'a str>,
     Option<&'a str>,
 ) {
-    // Absence in an incomplete catalog is not evidence that a saved choice was removed.
-    if catalog_incomplete
+    // Codex also accepts explicit IDs outside its recommended picker catalog.
+    // Absence in an incomplete catalog cannot invalidate a saved choice either.
+    if (catalog_incomplete
+        || selected_model.is_some_and(|model| {
+            allow_custom_codex
+                && model.provider == crate::session::ProviderKind::Codex
+                && !model.id.is_empty()
+        }))
         && selected_model.is_some()
         && !models
             .iter()

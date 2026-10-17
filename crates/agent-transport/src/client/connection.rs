@@ -138,7 +138,7 @@ impl Client {
         let (initial, updates) = self.call_stream(call).await?;
         let started = std::time::Instant::now();
         let result = protocol::decode(&initial)
-            .map_err(invalid)
+            .map_err(|error| invalid(format!("{} response: {error}", call.method())))
             .and_then(response);
         if self.trace.active() && !matches!(call, Call::ConnectionPerformance(_)) {
             self.trace.record(

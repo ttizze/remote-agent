@@ -7,6 +7,9 @@ pub fn error_message(error: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return "接続先で操作に失敗しました。エラーの詳細を取得できませんでした。".into();
     };
+    if value["code"] == "thread_in_use" {
+        return agent_protocol::error::THREAD_IN_USE_MESSAGE.into();
+    }
     if value["code"] == "dictation_failed" {
         let reason = value["message"]
             .as_str()
@@ -27,6 +30,15 @@ pub fn error_message(error: &str) -> String {
 #[cfg(test)]
 mod error_tests {
     use super::error_message;
+    #[test]
+    fn writer_conflicts_explain_explicit_fork_recovery() {
+        let message = error_message(
+            r#"remote RPC error: {"code":"thread_in_use","message":"thread private-id already has an active writer","delivery":"notSent"}"#,
+        );
+        assert!(message.contains("分岐") && message.contains("未送信"));
+        assert!(!message.contains("private-id") && !message.contains('{'));
+    }
+
     #[test]
     fn provider_cause_survives_host_envelope_without_exposing_payloads() {
         let raw = r#"remote RPC error: {"delivery":"unknown","code":"provider_failed","message":"thread example already has an active writer","execution":{"providerCode":"-32600"}}"#;

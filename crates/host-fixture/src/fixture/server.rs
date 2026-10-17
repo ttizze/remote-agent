@@ -332,6 +332,11 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         context.respond(id, &json!({"filePath":path,"version":bytes,"status":"ok"}))?;
                     }
                 }
+                "project/list" => {
+                    let path = context.home.join("projects-fixture.json");
+                    let projects: Value = if path.exists() { serde_json::from_slice(&fs::read(path)?)? } else { json!([]) };
+                    context.respond(id, &json!({"data":projects,"nextCursor":null}))?;
+                }
                 "model/list" => {
                     let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
                             "defaultServiceTier":"default","serviceTiers":[{"id":"priority","name":"高速"}],
@@ -441,7 +446,10 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     };
                     let matches = context.config.expected_cwd.as_ref().is_none_or(|expected| cwd.as_str().is_some_and(|cwd| std::path::Path::new(cwd) == expected));
                     context.trace(method, json!({"hasProjectId":params.get("projectId").is_some(),"cwdMatchesFixture":matches}))?;
-                    assert!(params.get("projectId").is_none(), "Bex owns project registration");
+                    if let Some(project) = params.get("projectId") {
+                        let projects: Vec<Value> = serde_json::from_slice(&fs::read(context.home.join("projects-fixture.json"))?)?;
+                        assert!(projects.iter().any(|entry| &entry["id"] == project), "thread must name a native project");
+                    }
                     if !matches || !cwd.as_str().is_some_and(|cwd| !cwd.is_empty()) {
                         context.error(id, -32602, "invalid cwd")?; continue;
                     }
@@ -451,6 +459,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         if !threads.contains_key(&id) { break id; }
                     };
                     let mut thread = Thread::new(thread_id.clone(), cwd);
+                    if let Some(project) = params.get("projectId") { thread.metadata.insert("projectId".into(), project.clone()); }
                     if context.config.deferred_thread_metadata { thread.metadata.insert("name".into(), Value::Null); }
                     thread.metadata.insert("path".into(), context.home.join(format!("{thread_id}.jsonl")).into_os_string().into_string().unwrap().into());
                     thread.metadata.insert("historyMode".into(), "paginated".into());

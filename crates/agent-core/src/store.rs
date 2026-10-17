@@ -720,6 +720,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         operation_sequence,
         model_defaults,
         scoped_model_defaults,
+        project_preferences,
         permission_settings,
         composer_catalog,
         host_name,
@@ -756,6 +757,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
     if Arc::ptr_eq(&current.operations, operations)
         && current.operation_sequence == *operation_sequence
         && current.model_defaults == *model_defaults
+        && Arc::ptr_eq(&current.project_preferences, project_preferences)
         && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
         && current.host_name == *host_name
         && current.task_activity == *task_activity
@@ -1728,5 +1730,51 @@ mod tests {
             writer.send_if_modified(|current| publish_locked(current, next));
             assert!(reader.has_changed().unwrap(), "{name} update was dropped");
         }
+    }
+}
+
+#[cfg(test)]
+mod model_reconnection_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_refreshes_a_cached_catalog_without_clearing_choices() {
+        let models = serde_json::from_value(serde_json::json!([
+            {"id":"old","model":{"provider":"codex","id":"gpt-6-sol"},
+             "displayName":"GPT-6", "defaultReasoningEffort":"medium",
+             "supportedReasoningEfforts":[]}
+        ]))
+        .unwrap();
+        let previous = Snapshot {
+            models: Arc::new(models),
+            ..Default::default()
+        };
+        let (mut next, effects) = reduce(&previous, Event::Connected);
+        assert_eq!(next.models, previous.models);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| effect.operation.key() == Some(op::OperationKey::Models))
+                .count(),
+            1
+        );
+        use op::Operation;
+        op::LoadModels {}.apply(
+            &mut next,
+            agent_protocol::operations::ModelPage {
+                data: serde_json::from_value(serde_json::json!([
+                    {"id":"new","model":{"provider":"codex","id":"gpt-6.1-sol"},
+                     "displayName":"GPT-6.1", "defaultReasoningEffort":"medium",
+                     "supportedReasoningEfforts":[], "isDefault":true}
+                ]))
+                .unwrap(),
+                next_cursor: None,
+                provider_errors: None,
+            },
+        );
+        assert_eq!(
+            next.models_matching(None, "6.1".into())[0].model.id,
+            "gpt-6.1-sol"
+        );
     }
 }

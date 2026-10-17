@@ -286,20 +286,21 @@ impl Desktop {
                 IconName::Close,
                 format!("{}を外す", file.name),
                 cx,
-                move |s, _, _| {
+                move |s, _, cx| {
+                    cx.stop_propagation();
                     s.dispatch(Intent::RemoveAttachment {
                         draft_key: key.clone(),
                         index: i as u32,
                     });
                 },
             )
+            .debug_selector(move || format!("attachment-remove-{i}"))
             .xsmall()
             .rounded_full();
             files = files.child(if file.is_image {
-                let group = SharedString::from(format!("draft-image-{i}"));
                 div()
+                    .id(format!("draft-attachment-{i}"))
                     .relative()
-                    .group(group.clone())
                     .size(px(120.))
                     .flex_shrink_0()
                     .child(
@@ -310,20 +311,24 @@ impl Desktop {
                             .child(self.image(&file.path, false, 120., true, cx)),
                     )
                     .child(
-                        remove
+                        div()
+                            .id(format!("attachment-remove-hitbox-{i}"))
+                            .occlude()
                             .absolute()
                             .top(px(-4.))
                             .right(px(-4.))
-                            .invisible()
-                            .group_hover(group, |style| style.visible())
                             .size(px(18.))
-                            .custom(
-                                ButtonCustomVariant::new(cx)
-                                    .foreground(rgb(0x222222).into())
-                                    .hover(rgb(0xe6e6e6).into())
-                                    .active(rgb(0xd4d4d4).into()),
-                            )
-                            .bg(rgb(0xffffff)),
+                            .child(
+                                remove
+                                    .size(px(18.))
+                                    .custom(
+                                        ButtonCustomVariant::new(cx)
+                                            .foreground(rgb(0x222222).into())
+                                            .hover(rgb(0xe6e6e6).into())
+                                            .active(rgb(0xd4d4d4).into()),
+                                    )
+                                    .bg(rgb(0xffffff)),
+                            ),
                     )
                     .into_any_element()
             } else {
@@ -507,5 +512,126 @@ impl Desktop {
                 .child(controls),
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use gpui_kit as gpui;
+
+    struct ComposerView(Entity<Desktop>);
+    impl Render for ComposerView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |view, cx| view.chat(cx))
+        }
+    }
+
+    #[gpui::test]
+    fn removing_an_image_does_not_open_its_gallery(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            crate::appearance::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let image_directory = tempfile::tempdir().unwrap();
+        let image_path = image_directory.path().join("attachment.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&image_path)
+            .unwrap();
+        let source = image_path.to_string_lossy().into_owned();
+        let mut desktop_handle = None;
+        let mut store_handle = None;
+        let mut draft_key = None;
+        let (_, window) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| {
+                Desktop::new(
+                    Mode::SideChat {
+                        remote: Some(RemoteHost {
+                            id: "fixture".into(),
+                            name: "fixture".into(),
+                            ticket: "invalid".into(),
+                        }),
+                        cwd: image_directory.path().to_string_lossy().into_owned(),
+                    },
+                    window,
+                    cx,
+                )
+            });
+            desktop.update(cx, |view, _| {
+                let key = view.draft_key().clone();
+                draft_key = Some(key.clone());
+                Arc::make_mut(&mut Arc::make_mut(&mut view.snapshot).drafts).insert(
+                    key,
+                    Arc::new(Draft {
+                        text: "Keep this draft".into(),
+                        attachments: vec![agent_core::state::Attachment {
+                            path: source.clone(),
+                            name: "attachment.png".into(),
+                            is_image: true,
+                        }],
+                        ..Default::default()
+                    }),
+                );
+                view.images.insert(
+                    view.image_key(&source, false),
+                    ImageState {
+                        source: Arc::new(source.clone()),
+                        path: Some(source.clone().into()),
+                        error: None,
+                    },
+                );
+                let store = runtime.block_on(async {
+                    Arc::new(agent_core::store::Store::offline((*view.snapshot).clone()))
+                });
+                let app_runtime = view.runtime.clone();
+                view.session = Some(runtime.block_on(async {
+                    let (updates, receive) = async_channel::unbounded();
+                    tokio::spawn(StoreSession::publish(
+                        Ok(store.clone()),
+                        app_runtime,
+                        updates,
+                        Some,
+                        |_| None,
+                    ));
+                    receive.recv().await.unwrap().unwrap().unwrap()
+                }));
+                store_handle = Some(store);
+            });
+            desktop_handle = Some(desktop.clone());
+            ComposerView(desktop)
+        });
+        window.simulate_resize(size(px(700.), px(700.)));
+        window.run_until_parked();
+        let bounds = window.debug_bounds("chat-image").unwrap();
+        window.simulate_click(bounds.center(), Modifiers::default());
+        let desktop = desktop_handle.unwrap();
+        window.update(|_, cx| {
+            desktop.update(cx, |view, _| {
+                assert!(
+                    view.image_gallery.is_some(),
+                    "the thumbnail still opens the gallery"
+                );
+                view.image_gallery = None;
+            })
+        });
+        window.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+        window.run_until_parked();
+        let remove = window.debug_bounds("attachment-remove-0").unwrap().center();
+        window.simulate_click(remove, Modifiers::default());
+        window.update(|_, cx| desktop.update(cx, |view, _| assert!(view.image_gallery.is_none())));
+        let snapshot = store_handle.unwrap().snapshot();
+        let draft = &snapshot.drafts[&draft_key.unwrap()];
+        assert!(draft.attachments.is_empty());
+        assert_eq!(draft.text, "Keep this draft");
     }
 }

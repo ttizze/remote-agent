@@ -26,6 +26,8 @@ impl Snapshot {
         same_list
             && Arc::ptr_eq(&self.activity, &other.activity)
             && Arc::ptr_eq(&self.expanded_projects, &other.expanded_projects)
+            && Arc::ptr_eq(&self.project_preferences, &other.project_preferences)
+            && self.storage_scope == other.storage_scope
             && Arc::ptr_eq(&self.project_threads, &other.project_threads)
             && Arc::ptr_eq(&self.archived_scopes, &other.archived_scopes)
             && self.connected == other.connected
@@ -102,7 +104,9 @@ impl Snapshot {
         self.host_name.clone()
     }
     pub fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.error
+            .as_deref()
+            .map(crate::presentation::error::error_message)
     }
     pub fn navigation(&self) -> Navigation {
         self.navigation.as_ref().clone()
@@ -264,6 +268,17 @@ pub fn project_conversation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_clients_receive_readable_errors_without_rpc_envelopes() {
+        let mut snapshot = crate::state::Snapshot::default();
+        snapshot.error = Some(r#"remote RPC error: {"code":"thread_in_use","message":"private","delivery":"notSent"}"#.into());
+        assert_eq!(
+            snapshot.error().as_deref(),
+            Some(agent_protocol::error::THREAD_IN_USE_MESSAGE)
+        );
+        assert!(snapshot.error.as_deref().unwrap().contains("private"));
+    }
+
     use super::*;
 
     #[test]

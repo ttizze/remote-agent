@@ -1,13 +1,16 @@
 package dev.remoteagent.mobile
 
+import android.content.ContentValues
 import android.content.ContextWrapper
 import android.content.SharedPreferences
+import android.provider.MediaStore
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.remoteagent.core.DownloadFile
 import dev.remoteagent.core.DraftKey
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
@@ -22,6 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -102,6 +106,7 @@ class ConversationRecoveryTest {
                     assertEquals(id, model.snapshot.navigation().threadId)
                     assertEquals("preserved draft", model.snapshot.draft(DraftKey.Session(id)).text)
                     assertNull(model.notice)
+                    verifyImageAttachment(model, context, ::perform)
                     perform(Intent.Submit(id, UUID.randomUUID().toString())).getOrThrow()
                     while (true) {
                         val thread = model.snapshot.threadJson(id)
@@ -119,6 +124,50 @@ class ConversationRecoveryTest {
                     models.clear()
                 }
             }
+        }
+    }
+
+    private suspend fun verifyImageAttachment(
+        model: AndroidAppModel,
+        context: android.content.Context,
+        perform: suspend (Intent) -> Result<Outcome>,
+    ) {
+        val resolver = context.contentResolver
+        val image =
+            android.util.Base64.decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ1sAAAAASUVORK5CYII=",
+                android.util.Base64.DEFAULT,
+            )
+        val uri =
+            requireNotNull(
+                resolver.insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, "attachment-regression.png")
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    },
+                )
+            )
+        val downloaded = File(context.cacheDir, "attachment-${UUID.randomUUID()}.png")
+        try {
+            requireNotNull(resolver.openOutputStream(uri)).use { it.write(image) }
+            // Exercise both orders: foreground reconnect before the picker result, and
+            // another foreground callback while the selected image is being imported.
+            model.foreground()
+            val finished = CompletableDeferred<Unit>()
+            model.attach(model.selectionKey, uri) { finished.complete(Unit) }
+            model.foreground()
+            finished.await()
+            assertNull(model.notice)
+            val attachment = model.snapshot.draft(model.draftKey).attachments.single()
+            assertTrue(attachment.isImage)
+            assertEquals("attachment-regression.png", attachment.name)
+            perform(Intent.DownloadFile(DownloadFile(attachment.path, downloaded.path))).getOrThrow()
+            assertArrayEquals(image, downloaded.readBytes())
+            perform(Intent.RemoveAttachment(model.draftKey, 0u)).getOrThrow()
+        } finally {
+            resolver.delete(uri, null, null)
+            downloaded.delete()
         }
     }
 }

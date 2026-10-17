@@ -9,7 +9,7 @@ use std::{
 pub(crate) mod icons;
 pub(crate) mod state;
 pub(crate) mod titles;
-/// The Host owns project registration independently of native provider catalogs.
+/// BEX registrations supplement the read-only native provider project catalog.
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
     path: PathBuf,
@@ -82,9 +82,29 @@ impl ProjectStore {
         .await??;
         Ok(path.into())
     }
+    #[cfg(test)]
     pub(crate) async fn load(&self) -> anyhow::Result<state::Snapshot> {
+        self.load_with_projects(Vec::new()).await
+    }
+    pub(crate) async fn load_with_projects(
+        &self,
+        mut native: Vec<Project>,
+    ) -> anyhow::Result<state::Snapshot> {
+        let native_project_ids = native.iter().map(|project| project.id.clone()).collect();
+        for mut project in self.read_projects().await? {
+            if native.iter().any(|entry| entry.id == project.id) {
+                continue;
+            }
+            project
+                .roots
+                .retain(|root| !native.iter().any(|entry| entry.roots.contains(root)));
+            if !project.roots.is_empty() {
+                native.push(project);
+            }
+        }
         let mut snapshot = state::Snapshot {
-            projects: self.read_projects().await?,
+            projects: native,
+            native_project_ids,
             ..Default::default()
         };
         for root in snapshot.projects.iter().flat_map(|project| &project.roots) {
@@ -118,6 +138,34 @@ impl ProjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn native_projects_refresh_and_take_precedence_over_duplicate_bex_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let store = ProjectStore::new(root.join("bex-worktrees.json"));
+        store.register(&project).await.unwrap();
+        let native = Project {
+            id: "native-project".into(),
+            name: "Codex project name".into(),
+            roots: vec![agent_protocol::models::ProjectRoot {
+                path: project.to_str().unwrap().into(),
+            }],
+            ..Default::default()
+        };
+        let snapshot = store
+            .load_with_projects(vec![native.clone()])
+            .await
+            .unwrap();
+        assert_eq!(snapshot.projects, [native]);
+        assert_eq!(
+            snapshot.project_for_workspace(project.to_str().unwrap()),
+            Some("native-project")
+        );
+        assert_eq!(store.load().await.unwrap().projects.len(), 1);
+        assert!(!root.join(".codex-global-state.json").exists());
+    }
     #[tokio::test]
     async fn registration_is_durable_idempotent_and_refreshes_worktree_roots() {
         let directory = tempfile::tempdir().unwrap();

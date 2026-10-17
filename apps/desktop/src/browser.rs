@@ -65,15 +65,12 @@ pub(crate) struct Browser {
 }
 
 impl Browser {
-    pub(crate) fn new(
+    fn prepare(
         builder: wry::WebViewBuilder<'_>,
-        #[cfg(target_os = "macos")] chrome: ChromeProfileSource,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Result<Entity<Self>, String> {
+    ) -> (wry::WebViewBuilder<'_>, async_channel::Receiver<Event>) {
         let (tx, rx) = async_channel::unbounded();
         let navigation = tx.clone();
-        let raw = builder
+        let builder = builder
             .with_url("about:blank")
             .with_background_color((24, 24, 24, 255))
             .with_focused(false)
@@ -86,12 +83,64 @@ impl Browser {
             })
             .with_on_page_load_handler(move |_, url| {
                 let _ = tx.try_send(Event::Location(url));
-            })
-            .build_as_child(window)
-            .map_err(|e| e.to_string())?;
+            });
+        (builder, rx)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn start(
+        window: &mut Window,
+        cx: &mut App,
+        ready: impl FnOnce(Result<Entity<Self>, String>, &mut Window, &mut App) + 'static,
+    ) -> Result<Task<()>, String> {
+        use wry::raw_window_handle::HasWindowHandle;
+        let raw_parent = window.window_handle().map_err(|e| e.to_string())?.as_raw();
+        Ok(window.spawn(cx, async move |cx| {
+            // The owning Desktop retains this task, cancelling it before its window is
+            // destroyed. Never retain a GPUI App/Window borrow across WebView2 awaits:
+            // the synchronous builder pumps messages and re-enters GPUI updates.
+            let parent = unsafe { wry::raw_window_handle::WindowHandle::borrow_raw(raw_parent) };
+            let (builder, rx) = Self::prepare(wry::WebViewBuilder::new());
+            let result = builder
+                .build_as_child_async(&parent)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = cx.update(move |window, cx| {
+                let result = result.map(|raw| Self::attach(raw, rx, window, cx));
+                ready(result, window, cx);
+            });
+        }))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn new(
+        builder: wry::WebViewBuilder<'_>,
+        #[cfg(target_os = "macos")] chrome: ChromeProfileSource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, String> {
+        let (builder, rx) = Self::prepare(builder);
+        let raw = builder.build_as_child(window).map_err(|e| e.to_string())?;
+        Ok(Self::attach(
+            raw,
+            rx,
+            #[cfg(target_os = "macos")]
+            chrome,
+            window,
+            cx,
+        ))
+    }
+
+    fn attach(
+        raw: wry::WebView,
+        rx: async_channel::Receiver<Event>,
+        #[cfg(target_os = "macos")] chrome: ChromeProfileSource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
         let webview = cx.new(|cx| WebView::new(raw, window, cx));
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("URL を入力"));
-        Ok(cx.new(|cx: &mut Context<Self>| {
+        cx.new(|cx: &mut Context<Self>| {
             let subscription = cx.subscribe_in(&address, window, |s, _, event, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     s.navigate(cx);
@@ -144,7 +193,7 @@ impl Browser {
                 profile_menu_open: false,
                 _subscription: subscription,
             }
-        }))
+        })
     }
     pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut App) {
         #[cfg(target_os = "macos")]

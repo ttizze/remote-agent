@@ -14,6 +14,8 @@ pub struct PersistedState {
     model_defaults: ModelDefaults,
     #[serde(with = "entries")]
     scoped_model_defaults: Arc<BTreeMap<ModelDefaultsScope, ModelDefaults>>,
+    #[serde(default)]
+    project_preferences: Arc<BTreeMap<String, BTreeMap<String, crate::state::ProjectPreferences>>>,
     storage_scope: String,
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
@@ -29,6 +31,7 @@ impl PersistedState {
         Self {
             model_defaults: snapshot.model_defaults.clone(),
             scoped_model_defaults: snapshot.scoped_model_defaults.clone(),
+            project_preferences: snapshot.project_preferences.clone(),
             storage_scope: snapshot.storage_scope.clone(),
             archived_scopes: snapshot.archived_scopes.clone(),
             drafts: snapshot.drafts.clone(),
@@ -91,6 +94,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     Ok(Snapshot {
         model_defaults: saved.model_defaults,
         scoped_model_defaults: saved.scoped_model_defaults,
+        project_preferences: saved.project_preferences,
         storage_scope: saved.storage_scope,
         archived_scopes: saved.archived_scopes,
         drafts: saved.drafts,

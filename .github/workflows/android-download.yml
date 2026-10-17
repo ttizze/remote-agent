@@ -1,0 +1,89 @@
+name: Android APK download
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: android-download
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: 0
+      GRADLE_USER_HOME: /tmp/bex-gradle
+      ANDROID_USER_HOME: /tmp/bex-android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Free build space
+        run: |
+          for sdk in /usr/local/lib/android /usr/share/dotnet; do
+            if [[ -d "$sdk" ]]; then
+              sudo find "$sdk" -type f -size +10M -delete
+            fi
+          done
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: nix develop . --command {0}
+          key: android-download-${{ hashFiles('flake.lock') }}
+          cache-on-failure: true
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Restore stable preview signing key
+        env:
+          PREVIEW_KEYSTORE_BASE64: ${{ secrets.BEX_ANDROID_PREVIEW_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$PREVIEW_KEYSTORE_BASE64" || { echo 'Configure BEX_ANDROID_PREVIEW_KEYSTORE_BASE64 before publishing previews.'; exit 1; }
+          umask 077
+          printf '%s' "$PREVIEW_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/bex-preview.p12"
+          echo "BEX_ANDROID_PREVIEW_KEYSTORE=$RUNNER_TEMP/bex-preview.p12" >> "$GITHUB_ENV"
+          echo "BEX_ANDROID_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+      - name: Test and build installable Android preview
+        run: |
+          nix develop . --command ./gradlew \
+            :apps:mobile:testDebugUnitTest :apps:mobile:assembleDebugAndroidTest :apps:mobile:lintDebug :apps:mobile:assembleDebug \
+            --no-daemon --max-workers=4 --build-cache --console=plain || {
+              cat apps/mobile/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt 2>/dev/null || true
+              exit 1
+            }
+      - name: Enable emulator hardware acceleration
+        run: sudo chmod a+rw /dev/kvm
+      - name: Build isolated Android Host fixtures
+        run: nix develop .#native --command cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
+      - name: Verify image attachments against an isolated Host
+        run: nix develop .#android-test --command bash scripts/android-e2e.sh attachments
+      - name: Retain Android verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-verification-reports
+          path: |
+            apps/mobile/build/reports/
+            apps/mobile/build/test-results/
+            target/qa/android-*
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Package APK and checksum
+        run: |
+          mkdir -p target/android-packages
+          cp apps/mobile/build/outputs/apk/debug/mobile-debug.apk target/android-packages/bex-android-preview.apk
+          cd target/android-packages
+          sha256sum bex-android-preview.apk > bex-android-preview.apk.sha256
+      - name: Verify APK installation requirements and signature
+        run: nix develop . --command bash scripts/verify-android-apk.sh target/android-packages/bex-android-preview.apk 26
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bex-android-preview
+          path: target/android-packages/*
+          if-no-files-found: error
+      - name: Publish APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="android-preview-${GITHUB_RUN_NUMBER}"
+          printf 'Android 8.0 (API 26) or newer. ARM64 and x86-64. Signed preview APK with a stable repository signing key.\n\nDark mobile composer, model/effort/speed choices, multiple-file upload and image/PDF/text previews.\n\nOlder previews used disposable signing keys and cannot be updated in place. Preserve unsent mobile drafts before replacing an older installation. PC conversation history remains on the Host. This and later previews from this repository reuse the same signing key.\n\nSource commit: %s\n' "$GITHUB_SHA" > target/android-packages/release-notes.txt
+          gh release create "$tag" target/android-packages/bex-android-preview.apk target/android-packages/bex-android-preview.apk.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "BEX Android preview ${GITHUB_RUN_NUMBER}" --notes-file target/android-packages/release-notes.txt

@@ -1,4 +1,7 @@
 use serde::Serialize;
+
+pub const THREAD_IN_USE_MESSAGE: &str = "この会話はPCのCodexで使用中です。メッセージの「分岐」を押すと、履歴を引き継いだ別の会話で続けられます。未送信の文章は保持されています。";
+
 /// Delivery evidence is independent of provider availability and display text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

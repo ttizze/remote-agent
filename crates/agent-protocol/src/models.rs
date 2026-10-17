@@ -260,6 +260,8 @@ pub struct Model {
 pub struct ServiceTier {
     pub id: String,
     pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub fast: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

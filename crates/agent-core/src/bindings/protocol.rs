@@ -93,6 +93,7 @@ struct Model {
 struct ServiceTier {
     pub id: String,
     pub name: Option<String>,
+    pub description: Option<String>,
     pub fast: bool,
 }
 #[uniffi::remote(Record)]

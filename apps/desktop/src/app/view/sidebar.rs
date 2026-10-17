@@ -11,6 +11,7 @@ pub(super) struct SidebarSection {
 #[derive(Clone)]
 pub(super) enum SidebarRow {
     Item(Box<SidebarMenuItem>),
+    Heading(String),
     Project {
         id: String,
         name: String,
@@ -33,6 +34,14 @@ impl From<SidebarMenuItem> for SidebarRow {
 impl SidebarRow {
     fn render(self, id: String, collapsed: bool, window: &mut Window, cx: &mut App) -> AnyElement {
         match self {
+            Self::Heading(label) => div()
+                .px_3()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .text_color(rgb(appearance::MUTED))
+                .when(!collapsed, |row| row.child(label))
+                .into_any_element(),
             Self::Item(item) => item
                 .collapsed(collapsed)
                 .render(id, window, cx)
@@ -73,6 +82,8 @@ impl SidebarRow {
                         .into_any_element()
                 };
                 let target = desktop.clone();
+                let menu_id = project_id.clone();
+                let menu_owner = desktop.clone();
                 let selector = format!("project-{project_id}");
                 h_flex()
                     .id(id)
@@ -121,7 +132,10 @@ impl SidebarRow {
                             }),
                     )
                     .when(!collapsed, |row| {
-                        row.child(
+                        row.child(super::project_management::project_menu_button(
+                            menu_id, menu_owner,
+                        ))
+                        .child(
                             Button::new("new-project-chat")
                                 .icon(new_chat_icon())
                                 .xsmall()
@@ -233,11 +247,29 @@ impl Desktop {
             .snapshot
             .operation_running(op::OperationKey::SessionList);
         let mut projects = Vec::new();
+        let mut last_section = Some("プロジェクト".to_string());
+        let mut pinned_heading = false;
         for project in list
             .as_ref()
             .map(|page| page.projects.as_slice())
             .unwrap_or_default()
         {
+            if project.pinned {
+                last_section = None;
+                if !pinned_heading {
+                    projects.push(SidebarRow::Heading("ピン留め".into()));
+                    pinned_heading = true;
+                }
+            } else {
+                let section = project
+                    .section
+                    .clone()
+                    .unwrap_or_else(|| "プロジェクト".into());
+                if last_section.as_ref() != Some(&section) {
+                    projects.push(SidebarRow::Heading(section.clone()));
+                    last_section = Some(section);
+                }
+            }
             let id = project.id.clone();
             let expanded = project.expanded;
             let new_root = project
@@ -313,6 +345,22 @@ impl Desktop {
                 )
                 .into(),
             );
+        }
+        if let Some(list) = &list {
+            for project in &list.hidden_projects {
+                let id = project.id.clone();
+                projects.push(
+                    SidebarMenuItem::new(format!("一覧に戻す: {}", project.name))
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.dispatch(Intent::SetProjectHidden {
+                                project_id: id.clone(),
+                                hidden: false,
+                            });
+                            cx.notify();
+                        }))
+                        .into(),
+                );
+            }
         }
         let mut chats: Vec<SidebarRow> = list
             .as_ref()

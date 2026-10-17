@@ -6,6 +6,7 @@ mod media;
 mod model_settings;
 mod onboarding;
 mod permissions;
+mod project_management;
 mod settings;
 mod sidebar;
 mod workbench;
@@ -131,14 +132,18 @@ fn conversation_file_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.image_gallery.is_none() && self.panel_open && self.tab == Tab::Chat;
+        let active = self.project_editor.is_none()
+            && self.image_gallery.is_none()
+            && self.panel_open
+            && self.tab == Tab::Chat;
         let thread_id = (active && self.panel == Panel::Agents)
             .then(|| self.snapshot.navigation.thread_id.clone())
             .flatten();
         if self.snapshot.observed_agents != thread_id {
             self.dispatch(Intent::WatchAgents { thread_id });
         }
-        let composer_visible = self.image_gallery.is_none()
+        let composer_visible = self.project_editor.is_none()
+            && self.image_gallery.is_none()
             && self.tab == Tab::Chat
             && (!self.panel_open
                 || (!self.side_chat_mode && window.viewport_size().width >= px(1080.)));
@@ -177,9 +182,13 @@ impl Render for Desktop {
                 let _ = entity.update(cx, |view, cx| view.load_visible_history(cx));
             });
         }
-        let main = match self.tab {
-            Tab::Chat => self.conversation_content(window.viewport_size().width, cx),
-            Tab::Settings => self.settings(cx),
+        let main = if self.project_editor.is_some() {
+            self.project_editor_view(cx)
+        } else {
+            match self.tab {
+                Tab::Chat => self.conversation_content(window.viewport_size().width, cx),
+                Tab::Settings => self.settings(cx),
+            }
         };
         h_flex()
             .size_full()

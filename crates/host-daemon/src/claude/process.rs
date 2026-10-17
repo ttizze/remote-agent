@@ -23,7 +23,15 @@ pub(super) fn executable(
     } else {
         path.and_then(|path| {
             std::env::split_paths(path)
-                .map(|directory| directory.join(program.as_os_str()))
+                .flat_map(|directory| {
+                    let direct = directory.join(program.as_os_str());
+                    // npm's Windows shim launches this native binary. Resolve
+                    // it directly so the SDK never needs a command shell.
+                    let npm = (cfg!(windows) && program.as_os_str() == "claude.exe").then(|| {
+                        directory.join("node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+                    });
+                    std::iter::once(direct).chain(npm)
+                })
                 .find(|candidate| candidate.is_file())
         })
     }
@@ -77,6 +85,31 @@ pub(super) struct Process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_npm_claude_is_resolved_without_running_a_shim() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root
+            .path()
+            .join("node_modules/@anthropic-ai/claude-code/bin/claude.exe");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"native CLI").unwrap();
+        let path = std::env::join_paths([root.path()]).unwrap();
+        assert_eq!(
+            executable(Path::new("claude"), Some(&path)).unwrap(),
+            binary
+        );
+        assert!(executable(Path::new("node"), Some(&path)).is_err());
+        let explicit = root.path().join("missing/claude.exe");
+        assert!(executable(&explicit, Some(&path)).is_err());
+        let direct = root.path().join("claude.exe");
+        std::fs::write(&direct, b"native install").unwrap();
+        assert_eq!(
+            executable(Path::new("claude"), Some(&path)).unwrap(),
+            direct
+        );
+    }
 
     #[test]
     fn mac_sdk_uses_bundled_node_without_path_and_respects_explicit_overrides() {

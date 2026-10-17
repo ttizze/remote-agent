@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 : "${ANDROID_HOME:?Run through nix develop .#android-test}"
 mode=${1:-all}
-[[ $mode == all || $mode == terminal ]] || { echo "usage: android-e2e.sh [all|terminal]" >&2; exit 2; }
+[[ $mode == all || $mode == terminal || $mode == attachments ]] || { echo "usage: android-e2e.sh [all|terminal|attachments]" >&2; exit 2; }
 target=${CARGO_TARGET_DIR:-target}
 mkdir -p "$target/qa"
 target=$(cd "$target" && pwd -P)
@@ -58,7 +58,7 @@ adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/debug/m
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/androidTest/debug/mobile-debug-androidTest.apk
 adb -P "$server_port" -s "$serial" shell am start -W -a android.intent.action.MAIN -c android.intent.category.HOME | tee "$log.home.log"
 grep -qx 'Status: ok' "$log.home.log"
-if [[ $mode == terminal ]]; then
+if [[ $mode != all ]]; then
     adb -P "$server_port" -s "$serial" shell pm grant dev.remoteagent.mobile android.permission.ACCESS_LOCAL_NETWORK
 else
 test_status=0
@@ -84,6 +84,15 @@ prepare_pairing() {
     adb -P "$server_port" -s "$serial" shell run-as dev.remoteagent.mobile mkdir -p cache
     adb -P "$server_port" -s "$serial" shell "run-as dev.remoteagent.mobile sh -c 'cat > cache/fixture-invitation.json'" <"$fixture/invitation.json"
 }
+if [[ $mode == attachments ]]; then
+prepare_pairing
+adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
+    -e class dev.remoteagent.mobile.ConversationRecoveryTest \
+    dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.attachments.log"
+grep -qx 'OK (1 test)' "$log.attachments.log"
+echo "Android image attachment round-trip passed"
+exit 0
+fi
 if [[ $mode == all ]]; then
 prepare_pairing
 adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \

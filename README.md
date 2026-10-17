@@ -8,7 +8,7 @@ The workspace pins netwatch 0.19.3 to a fork commit containing [UDP rebind recov
 
 ## Supported operating systems
 
-Except for Linux (Ubuntu 24.04 CI baseline), BEX supports only the latest generally available OS major, including its stable minor/patch releases. Betas, release candidates, older majors and future majors are outside the support contract. Minimum deployment versions prevent installation on older Apple/Android systems; they do not impose a runtime upper-version kill switch.
+Except for Linux (Ubuntu 24.04 CI baseline) and Android (Android 8.0/API 26 minimum), BEX supports only the latest generally available OS major, including its stable minor/patch releases. For platforms subject to the latest-major policy, betas, release candidates, older majors and future majors are outside the support contract. Minimum deployment versions prevent installation below the listed Apple/Android requirements; they do not impose a runtime upper-version kill switch.
 
 Verified on **2026-09-13**:
 
@@ -16,13 +16,13 @@ Verified on **2026-09-13**:
 | --- | --- | --- |
 | iPhone / iPad | iOS / iPadOS 26 | Xcode 26 stable, deployment target 26.0 in the app, UI tests, Rust and Swift bindings; iOS 26 Simulator |
 | macOS desktop, Host and CLI | macOS Tahoe 26 | Rust deployment target and app/helper bundle minimum 26.0; Swift helper target 26.0 |
-| Android | Android 17 (API 37) | Minimum, compile and target SDK 37; Nix build and test SDK platform 37 |
+| Android | Android 8.0+ (API 26+) | Minimum SDK 26; compile/target SDK 37; Nix build and test SDK platform 37 |
 | Windows desktop, Host and CLI | Windows 11; Windows Server 2025 | Existing `windows-2025` CI builds/tests on Server 2025, not a Windows 11 UI acceptance test |
 | Linux desktop, Host and CLI | Ubuntu 24.04 CI baseline | GitHub-hosted `ubuntu-24.04` runner and pinned `nix develop .#native` userspace |
 
 Sources: [Apple security releases](https://support.apple.com/en-ca/100100), [Android 17 release](https://android-developers.googleblog.com/2026/06/Android-17.html), [API 37 SDK configuration](https://developer.android.com/about/versions/17/setup-sdk), [Windows client releases](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information), and [Windows Server releases](https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info). Windows feature updates such as 25H2/26H1 do not constitute a new Windows major.
 
-Android 17 asks for nearby-device access before opening a LAN connection. Denial retains the permission screen with retry and Settings actions; users can also continue over the Internet (a LAN-only Host still needs permission). Returning from Settings with permission granted opens the app. The Internet choice survives activity recreation; a new launch checks permission again. Saved hosts and drafts remain in the existing repository.
+Android 8–16 do not request the Android 17-only local-network permission. Android 17 asks for nearby-device access before opening a LAN connection. Denial retains the permission screen with retry and Settings actions; users can also continue over the Internet (a LAN-only Host still needs permission). Returning from Settings with permission granted opens the app. The Internet choice survives activity recreation; a new launch checks permission again. Saved hosts and drafts remain in the existing repository.
 
 When a new major becomes generally available, verify the vendor release, update these baselines together, remove obsolete compatibility paths, and run client acceptance tests before claiming support. Do not promote a beta/RC because an SDK or runner happens to include it. This policy does not select a Markdown rendering library.
 
@@ -106,6 +106,12 @@ Host preferences for worktrees (`bex-worktrees.json`) and the directory for chat
 
 To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続を解除** and confirm. This deletes its authentication key on that iPhone and prevents reconnection after relaunch, while retaining Host conversation data. On Mac, **設定 → 端末と接続 → 接続を解除** revokes the device’s access and closes active connections. Pair again to reconnect. Removing a PC on iPhone does not remove the old device entry from the Mac.
 
+## Windows downloads
+
+Windows 11 users can run a prebuilt ZIP without installing Rust. See
+[Windows installation and build instructions](docs/WINDOWS.md) for prerequisites,
+release downloads, verified CI development artifacts, and source builds.
+
 ## Build the clients
 
 ```sh
@@ -116,7 +122,7 @@ scripts/dev-env.sh just build-desktop-macos && open target/release/bex.app
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
 open apps/mobile/iosApp/Bex.xcodeproj
 
-# Android 17 (API 37)
+# Android 8.0+ (build SDK 37)
 scripts/dev-env.sh ./gradlew :apps:mobile:assembleDebug
 ```
 

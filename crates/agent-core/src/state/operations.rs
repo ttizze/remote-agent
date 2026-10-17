@@ -39,6 +39,7 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ManageCodexCli(ManageCodexCli),
     ReadTaskActivity(ReadTaskActivity),
     RegisterLiveActivity(RegisterLiveActivity),
     UnregisterLiveActivity(UnregisterLiveActivity),
@@ -78,6 +79,30 @@ pub enum Intent {
     ExpandProjects,
     ExpandThreadList {
         project_id: Option<String>,
+    },
+    SetProjectPinned {
+        project_id: String,
+        pinned: bool,
+    },
+    EditProject {
+        project_id: String,
+        name: String,
+        section: String,
+    },
+    SetProjectSection {
+        project_id: String,
+        section: String,
+    },
+    SetProjectHidden {
+        project_id: String,
+        hidden: bool,
+    },
+    ArchiveProjectChats {
+        project_id: String,
+        before: i64,
+    },
+    RestoreProjectChats {
+        project_id: String,
     },
     SetProjectExpanded {
         project_id: String,
@@ -233,6 +258,7 @@ pub enum OperationKey {
         path: String,
     },
     WorkspaceReview,
+    CodexCli,
     Models,
     Accounts,
     AccountLogin {
@@ -386,6 +412,8 @@ mod permissions;
 pub use permissions::*;
 mod composer;
 pub use composer::*;
+mod codex_cli;
+pub use codex_cli::*;
 mod accounts;
 pub use accounts::*;
 mod terminal;

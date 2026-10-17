@@ -2535,7 +2535,11 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
 #[tokio::test]
 async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
     for navigate in [false, true] {
-        let (store, mut reader, mut writer) = setup(snapshot()).await;
+        let source = SessionRef { provider: ProviderKind::Codex, id: "thread".into() };
+        let mut initial = snapshot();
+        let draft = Arc::new(Draft { text: "unsent message".into(), ..Default::default() });
+        Arc::make_mut(&mut initial.drafts).insert(source.clone().into(), draft.clone());
+        let (store, mut reader, mut writer) = setup(initial).await;
         let fork = store.dispatch(Intent::ForkSession(op::ForkSession::new(
             SessionRef {
                 provider: ProviderKind::Codex,
@@ -2549,7 +2553,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
         if navigate {
             new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
-        writer.reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"forked"},"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
+        writer.reply(&request, json!({"result":{"model":{"provider":"codex","id":"fork-model"},"thread":{"id":{"provider":"codex","id":"forked"},"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
         if !navigate {
             loop {
                 let opening = read(&mut reader).await;
@@ -2608,6 +2612,15 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
             if navigate { "/new" } else { "/fixture" }
         );
         assert_eq!(loaded_text(&store.snapshot()), Some("old"));
+        assert_eq!(store.snapshot().drafts[&DraftKey::from(source)], draft);
+        let fork_key = DraftKey::from(SessionRef { provider: ProviderKind::Codex, id: "forked".into() });
+        if navigate {
+            assert!(!store.snapshot().drafts.contains_key(&fork_key));
+        } else {
+            let mut expected = draft.as_ref().clone();
+            expected.model = Some(agent_protocol::models::ModelRef { provider: ProviderKind::Codex, id: "fork-model".into() });
+            assert_eq!(store.snapshot().drafts[&fork_key].as_ref(), &expected);
+        }
         store.close().await.unwrap();
     }
 }

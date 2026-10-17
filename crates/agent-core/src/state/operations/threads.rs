@@ -788,6 +788,7 @@ fn select_thread(snapshot: &mut Snapshot, id: crate::session::SessionRef, cwd: S
             Some(id.provider),
             &snapshot.models,
             !snapshot.model_errors.is_empty(),
+            snapshot.allows_custom_codex_models(),
         );
         if settings
             != (
@@ -886,6 +887,15 @@ impl Operation for ForkSession {
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let id = output.thread.id.clone().expect("validated thread ID");
+        let draft = snapshot
+            .drafts
+            .get(&DraftKey::from(self.thread_id.clone()))
+            .cloned();
+        if let Some(draft) = draft {
+            Arc::make_mut(&mut snapshot.drafts)
+                .entry(id.clone().into())
+                .or_insert(draft);
+        }
         let mut effects = open_thread(snapshot, output.thread, output.model);
         effects.push(Effect::execute(ReadThread::new(id)));
         effects
@@ -974,6 +984,7 @@ impl Operation for LoadModels {
             &snapshot
                 .model_defaults_for_cwd(&snapshot.navigation.cwd)
                 .providers,
+            snapshot.allows_custom_codex_models(),
         );
         snapshot.models = Arc::new(models);
         snapshot.model_errors = Arc::new(errors);

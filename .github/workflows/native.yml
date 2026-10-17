@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       ios-test-rounds:
@@ -89,6 +91,7 @@ jobs:
       - name: Check workflows and vendored runtimes
         run: |
           nix develop .#native --command actionlint
+          nix develop .#native --command node --test lp/download.test.cjs
           nix develop .#native --command npm --prefix crates/host-daemon/src/visualize ci --ignore-scripts --no-audit
           nix develop .#native --command npm --prefix crates/host-daemon/src/visualize run vendor
           git diff --exit-code -- crates/host-daemon/src/visualize
@@ -151,6 +154,8 @@ jobs:
         run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
   android:
     needs: changes
+    permissions:
+      contents: write # Attach the tested Android preview APK on release publication.
     if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -196,6 +201,25 @@ jobs:
           name: android-acceptance
           path: target/qa/android-*
           retention-days: 7
+      - name: Package the tested Android preview APK
+        run: |
+          mkdir -p target/android-packages
+          cp apps/mobile/build/outputs/apk/debug/mobile-debug.apk target/android-packages/bex-android-preview.apk
+          cd target/android-packages
+          sha256sum bex-android-preview.apk > bex-android-preview.apk.sha256
+      - name: Retain the Android preview download
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bex-android-preview
+          path: target/android-packages/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach Android preview APK to the published release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" target/android-packages/bex-android-preview.apk target/android-packages/bex-android-preview.apk.sha256 --repo "$GITHUB_REPOSITORY" --clobber
   mac:
     name: Mac
     needs: changes
@@ -321,6 +345,8 @@ jobs:
           retention-days: 7
   windows:
     needs: toolchain
+    permissions:
+      contents: write # Attach the verified Windows package to a published release.
     # Latest stable Windows Server major; Windows 11 UI acceptance is separate.
     runs-on: windows-2025
     timeout-minutes: 60
@@ -351,3 +377,24 @@ jobs:
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
+      - name: Package verified Windows development binaries
+        if: github.event_name != 'release'
+        run: ./scripts/package-windows.ps1 -Profile dev -SkipBuild
+      - name: Build and package Windows release
+        if: github.event_name == 'release'
+        run: ./scripts/package-windows.ps1 -Profile release
+      - name: Retain the Windows package and checksum
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bex-windows-x86_64-${{ github.event_name == 'release' && 'release' || 'dev' }}
+          path: target/windows-packages/bex-windows-x86_64-*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach Windows package to the published release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" target/windows-packages/bex-windows-x86_64-release.zip target/windows-packages/bex-windows-x86_64-release.zip.sha256 --repo "$env:GITHUB_REPOSITORY" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Windows release upload failed." }

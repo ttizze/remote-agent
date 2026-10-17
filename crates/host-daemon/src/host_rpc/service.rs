@@ -844,6 +844,11 @@ impl HostRpcService {
             | Call::SubmitAccountLogin(_)
             | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
 
+            Call::CodexCli(params) => self
+                .agent(ProviderKind::Codex)?
+                .codex_cli(params.update)
+                .await?
+                .into(),
             Call::ListModels(params) => {
                 let cursors: std::collections::BTreeMap<ProviderKind, Option<String>> = params
                     .cursor
@@ -1307,11 +1312,41 @@ impl HostRpcService {
     }
 
     async fn project_snapshot(&self) -> Result<crate::projects::state::Snapshot, Failure> {
-        self.inner
+        let mut native = match self.agent(ProviderKind::Codex) {
+            Ok(agent) if agent.availability().is_ok() => agent.projects().await?,
+            _ => Vec::new(),
+        };
+        let codex_project_ids = native.iter().map(|project| project.id.clone()).collect();
+        // Claude catalogs are read-only native metadata; listing them does not
+        // require an executable CLI or an authenticated inference account.
+        if let Ok(agent) = self.agent(ProviderKind::Claude) {
+            for mut project in agent.projects().await? {
+                let native_group = project.roots.is_empty();
+                project.roots.retain(|root| {
+                    !native.iter().any(|existing| {
+                        existing.roots.iter().any(|other| {
+                            other.path == root.path
+                                || dunce::canonicalize(&other.path)
+                                    .ok()
+                                    .zip(dunce::canonicalize(&root.path).ok())
+                                    .is_some_and(|(a, b)| a == b)
+                        })
+                    })
+                });
+                if native_group || !project.roots.is_empty() {
+                    native.push(project);
+                }
+            }
+        }
+        let mut snapshot = self
+            .inner
             .projects
-            .load()
+            .load_with_projects(native)
             .await
-            .map_err(|error| Failure::new("project_state_unavailable", error))
+            .map_err(|error| Failure::new("project_state_unavailable", error))?;
+        // Only IDs from Codex can be sent to Codex's create_in_project API.
+        snapshot.native_project_ids = codex_project_ids;
+        Ok(snapshot)
     }
 
     async fn host_title_list(
@@ -1555,11 +1590,16 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
+        let projects = self.project_snapshot().await?;
+        let project = projects
+            .project_for_workspace(params.cwd.as_deref().unwrap_or_default())
+            .filter(|id| projects.native_project_ids.contains(*id));
         self.start_thread(agent.as_ref(), |browser| {
-            agent.create(
+            agent.create_in_project(
                 params.cwd.as_deref().unwrap_or_default(),
                 params.model.as_ref().map(|m| m.id.as_str()),
                 browser,
+                project,
             )
         })
         .await
@@ -1731,12 +1771,65 @@ fn describe_thread(
     capabilities: agent_protocol::session::Capabilities,
     projects: &crate::projects::state::Snapshot,
 ) {
-    thread.project_id = projects.project_membership(thread.cwd.as_deref());
+    // A null native ID also occurs for existing folder-based Codex conversations.
+    // Only a non-null native assignment can override workspace membership.
+    if !matches!(
+        thread.project_id,
+        agent_protocol::models::ProjectMembership::Assigned(_)
+    ) {
+        thread.project_id = projects.project_membership(thread.cwd.as_deref());
+    }
     thread.capabilities = Some(capabilities);
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_projects_include_existing_threads_without_a_native_assignment() {
+        use super::*;
+        use agent_protocol::models::{Project, ProjectMembership, ProjectRoot};
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let projects = ProjectStore::new(root.join("bex-worktrees.json"))
+            .load_with_projects(vec![Project {
+                id: "native".into(),
+                name: "Native project".into(),
+                roots: vec![ProjectRoot {
+                    path: project.to_str().unwrap().into(),
+                }],
+                ..Default::default()
+            }])
+            .await
+            .unwrap();
+        for (cwd, membership, expected) in [
+            (
+                project.clone(),
+                ProjectMembership::Unassigned {},
+                Some("native"),
+            ),
+            (
+                project.clone(),
+                ProjectMembership::Unknown {},
+                Some("native"),
+            ),
+            (
+                project.clone(),
+                ProjectMembership::Assigned("explicit-other".into()),
+                Some("explicit-other"),
+            ),
+            (root.join("outside"), ProjectMembership::Unassigned {}, None),
+        ] {
+            let mut thread = Thread {
+                cwd: Some(cwd.to_str().unwrap().into()),
+                project_id: membership,
+                ..Default::default()
+            };
+            describe_thread(&mut thread, Default::default(), &projects);
+            assert_eq!(thread.project_id.as_deref(), expected);
+        }
+    }
     #[tokio::test]
     async fn live_activity_registration_falls_back_without_apns_and_rejects_malformed_tokens() {
         use super::*;
@@ -2275,6 +2368,83 @@ mod tests {
                 assert_eq!(response["error"]["code"], "provider_unavailable");
                 assert_eq!(response["error"]["delivery"], "notSent");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_native_projects_keep_shared_directory_threads_below_the_project() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let native = root.path().join("native");
+        let transcripts = native.join("projects/shared");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        for project in ["chan_games", "chan_tanks"] {
+            let id = uuid::Uuid::new_v4();
+            let snapshot = serde_json::json!({"type":"attachment","attachment":{
+                "type":"prompt_snapshot","systemPrompt":[format!("## Where you are\n\nProject: \"{project}\" (id: `{project}`)\n")]
+            }});
+            let user = serde_json::json!({"type":"user","sessionId":id,"cwd":root.path(),"message":{"content":"hello"}});
+            std::fs::write(
+                transcripts.join(format!("{id}.jsonl")),
+                format!("{snapshot}\n{user}\n"),
+            )
+            .unwrap();
+        }
+        let claude = crate::adapters::Claude::load(
+            root.path().join("missing-cli"),
+            root.path().join("state"),
+            Some(native),
+        )
+        .await
+        .unwrap();
+        let service = HostRpcService::new(
+            [
+                Backend::unavailable(ProviderKind::Codex, "unavailable"),
+                claude.into(),
+            ],
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
+        );
+        let session = service.open_session();
+        let response = service
+            .dispatch(
+                session.id(),
+                &Call::ListSessions(op::ListSessions {
+                    query: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let Response::Success { result } = agent_protocol::protocol::decode::<
+            Response<agent_protocol::models::ThreadList>,
+        >(&response.initial)
+        .unwrap() else {
+            panic!("list failed")
+        };
+        assert_eq!(result.projects.len(), 2);
+        for project in &result.projects {
+            assert!(project.roots.is_empty());
+            let response = service
+                .dispatch(
+                    session.id(),
+                    &Call::ListProjectSessions(op::ListProjectSessions {
+                        project_id: project.id.clone(),
+                        limit: 5,
+                        search_term: String::new(),
+                    }),
+                )
+                .await
+                .unwrap();
+            let Response::Success { result: page } = agent_protocol::protocol::decode::<
+                Response<agent_protocol::models::ThreadList>,
+            >(&response.initial)
+            .unwrap() else {
+                panic!("project page failed")
+            };
+            assert_eq!(page.data.len(), 1);
+            assert_eq!(
+                page.data[0].project_id.as_deref(),
+                Some(project.id.as_str())
+            );
         }
     }
 

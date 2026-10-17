@@ -81,6 +81,7 @@ private fun AndroidQrCaptureDialog(activity: ComponentActivity, onContents: (Str
     androidx.compose.runtime.DisposableEffect(Unit) { onDispose { executor.shutdownNow() } }
 }
 
+@androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
 private fun bindCamera(
     activity: ComponentActivity,
     previewView: PreviewView,
@@ -91,6 +92,12 @@ private fun bindCamera(
     val providerFuture = ProcessCameraProvider.getInstance(activity)
     providerFuture.addListener(
         {
+            if (
+                ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) !=
+                    PackageManager.PERMISSION_GRANTED
+            ) {
+                return@addListener
+            }
             val provider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
             val scannerOptions = BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
             val scanner = BarcodeScanning.getClient(scannerOptions)

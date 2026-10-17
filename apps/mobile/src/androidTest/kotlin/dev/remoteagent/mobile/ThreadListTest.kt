@@ -25,6 +25,34 @@ class ThreadListTest {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun workspaceTabsAndNewChatKeepExistingIntentNavigation() {
+        Snapshot.empty().use { snapshot ->
+            val intents = mutableListOf<Intent>()
+            var openedHosts = false
+            compose.setContent {
+                BexTheme {
+                    ThreadListScreen(
+                        snapshot.threadList(),
+                        snapshot.listQuery(),
+                        false,
+                        { intents.add(it) },
+                        { openedHosts = true },
+                        hostName = "Development PC",
+                        connected = true,
+                    )
+                }
+            }
+            compose.onNodeWithText("接続中").assertIsDisplayed()
+            compose.onNodeWithText("Development PC").performClick()
+            assertTrue(openedHosts)
+            compose.onNodeWithText("プロジェクト").performClick()
+            compose.onNodeWithText("最近のチャット").performClick()
+            compose.onNodeWithText("新しいチャット").performClick()
+            assertTrue(intents.last() is Intent.NewChat)
+        }
+    }
+
+    @Test
     fun worktreeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter() {
         val persisted =
             JSONObject(Snapshot.empty().serialize().decodeToString())
@@ -60,9 +88,7 @@ class ThreadListTest {
                         list,
                         snapshot.listQuery(),
                         false,
-                        { intent ->
-                            if (intent is Intent.ReadThread) opened.add(intent.v1.threadId)
-                        },
+                        { intent -> if (intent is Intent.ReadThread) opened.add(intent.v1.threadId) },
                         {},
                     )
                 }
