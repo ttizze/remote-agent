@@ -6,7 +6,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     component::{
-        IconName, Sizable,
+        IconName, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -23,9 +23,11 @@ mod windows_import;
 enum Event {
     Location(String),
     Navigate(String),
+    Title(String),
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub(crate) struct ChromeProfileSource {
     pub(crate) root: Option<std::path::PathBuf>,
     pub(crate) password: fn() -> Result<Vec<u8>, String>,
@@ -50,10 +52,11 @@ impl Default for ChromeProfileSource {
     }
 }
 
-pub(crate) struct Browser {
+pub(crate) struct BrowserPage {
     webview: Entity<WebView>,
     address: Entity<InputState>,
     error: String,
+    title: String,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     importing: bool,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -67,13 +70,294 @@ pub(crate) struct Browser {
     _subscription: Subscription,
 }
 
+struct OpenTab(String);
+impl EventEmitter<OpenTab> for BrowserPage {}
+
+struct BrowserTab {
+    id: usize,
+    page: Entity<BrowserPage>,
+    _subscription: Subscription,
+    _observation: Subscription,
+}
+
+pub(crate) struct Browser {
+    tabs: Vec<BrowserTab>,
+    active: usize,
+    next_id: usize,
+    visible: bool,
+    error: String,
+    #[cfg(target_os = "windows")]
+    pending: Vec<Task<()>>,
+}
+
 impl Browser {
+    fn attach(page: Entity<BrowserPage>, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| {
+            let mut browser = Self {
+                tabs: Vec::new(),
+                active: 0,
+                next_id: 0,
+                visible: true,
+                error: String::new(),
+                #[cfg(target_os = "windows")]
+                pending: Vec::new(),
+            };
+            browser.insert(page, window, cx);
+            browser
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn start(
+        window: &mut Window,
+        cx: &mut App,
+        ready: impl FnOnce(Result<Entity<Self>, String>, &mut Window, &mut App) + 'static,
+    ) -> Result<Task<()>, String> {
+        BrowserPage::start(window, cx, move |result, window, cx| {
+            ready(
+                result.map(|page| Self::attach(page, window, cx)),
+                window,
+                cx,
+            );
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn new(
+        builder: wry::WebViewBuilder<'_>,
+        #[cfg(target_os = "macos")] chrome: ChromeProfileSource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, String> {
+        let page = BrowserPage::new(
+            builder,
+            #[cfg(target_os = "macos")]
+            chrome,
+            window,
+            cx,
+        )?;
+        Ok(Self::attach(page, window, cx))
+    }
+
+    fn insert(&mut self, page: Entity<BrowserPage>, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let subscription = cx.subscribe_in(&page, window, |s, _, event: &OpenTab, window, cx| {
+            s.add_tab(Some(event.0.clone()), window, cx);
+        });
+        let observation = cx.observe(&page, |_, _, cx| cx.notify());
+        self.tabs.push(BrowserTab {
+            id,
+            page,
+            _subscription: subscription,
+            _observation: observation,
+        });
+        self.select(id, cx);
+    }
+
+    fn select(&mut self, id: usize, cx: &mut Context<Self>) {
+        if !self.tabs.iter().any(|tab| tab.id == id) {
+            return;
+        }
+        self.active = id;
+        self.set_visible(self.visible, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut App) {
+        self.visible = visible;
+        for tab in &self.tabs {
+            tab.page.update(cx, |page, cx| {
+                page.set_visible(visible && tab.id == self.active, cx)
+            });
+        }
+    }
+
+    pub(crate) fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Reuse the initial blank page; later links preserve the current page.
+        if self.tabs.len() == 1
+            && self.tabs[0]
+                .page
+                .read(cx)
+                .address
+                .read(cx)
+                .value()
+                .is_empty()
+        {
+            self.tabs[0]
+                .page
+                .update(cx, |page, cx| page.open_url(url, window, cx));
+        } else {
+            self.add_tab(Some(url.to_owned()), window, cx);
+        }
+    }
+
+    fn add_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(url) = &url {
+            if let Err(error) = browser_url(url) {
+                self.error = error;
+                cx.notify();
+                return;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let owner = cx.entity().downgrade();
+            match BrowserPage::start(window, cx, move |result, window, cx| {
+                let _ = owner.update(cx, |s, cx| s.finish_tab(result, url, window, cx));
+            }) {
+                Ok(task) => self.pending.push(task),
+                Err(error) => {
+                    self.error = error;
+                    cx.notify();
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(target_os = "macos")]
+            let chrome = self
+                .tabs
+                .first()
+                .map(|tab| tab.page.read(cx).chrome.clone())
+                .unwrap_or_default();
+            let result = BrowserPage::new(
+                wry::WebViewBuilder::new(),
+                #[cfg(target_os = "macos")]
+                chrome,
+                window,
+                cx,
+            );
+            self.finish_tab(result, url, window, cx);
+        }
+    }
+
+    fn finish_tab(
+        &mut self,
+        result: Result<Entity<BrowserPage>, String>,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(page) => {
+                if let Some(url) = url {
+                    page.update(cx, |page, cx| page.open_url(&url, window, cx));
+                }
+                self.error.clear();
+                self.insert(page, window, cx);
+            }
+            Err(error) => self.error = error,
+        }
+        cx.notify();
+    }
+
+    fn close(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        self.tabs[index]
+            .page
+            .update(cx, |page, cx| page.set_visible(false, cx));
+        self.tabs.remove(index);
+        if self.active == id {
+            if let Some(tab) = self.tabs.get(index.min(self.tabs.len().saturating_sub(1))) {
+                self.active = tab.id;
+            }
+        }
+        self.set_visible(self.visible, cx);
+        cx.notify();
+    }
+}
+
+impl Render for Browser {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .p_1()
+                    .child(
+                        h_flex()
+                            .id("browser-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .children(self.tabs.iter().map(|tab| {
+                                let id = tab.id;
+                                let value = tab.page.read(cx).address.read(cx).value();
+                                let page = tab.page.read(cx);
+                                let label = if !page.title.is_empty() {
+                                    page.title.chars().take(28).collect()
+                                } else if value.is_empty() {
+                                    "新しいタブ".to_owned()
+                                } else {
+                                    url::Url::parse(value.as_ref())
+                                        .ok()
+                                        .and_then(|url| url.host_str().map(str::to_owned))
+                                        .unwrap_or_else(|| value.chars().take(32).collect())
+                                };
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new(("browser-tab", id))
+                                            .label(label)
+                                            .small()
+                                            .ghost()
+                                            .selected(id == self.active)
+                                            .on_click(
+                                                cx.listener(move |s, _, _, cx| s.select(id, cx)),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new(("browser-close-tab", id))
+                                            .icon(IconName::Close)
+                                            .small()
+                                            .ghost()
+                                            .tooltip("タブを閉じる")
+                                            .accessibility_label("タブを閉じる")
+                                            .on_click(
+                                                cx.listener(move |s, _, _, cx| s.close(id, cx)),
+                                            ),
+                                    )
+                            })),
+                    )
+                    .child(
+                        Button::new("browser-new-tab")
+                            .icon(IconName::Plus)
+                            .small()
+                            .ghost()
+                            .tooltip("新しいタブ")
+                            .accessibility_label("新しいタブ")
+                            .on_click(cx.listener(|s, _, window, cx| s.add_tab(None, window, cx))),
+                    ),
+            )
+            .when(!self.error.is_empty(), |body| {
+                body.child(div().px_2().text_sm().child(self.error.clone()))
+            })
+            .children(
+                self.tabs
+                    .iter()
+                    .filter(|tab| tab.id == self.active)
+                    .map(|tab| tab.page.clone()),
+            )
+    }
+}
+
+impl BrowserPage {
     fn prepare(
         builder: wry::WebViewBuilder<'_>,
     ) -> (wry::WebViewBuilder<'_>, async_channel::Receiver<Event>) {
         let (tx, rx) = async_channel::unbounded();
         let navigation = tx.clone();
+        let title = tx.clone();
         let builder = builder
+            .with_document_title_changed_handler(move |value| {
+                let _ = title.try_send(Event::Title(value));
+            })
             .with_url("about:blank")
             .with_background_color((24, 24, 24, 255))
             .with_focused(false)
@@ -157,6 +441,7 @@ impl Browser {
         cx: &mut App,
     ) -> Entity<Self> {
         let webview = cx.new(|cx| WebView::new(raw, window, cx));
+        webview.update(cx, |view, _| view.hide());
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("URL を入力"));
         cx.new(|cx: &mut Context<Self>| {
             let subscription = cx.subscribe_in(&address, window, |s, _, event, _, cx| {
@@ -180,10 +465,11 @@ impl Browser {
                                         cx,
                                     )
                                 }),
+                                Event::Title(title) => s.title = title,
                                 Event::Navigate(url) => {
-                                    s.address
-                                        .update(cx, |input, cx| input.set_value(url, window, cx));
-                                    s.navigate(cx);
+                                    if browser_url(&url).is_ok() {
+                                        cx.emit(OpenTab(url));
+                                    }
                                 }
                             }
                             cx.notify();
@@ -198,6 +484,7 @@ impl Browser {
             Self {
                 webview,
                 address,
+                title: String::new(),
                 error: String::new(),
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 importing: false,
@@ -357,7 +644,7 @@ impl Browser {
     }
 }
 
-impl Render for Browser {
+impl Render for BrowserPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
