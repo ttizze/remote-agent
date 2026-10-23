@@ -66,7 +66,7 @@ tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach 
 
 android {
     namespace = "dev.remoteagent.mobile"
-    compileSdk = 37
+    compileSdk { version = release(37) { minorApiLevel = 1 } }
     defaultConfig {
         applicationId = "dev.remoteagent.mobile"
         minSdk = 26

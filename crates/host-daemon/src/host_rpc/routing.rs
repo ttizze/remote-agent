@@ -134,7 +134,7 @@ impl Outbound {
         let cost = frame_cost(frame.capacity());
         if self
             .bytes
-            .fetch_update(Relaxed, Relaxed, |bytes| {
+            .try_update(Relaxed, Relaxed, |bytes| {
                 bytes
                     .checked_add(cost)
                     .filter(|bytes| *bytes <= MAX_QUEUED_BYTES)

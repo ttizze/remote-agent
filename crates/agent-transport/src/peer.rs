@@ -404,7 +404,7 @@ impl RpcPeer {
 }
 
 fn allocate_id(next: &AtomicU64) -> Result<u64, PeerError> {
-    next.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    next.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map_err(|_| PeerError::RequestIdExhausted)
 }
 pub fn request_line<P: Serialize>(method: &str, params: &P) -> Result<String, PeerError> {

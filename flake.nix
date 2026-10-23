@@ -73,7 +73,7 @@
             fi
           '';
           androidSdk = (pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "37.0" ];
+            platformVersions = [ "37.1" ];
             buildToolsVersions = [ "36.0.0" ];
             includeNDK = true;
             includeEmulator = false;
