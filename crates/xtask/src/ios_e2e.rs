@@ -513,10 +513,9 @@ async fn template(
     log: &File,
     cancel: &watch::Receiver<bool>,
 ) -> Result<String> {
-    let owner = format!(
-        "{:x}",
-        Sha256::digest(owner_root.canonicalize()?.as_os_str().as_encoded_bytes())
-    );
+    let owner = hex::encode(Sha256::digest(
+        owner_root.canonicalize()?.as_os_str().as_encoded_bytes(),
+    ));
     let name = format!("Bex pristine E2E {owner} {runtime}");
     let devices = supervision::run(
         &args!["xcrun", "simctl", "list", "devices", "-j"],

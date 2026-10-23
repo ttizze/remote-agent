@@ -13262,6 +13262,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "filetime",
+ "hex",
  "nix 0.31.3",
  "plist",
  "process-wrap",

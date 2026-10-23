@@ -74,7 +74,7 @@ pub async fn run() -> Result<()> {
         hash.update(value);
     }
     let parent = target.join("qa/ios-markdown");
-    let cache = parent.join(format!("{:x}", hash.finalize()));
+    let cache = parent.join(hex::encode(hash.finalize()));
     let executable = cache.join("markdown-tests");
     let reusable = executable
         .metadata()
