@@ -124,7 +124,14 @@ internal fun ThreadListScreen(
                 Tab(selected = selectedTab == index, onClick = { selectedTab = index }, text = { Text(label) })
             }
         }
-        ThreadListContent(list, loadingThreads, selectedTab, reorder, perform, Modifier.weight(1f).fillMaxWidth())
+        ThreadListContent(
+            list,
+            loadingThreads,
+            selectedTab,
+            reorder,
+            perform,
+            Modifier.weight(1f).fillMaxWidth(),
+        )
         NewChatButton(perform)
     }
 }
@@ -322,14 +329,9 @@ private fun LazyListScope.projectThreads(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         }
         if (project.expanded) {
-            project.coordinatorUrl?.let {
+            project.coordinator?.let { session ->
                 item(key = "coordinator:${project.id}") {
-                    Text(
-                        "タスクの依頼・振り分けはメイン会話へ。以下はこのPCの作業スレッドです。",
-                        Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    CoordinatorEntry(session, perform)
                 }
             }
             if (project.loading && !project.hasMore)
@@ -376,8 +378,7 @@ private fun ProjectRow(
     modifier: Modifier = Modifier,
     floating: Boolean = false,
 ) {
-    val openLink = rememberExternalLinkOpener()
-    val coordinatorUrl = project.coordinatorUrl
+    val coordinator = project.coordinator
     Row(
         modifier.fillMaxWidth().padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -416,9 +417,9 @@ private fun ProjectRow(
                 }
             }
         }
-        if (coordinatorUrl != null) {
-            IconButton(onClick = { openLink(coordinatorUrl) }) {
-                Icon(painterResource(R.drawable.ic_chat), "${project.name}のメイン会話をClaudeで開く")
+        if (coordinator != null) {
+            IconButton(onClick = { perform(Intent.ReadThread(ReadThread(coordinator, open = true))) }) {
+                Icon(painterResource(R.drawable.ic_chat), "${project.name}のメイン会話を開く")
             }
         } else {
             IconButton(onClick = { perform(Intent.NewChat(project.roots.firstOrNull()?.path.orEmpty())) }) {

@@ -1,0 +1,75 @@
+name: Windows release installer
+on:
+  push:
+    branches: [fix/windows-release-installer]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: windows-release-installer
+  cancel-in-progress: false
+jobs:
+  unix-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/agent-peer
+          cache-on-failure: true
+      - run: cargo test --locked --manifest-path tools/agent-peer/Cargo.toml
+  windows:
+    needs: unix-tools
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Test SDK and build unit-test prerequisites
+        run: |
+          npm --prefix crates/host-daemon/src/claude/sdk ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw "SDK dependency installation failed." }
+          npm --prefix crates/host-daemon/src/claude/sdk test
+          if ($LASTEXITCODE -ne 0) { throw "SDK tests failed." }
+          node scripts/install-claude-sdk.mjs target/debug
+          cargo build --locked -p bex-process --bin bex-provider-supervisor
+          if ($LASTEXITCODE -ne 0) { throw "Supervisor build failed." }
+      - name: Test workspace libraries and binaries
+        run: cargo test --locked --workspace --lib --bins --features agent-core/bindings
+      - name: Reject development installer requests
+        run: |
+          $rejected = $false
+          try { ./scripts/package-windows.ps1 -Profile dev } catch [System.Management.Automation.ParameterBindingException] { $rejected = $true }
+          if (-not $rejected) { throw "Development installer packaging must be rejected." }
+      - name: Test download links
+        run: node --test lp/download.test.cjs
+      - name: Build matching release binaries and installer
+        run: ./scripts/package-windows.ps1
+      - name: Install and launch without the build machine's shaders
+        run: ./scripts/test-windows-installer.ps1 -Installer target/windows-packages/bex-windows-x86_64-setup.exe -HideShaderSources
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bex-windows-release-installer
+          path: target/windows-packages/bex-windows-x86_64-*
+          if-no-files-found: error
+      - name: Publish verified installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-release-shaders-${{ github.run_number }}"
+          $notes = "Release build with embedded GPUI shaders. Installer tested away from the build-time shader sources. Desktop, Host, CLI and supervisor share source revision $env:GITHUB_SHA."
+          gh release create $tag target/windows-packages/bex-windows-x86_64-setup.exe target/windows-packages/bex-windows-x86_64-setup.exe.sha256 target/windows-packages/bex-windows-x86_64-release.zip target/windows-packages/bex-windows-x86_64-release.zip.sha256 --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "BEX Windows release shader fix" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed." }

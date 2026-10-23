@@ -5,7 +5,7 @@ its currently deployed static assets so download changes can be reviewed here.
 
 Windows buttons download the published `bex-windows-x86_64-setup.exe` installer directly, including when the GitHub release API is unavailable. Run the EXE to install BEX and all companion Host/CLI/Claude SDK files into the current user's Programs folder and create a Start menu shortcut. No ZIP extraction or Rust compilation is needed. Git, Node.js, the chosen agents and WebView2 are separate runtime prerequisites.
 
-The latest-release API may replace the pinned Windows preview only with an uploaded `bex-windows-x86_64-setup.exe` from the upstream repository. Old ZIP-only releases never override the EXE download. Native clients builds the installer with Inno Setup after Windows tests, retains it as an artifact, and uploads the EXE/checksum on release publication. The ZIP remains an optional diagnostic artifact, not a site download.
+Windows downloads stay pinned to an explicitly verified installer. A moving upstream release or a matching asset filename cannot establish that an installer uses a portable release build, so the site does not automatically replace the verified Windows URL. Native clients builds a release installer with Inno Setup after Windows tests, installs it and launches it without the build-time GPUI shader sources, retains it as an artifact, and uploads the EXE/checksum on release publication. The packager rejects development binaries and mismatched revisions. The ZIP remains an optional diagnostic artifact, not a site download.
 
 Android phones show the Android download action prominently. Android buttons link
 directly to the fork's verified Android preview APK release asset,
@@ -134,6 +134,13 @@ until uploads finish. Attachment cards open image, PDF, text/code and Markdown
 previews. Conversation images and existing Markdown file links also open previews.
 Binary or oversized text files show an explicit unavailable-preview message.
 Draft attachments can be removed without deleting the original phone file.
+
+The project chat icon and 「メイン会話を開く」 open the existing Claude project
+coordinator in BEX's regular native conversation screen. History, Markdown,
+selection/copy, older-message pagination and text input share the existing BEX
+conversation implementation. The paired Host reads and sends channel messages
+with the Claude account selected in BEX; no embedded page or phone web login is
+needed. Local worker threads remain separate conversations in the project.
 
 Conversation website and PR links open Android's browser or matching app. Links
 inside tables behave the same way. If no app can handle a link, BEX displays its

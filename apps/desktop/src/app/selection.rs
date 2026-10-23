@@ -182,7 +182,6 @@ impl Render for ConversationSelection {
                     .debug_selector(|| "selection-add".into())
                     .label("チャットに追加")
                     .small()
-                    .ghost()
                     .on_click(cx.listener(move |view, _, _, cx| {
                         cx.emit(SelectionAction::AddToChat(add.clone()));
                         view.clear(cx);
@@ -193,7 +192,6 @@ impl Render for ConversationSelection {
                     .debug_selector(|| "selection-details".into())
                     .label("詳細を表示")
                     .small()
-                    .ghost()
                     .on_click(cx.listener(move |view, _, _, cx| {
                         cx.emit(SelectionAction::Explain(details.clone()));
                         view.clear(cx);
@@ -205,7 +203,6 @@ impl Render for ConversationSelection {
                         .debug_selector(|| "selection-side-chat".into())
                         .label("サイドチャットで質問")
                         .small()
-                        .ghost()
                         .on_click(cx.listener(move |view, _, _, cx| {
                             cx.emit(SelectionAction::AskSideChat(side.clone()));
                             view.clear(cx);

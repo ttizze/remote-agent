@@ -5,8 +5,8 @@
   const DL = window.BEX_DL = {
     mac:     { name: 'macOS',         file: { ja: 'Apple Silicon · macOS 26 · .zip 34MB', en: 'Apple Silicon · macOS 26 · .zip 34MB' }, url: 'https://github.com/ttizze/remote-agent/releases/download/prd-74/bex-74-macOS-arm64.zip', ready: true },
     ios:     { name: 'iPhone / iPad', file: { ja: 'iOS 26 · TestFlightで配布中', en: 'iOS 26 · via TestFlight' }, url: 'https://testflight.apple.com/join/UJbK9Ww7', ready: true, cta: { ja: 'TestFlightで入手', en: 'Get on TestFlight' } },
-    win:     { name: 'Windows',       file: { ja: 'Windows 11 · x86-64 · EXE（プレビュー）', en: 'Windows 11 · x86-64 · preview EXE' }, url: 'https://github.com/TooriG/remote-agent/releases/download/windows-preview-20261020-storage-notice/bex-windows-x86_64-setup.exe', ready: true },
-    android: { name: 'Android',       file: { ja: 'Android 8.0以降 · 64-bit · APK（プレビュー）', en: 'Android 8.0+ · 64-bit · preview APK' }, url: 'https://github.com/TooriG/remote-agent/releases/download/android-preview-69/bex-android-preview.apk', ready: true, cta: { ja: 'Androidで使う', en: 'Use on Android' } },
+    win:     { name: 'Windows',       file: { ja: 'Windows 11 · x86-64 · EXE（プレビュー）', en: 'Windows 11 · x86-64 · preview EXE' }, url: 'https://github.com/TooriG/remote-agent/releases/download/windows-preview-20261024-buttons-810661d7/bex-windows-x86_64-setup.exe', ready: true },
+    android: { name: 'Android',       file: { ja: 'Android 8.0以降 · 64-bit · APK（プレビュー）', en: 'Android 8.0+ · 64-bit · preview APK' }, url: 'https://github.com/TooriG/remote-agent/releases/download/android-preview-78/bex-android-preview.apk', ready: true, cta: { ja: 'Androidで使う', en: 'Use on Android' } },
     linux:   { name: 'Linux',         file: { ja: 'ヘッドレスHost・CLI', en: 'Headless Host and CLI' }, url: SRC + '#headless-linux-and-iphone-pairing', ready: true, source: true }
   };
   const ICON = {
@@ -91,29 +91,6 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('[data-dl-menu]').forEach(m => m.hidden = true); });
   new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
   render();
-  // Publish a direct download only after GitHub reports the release asset.
-  // A Mac-only release, an API failure or an unpublished installer keeps the pinned download available.
-  async function loadReleaseDownloads() {
-    try {
-      const response = await fetch('https://api.github.com/repos/ttizze/remote-agent/releases/latest', {
-        headers: { Accept: 'application/vnd.github+json' },
-        signal: AbortSignal.timeout(5000)
-      });
-      if (!response.ok) return;
-      const release = await response.json();
-      for (const [platform, filename] of [['win', 'bex-windows-x86_64-setup.exe']]) {
-        const asset = release.assets?.find(x => x.name === filename && x.state === 'uploaded');
-        if (!asset) continue;
-        const url = new URL(asset.browser_download_url);
-        if (url.origin !== 'https://github.com' || !url.pathname.startsWith('/ttizze/remote-agent/releases/download/')) continue;
-        const target = DL[platform];
-        target.url = url.href;
-        target.ready = true;
-        target.source = false;
-        target.file = { ja: 'Windows 11 · x86-64 · EXE', en: 'Windows 11 · x86-64 · EXE' };
-      }
-      render();
-    } catch { /* Keep the pinned, published preview download. */ }
-  }
-  loadReleaseDownloads();
+  // Keep the explicitly verified installer pinned. An unrelated or older upstream
+  // release must not silently replace it based only on its asset filename.
 })();

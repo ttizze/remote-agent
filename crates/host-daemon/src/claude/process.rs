@@ -12,6 +12,15 @@ pub(super) fn executable(
     program: &Path,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<std::path::PathBuf, String> {
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    executable_from(program, path, home.as_deref())
+}
+
+fn executable_from(
+    program: &Path,
+    path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> Result<std::path::PathBuf, String> {
     #[cfg(windows)]
     let program = if program.extension().is_none() {
         std::borrow::Cow::Owned(program.with_extension("exe"))
@@ -33,9 +42,22 @@ pub(super) fn executable(
                     std::iter::once(direct).chain(npm)
                 })
                 .find(|candidate| candidate.is_file())
+        }).or_else(|| {
+            // The official native installer uses ~/.local/bin. Explorer may
+            // still have the PATH from before installation.
+            (program.as_os_str() == if cfg!(windows) { "claude.exe" } else { "claude" })
+                .then(|| home.map(|home| home.join(".local/bin").join(program.as_os_str())))
+                .flatten()
+                .filter(|candidate| candidate.is_file())
         })
     }
-    .ok_or_else(|| format!("executable is missing: {}", program.display()))?;
+    .ok_or_else(|| {
+        if program.as_os_str() == if cfg!(windows) { "claude.exe" } else { "claude" } {
+            "Claude Codeが見つかりません。公式サイト（https://code.claude.com/docs/en/setup）からインストールして、もう一度ログインしてください。".to_owned()
+        } else {
+            format!("executable is missing: {}", program.display())
+        }
+    })?;
     std::path::absolute(found).map_err(|error| error.to_string())
 }
 
@@ -85,6 +107,19 @@ pub(super) struct Process {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_claude_is_found_without_path_but_explicit_programs_are_respected() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join(format!(".local/bin/claude{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"native CLI").unwrap();
+        assert_eq!(executable_from(Path::new("claude"), None, Some(root.path())).unwrap(), binary);
+        assert!(executable_from(&root.path().join("missing-claude"), None, Some(root.path())).is_err());
+        assert!(executable_from(Path::new("node"), None, Some(root.path())).is_err());
+        std::fs::remove_file(binary).unwrap();
+        assert!(executable_from(Path::new("claude"), None, Some(root.path())).unwrap_err().contains("公式サイト"));
+    }
 
     #[cfg(windows)]
     #[test]

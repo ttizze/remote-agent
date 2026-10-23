@@ -86,7 +86,6 @@ impl Desktop {
                 "新しい会話のモデル"
             })
             .debug_selector(move || id.into())
-            .ghost()
             .when_some(model, |button, model| {
                 button.icon(provider_icon(model.model.provider))
             })
@@ -142,7 +141,6 @@ impl Desktop {
                     .label(effort.clone().unwrap_or_else(|| "自動".into()))
                     .accessibility_label("デフォルトの推論強度")
                     .debug_selector(move || format!("default-model-effort-{provider:?}"))
-                    .ghost()
                     .child(Icon::new(IconName::ChevronDown).size(px(14.)))
                     .dropdown_menu(move |mut menu, _, _| {
                         for value in std::iter::once(None).chain(efforts.iter().cloned().map(Some))
@@ -179,7 +177,6 @@ impl Desktop {
                     .icon(fast_icon(quick.fast))
                     .accessibility_label("デフォルトの速度")
                     .debug_selector(move || format!("default-model-speed-{provider:?}"))
-                    .ghost()
                     .child(Icon::new(IconName::ChevronDown).size(px(14.)))
                     .dropdown_menu(move |mut menu, _, _| {
                         for (label, value) in [
@@ -266,8 +263,7 @@ impl Desktop {
                                     scope: scope.clone(),
                                 });
                             },
-                        )
-                        .ghost(),
+                        ),
                     )
                 },
             )
@@ -317,8 +313,7 @@ impl Desktop {
                     .large()
                     .px_1()
                     .max_w(px(180.))
-                    .h(px(44.))
-                    .ghost(),
+                    .h(px(44.)),
             )
             .on_open_change(move |open, window, cx| {
                 if *open {
@@ -388,7 +383,7 @@ impl Desktop {
                 .debug_selector(move || format!("model-provider-{label}"))
                 .selected(provider == Some(value))
                 .when(in_settings, |button| {
-                    button.small().ghost().icon(provider_icon(value))
+                    button.small().icon(provider_icon(value))
                 })
                 .disabled(disabled)
                 .flex_1(),
@@ -468,7 +463,6 @@ impl Desktop {
                             Button::new(format!("account-choice-{index}"))
                                 .accessibility_label(identity.to_owned())
                                 .small()
-                                .ghost()
                                 .child(account_identity(Some(account.provider), identity).flex_1())
                                 .on_click(cx.listener(move |s, _, _, cx| {
                                     s.account_operation(Intent::SelectAccountForDraft(
@@ -507,7 +501,7 @@ impl Desktop {
                             row.child(
                                 self.button(format!("account-usage-manage-{index}"), "追加クレジット・上限を管理", cx, |s, window, cx| {
                                     s.open_browser_url("https://chatgpt.com/settings/usage", window, cx);
-                                }).small().ghost()
+                                }).small()
                             ).child(div().text_xs().text_color(rgb(appearance::MUTED))
                                 .child("利用枠は表示時刻に自動リセットされます。上限の変更・追加クレジットは管理画面で行えます。"))
                         });
@@ -684,8 +678,18 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.account_code
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.account_code.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_placeholder(
+                if provider == ProviderKind::DeepSeek {
+                    "APIキーを貼り付け"
+                } else {
+                    "ブラウザに表示された認証コードを貼り付け"
+                },
+                window,
+                cx,
+            );
+        });
         self.model_provider = Some(provider);
         if provider == ProviderKind::DeepSeek {
             self.model_panel = ModelPanel::Manage;
@@ -708,7 +712,7 @@ impl Desktop {
         self.perform(intent, OperationCompletion::Account);
     }
 
-    fn credential_controls(&self, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn credential_controls(&self, cx: &Context<Self>) -> AnyElement {
         let disabled = !self.snapshot.connected
             || self
                 .snapshot
@@ -806,7 +810,6 @@ impl Desktop {
                     },
                 )
                 .small()
-                .ghost()
                 .disabled(disabled)
                 .debug_selector(|| "dsh-key-remove".into()),
             );
@@ -860,15 +863,14 @@ impl Desktop {
             )
             .debug_selector(|| "account-cancel-login".into())
             .small()
-            .ghost()
             .disabled(disabled);
         let mut form = v_flex()
             .gap_3()
             .text_sm()
             .child(if login.requires_code_submission {
-                "ブラウザでログインし、認証コードを貼り付けてください。"
+                "① ブラウザでログイン → ② 表示された認証コードを下の欄に貼り付け → ③「接続」を押してください。"
             } else {
-                "ブラウザでログインし、次のコードを入力してください。"
+                "① コードをコピー → ② ブラウザでログイン → ③ ブラウザ側にコードを入力してください。"
             })
             .child(
                 self.button(
@@ -880,6 +882,7 @@ impl Desktop {
                     },
                 )
                 .debug_selector(|| "account-open-login".into())
+                .primary()
                 .small(),
             );
         if login.requires_code_submission {
@@ -910,6 +913,7 @@ impl Desktop {
                                 .update(cx, |input, cx| input.set_value("", window, cx));
                         })
                         .debug_selector(|| "account-submit-code".into())
+                        .primary()
                         .disabled(disabled || self.account_code.read(cx).value().trim().is_empty()),
                     ),
             );
@@ -928,18 +932,18 @@ impl Desktop {
                                 cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
                             },
                         )
-                        .small()
-                        .ghost(),
+                        .small(),
                     ),
             );
         }
         form = form
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(appearance::MUTED))
-                    .child("ログインが完了すると、自動で接続されます。"),
-            )
+            .child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
+                if login.requires_code_submission {
+                    "この欄に貼り付けるのは認証コードです。接続後、AIの確認が終わると次へ進めます。"
+                } else {
+                    "ブラウザでの認証後、自動で接続されます。この画面でのコード入力は不要です。"
+                },
+            ))
             .when(!self.account_polling && !self.account_busy, |form| {
                 form.child(
                     self.button(
@@ -951,7 +955,6 @@ impl Desktop {
                         },
                     )
                     .small()
-                    .ghost()
                     .disabled(disabled),
                 )
             });
@@ -1096,7 +1099,6 @@ impl Desktop {
                 .accessibility_label("OpenRouterのモデル一覧を表示")
                 .debug_selector(|| "model-openrouter".into())
                 .small()
-                .ghost()
                 .disabled(disabled)
                 .on_click(cx.listener(|s, _, window, cx| s.show_openrouter_models(window, cx)))
                 .into_any_element(),
@@ -1152,6 +1154,7 @@ impl Desktop {
             || self.busy > 0
             || !self.snapshot.connected
             || self.snapshot.account.login.is_some();
+        let provider_locked = !self.snapshot.can_change_provider(self.draft_key().clone());
         let mut agents = v_flex()
             .w(px(112.))
             .flex_shrink_0()
@@ -1181,7 +1184,6 @@ impl Desktop {
                         }
                         .size(px(24.)),
                     )
-                    .ghost()
                     .w(px(104.))
                     .h(px(44.))
                     .rounded(px(8.))
@@ -1190,13 +1192,13 @@ impl Desktop {
                         button.bg(rgb(appearance::SELECTED))
                     })
                     .accessibility_label(label)
-                    .tooltip(if self.selected().is_some() {
+                    .tooltip(if provider_locked {
                         "この会話のエージェントは固定です。別のエージェントは新しい会話で選べます。"
                     } else {
                         label
                     })
                     .debug_selector(move || format!("model-agent-{label}"))
-                    .disabled(disabled || self.selected().is_some())
+                    .disabled(disabled || provider_locked)
                     .on_click(cx.listener(move |s, _, window, cx| {
                         s.model_provider = Some(value);
                         s.model_search
@@ -1213,7 +1215,7 @@ impl Desktop {
                     })),
             );
         }
-        if let Some(session) = self.selected() {
+        if let Some(session) = self.selected().filter(|_| provider_locked) {
             let label = match session.provider {
                 ProviderKind::Codex => "Codex",
                 ProviderKind::Claude => "Claude",
@@ -1252,6 +1254,10 @@ impl Desktop {
                             })),
                     ),
             );
+        } else if self.selected().is_some() {
+            body = body.child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
+                "応答が始まる前に失敗しました。別のエージェントを選ぶと、入力と添付を復元して再送できます。",
+            ));
         } else {
             body = body.child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
                 "Codex・Claude・DSH（DeepSeek / OpenRouterなど）を選んで会話を始められます。",
@@ -1270,7 +1276,6 @@ impl Desktop {
         body = body.child(
             Button::new("model-account-summary")
                 .accessibility_label("アカウントと週間残量")
-                .ghost()
                 .w_full()
                 .h_auto()
                 .debug_selector(|| "model-account-summary".into())
@@ -1353,7 +1358,6 @@ impl Desktop {
                         });
                     }))
                     .debug_selector(move || selector.clone())
-                    .ghost()
                     .w_full()
                     .h(px(44.))
                     .px_2()
@@ -1390,7 +1394,6 @@ impl Desktop {
                 Button::new("custom-model-choice")
                     .debug_selector(|| "custom-model-choice".into())
                     .label(label)
-                    .ghost()
                     .w_full()
                     .disabled(disabled)
                     .on_click(cx.listener(move |s, _, _, _| {
@@ -1467,7 +1470,6 @@ impl Desktop {
         };
         let button = Button::new(id)
             .icon(fast_icon(fast))
-            .ghost()
             .accessibility_label(label)
             .tooltip(speed_tooltip)
             .debug_selector(move || id.into())
@@ -1555,7 +1557,6 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         Button::new(id)
             .child(bars)
-            .ghost()
             .when(!expanded, |button| button.w(px(44.)))
             .when(expanded, |button| {
                 button

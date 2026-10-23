@@ -57,7 +57,6 @@ import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.Respond
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.activityIsExpanded
-import dev.remoteagent.core.insertInvocation
 import dev.remoteagent.core.shouldLoadHistory
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -247,6 +246,7 @@ internal fun ThreadComposer(
 ) {
     val navigation = snapshot.navigation()
     val draft = snapshot.draft(navigation.draftKey)
+    val controls = snapshot.composerControls()
     val sending = snapshot.operationRunning(dev.remoteagent.core.OperationKey.Submission(navigation.draftKey))
     var uploading by remember(navigation.draftKey) { mutableStateOf(false) }
     val inputUnavailable = navigation.threadId?.let(snapshot::conversation)?.inputUnavailableReason()
@@ -259,16 +259,13 @@ internal fun ThreadComposer(
         Column(Modifier.padding(8.dp)) {
             inputUnavailable?.let { Text(it) }
             DraftAttachments(draft.attachments, navigation.draftKey, perform)
-            val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
-            ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
-                insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {
-                    perform(Intent.InsertInvocation(navigation.draftKey, it.text, invocation)) {}
-                }
-            }
+            ComposerInvocations(snapshot, perform)
             ComposerTextInput(snapshot, perform)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                attach { uploading = it }
-                ModelPickerButton(snapshot, perform, Modifier.weight(1f))
+                if (controls.canAttachFiles) attach { uploading = it }
+                if (controls.canChangeModel) ModelPickerButton(snapshot, perform, Modifier.weight(1f))
+                else Text(controls.settingsLabel.orEmpty(), Modifier.weight(1f).padding(horizontal = 8.dp),
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 VoiceInputButton(snapshot, perform, enabled = inputUnavailable == null && !sending)
                 if (navigation.threadId != null && activeTurn != null) {
                     ComposerStopButton(

@@ -17,7 +17,6 @@ pub(super) fn project_menu_button(id: String, owner: WeakEntity<Desktop>) -> imp
     Button::new("project-menu")
         .label("…")
         .xsmall()
-        .ghost()
         .accessibility_label("プロジェクトの操作")
         .tooltip("プロジェクトの操作")
         .dropdown_menu(move |mut menu, window, cx| {

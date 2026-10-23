@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 pub struct ProjectSummary {
     pub id: String,
     pub name: String,
-    /// The native coordinator lives on Claude, separately from local worker sessions.
-    pub coordinator_url: Option<String>,
+    /// Open the cloud project conversation with the regular BEX conversation UI.
+    pub coordinator: Option<crate::session::SessionRef>,
     pub roots: Vec<ProjectRoot>,
     pub icon_png: Option<Vec<u8>>,
     pub monogram: String,
@@ -57,7 +57,7 @@ fn project_summary(project: &Project) -> ProjectSummary {
     ProjectSummary {
         id: project.id.clone(),
         name: project.name.clone(),
-        coordinator_url: coordinator_url(&project.id),
+        coordinator: coordinator(&project.id),
         roots: project.roots.clone(),
         icon_png: project
             .favicon_png
@@ -76,10 +76,27 @@ fn project_summary(project: &Project) -> ProjectSummary {
     }
 }
 
-fn coordinator_url(project_id: &str) -> Option<String> {
-    let id = project_id.strip_prefix("claude-project:chan_")?;
-    (!id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
-        .then(|| format!("https://claude.ai/code/project/chan_{id}"))
+fn coordinator(project_id: &str) -> Option<crate::session::SessionRef> {
+    let id = project_id.strip_prefix("claude-project:")?;
+    coordinator_id(id).then(|| crate::session::SessionRef {
+        provider: crate::session::ProviderKind::Claude,
+        id: id.into(),
+    })
+}
+
+pub(crate) fn is_coordinator_session(session: &crate::session::SessionRef) -> bool {
+    session.provider == crate::session::ProviderKind::Claude && coordinator_id(&session.id)
+}
+
+fn coordinator_id(id: &str) -> bool {
+    let Some(suffix) = id.strip_prefix("chan_") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix.len() <= 120
+        && suffix
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadSummary {
@@ -378,14 +395,17 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn only_native_claude_projects_link_to_their_coordinator() {
+    fn only_native_claude_projects_open_their_original_coordinator() {
         let summary = project_summary(&Project {
             id: "claude-project:chan_01Q7KpeXNrNrvTTahXT6YE2S".into(),
             ..Default::default()
         });
         assert_eq!(
-            summary.coordinator_url.as_deref(),
-            Some("https://claude.ai/code/project/chan_01Q7KpeXNrNrvTTahXT6YE2S")
+            summary.coordinator,
+            Some(crate::session::SessionRef {
+                provider: crate::session::ProviderKind::Claude,
+                id: "chan_01Q7KpeXNrNrvTTahXT6YE2S".into()
+            })
         );
         for id in [
             "local",
@@ -395,10 +415,7 @@ mod tests {
             "claude-project:chan_bad?thread=other",
             "claude-project:chan_日本語",
         ] {
-            assert!(
-                coordinator_url(id).is_none(),
-                "unexpected coordinator for {id}"
-            );
+            assert!(coordinator(id).is_none(), "unexpected coordinator for {id}");
         }
     }
 

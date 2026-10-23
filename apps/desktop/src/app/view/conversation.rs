@@ -341,7 +341,6 @@ impl Desktop {
                                     Button::new(format!("copy-output-{id}"))
                                         .label("出力をコピー")
                                         .small()
-                                        .ghost()
                                         .on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 copied.clone(),
@@ -432,7 +431,6 @@ impl Desktop {
                             Button::new(format!("copy-plan-{id}"))
                                 .icon(IconName::Copy)
                                 .small()
-                                .ghost()
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
                                 }),
@@ -600,7 +598,6 @@ impl Desktop {
                                     Button::new(format!("copy-{}", item.data.id))
                                         .icon(IconName::Copy)
                                         .small()
-                                        .ghost()
                                         .debug_selector(|| "response-copy".into())
                                         .tooltip("回答をコピー")
                                         .accessibility_label("回答をコピー")
@@ -623,7 +620,6 @@ impl Desktop {
                                             .child(
                                                 Button::new(format!("fork-{}", item.data.id))
                                                     .small()
-                                                    .ghost()
                                                     .loading(forking)
                                                     .tooltip(if forking {
                                                         "分岐を作成中…"
@@ -873,7 +869,6 @@ impl Desktop {
                                     "{number}. {} {}",
                                     option.label, option.description
                                 ))
-                                .ghost()
                                 .selected(selected)
                                 .toggled(selected)
                                 .w_full()
@@ -1185,7 +1180,6 @@ fn user_message_row(
                             .debug_selector(|| "user-message-copy".into())
                             .icon(IconName::Copy)
                             .small()
-                            .ghost()
                             .tooltip("発言をコピー")
                             .accessibility_label("発言をコピー")
                             .disabled(copy_text.is_empty())
@@ -1196,7 +1190,6 @@ fn user_message_row(
                     .child(
                         edit.icon(Icon::default().path("bex/pencil.svg"))
                             .small()
-                            .ghost()
                             .debug_selector(|| "user-message-edit".into())
                             .tooltip("入力欄で編集")
                             .accessibility_label("入力欄で編集")

@@ -65,7 +65,13 @@ fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
         .flex_shrink_0()
         .pl(px(88.))
         .gap_2()
-        .child(div().flex_shrink_0().text_sm().font_semibold().child("bex"))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_sm()
+                .font_semibold()
+                .child(crate::APP_NAME),
+        )
         .when(expanded, |header| {
             header.w_full().pr_3().child(div().flex_1())
         })
@@ -74,7 +80,6 @@ fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
                 .debug_selector(move || id.into())
                 .icon(icon)
                 .small()
-                .ghost()
                 .tooltip(label)
                 .accessibility_label(label)
                 .on_click(cx.listener(move |desktop, _, _, cx| {
@@ -361,7 +366,6 @@ impl Desktop {
             .accessibility_label(label.clone())
             .child(div().flex_1().min_w_0().text_ellipsis().child(label))
             .small()
-            .ghost()
             .on_click(cx.listener(move |s, _, w, cx| {
                 action(s, w, cx);
                 cx.notify();
@@ -378,7 +382,6 @@ impl Desktop {
         Button::new(id.into())
             .icon(icon.into())
             .small()
-            .ghost()
             .tooltip(label.clone())
             .accessibility_label(label)
             .on_click(cx.listener(move |s, _, w, cx| {

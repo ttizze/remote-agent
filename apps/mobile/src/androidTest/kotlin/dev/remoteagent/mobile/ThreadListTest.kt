@@ -38,6 +38,31 @@ class ThreadListTest {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun bothCoordinatorEntriesOpenTheOriginalSessionInTheBexConversationScreen() {
+        val persisted = JSONObject(Snapshot.empty().serialize().decodeToString()).put(
+            "threads", JSONObject("""{"data":[],"projects":[
+                {"id":"claude-project:chan_example","name":"Cloud project","roots":[]}],
+                "hasMore":false,"hasMoreProjects":false,"limit":5,"projectPages":{}}"""),
+        )
+        Snapshot.restore(persisted.toString().encodeToByteArray()).use { snapshot ->
+            val original = snapshot.threadList()!!
+            val list = original.copy(projects = original.projects.map { it.copy(expanded = true) })
+            val intents = mutableListOf<Intent>()
+            compose.setContent {
+                BexTheme { ThreadListScreen(list, snapshot.listQuery(), false, { intents.add(it) }, {}) }
+            }
+            compose.onNodeWithText("プロジェクト").performClick()
+            compose.onNodeWithContentDescription("Cloud projectのメイン会話を開く").performClick()
+            compose.onNodeWithText("メイン会話を開く").assertIsDisplayed().performClick()
+            compose.runOnIdle {
+                val expected = SessionRef(ProviderKind.CLAUDE, "chan_example")
+                assertEquals(listOf(expected, expected), intents.map { (it as Intent.ReadThread).v1.threadId })
+                assertTrue(intents.all { (it as Intent.ReadThread).v1.open })
+            }
+        }
+    }
+
+    @Test
     fun recentChatsShowProjectNamesAndOpenTheOriginalConversation() {
         val persisted =
             JSONObject(Snapshot.empty().serialize().decodeToString())

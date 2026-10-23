@@ -1,21 +1,25 @@
 use super::*;
 use agent_core::presentation::connections::{AgentAvailability, ConnectionAgent};
+use agent_protocol::session::ProviderKind;
 
 impl Desktop {
     pub(super) fn connection_agent_controls(
         &self,
         agents: &[ConnectionAgent],
+        onboarding: bool,
         cx: &Context<Self>,
     ) -> Div {
         let login_provider = self.account_provider();
         let login = self.snapshot.account.login.is_some();
         let disabled = !self.snapshot.connected || self.account_busy || login;
-        let mut body = v_flex().gap_2().child(
-            div()
-                .text_xs()
-                .text_color(rgb(appearance::MUTED))
-                .child("この環境で使えるAI"),
-        );
+        let mut body = v_flex().gap_3().child(section_heading(
+            if onboarding {
+                "2. 使うAIを1つ設定"
+            } else {
+                "この環境で使えるAI"
+            },
+            "すべてのAIを設定する必要はありません。利用できるものが1つあれば始められます。",
+        ));
         for agent in agents {
             let provider = agent.provider;
             if login && Some(provider) == login_provider {
@@ -26,8 +30,21 @@ impl Desktop {
             let mut row = h_flex()
                 .items_center()
                 .gap_3()
-                .py_1()
-                .child(div().flex_1().child(agent.name.clone()))
+                .py_2()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(agent.name.clone())
+                        .child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
+                            match provider {
+                                ProviderKind::Codex => "ChatGPTのアカウントでログイン",
+                                ProviderKind::Claude => "Claudeのアカウントでログイン",
+                                ProviderKind::DeepSeek => "APIキーで設定する追加のAI",
+                            },
+                        )),
+                )
                 .child(
                     div()
                         .text_sm()
@@ -48,18 +65,64 @@ impl Desktop {
             ) {
                 let id = format!("connection-agent-{}", agent.name);
                 row = row.child(
-                    self.button(id.clone(), "ログイン", cx, move |view, window, cx| {
-                        view.start_provider_setup(provider, window, cx);
-                    })
+                    self.button(
+                        id.clone(),
+                        if provider == ProviderKind::DeepSeek {
+                            "APIキーを設定"
+                        } else {
+                            "ログイン"
+                        },
+                        cx,
+                        move |view, window, cx| {
+                            view.start_provider_setup(provider, window, cx);
+                        },
+                    )
                     .debug_selector(move || id.clone())
                     .small()
-                    .ghost()
                     .disabled(disabled),
                 );
             }
             body = body.child(row);
+            if provider == ProviderKind::DeepSeek
+                && login_provider == Some(provider)
+                && self.model_panel == ModelPanel::Manage
+            {
+                body = body.child(self.credential_controls(cx));
+            }
+        }
+        if onboarding {
+            body = body.child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
+                "BEXはAIを操作するアプリです。AI側のアカウント・利用契約と、選んだPC上の実行環境が必要です。設定できない場合は、そのPCでCodex / Claude Codeのインストールとログインを確認してください。",
+            ));
+            body = body.child(
+                self.button(
+                    "onboarding-setup-guide",
+                    "インストール・事前準備の手順を見る",
+                    cx,
+                    |_, _, cx| {
+                        cx.open_url(if cfg!(target_os = "windows") {
+                            "https://github.com/ttizze/remote-agent/blob/main/docs/WINDOWS.md"
+                        } else {
+                            "https://github.com/ttizze/remote-agent/blob/main/README.ja.md"
+                        });
+                    },
+                )
+                .small(),
+            );
         }
         body
+    }
+
+    fn retry_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.error.clear();
+        if self.snapshot.connected {
+            self.refresh_accounts_and_models();
+        } else {
+            self.connect(None);
+        }
+        if let Some(hosts) = &self.hosts {
+            hosts.update(cx, |hosts, _| hosts.refresh());
+        }
     }
 
     fn complete_onboarding(&mut self) {
@@ -90,7 +153,7 @@ impl Desktop {
         let setup = self.snapshot.connection_setup();
         let current = self.remote.as_ref().map(|host| host.id.as_str());
         let connected = self.snapshot.connected;
-        let agent_controls = self.connection_agent_controls(&setup.agents, cx);
+        let agent_controls = self.connection_agent_controls(&setup.agents, true, cx);
         let choices = self.hosts.as_ref().map(|hosts| {
             hosts.update(cx, |hosts, cx| {
                 hosts.connection_choices(
@@ -107,7 +170,10 @@ impl Desktop {
             .iter()
             .any(|agent| agent.availability == AgentAvailability::Checking);
         let mut body = v_flex()
-            .flex_shrink_0()
+            .flex_1()
+            .min_h_0()
+            .id("onboarding-scroll")
+            .overflow_y_scroll()
             .gap_5()
             .p_6()
             .child(
@@ -117,30 +183,70 @@ impl Desktop {
                         div()
                             .text_size(px(24.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("どこで作業しますか？"),
+                            .child("いつものAIを、ひとつの作業画面で。"),
                     )
                     .child(
                         div()
                             .text_color(rgb(appearance::MUTED))
-                            .child("手元のPCでも、クラウドでも。いつもの環境でAIを使えます。"),
+                            .child("BEXはCodexやClaude Codeに依頼し、会話・ファイル・作業の進み具合をまとめて扱うアプリです。PCで始めた作業は、接続したスマートフォンからも確認・操作できます。"),
                     ),
-            )
-            .children(choices);
+            );
         if !self.error.is_empty() {
             body = body.child(
-                div()
-                    .text_color(rgb(0xff8e86))
-                    .child(error_message(&self.error)),
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgb(appearance::BORDER))
+                    .child(div().font_semibold().child("準備を完了できませんでした"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xff8e86))
+                            .child(error_message(&self.error)),
+                    )
+                    .child(
+                        self.button(
+                            "onboarding-retry",
+                            "もう一度確認",
+                            cx,
+                            |view, _, cx| view.retry_onboarding(cx),
+                        )
+                        .debug_selector(|| "onboarding-retry".into())
+                        .small()
+                        .disabled(self.connecting),
+                    ),
             );
         }
+        body = body
+            .child(section_heading(
+                "1. AIが作業するPCを選ぶ",
+                "まずは「このPC」で始められます。別のPCへの接続は、あとから設定できます。",
+            ))
+            .children(choices)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_4()
+                    .rounded(px(12.))
+                    .bg(rgb(appearance::SURFACE))
+                    .child(section_heading(
+                        "3. 作業フォルダーを選んで依頼",
+                        "準備ができたら次の画面でフォルダーとAIを選び、やりたいことを入力します。",
+                    ))
+                    .child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
+                        "依頼の例：このプロジェクトの構成を説明して / このエラーの原因を調べて",
+                    )),
+            );
         let start_label = if self.connecting || !connected {
             "接続中…"
         } else if setup.can_start {
-            "この環境で始める"
+            "BEXを使い始める"
         } else if checking {
             "AIを確認中…"
         } else {
-            "AIにログインしてください"
+            "AIを1つ設定してください"
         };
         let footer = h_flex()
             .flex_shrink_0()
@@ -156,7 +262,13 @@ impl Desktop {
                     .min_w_0()
                     .text_xs()
                     .text_color(rgb(appearance::MUTED))
-                    .child("既存の会話とプロジェクトは自動で表示されます。"),
+                    .child(if setup.can_start {
+                        "準備できました。ほかのAIはあとから追加できます。"
+                    } else if checking {
+                        "確認が長い場合は、右上の「状態を再確認」を押してください。"
+                    } else {
+                        "上のAIから1つ選んでログインすると、次へ進めます。"
+                    }),
             )
             .child(
                 self.button("onboarding-start", start_label, cx, |view, _, _| {
@@ -181,8 +293,7 @@ impl Desktop {
                     .w_full()
                     .max_w(px(768.))
                     .max_h(window.viewport_size().height - px(80.))
-                    .id("onboarding-scroll")
-                    .overflow_y_scroll()
+                    .overflow_hidden()
                     .rounded(px(18.))
                     .border_1()
                     .border_color(rgb(appearance::BORDER))
@@ -199,31 +310,25 @@ impl Desktop {
                                 div()
                                     .text_size(px(23.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("bex"),
+                                    .child(crate::APP_NAME),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .text_color(rgb(appearance::MUTED))
-                                    .child("セットアップ"),
+                                    .child("はじめての準備"),
                             )
                             .child(
-                                Self::icon_button(
+                                self.button(
                                     "onboarding-refresh",
-                                    IconName::RotateCw,
-                                    "接続とAIの状態を再確認",
+                                    "状態を再確認",
                                     cx,
                                     |view, _, cx| {
-                                        if view.snapshot.connected {
-                                            view.refresh_accounts_and_models();
-                                        } else {
-                                            view.connect(None);
-                                        }
-                                        if let Some(hosts) = &view.hosts {
-                                            hosts.update(cx, |hosts, _| hosts.refresh());
-                                        }
+                                        view.retry_onboarding(cx);
                                     },
                                 )
+                                .icon(IconName::RotateCw)
+                                .small()
                                 .disabled(self.connecting),
                             ),
                     )
@@ -369,5 +474,23 @@ mod tests {
             assert!(desktop.tab == Tab::Chat);
             assert!(desktop.account_busy);
         });
+        window.update(|_, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.account_busy = false;
+                Arc::make_mut(&mut Arc::make_mut(&mut view.snapshot).account).login = None;
+                view.model_provider = Some(agent_protocol::session::ProviderKind::DeepSeek);
+                view.model_panel = super::ModelPanel::Manage;
+                view.error = "request host/model/list timed out".into();
+                cx.notify();
+            });
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("account-submit-code").is_some(),
+            "API key setup must stay inside onboarding"
+        );
+        let retry = window.debug_bounds("onboarding-retry").unwrap();
+        window.simulate_click(retry.center(), Modifiers::default());
+        window.update(|_, cx| assert!(view.read(cx).0.read(cx).error.is_empty()));
     }
 }

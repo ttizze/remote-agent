@@ -60,8 +60,47 @@ pub struct ModelScopeChoice {
     pub scope: ModelDefaultsScope,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ComposerControls {
+    pub can_change_model: bool,
+    pub can_attach_files: bool,
+    pub can_invoke_local_tools: bool,
+    pub settings_label: Option<String>,
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn can_change_provider(&self, key: crate::state::DraftKey) -> bool {
+        match key {
+            crate::state::DraftKey::Local { .. } => true,
+            crate::state::DraftKey::Session { session } => self.recoverable_model_draft(&session).is_some(),
+        }
+    }
+
+    /// Present only operations owned by this conversation's execution surface.
+    pub fn composer_controls(&self) -> ComposerControls {
+        let session = self.navigation.thread_id.as_ref();
+        let coordinator = session.is_some_and(super::list::is_coordinator_session);
+        let model_change = session
+            .and_then(|id| self.conversations.get(id))
+            .and_then(|thread| thread.capabilities.as_ref())
+            .is_none_or(|capabilities| capabilities.model_change);
+        let can_change_model = model_change && !coordinator;
+        ComposerControls {
+            can_change_model,
+            can_attach_files: !coordinator,
+            can_invoke_local_tools: !coordinator,
+            settings_label: (!can_change_model).then(|| {
+                if coordinator {
+                    "プロジェクトの設定を使用".into()
+                } else {
+                    "この会話の設定を使用".into()
+                }
+            }),
+        }
+    }
+
     pub fn model_defaults(&self, scope: ModelDefaultsScope) -> ModelDefaults {
         if scope == ModelDefaultsScope::Global {
             return self.model_defaults.clone();
@@ -668,6 +707,38 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn composer_controls_follow_the_original_session_and_model_capabilities() {
+        let mut snapshot = Snapshot::default();
+        assert!(snapshot.composer_controls().can_change_model);
+        for (provider, id, coordinator) in [
+            (ProviderKind::Claude, "chan_fixture", true),
+            (ProviderKind::Codex, "chan_fixture", false),
+            (ProviderKind::Claude, "local-session", false),
+            (ProviderKind::Claude, "chan_", false),
+        ] {
+            let session = crate::session::SessionRef {
+                provider,
+                id: id.into(),
+            };
+            Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
+            let controls = snapshot.composer_controls();
+            assert_eq!(controls.can_change_model, !coordinator);
+            assert_eq!(controls.can_attach_files, !coordinator);
+            assert_eq!(controls.can_invoke_local_tools, !coordinator);
+            let thread = serde_json::from_value(serde_json::json!({
+                "id": session, "capabilities": {
+                    "fork": false, "additionalInput": true, "rename": false, "modelChange": false
+                }
+            }))
+            .unwrap();
+            Arc::make_mut(&mut snapshot.conversations).insert(session, Arc::new(thread));
+            let controls = snapshot.composer_controls();
+            assert!(!controls.can_change_model);
+            assert_eq!(controls.can_attach_files, !coordinator);
+            assert_eq!(controls.can_invoke_local_tools, !coordinator);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -746,7 +817,7 @@ mod credential_control_tests {
                 ],
             }));
         let controls = snapshot.credential_controls();
-        assert_eq!(controls.len(), 9);
+        assert_eq!(controls.len(), KeyProvider::ALL.len());
         assert!(
             !controls
                 .iter()

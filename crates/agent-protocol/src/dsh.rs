@@ -7,6 +7,7 @@ pub enum KeyProvider {
     DeepSeek,
     OpenRouter,
     NanoGpt,
+    Venice,
     OpenAI,
     Anthropic,
     Gemini,
@@ -24,10 +25,11 @@ impl KeyProvider {
         }
     }
 
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::DeepSeek,
         Self::OpenRouter,
         Self::NanoGpt,
+        Self::Venice,
         Self::OpenAI,
         Self::Anthropic,
         Self::Gemini,
@@ -41,6 +43,7 @@ impl KeyProvider {
             Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
             Self::NanoGpt => "NanoGPT",
+            Self::Venice => "Venice AI",
             Self::OpenAI => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::Gemini => "Gemini",
@@ -55,6 +58,7 @@ impl KeyProvider {
             Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::NanoGpt => "NANOGPT_API_KEY",
+            Self::Venice => "VENICE_API_KEY",
             Self::OpenAI => "OPENAI_API_KEY",
             Self::Anthropic => "ANTHROPIC_API_KEY",
             Self::Gemini => "GEMINI_API_KEY",
@@ -69,6 +73,7 @@ impl KeyProvider {
             Self::DeepSeek => "deepseek-official",
             Self::OpenRouter => "openrouter",
             Self::NanoGpt => "nanogpt",
+            Self::Venice => "venice",
             Self::OpenAI => "openai",
             Self::Anthropic => "anthropic",
             Self::Gemini => "google",
@@ -83,6 +88,7 @@ impl KeyProvider {
             Self::DeepSeek => "https://platform.deepseek.com/api_keys",
             Self::OpenRouter => "https://openrouter.ai/settings/keys",
             Self::NanoGpt => "https://nano-gpt.com/api",
+            Self::Venice => "https://venice.ai/settings/api",
             Self::OpenAI => "https://platform.openai.com/api-keys",
             Self::Anthropic => "https://console.anthropic.com/settings/keys",
             Self::Gemini => "https://aistudio.google.com/apikey",

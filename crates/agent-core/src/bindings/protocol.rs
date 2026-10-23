@@ -670,6 +670,7 @@ enum KeyProvider {
     DeepSeek,
     OpenRouter,
     NanoGpt,
+    Venice,
     OpenAI,
     Anthropic,
     Gemini,

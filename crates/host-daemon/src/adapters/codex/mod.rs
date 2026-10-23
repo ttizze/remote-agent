@@ -595,11 +595,11 @@ fn request_change(
 #[async_trait::async_trait]
 impl Identity for Codex {
     async fn list(&self) -> Result<op::Accounts, Failure> {
+        self.server()?;
         let mut accounts = self.accounts.lock().await;
         let accounts = accounts.as_mut().ok_or_else(|| {
             Failure::new("account_unavailable", "アカウント管理が利用できません。")
         })?;
-        self.server()?;
         accounts
             .list()
             .await
@@ -609,15 +609,17 @@ impl Identity for Codex {
         &self,
         command: crate::host_rpc::agent::AccountCommand,
     ) -> Result<crate::host_rpc::agent::AccountReply, Failure> {
+        let server = self.server()?;
         let mut accounts = self.accounts.lock().await;
         accounts
             .as_mut()
             .ok_or_else(|| Failure::new("account_unavailable", "アカウント管理が利用できません。"))?
-            .request(self.server()?, command)
+            .request(server, command)
             .await
             .map_err(|e| Failure::new("account_operation_failed", e))
     }
     async fn usage(&self, id: &str) -> Result<op::AccountUsage, Failure> {
+        self.server()?;
         let fetch = self
             .accounts
             .lock()
@@ -1159,6 +1161,22 @@ impl Agent for Codex {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn unavailable_codex_accounts_report_the_startup_failure() {
+        use super::*;
+        let codex = Codex::new(Err("Codex executable was not found on PATH: codex".into()));
+        for error in [
+            Identity::list(&codex).await.unwrap_err(),
+            Identity::account(&codex, crate::host_rpc::agent::AccountCommand::StartLogin)
+                .await
+                .err()
+                .expect("login must fail"),
+            Identity::usage(&codex, "desktop").await.unwrap_err(),
+        ] {
+            assert_eq!(error.code, "provider_unavailable");
+            assert!(error.message.contains("Codex executable was not found"));
+        }
+    }
     #[test]
     fn native_rename_notices_carry_the_name_including_a_cleared_name() {
         for name in [Some("New name"), None] {

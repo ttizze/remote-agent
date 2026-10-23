@@ -14,6 +14,10 @@ pub(crate) const BORDER: u32 = 0x303030;
 pub(crate) const FOREGROUND: u32 = 0xe6e6e6;
 pub(crate) const MUTED: u32 = 0xa6a6a6;
 pub(crate) const ACCENT: u32 = 0x346bf1;
+// Buttons keep their own visible surface instead of blending into panels.
+const BUTTON: u32 = 0x262626;
+const BUTTON_HOVER: u32 = 0x383838;
+const BUTTON_ACTIVE: u32 = 0x244b87;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn style_native_titlebar(window: &gpui_kit::Window) {
@@ -83,15 +87,15 @@ pub(crate) fn init(cx: &mut App) {
         button_primary_hover: rgb(0x477af5).into(),
         button_primary_active: rgb(0x285bd5).into(),
         button_primary_foreground: rgb(FOREGROUND).into(),
-        button_secondary: rgb(RAISED).into(),
-        button_secondary_hover: rgb(HOVER).into(),
-        button_secondary_active: rgb(SELECTED).into(),
+        button_secondary: rgb(BUTTON).into(),
+        button_secondary_hover: rgb(BUTTON_HOVER).into(),
+        button_secondary_active: rgb(BUTTON_ACTIVE).into(),
         button_secondary_foreground: rgb(FOREGROUND).into(),
         ring: rgb(ACCENT).into(),
         selection: rgb(ACCENT).opacity(0.25).into(),
-        button: rgb(RAISED).into(),
-        button_hover: rgb(HOVER).into(),
-        button_active: rgb(SELECTED).into(),
+        button: rgb(BUTTON).into(),
+        button_hover: rgb(BUTTON_HOVER).into(),
+        button_active: rgb(BUTTON_ACTIVE).into(),
         button_foreground: rgb(FOREGROUND).into(),
         sidebar: rgb(SIDEBAR).into(),
         sidebar_foreground: rgb(MUTED).into(),

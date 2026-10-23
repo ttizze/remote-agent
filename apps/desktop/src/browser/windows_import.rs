@@ -121,7 +121,7 @@ impl Browser {
         let visibility = owner.clone();
         let bookmarks_owner = owner.clone();
         h_flex().px_2().pb_2().gap_1()
-            .child(Button::new("browser-import").label("Chromeのブックマークを取り込む").small().ghost().disabled(self.importing).dropdown_caret(true)
+            .child(Button::new("browser-import").label("Chromeのブックマークを取り込む").small().disabled(self.importing).dropdown_caret(true)
                 .dropdown_menu(move |mut menu, _, _| {
                     match chrome_profiles() {
                         Ok(profiles) => for (name, path) in profiles {
@@ -140,7 +140,7 @@ impl Browser {
                     }
                     menu.item(PopupMenuItem::new("Chromeのログイン状態の取り込みは非対応です").disabled(true))
                 }).on_open_change(move |open, _, cx| { let _ = visibility.update(cx, |browser, cx| { browser.profile_menu_open = *open; browser.set_visible(browser.visible, cx); cx.notify(); }); }))
-            .child(Button::new("browser-bookmarks").label("ブックマーク").small().ghost().dropdown_caret(true)
+            .child(Button::new("browser-bookmarks").label("ブックマーク").small().dropdown_caret(true)
                 .dropdown_menu(move |mut menu, _, _| {
                     match data_path().and_then(|path| load(&path)) {
                         Ok(bookmarks) if !bookmarks.is_empty() => {
@@ -160,7 +160,7 @@ impl Browser {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{update, load, BrowserBookmark, fs};
     #[test]
     fn imports_merge_reopen_and_preserve_corrupt_storage() {
         let directory = tempfile::tempdir().unwrap();

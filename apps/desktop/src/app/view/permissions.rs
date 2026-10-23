@@ -18,7 +18,6 @@ impl Desktop {
                     .icon(Icon::default().path("bex/shield.svg"))
                     .label(control.label)
                     .accessibility_label("承認方法を変更")
-                    .ghost()
                     .h(px(40.))
                     .when(control.mode == Some(PermissionMode::FullAccess), |button| {
                         button.text_color(rgb(0xf58b42))
@@ -67,7 +66,6 @@ impl Desktop {
                 Button::new(format!("permission-choice-{index}"))
                     .debug_selector(move || format!("permission-choice-{index}"))
                     .accessibility_label(label)
-                    .ghost()
                     .w_full()
                     .h_auto()
                     .py_2()

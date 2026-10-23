@@ -509,13 +509,17 @@ impl HostRpcService {
                 t.status == agent_protocol::models::TurnStatus::Running && !t.id.trim().is_empty()
             })
             .map(|t| t.id.as_str());
-        let route = super::submission::submission_target(
-            response.thread.status,
-            running_turn,
-            agent.running_input(),
-            response.thread.cwd.as_deref(),
-        )
-        .map_err(|e| Failure::new("submission_unavailable", e))?;
+        let route = if !agent.manages_workspace(&target.id) {
+            super::submission::SubmissionTarget::Queue
+        } else {
+            super::submission::submission_target(
+                response.thread.status,
+                running_turn,
+                agent.running_input(),
+                response.thread.cwd.as_deref(),
+            )
+            .map_err(|e| Failure::new("submission_unavailable", e))?
+        };
         let mut reload = state.needs_reload;
         if let super::submission::SubmissionTarget::Start { cwd } = route
             && let Some(directory) = self
@@ -923,13 +927,10 @@ impl HostRpcService {
                 if !next.is_empty() {
                     page.next_cursor = Some(serde_json::to_string(&next)?);
                 }
-                if params.cursor.is_none() && page.data.is_empty() && page.provider_errors.is_some()
-                {
-                    return Err(Failure::new(
-                        "models_unavailable",
-                        serde_json::to_value(&page.provider_errors)?,
-                    ));
-                }
+                // Even when every provider is unavailable, return the catalog
+                // with its per-provider errors. Serializing that map into an
+                // RPC error message gets redacted to "[payload omitted]" and
+                // prevents clients from explaining which provider needs setup.
                 page.into()
             }
 
@@ -1347,11 +1348,26 @@ impl HostRpcService {
     }
 
     async fn project_snapshot(&self) -> Result<crate::projects::state::Snapshot, Failure> {
-        self.inner
+        let mut snapshot = self
+            .inner
             .projects
             .load()
             .await
-            .map_err(|error| Failure::new("project_state_unavailable", error))
+            .map_err(|error| Failure::new("project_state_unavailable", error))?;
+        if let Ok(agent) = self.agent(ProviderKind::Claude)
+            && let Ok(projects) = agent.cloud_projects().await
+        {
+            for project in projects
+                .into_iter()
+                .filter(|project| project.roots.is_empty())
+            {
+                snapshot
+                    .projects
+                    .retain(|existing| existing.id != project.id);
+                snapshot.projects.push(project);
+            }
+        }
+        Ok(snapshot)
     }
 
     async fn host_title_list(
@@ -1778,12 +1794,52 @@ fn describe_thread(
     capabilities: agent_protocol::session::Capabilities,
     projects: &crate::projects::state::Snapshot,
 ) {
-    thread.project_id = projects.project_membership(thread.cwd.as_deref());
-    thread.capabilities = Some(capabilities);
+    let cloud_channel = thread.id.as_ref().is_some_and(|session| {
+        session.provider == ProviderKind::Claude
+            && crate::claude::coordinator::is_channel(&session.id)
+    });
+    if cloud_channel {
+        thread.capabilities.get_or_insert(capabilities);
+    } else {
+        thread.project_id = projects.project_membership(thread.cwd.as_deref());
+        thread.capabilities = Some(capabilities);
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloud_channels_keep_provider_membership_and_composer_capabilities() {
+        use super::*;
+        let mut thread = Thread {
+            id: Some(agent_protocol::session::SessionRef {
+                provider: ProviderKind::Claude,
+                id: "chan_cloud".into(),
+            }),
+            project_id: agent_protocol::models::ProjectMembership::Assigned(
+                "claude-project:chan_cloud".into(),
+            ),
+            capabilities: Some(agent_protocol::session::Capabilities {
+                model_change: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        describe_thread(
+            &mut thread,
+            agent_protocol::session::Capabilities {
+                model_change: true,
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        assert_eq!(
+            thread.project_id.as_deref(),
+            Some("claude-project:chan_cloud")
+        );
+        assert!(!thread.capabilities.unwrap().model_change);
+    }
+
     #[tokio::test]
     async fn prefetched_project_titles_continue_past_the_first_native_page() {
         use super::*;
@@ -1994,6 +2050,39 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn unavailable_model_catalog_preserves_provider_setup_errors() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            [
+                crate::adapters::codex::Codex::new(Err("Codex executable is missing".into()))
+                    .into(),
+            ],
+            ProjectStore::new(directory.path().join("projects.json")),
+        );
+        let connection = service.open_session();
+        let response = service
+            .dispatch(
+                connection.id(),
+                &Call::ListModels(op::ListModels {
+                    limit: 100,
+                    cursor: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let Response::Success { result } =
+            agent_protocol::protocol::decode::<Response<op::ModelPage>>(&response.initial).unwrap()
+        else {
+            panic!("provider setup errors must remain a structured catalog");
+        };
+        assert!(result.data.is_empty());
+        let errors = result.provider_errors.unwrap();
+        assert_eq!(errors["codex"]["message"], "Codex executable is missing");
+        assert_eq!(errors["codex"]["code"], "provider_unavailable");
+    }
+
     #[tokio::test]
     async fn live_activity_registration_falls_back_without_apns_and_rejects_malformed_tokens() {
         use super::*;

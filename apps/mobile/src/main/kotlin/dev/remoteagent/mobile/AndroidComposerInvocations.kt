@@ -12,6 +12,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.ComposerSuggestions
 import dev.remoteagent.core.Invocation
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.insertInvocation
 
 @Composable
 internal fun ComposerInvocationPicker(suggestions: ComposerSuggestions?, select: (Invocation) -> Unit) {
@@ -27,6 +31,22 @@ internal fun ComposerInvocationPicker(suggestions: ComposerSuggestions?, select:
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun ComposerInvocations(
+    snapshot: Snapshot,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+) {
+    val navigation = snapshot.navigation()
+    val draft = snapshot.draft(navigation.draftKey)
+    if (!snapshot.composerControls().canInvokeLocalTools) return
+    val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
+    ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
+        insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {
+            perform(Intent.InsertInvocation(navigation.draftKey, it.text, invocation)) {}
         }
     }
 }

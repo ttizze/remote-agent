@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("dev", "release")]
+    [ValidateSet("release")]
     [string]$Profile = "release",
+    [ValidateSet("main", "dev")]
+    [string]$Channel = "main",
     [switch]$SkipBuild,
     [string]$BinaryDirectory,
     [string]$InnoCompiler
@@ -21,8 +23,7 @@ try {
     $metadataJson = & cargo metadata --locked --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed." }
     $metadata = $metadataJson | ConvertFrom-Json
-    $directory = if ($Profile -eq "dev") { "debug" } else { "release" }
-    $buildDirectory = Join-Path $metadata.target_directory $directory
+    $buildDirectory = Join-Path $metadata.target_directory "release"
     if ($BinaryDirectory) {
         if (-not $SkipBuild) { throw "BinaryDirectory requires SkipBuild." }
         $buildDirectory = (Resolve-Path -LiteralPath $BinaryDirectory).Path
@@ -53,12 +54,25 @@ try {
     if ($sourceStatus) { $revision = "$revision-dirty" }
     if (-not $SkipBuild) {
         $previousRevision = $env:BEX_BUILD_REVISION
+        $previousChannel = $env:BEX_BUILD_CHANNEL
         try {
             $env:BEX_BUILD_REVISION = $revision
+            $env:BEX_BUILD_CHANNEL = $Channel
             & cargo build --locked --profile $Profile --features agent-core/bindings -p bex-desktop -p host-daemon -p bex-process -p agent-cli
             if ($LASTEXITCODE -ne 0) { throw "Windows build failed." }
-        } finally { $env:BEX_BUILD_REVISION = $previousRevision }
+        } finally {
+            $env:BEX_BUILD_REVISION = $previousRevision
+            $env:BEX_BUILD_CHANNEL = $previousChannel
+        }
     }
+    # Read facts from the executable; directory names and caller labels are not proof.
+    $desktopInfo = & (Join-Path $buildDirectory "bex-desktop.exe") --build-info | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $desktopInfo.profile -ne "release" -or $desktopInfo.debugAssertions) {
+        throw "Distribution requires a release executable with debug assertions disabled."
+    }
+    if ($desktopInfo.revision -ne $revision) { throw "Desktop binary does not match source revision $revision." }
+    $expectedAppName = if ($Channel -eq "dev") { "Bex dev" } else { "bex" }
+    if ($desktopInfo.appName -ne $expectedAppName) { throw "Desktop binary does not match channel $Channel." }
     # A unique staging directory avoids modifying an installed/running Host.
     $packageRoot = Join-Path $metadata.target_directory "windows-packages"
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
@@ -73,8 +87,9 @@ try {
         & node scripts/install-claude-sdk.mjs $bundle
         if ($LASTEXITCODE -ne 0) { throw "Claude SDK packaging failed." }
         Copy-Item -LiteralPath "docs/WINDOWS.md" -Destination (Join-Path $bundle "README.md")
-        @{ revision = $revision; profile = $Profile; target = "x86_64-pc-windows-msvc" } |
+        @{ revision = $revision; profile = $Profile; target = "x86_64-pc-windows-msvc"; appName = $desktopInfo.appName } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bundle "build-info.json") -Encoding UTF8
+        Copy-Item -LiteralPath (Join-Path $bundle "build-info.json") -Destination (Join-Path $bundle "desktop-build-info.json")
         $archive = Join-Path $packageRoot "bex-windows-x86_64-$Profile.zip"
         Compress-Archive -LiteralPath $bundle -DestinationPath $archive -Force
         $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()

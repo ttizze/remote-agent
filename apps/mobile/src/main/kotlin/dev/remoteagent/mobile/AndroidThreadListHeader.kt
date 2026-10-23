@@ -9,6 +9,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -19,6 +21,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ReadThread
+import dev.remoteagent.core.SessionRef
 
 @Composable
 internal fun ThreadListHeader(
@@ -49,4 +54,20 @@ internal fun ThreadListHeader(
             }
         }
     }
+}
+
+@Composable
+internal fun CoordinatorEntry(session: SessionRef, perform: (Intent) -> Unit) {
+    TextButton(
+        onClick = { perform(Intent.ReadThread(ReadThread(session, open = true))) },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("メイン会話を開く")
+    }
+    Text(
+        "タスクの依頼・振り分けはメイン会話へ。以下はこのPCの作業スレッドです。",
+        Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }

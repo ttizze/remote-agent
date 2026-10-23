@@ -14,7 +14,36 @@ pub(crate) const DEFAULT_CODEX_PROGRAM: &str = "codex";
 
 pub(crate) fn resolve(program: &Path) -> Result<PathBuf, Error> {
     let path = env::var_os("PATH");
-    resolve_from(program, path.as_deref(), bundled_codex_path())
+    let result = resolve_from(program, path.as_deref(), bundled_codex_path());
+    #[cfg(windows)]
+    if matches!(&result, Err(Error::ExecutableNotFound(_)))
+        && program == Path::new(DEFAULT_CODEX_PROGRAM)
+        && let Some(local_app_data) = env::var_os("LOCALAPPDATA")
+        && let Some(candidate) = windows_installed_codex(&PathBuf::from(local_app_data))
+    {
+        return resolve_candidate(Some(&candidate))?
+            .ok_or_else(|| Error::ExecutableNotFound(program.to_path_buf()));
+    }
+    result
+}
+
+// Explorer can retain PATH from before a Codex install/update. The official
+// Windows launcher installs into versioned directories, so never persist a
+// particular version's path or require the user to restart Windows.
+#[cfg(any(windows, test))]
+fn windows_installed_codex(local_app_data: &Path) -> Option<PathBuf> {
+    let bin = local_app_data.join("OpenAI/Codex/bin");
+    let mut candidates: Vec<_> = fs::read_dir(bin)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path().join("codex.exe");
+            let metadata = fs::metadata(&path).ok()?;
+            metadata.is_file().then(|| (metadata.modified().ok(), path))
+        })
+        .collect();
+    candidates.sort();
+    candidates.pop().map(|(_, path)| path)
 }
 
 fn resolve_from(
@@ -83,6 +112,24 @@ mod tests {
 
     fn path_variable(directory: &Path) -> std::ffi::OsString {
         env::join_paths([directory]).expect("build test PATH")
+    }
+
+    #[test]
+    fn finds_windows_install_when_explorer_path_is_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("OpenAI/Codex/bin");
+        fs::create_dir_all(bin.join("removed-version")).unwrap();
+        fs::create_dir_all(bin.join("current-version")).unwrap();
+        // An incomplete update must not hide the usable installed executable.
+        fs::create_dir_all(bin.join("incomplete-version/codex.exe")).unwrap();
+        let executable = bin.join("current-version/codex.exe");
+        write_executable(&executable);
+        assert_eq!(
+            windows_installed_codex(root.path()),
+            Some(executable.clone())
+        );
+        fs::remove_file(executable).unwrap();
+        assert_eq!(windows_installed_codex(root.path()), None);
     }
 
     #[test]

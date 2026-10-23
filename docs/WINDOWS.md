@@ -31,9 +31,13 @@ toolchain job).
 
 ```powershell
 ./scripts/package-windows.ps1
-# Faster local development package:
-./scripts/package-windows.ps1 -Profile dev
 ```
+
+For a development preview, use `./scripts/package-windows.ps1 -Channel dev`.
+This embeds `Bex dev` in the sidebar header and native window title, including
+when the installed executable is launched directly. The default `main` channel
+keeps the `bex` name. Ordinary Cargo builds can select the same channel with
+`BEX_BUILD_CHANNEL=dev`; build optimization profiles are independent of channels.
 
 Both profiles embed the Windows renderer's compiled shaders. The workspace
 disables `debug_assertions` only for `gpui-pre-windows` in the development
@@ -77,7 +81,23 @@ then writes the EXE installer, optional ZIP, and SHA-256 checksums under `target
 (or the Cargo-configured target directory). `-SkipBuild` packages already-built
 executables and is intended for CI immediately after verification.
 
+Installers always contain release binaries. The packager reads `--build-info`
+from the desktop executable and rejects debug builds or a mismatched source
+revision, including with `-SkipBuild` or `-BinaryDirectory`. GPUI development
+builds read shader files from their build machine and must not be distributed.
+CI installs the EXE in a temporary directory, hides GPUI's build-time shader
+sources, and checks that the installed app opens a window without a panic.
+
 ## 日本語
+
+Codexを公式Windowsインストーラーで導入した場合、BEXはPATHに加えて
+`%LOCALAPPDATA%\OpenAI\Codex\bin`のインストール済み実行ファイルを検出します。
+Codex更新後にスタートメニューのPATHが古いままでも、Windowsの再起動は不要です。
+明示的に指定した`BEX_CODEX`と、利用できるPATH上のCodexを優先します。
+
+Claude Codeも公式インストーラーの`%USERPROFILE%\.local\bin\claude.exe`を検出します。
+Claude Codeが未導入の場合は、ログイン開始前に導入先を案内します。
+中止時は一時認証の終了を確認し、後片付けに失敗しても再試行できる状態を保持します。
 
 getbex.dev からWindows用EXEインストーラーを取得して実行します。BEX本体・Host・CLI・Claude SDKをまとめて配置し、スタートメニューにBEXを登録します。ZIPの展開やRustの導入は不要です。Git、Node.js、利用するエージェントとWebView2は別途必要です。
 
@@ -87,7 +107,7 @@ Claude sign-in opens from the requesting BEX client. The Host suppresses the CLI
 
 ## DeepSeek Harness
 
-Install Node.js 22.19 or newer and `npm install -g @deepseek-ai/dsh@0.2.1-rc.2` on the Host PC. In BEX, open **設定 → エージェント → DeepSeek** and use **接続先のAPIキー** (also available from the model picker). Choose DeepSeek, OpenRouter, NanoGPT, OpenAI, Anthropic, Gemini, Groq, Mistral or xAI, then enter and save its API key. **APIキーを取得** opens the selected provider’s key page. Keys are masked, stored on the connected Host separately from conversations, and never returned to clients. Saved keys can be replaced or removed individually; another provider’s key is preserved. Wait for active DSH tasks to finish before changing credentials. BEX enables the corresponding DSH routes, and their models appear in the model picker after saving. All devices connected to that Host can use these routes. Route status identifies BEX-managed keys, external official credentials and missing configuration. BEX-managed keys take precedence for its Harness process.
+Install Node.js 22.19 or newer and `npm install -g @deepseek-ai/dsh@0.2.1-rc.2` on the Host PC. In BEX, open **設定 → エージェント → DeepSeek** and use **接続先のAPIキー** (also available from the model picker). Choose DeepSeek, OpenRouter, NanoGPT, Venice AI, OpenAI, Anthropic, Gemini, Groq, Mistral or xAI, then enter and save its API key. **APIキーを取得** opens the selected provider’s key page. Keys are masked, stored on the connected Host separately from conversations, and never returned to clients. Saved keys can be replaced or removed individually; another provider’s key is preserved. Wait for active DSH tasks to finish before changing credentials. BEX enables the corresponding DSH routes, and their models appear in the model picker after saving. All devices connected to that Host can use these routes. Route status identifies BEX-managed keys, external official credentials and missing configuration. BEX-managed keys take precedence for its Harness process.
 
 For NanoGPT, save its key under **NanoGPT** and choose **NanoGPT · DeepSeek V4.1 Flash** (or the Thinking variant). This route uses `https://nano-gpt.com/api/v1` and the `deepseek/deepseek-v4.1-flash` model ID. Reasoning choices are resolved separately for the selected model through Harness; catalog reads do not change the selected model.
 
@@ -108,3 +128,5 @@ Chromeのログイン状態、パスワード、Cookie、パスキーの取り�
 ## 使用量とリセット
 
 利用上限のエラーに表示される「使用量・リセット時刻」から、設定のエージェント画面を開けます。使用量とローカル時刻のリセット予定を確認し、「使用量を再取得」で表示を更新できます。Codexには「追加クレジット・上限を管理」も表示され、BEXのブラウザでChatGPTの管理画面を開きます。ログイン中のアカウントを確認して操作してください。利用枠そのものをBEXから強制リセットする機能ではありません。提供元から取得した使用量には最大60秒のキャッシュがあります。
+
+For Venice AI, save a key under **Venice AI** (**APIキーを取得** opens https://venice.ai/settings/api). Select **Venice AI · Qwen 3 Coder 480B Turbo** for code or **Venice AI · Venice Uncensored 1.2** for text/image input. These tool-capable routes use https://api.venice.ai/api/v1 and the separate VENICE_API_KEY credential.

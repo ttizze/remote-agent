@@ -32,7 +32,6 @@ impl Desktop {
                         "ソース"
                     })
                     .small()
-                    .ghost()
                     .on_click(cx.listener(move |view, _, _, cx| {
                         if !view.expanded_items.remove(&source_key) {
                             view.expanded_items.insert(source_key.clone());
@@ -45,7 +44,6 @@ impl Desktop {
                 Button::new("diagram-size")
                     .label(if large { "縮小" } else { "拡大" })
                     .small()
-                    .ghost()
                     .on_click(cx.listener(move |view, _, _, cx| {
                         if !view.expanded_items.remove(&large_key) {
                             view.expanded_items.insert(large_key.clone());
@@ -58,7 +56,6 @@ impl Desktop {
                 Button::new("copy-diagram")
                     .icon(IconName::Copy)
                     .small()
-                    .ghost()
                     .tooltip("Mermaidをコピー")
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(source.clone()))

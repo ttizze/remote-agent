@@ -432,6 +432,11 @@ impl SessionRouter {
             })),
         }
     }
+    pub(crate) fn is_observed(&self, target: &SessionRef) -> bool {
+        self.existing(target)
+            .is_some_and(|actor| !lock_state(&actor).subscriptions.is_empty())
+    }
+
     fn actor(&self, target: &SessionRef) -> Arc<Mutex<SessionActor>> {
         lock_state(&self.state)
             .executions

@@ -313,7 +313,6 @@ impl Browser {
             })
             .accessibility_label("ChromeからCookieを取り込む")
             .small()
-            .ghost()
             .disabled(self.importing)
             .dropdown_caret(true)
             .dropdown_menu(move |mut menu, _, _| {
@@ -371,7 +370,6 @@ impl Render for Browser {
                         Button::new("browser-back")
                             .icon(IconName::ArrowLeft)
                             .small()
-                            .ghost()
                             .tooltip("戻る")
                             .accessibility_label("戻る")
                             .on_click(cx.listener(|s, _, _, cx| {
@@ -382,7 +380,6 @@ impl Render for Browser {
                         Button::new("browser-forward")
                             .icon(IconName::ArrowRight)
                             .small()
-                            .ghost()
                             .tooltip("進む")
                             .accessibility_label("進む")
                             .on_click(cx.listener(|s, _, _, cx| {
@@ -397,7 +394,6 @@ impl Render for Browser {
                         Button::new("browser-reload")
                             .icon(IconName::RotateCw)
                             .small()
-                            .ghost()
                             .tooltip("再読み込み")
                             .accessibility_label("再読み込み")
                             .on_click(cx.listener(|s, _, _, cx| {
@@ -416,7 +412,6 @@ impl Render for Browser {
                         Button::new("browser-go")
                             .icon(IconName::ArrowRight)
                             .small()
-                            .ghost()
                             .tooltip("URL を開く")
                             .accessibility_label("URL を開く")
                             .on_click(cx.listener(|s, _, _, cx| s.navigate(cx))),

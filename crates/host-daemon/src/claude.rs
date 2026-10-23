@@ -2,6 +2,7 @@
 //! the client-facing conversation and adapts official Agent SDK events.
 use agent_protocol::{execution::*, items::*};
 mod accounts;
+pub(crate) mod coordinator;
 mod history;
 mod native;
 mod permissions;
@@ -106,6 +107,7 @@ pub struct Claude {
     event_receiver: std::sync::Mutex<Option<mpsc::Receiver<AgentEvent>>>,
     stop: CancellationToken,
     workers: AsyncMutex<tokio::task::JoinSet<()>>,
+    coordinators: coordinator::Coordinators,
 }
 
 struct Record {
@@ -174,7 +176,31 @@ impl Claude {
             event_receiver: std::sync::Mutex::new(Some(event_receiver)),
             stop: CancellationToken::new(),
             workers: AsyncMutex::new(tokio::task::JoinSet::new()),
+            coordinators: Default::default(),
         })
+    }
+
+    async fn coordinator_client(&self) -> Result<coordinator::Client, Failure> {
+        let home = self
+            .accounts
+            .lock()
+            .await
+            .selected_home()
+            .map_err(|message| Failure::new("coordinator_auth", message))?
+            .ok_or_else(|| {
+                Failure::new(
+                    "coordinator_auth",
+                    "アカウント設定でClaudeへログインしてください。",
+                )
+            })?;
+        self.coordinators
+            .client(
+                home,
+                self.native_home.clone(),
+                self.native_inherited,
+                self.program.clone(),
+            )
+            .await
     }
 
     async fn models(&self) -> Result<Vec<Model>, String> {
@@ -389,6 +415,20 @@ impl Claude {
 
     /// Read native history on each open; the router overlays only owned execution.
     async fn read(&self, id: &str, requested: usize) -> anyhow::Result<ThreadResponse> {
+        if coordinator::is_channel(id) {
+            let client = self
+                .coordinator_client()
+                .await
+                .map_err(anyhow::Error::from)?;
+            let response = client
+                .open(id, requested)
+                .await
+                .map_err(anyhow::Error::from)?;
+            self.coordinators
+                .watch(client, &response, self.events.clone(), self.stop.clone())
+                .await;
+            return Ok(response);
+        }
         let native = Uuid::parse_str(id)?;
         let home = self.native_home.clone();
         let history: anyhow::Result<ThreadResponse> = tokio::task::spawn_blocking(move || {
@@ -1545,6 +1585,7 @@ impl crate::host_rpc::agent::Identity for Claude {
         &self,
         command: crate::host_rpc::agent::AccountCommand,
     ) -> Result<crate::host_rpc::agent::AccountReply, crate::host_rpc::service::Failure> {
+        self.coordinators.cancel().await;
         self.accounts
             .lock()
             .await
@@ -1633,6 +1674,9 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
 
 #[async_trait::async_trait]
 impl Agent for Claude {
+    fn manages_workspace(&self, id: &str) -> bool {
+        !coordinator::is_channel(id)
+    }
     fn data_recipient(&self) -> &'static str {
         "Anthropic"
     }
@@ -1720,10 +1764,17 @@ impl Agent for Claude {
     }
     async fn read_history(
         &self,
-        _id: &str,
-        _cursor: &str,
+        id: &str,
+        cursor: &str,
         _include_activity: bool,
     ) -> Result<agent_protocol::session::HistoryPage, Failure> {
+        if coordinator::is_channel(id) {
+            return self
+                .coordinator_client()
+                .await?
+                .page(id, Some(cursor), 100)
+                .await;
+        }
         Err(Failure::new(
             "invalid_cursor",
             "Claude history does not issue timeline cursors",
@@ -1780,6 +1831,9 @@ impl Agent for Claude {
         _reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
+        if coordinator::is_channel(&input.thread_id.id) {
+            return self.coordinator_client().await?.send(input).await;
+        }
         use crate::host_rpc::submission::SubmissionTarget;
         let turn_id = match route {
             SubmissionTarget::Steer(_) => {
@@ -1820,6 +1874,12 @@ impl Agent for Claude {
             next_cursor: None,
             provider_errors: None,
         })
+    }
+    async fn cloud_projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {
+        let Ok(client) = self.coordinator_client().await else {
+            return Ok(Vec::new());
+        };
+        self.coordinators.projects(&client).await
     }
     async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
         use agent_protocol::composer::{ComposerCandidate, ComposerCatalog};
@@ -1944,6 +2004,7 @@ impl Agent for Claude {
     }
     async fn shutdown(&self) {
         self.stop.cancel();
+        self.coordinators.shutdown().await;
         let _ = self.accounts.lock().await.cancel().await;
         let mut workers = self.workers.lock().await;
         while let Some(result) = workers.join_next().await {

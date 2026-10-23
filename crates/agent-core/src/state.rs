@@ -5,6 +5,7 @@ use crate::models::{
 };
 use agent_protocol::requests::{Answer, Request};
 use operations as op;
+mod model_recovery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -837,6 +838,17 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 | Intent::SelectServiceTier { thread_id, .. } => thread_id,
                 _ => unreachable!(),
             };
+            let recovery = match &intent {
+                Intent::SelectModel { thread_id: DraftKey::Session { session }, model } => {
+                        let draft = (previous.navigation.thread_id.as_ref() == Some(session))
+                            .then(|| previous.recoverable_model_draft(session)).flatten();
+                        if session.provider != model.provider && draft.is_none() {
+                            return (next, Vec::new());
+                        }
+                        draft
+                    }
+                _ => None,
+            };
             let mut draft = previous
                 .drafts
                 .get(thread_id)
@@ -844,6 +856,30 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 .unwrap_or_default();
             let thread_id = match intent {
                 Intent::SelectModel { thread_id, model } => {
+                    let thread_id = if let Some(mut recovered) = recovery {
+                        if recovered.text != draft.text {
+                            append_transcript(&mut recovered.text, &draft.text);
+                        }
+                        for attachment in &draft.attachments {
+                            if !recovered.attachments.iter().any(|file| file.path == attachment.path) {
+                                recovered.attachments.push(attachment.clone());
+                            }
+                        }
+                        draft = recovered;
+                        let mut suffix = 0u64;
+                        let key = loop {
+                            let key = DraftKey::from(format!("model-recovery-{suffix}"));
+                            if !previous.drafts.contains_key(&key) { break key; }
+                            suffix += 1;
+                        };
+                        navigate(&mut next, Navigation {
+                            thread_id: None,
+                            cwd: previous.navigation.cwd.clone(),
+                            draft_key: key.clone(),
+                        });
+                        next.error = None;
+                        key
+                    } else { thread_id };
                     if draft.model.as_ref() != Some(&model) {
                         if matches!(&thread_id, DraftKey::Local { .. })
                             && draft.model.as_ref().is_none_or(|selected| selected.provider != model.provider)

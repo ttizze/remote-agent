@@ -64,7 +64,6 @@ impl Desktop {
                     .min_w_0()
                     .max_w(px(260.))
                     .flex_shrink_1()
-                    .ghost()
                     .disabled(!self.snapshot.connected || self.dictation.is_some())
                     .dropdown_menu(move |menu, _, _| {
                         let refresh = entity.clone();
@@ -109,7 +108,6 @@ impl Desktop {
             .min_w_0()
             .max_w(px(260.))
             .flex_shrink_1()
-            .ghost()
             .disabled(self.busy > 0 || self.dictation.is_some())
             .dropdown_menu(move |mut menu, _, cx| {
                 let Some(owner) = entity.upgrade() else {
@@ -379,7 +377,6 @@ impl Desktop {
         };
         let microphone = Button::new("dictation-toggle")
             .icon(Icon::default().path("bex/microphone.svg").size(px(20.)))
-            .ghost()
             .w(px(40.))
             .h(px(40.))
             .large()

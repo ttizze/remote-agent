@@ -182,7 +182,6 @@ impl Desktop {
                             Button::new(SharedString::from(format!("download-{i}")))
                                 .icon(IconName::ArrowDown)
                                 .small()
-                                .ghost()
                                 .tooltip("ダウンロード")
                                 .accessibility_label("ダウンロード")
                                 .on_click(cx.listener(move |s, _, _, cx| {
@@ -511,7 +510,6 @@ impl Desktop {
             ))
             .accessibility_label("差分のファイルを選択")
             .dropdown_caret(true)
-            .ghost()
             .dropdown_menu(move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade()
                     && let Some(review) = &owner.read(cx).snapshot.workspace.review

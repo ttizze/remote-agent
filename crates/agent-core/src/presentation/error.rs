@@ -1,6 +1,9 @@
 use serde_json::Value;
 
 pub fn error_message(error: &str) -> String {
+    if error == "request host/model/list timed out" {
+        return "AIの情報を取得するまでに時間がかかっています。PCの接続とAIへのログインを確認し、もう一度お試しください。".into();
+    }
     let Some(raw) = error.strip_prefix("remote RPC error: ") else {
         return error.into();
     };
@@ -30,6 +33,20 @@ pub fn error_message(error: &str) -> String {
 #[cfg(test)]
 mod error_tests {
     use super::error_message;
+    #[test]
+    fn model_catalog_timeout_explains_how_to_recover() {
+        let message = error_message("request host/model/list timed out");
+        assert!(
+            message.contains("AIの情報")
+                && message.contains("ログイン")
+                && message.contains("もう一度")
+        );
+        assert!(!message.contains("host/model/list"));
+        assert_eq!(
+            error_message("request host/session/read timed out"),
+            "request host/session/read timed out"
+        );
+    }
     #[test]
     fn writer_conflicts_explain_explicit_fork_recovery() {
         let message = error_message(

@@ -1661,6 +1661,33 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires installed Harness; catalog only, no inference"]
+    async fn installed_harness_exposes_venice_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = DeepSeek::load("dsh".into(), dir.path().into())
+            .await
+            .unwrap();
+        save_test_key(&adapter, KeyProvider::Venice, Some("test-catalog-only")).await;
+        let id = r#"["venice","qwen3-coder-480b-a35b-instruct-turbo"]"#;
+        adapter.model_settings(id).await.unwrap();
+        let page = adapter
+            .models(&op::ListModels {
+                limit: 100,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        let model = page
+            .data
+            .iter()
+            .find(|model| model.model.id == id)
+            .expect("Venice route missing");
+        assert_eq!(model.credential_route, Some(KeyProvider::Venice));
+        assert_eq!(model.display_name, "Venice AI · Qwen 3 Coder 480B Turbo");
+        adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Harness; catalog only, no inference"]
     async fn installed_harness_exposes_nanogpt_deepseek_and_native_efforts() {
         let dir = tempfile::tempdir().unwrap();
         let adapter = DeepSeek::load("dsh".into(), dir.path().into())

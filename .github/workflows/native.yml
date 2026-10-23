@@ -390,16 +390,14 @@ jobs:
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
-      - name: Package verified Windows development binaries
-        if: github.event_name != 'release'
-        run: ./scripts/package-windows.ps1 -Profile dev -SkipBuild
       - name: Build and package Windows release
-        if: github.event_name == 'release'
         run: ./scripts/package-windows.ps1 -Profile release
+      - name: Install and launch away from build-time shader sources
+        run: ./scripts/test-windows-installer.ps1 -Installer target/windows-packages/bex-windows-x86_64-setup.exe -HideShaderSources
       - name: Retain the Windows package and checksum
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: bex-windows-x86_64-${{ github.event_name == 'release' && 'release' || 'dev' }}
+          name: bex-windows-x86_64-release
           path: target/windows-packages/bex-windows-x86_64-*
           if-no-files-found: error
           retention-days: 14

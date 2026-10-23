@@ -18,6 +18,29 @@ pub(super) fn credential_route(id: &str) -> Option<KeyProvider> {
 
 pub(super) fn provider_profile(provider: KeyProvider) -> Value {
     let mut profile = json!({"apiKeyEnv":provider.reference()});
+    if provider == KeyProvider::Venice {
+        profile["displayName"] = json!("Venice AI");
+        profile["api"] = json!("openai-completions");
+        profile["baseURL"] = json!("https://api.venice.ai/api/v1");
+        // Public Venice text catalog; only models supporting tool calls belong
+        // in the agent picker. Capabilities checked against /models?type=text.
+        profile["models"] = json!([
+            {
+                "id":"qwen3-coder-480b-a35b-instruct-turbo",
+                "name":"Qwen 3 Coder 480B Turbo",
+                "contextWindow":256000,
+                "maxTokens":65536,
+                "input":["text"]
+            },
+            {
+                "id":"venice-uncensored-1-2",
+                "name":"Venice Uncensored 1.2",
+                "contextWindow":128000,
+                "maxTokens":8192,
+                "input":["text","image"]
+            }
+        ]);
+    }
     if provider == KeyProvider::NanoGpt {
         profile["displayName"] = json!("NanoGPT");
         profile["api"] = json!("openai-completions");
@@ -134,6 +157,24 @@ mod tests {
             assert_eq!(credential_route(id), None);
         }
     }
+    #[test]
+    fn venice_uses_separate_credentials_and_tool_capable_models() {
+        let profile = provider_profile(KeyProvider::Venice);
+        assert_eq!(profile["apiKeyEnv"], "VENICE_API_KEY");
+        assert_eq!(profile["baseURL"], "https://api.venice.ai/api/v1");
+        assert_eq!(profile["api"], "openai-completions");
+        let created = json!({"configOptions":[{"id":"model","options":[{
+            "value":r#"["venice","qwen3-coder-480b-a35b-instruct-turbo"]"#,
+            "name":profile["models"][0]["name"]
+        }]}]});
+        let models = catalog(&created);
+        assert_eq!(models[0].credential_route, Some(KeyProvider::Venice));
+        assert_eq!(
+            models[0].display_name,
+            "Venice AI · Qwen 3 Coder 480B Turbo"
+        );
+    }
+
     #[test]
     fn nanogpt_uses_its_own_endpoint_credential_and_reasoning_wire_values() {
         let profile = provider_profile(KeyProvider::NanoGpt);

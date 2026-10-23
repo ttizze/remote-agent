@@ -307,7 +307,6 @@ impl Hosts {
                                         })
                                         .child(name.to_owned()),
                                 )
-                                .ghost()
                                 .flex_1()
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.emit(HostEvent::Selected(destination.clone()));
@@ -329,7 +328,6 @@ impl Hosts {
                                 Button::new(format!("remove-{id}"))
                                     .icon(IconName::Close)
                                     .small()
-                                    .ghost()
                                     .accessibility_label("保存した接続を削除")
                                     .tooltip("保存した接続を削除")
                                     .disabled(self.busy || !self.snapshot.connected)
@@ -345,6 +343,15 @@ impl Hosts {
                             )
                         }),
                 );
+            if cards {
+                card = card.child(div().text_xs().text_color(rgb(appearance::MUTED)).child(
+                    if remote.is_none() {
+                        "このPC上でAIがファイルの読み書きやコマンドの実行を行います。"
+                    } else {
+                        "接続先のPC上にあるファイルとAIを使って作業します。"
+                    },
+                ));
+            }
             if selected {
                 let details = v_flex()
                     .gap_2()
@@ -367,7 +374,7 @@ impl Hosts {
         choices = choices.child(
             Button::new("onboarding-add-remote")
                 .accessibility_label(if cards {
-                    "クラウドVM・別のPCに接続"
+                    "別のPC・自分のクラウドVMに接続（任意）"
                 } else {
                     "接続先を追加"
                 })
@@ -381,12 +388,11 @@ impl Hosts {
                             IconName::Plus
                         }))
                         .child(if cards {
-                            "クラウドVM・別のPCに接続"
+                            "別のPC・自分のクラウドVMに接続（任意）"
                         } else {
                             "接続先を追加"
                         }),
                 )
-                .ghost()
                 .w_full()
                 .when(!cards, |button| {
                     button.h(px(48.)).px_4().text_color(rgb(0x8bb7f9))
@@ -409,7 +415,6 @@ impl Hosts {
                     Button::new(id)
                         .label(label)
                         .small()
-                        .ghost()
                         .selected(self.use_ssh == use_ssh)
                         .disabled(disabled)
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -479,19 +484,20 @@ impl Hosts {
                     ),
                 );
         }
-        choices = choices.child(
-            h_flex()
-                .items_center()
-                .gap_3()
-                .p_4()
-                .when(cards, |view| view.rounded(px(12.)).border_1())
-                .when(!cards, |view| view.border_t_1())
-                .border_color(rgb(appearance::BORDER))
-                .text_color(rgb(appearance::MUTED))
-                .child(Icon::new(IconName::Network))
-                .child(div().flex_1().child("Bexの実行環境"))
-                .child(div().text_xs().child("今後対応")),
-        );
+        choices = choices.when(!cards, |choices| {
+            choices.child(
+                h_flex()
+                    .items_center()
+                    .gap_3()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(rgb(appearance::BORDER))
+                    .text_color(rgb(appearance::MUTED))
+                    .child(Icon::new(IconName::Network))
+                    .child(div().flex_1().child("Bexの実行環境"))
+                    .child(div().text_xs().child("今後対応")),
+            )
+        });
         if let Some(error) = self.error.as_ref().or(self.snapshot.error.as_ref()) {
             choices = choices.child(
                 div()
@@ -533,7 +539,6 @@ impl Hosts {
             .min_w_0()
             .max_w(px(200.))
             .flex_shrink_1()
-            .ghost()
             .dropdown_menu(move |mut menu, _, _| {
                 let local = owner.clone();
                 menu = menu.item(
@@ -626,7 +631,6 @@ impl Render for Hosts {
                         .child(Button::new("copy-invite")
                             .label("招待をコピー")
                             .icon(IconName::Copy)
-                            .ghost()
                             .on_click(cx.listener(|view, _, _, cx| {
                                 if let Some((text, _)) = &view.invitation {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -659,7 +663,6 @@ impl Render for Hosts {
                         Button::new("refresh-hosts")
                             .icon(IconName::RotateCw)
                             .small()
-                            .ghost()
                             .accessibility_label("接続一覧を更新")
                             .tooltip("接続一覧を更新")
                             .disabled(disabled)
@@ -713,7 +716,6 @@ impl Render for Hosts {
                             Button::new(format!("revoke-{index}"))
                                 .label("接続を解除")
                                 .small()
-                                .ghost()
                                 .text_color(rgb(0x8bb7f9))
                                 .disabled(disabled)
                                 .on_click(cx.listener(move |view, _, _, cx| {

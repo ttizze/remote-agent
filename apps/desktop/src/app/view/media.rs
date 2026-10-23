@@ -278,7 +278,6 @@ impl Desktop {
                                     "折り返し"
                                 })
                                 .small()
-                                .ghost()
                                 .on_click(move |_, _, cx| {
                                     let _ = wrap_view.update(cx, |view, cx| {
                                         if let Some(cached) = view.markdown_cache.get_mut(&code_key)
@@ -294,7 +293,6 @@ impl Desktop {
                             Button::new("copy-code")
                                 .icon(IconName::Copy)
                                 .small()
-                                .ghost()
                                 .tooltip("コードをコピー")
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
@@ -319,7 +317,6 @@ impl Desktop {
                                     "セルをコンパクトに表示"
                                 })
                                 .small()
-                                .ghost()
                                 .on_click(move |_, _, cx| {
                                     let _ = table_view.update(cx, |view, cx| {
                                         if let Some(cached) =
@@ -336,7 +333,6 @@ impl Desktop {
                             Button::new("copy-markdown")
                                 .label("Markdownをコピー")
                                 .small()
-                                .ghost()
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         markdown.clone(),
@@ -347,7 +343,6 @@ impl Desktop {
                             Button::new("copy-csv")
                                 .label("CSVをコピー")
                                 .small()
-                                .ghost()
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(csv.clone()))
                                 }),
@@ -471,7 +466,6 @@ impl Desktop {
         let image = self.image(&source, encoded, 64., false, cx);
         Button::new(format!("gallery-thumbnail-{index}"))
             .accessibility_label(format!("生成画像 {}", index + 1))
-            .ghost()
             .child(image)
             .w(px(80.))
             .h(px(80.))

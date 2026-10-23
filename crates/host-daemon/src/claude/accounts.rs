@@ -302,6 +302,10 @@ impl Accounts {
                 Ok(Empty {}.into())
             }
             AccountCommand::StartLogin => {
+                // Do not create a pending login that can only fail cleanup when
+                // the supervisor starts successfully but the CLI is missing.
+                let path = std::env::var_os("PATH");
+                super::process::executable(&self.program, path.as_deref())?;
                 self.cancel().await?;
                 let id = format!("claude:{}", uuid::Uuid::new_v4());
                 let home = self.directory.join(id.strip_prefix("claude:").unwrap());
@@ -329,7 +333,9 @@ impl Accounts {
                 let verification_url = match result {
                     Ok(url) => url,
                     Err(error) => {
-                        self.cancel().await?;
+                        if let Err(cleanup) = self.cancel().await {
+                            return Err(format!("{error}\n{cleanup}"));
+                        }
                         return Err(error);
                     }
                 };
@@ -442,14 +448,17 @@ impl Accounts {
     pub(super) async fn cancel(&mut self) -> Result<(), String> {
         if let Some(login) = self.login.as_mut() {
             login.process.input.take();
-            let _ = login.process.child.wait().await;
+            tokio::time::timeout(Duration::from_secs(10), login.process.child.wait())
+                .await
+                .map_err(|_| "Claude の認証処理を停止できません。もう一度お試しください。")?
+                .map_err(|_| "Claude の認証処理の停止を確認できません。")?;
             // A completion can race cancellation; let the CLI remove its credentials.
             let mut process =
                 Cli::start(&self.program, Some(&login.home), &["auth", "logout"], None)?;
             if !process.finish().await?.0 {
-                // A failed logout is harmless only when the CLI explicitly confirms
-                // there are no credentials. Keep the login available for retry on
-                // every other failure, including an unreadable status response.
+                // Some CLI versions return nonzero when already signed out.
+                // Accept that only after confirming this temporary home has no
+                // credentials; otherwise keep the pending login for a retry.
                 let mut status = Cli::start(
                     &self.program,
                     Some(&login.home),
@@ -457,10 +466,10 @@ impl Accounts {
                     None,
                 )?;
                 let (_, output) = status.finish().await?;
-                let value: Value = serde_json::from_slice(&output)
-                    .map_err(|_| "Claude の認証状態を読み取れません。")?;
-                if value["loggedIn"] != false {
-                    return Err("Claude の認証手続きを破棄できません。".into());
+                if !confirmed_logged_out(&output) {
+                    return Err(
+                        "Claude の認証手続きを破棄できません。もう一度お試しください。".into(),
+                    );
                 }
             }
             tokio::fs::remove_dir_all(&login.home)
@@ -472,6 +481,13 @@ impl Accounts {
     }
 }
 
+fn confirmed_logged_out(output: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(output)
+        .ok()
+        .and_then(|value| value["loggedIn"].as_bool())
+        == Some(false)
+}
+
 impl Cli {
     fn start(
         program: &Path,
@@ -479,8 +495,10 @@ impl Cli {
         args: &[&str],
         url: Option<oneshot::Sender<String>>,
     ) -> Result<Self, String> {
+        let path = std::env::var_os("PATH");
+        let program = super::process::executable(program, path.as_deref())?;
         let mut command =
-            bex_process::command(program).map_err(|_| "Claude の認証処理を起動できません。")?;
+            bex_process::command(&program).map_err(|_| "Claude の認証処理を起動できません。")?;
         super::process::set_homes(&mut command, home.map(|home| (home, home)));
         command
             .args(args)
@@ -567,6 +585,41 @@ async fn read_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_logout_requires_explicit_confirmation_before_removing_login_state() {
+        assert!(confirmed_logged_out(br#"{"loggedIn":false}"#));
+        for output in [
+            br#"{"loggedIn":true}"#.as_slice(),
+            br#"{"loggedIn":"false"}"#.as_slice(),
+            br#"{}"#.as_slice(),
+            b"CLI failed".as_slice(),
+        ] {
+            assert!(!confirmed_logged_out(output));
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_cli_does_not_create_a_pending_login_or_hide_the_cause() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut accounts = Accounts::load(
+            directory.path().join("missing-claude"),
+            directory.path().join("accounts"),
+            directory.path().join("native"),
+            false,
+        )
+        .await
+        .unwrap();
+        let error = accounts
+            .request(AccountCommand::StartLogin)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("executable is missing"));
+        assert!(accounts.login.is_none());
+        assert_eq!(std::fs::read_dir(&accounts.directory).unwrap().count(), 0);
+        accounts.cancel().await.unwrap();
+    }
 
     #[tokio::test]
     async fn repeated_listing_reuses_native_identity_but_expiration_rechecks_it() {

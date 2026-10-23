@@ -114,7 +114,6 @@ impl DiffView {
         {
             return Button::new(("context", source_ix))
                 .label(format!("{} 行の未変更部分を表示", range.len()))
-                .ghost()
                 .on_click(cx.listener(move |s, _, _, cx| {
                     s.expanded_context.insert(source_ix);
                     s.rebuild();
@@ -131,7 +130,6 @@ impl DiffView {
                     if folded { "›" } else { "⌄" },
                     self.file_names.get(&file).unwrap_or(&row.text)
                 ))
-                .ghost()
                 .on_click(cx.listener(move |s, _, _, cx| {
                     if !s.folded.remove(&file) {
                         s.folded.insert(file);
@@ -195,7 +193,6 @@ impl Render for DiffView {
         let mut body = v_flex().gap_2().w_full().child(
             Button::new("copy-patch")
                 .label("差分をコピー")
-                .ghost()
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(source.to_string()))
                 }),
@@ -223,7 +220,6 @@ impl Render for DiffView {
                 body = body.child(
                     Button::new("show-more")
                         .label(format!("残り {} 行を表示", self.visible.len() - count))
-                        .ghost()
                         .on_click(cx.listener(|s, _, _, cx| {
                             s.limit = None;
                             cx.notify();
