@@ -33,8 +33,8 @@ import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MarkdownFileKind
 import dev.remoteagent.core.MarkdownFileReference
-import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.OperationPhase
+import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.RenderedItem
 
 @Composable
@@ -67,8 +67,7 @@ internal fun ThreadMessageCard(
                     }
                 } else ConversationBody(body, cwd, perform)
             }
-        if (!isUser && content.kind == "agent")
-            MessageFooter(content.body.orEmpty(), timestampMs, fork, forkPhase)
+        if (!isUser && content.kind == "agent") MessageFooter(content.body.orEmpty(), timestampMs, fork, forkPhase)
         if (isUser) MessageFooter(content.body.orEmpty(), timestampMs, null)
         if (isUser && content.nativeId == null) {
             content.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }

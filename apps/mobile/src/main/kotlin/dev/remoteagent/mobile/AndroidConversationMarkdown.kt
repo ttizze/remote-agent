@@ -292,9 +292,7 @@ private fun MarkdownText(
                 }
             } else if (link != null) {
                 withStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)) {
-                    withLink(LinkAnnotation.Url(link) { openExternalLink(link) }) {
-                        append(styledRuns[index])
-                    }
+                    withLink(LinkAnnotation.Url(link) { openExternalLink(link) }) { append(styledRuns[index]) }
                 }
             } else append(styledRuns[index])
         }

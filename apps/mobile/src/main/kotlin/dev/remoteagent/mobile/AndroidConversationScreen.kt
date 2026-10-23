@@ -374,17 +374,17 @@ private fun ObserveFollowing(
     LaunchedEffect(snapshot, following, older) {
         val hasMore = snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
         snapshotFlow {
-                val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
-                shouldLoadHistory(
-                    hasMore,
-                    older == null || snapshot.error() != null,
-                    viewportHeight > 0 &&
-                        listState.firstVisibleItemIndex == 0 &&
-                        listState.firstVisibleItemScrollOffset < viewportHeight * HISTORY_PREFETCH_FRACTION,
-                    !listState.canScrollForward,
-                    following,
-                )
-            }
+            val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+            shouldLoadHistory(
+                hasMore,
+                older == null || snapshot.error() != null,
+                viewportHeight > 0 &&
+                    listState.firstVisibleItemIndex == 0 &&
+                    listState.firstVisibleItemScrollOffset < viewportHeight * HISTORY_PREFETCH_FRACTION,
+                !listState.canScrollForward,
+                following,
+            )
+        }
             .collect { needed -> if (needed) older?.invoke() }
     }
     LaunchedEffect(listState) {

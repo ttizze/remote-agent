@@ -99,7 +99,8 @@ class ModelDefaultsTest {
                         selected,
                         { intent, complete ->
                             intents.add(intent)
-                            if (intent is Intent.SaveDraftModelDefaults) complete(Result.failure(IOException("保存できません")))
+                            if (intent is Intent.SaveDraftModelDefaults)
+                                complete(Result.failure(IOException("保存できません")))
                             else complete(Result.success(Outcome.Applied))
                         },
                     )

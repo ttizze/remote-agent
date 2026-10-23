@@ -153,8 +153,7 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
                 shape = RoundedCornerShape(8.dp),
                 colors =
                     ButtonDefaults.textButtonColors(
-                        containerColor =
-                            if (isSelected) colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent,
+                        containerColor = if (isSelected) colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent,
                         contentColor = colorScheme.onSurface,
                     ),
             ) {
@@ -172,10 +171,9 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
     }
     Button(
         onClick = {
-            val values =
-                questions.associate {
-                    it.id to buildQuestionAnswer(it.multiple, answers[it.id].orEmpty(), selections[it.id].orEmpty())
-                }
+            val values = questions.associate {
+                it.id to buildQuestionAnswer(it.multiple, answers[it.id].orEmpty(), selections[it.id].orEmpty())
+            }
             respond(Answer.Questions(values))
         },
         enabled = !disabled,
