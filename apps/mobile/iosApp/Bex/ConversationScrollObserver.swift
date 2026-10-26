@@ -28,6 +28,11 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
         guard let scrollView else { return nil }
         Self.logger
             .notice("capture y=\(Double(scrollView.contentOffset.y)) height=\(Double(scrollView.contentSize.height))")
+        let renderedHeight = renderedPage?.height ?? -1
+        Self.logger
+            .notice("capture rendered-height=\(Double(renderedHeight)) viewport=\(Double(scrollView.bounds.height))")
+        Self.logger.notice("capture inset-top=\(Double(scrollView.adjustedContentInset.top))")
+        Self.logger.notice("capture inset-bottom=\(Double(scrollView.adjustedContentInset.bottom))")
         let id = UUID()
         historyAnchor = ReadingPosition(id: id, offset: scrollView.contentOffset,
                                         height: scrollView.contentSize.height,
@@ -83,6 +88,14 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
             DispatchQueue.main.async { [weak scrollView] in
                 guard let scrollView else { return }
                 Self.logger.notice("next-turn y=\(Double(scrollView.contentOffset.y))")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak scrollView] in
+                guard let scrollView else { return }
+                Self.logger
+                    .notice(
+                        "settled y=\(Double(scrollView.contentOffset.y)) height=\(Double(scrollView.contentSize.height))"
+                    )
+                Self.logger.notice("settled inset-top=\(Double(scrollView.adjustedContentInset.top))")
             }
         }
         return offset
