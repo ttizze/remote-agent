@@ -16,6 +16,7 @@ impl Desktop {
             self.images.insert(
                 key.clone(),
                 ImageState {
+                    focus: cx.focus_handle(),
                     source: source.clone(),
                     path: None,
                     error: None,
@@ -102,6 +103,8 @@ impl Desktop {
                 });
             let source = state.source.clone();
             let menu_source = source.clone();
+            let copy_source = source.clone();
+            let focus = state.focus.clone();
             let owner = cx.entity().downgrade();
             let saving = self
                 .image_gallery
@@ -109,6 +112,20 @@ impl Desktop {
                 .is_some_and(|gallery| gallery.saving);
             let image_menu = div()
                 .id(id)
+                .key_context("TextView")
+                .track_focus(&focus)
+                .on_mouse_down(MouseButton::Left, {
+                    let focus = focus.clone();
+                    move |_, window, cx| focus.focus(window, cx)
+                })
+                .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                    focus.focus(window, cx)
+                })
+                .on_action(
+                    cx.listener(move |view, _: &gpui_kit::base::input::Copy, _, cx| {
+                        view.copy_image(&copy_source, encoded, cx);
+                    }),
+                )
                 .w_full()
                 .h(px(height))
                 .flex_shrink_0()
@@ -126,7 +143,16 @@ impl Desktop {
                 .context_menu(move |menu, _, _| {
                     let owner = owner.clone();
                     let source = menu_source.clone();
-                    menu.item(
+                    let copy_owner = owner.clone();
+                    let copy_source = source.clone();
+                    menu.item(PopupMenuItem::new("画像をコピー").icon(IconName::Copy).on_click(
+                        move |_, _, cx| {
+                            let _ = copy_owner.update(cx, |view, cx| {
+                                view.copy_image(&copy_source, encoded, cx);
+                            });
+                        },
+                    ))
+                    .item(
                         PopupMenuItem::new("画像を名前を付けて保存…")
                             .icon(Icon::default().path("bex/download.svg"))
                             .disabled(saving)
@@ -636,6 +662,64 @@ impl Desktop {
         self.save_image(&source, encoded, cx);
     }
 
+    fn copy_image(&mut self, source: &str, encoded: bool, cx: &mut Context<Self>) {
+        let key = self.image_key(source, encoded);
+        let Some(ImageSource::Resource(resource)) =
+            self.images.get(&key).and_then(|image| image.path.clone())
+        else {
+            return;
+        };
+        let http = cx.http_client();
+        cx.spawn(async move |view, cx| {
+            let result = async {
+                let bytes = match resource {
+                    Resource::Path(path) => {
+                        std::fs::read(path.as_ref()).map_err(|error| error.to_string())?
+                    }
+                    Resource::Uri(uri) => {
+                        use futures_util::AsyncReadExt;
+                        let mut response = http
+                            .get(
+                                uri.as_ref(),
+                                gpui_kit::http_client::AsyncBody::empty(),
+                                true,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if !response.status().is_success() {
+                            return Err(format!("画像の取得に失敗しました: {}", response.status()));
+                        }
+                        let mut bytes = Vec::new();
+                        response
+                            .body_mut()
+                            .read_to_end(&mut bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        bytes
+                    }
+                    _ => return Err("コピーできない画像です".into()),
+                };
+                cx.background_executor()
+                    .spawn(async move {
+                        let decoded =
+                            image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
+                        let mut png = std::io::Cursor::new(Vec::new());
+                        decoded
+                            .write_to(&mut png, image::ImageFormat::Png)
+                            .map_err(|error| error.to_string())?;
+                        Ok::<_, String>(Image::from_bytes(ImageFormat::Png, png.into_inner()))
+                    })
+                    .await
+            }
+            .await;
+            let _ = view.update(cx, |view, cx| match result {
+                Ok(image) => cx.write_to_clipboard(ClipboardItem::new_image(&image)),
+                Err(error) => view.set_error(error),
+            });
+        })
+        .detach();
+    }
+
     fn save_image(&mut self, source: &str, encoded: bool, cx: &mut Context<Self>) {
         let key = self.image_key(source, encoded);
         let Some(ImageSource::Resource(resource)) =
@@ -828,6 +912,28 @@ mod file_panel_tests {
             .expect("image file entry");
         window.simulate_click(entry.center(), Modifiers::default());
         window.run_until_parked();
+        window.update(|window, cx| {
+            desktop.update(cx, |view, cx| {
+                let key = view.image_key(&source, false);
+                view.images.get_mut(&key).unwrap().path = Some(PathBuf::from(&source).into());
+                view.images[&key].focus.focus(window, cx);
+                cx.notify();
+                cx.write_to_clipboard(ClipboardItem::new_string("previous clipboard".into()));
+            });
+        });
+        window.run_until_parked();
+        #[cfg(target_os = "macos")]
+        window.simulate_keystrokes("cmd-c");
+        #[cfg(not(target_os = "macos"))]
+        window.simulate_keystrokes("ctrl-c");
+        window.run_until_parked();
+        window.update(|_, cx| {
+            let copied = cx.read_from_clipboard().unwrap();
+            let gpui_kit::ClipboardEntry::Image(copied) = &copied.entries()[0] else {
+                panic!("Ctrl+C copies image pixels");
+            };
+            assert_eq!(image::load_from_memory(copied.bytes()).unwrap().to_rgba8(), image);
+        });
         window.update(|_, cx| {
             desktop.update(cx, |view, cx| {
                 let gallery = view

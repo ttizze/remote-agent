@@ -146,6 +146,7 @@ impl ImageGallery {
     }
 }
 struct ImageState {
+    focus: FocusHandle,
     source: Arc<String>,
     path: Option<ImageSource>,
     error: Option<String>,

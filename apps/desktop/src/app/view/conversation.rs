@@ -1715,12 +1715,13 @@ mod rendering_tests {
                     user_message_fixture("caption", Some("/fixture/image.png"), pending);
                 let (view, window) = cx.add_window_view(|window, cx| {
                     let view = ConversationView::new(snapshot, source, window, cx);
-                    view.desktop.update(cx, |desktop, _| {
+                    view.desktop.update(cx, |desktop, cx| {
                         let source = "/fixture/image.png".to_owned();
                         let key = desktop.image_key(&source, false);
                         desktop.images.insert(
                             key,
                             ImageState {
+                                focus: cx.focus_handle(),
                                 source: Arc::new(source),
                                 path: Some(image.into()),
                                 error: None,
