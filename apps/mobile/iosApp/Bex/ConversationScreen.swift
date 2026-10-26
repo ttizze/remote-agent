@@ -19,7 +19,7 @@ struct ThreadScreen: View {
     @State var showingModelSettings = false
     @State var isFollowingLatest = true
     @State var scrollController = ConversationScrollObserver()
-    @State private var scrollPosition = ScrollPosition(idType: String.self, edge: .bottom)
+    @State var scrollPosition = ScrollPosition(idType: String.self, edge: .bottom)
     @State var visibleLatest: LatestBoundary?
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
@@ -166,8 +166,11 @@ struct ThreadScreen: View {
                                              turnCount: turnCount,
                                              hasMoreHistory: hasMoreHistory)
                 } action: { _, layout in
-                    scrollController.historyDidLayout(turnCount: layout.turnCount,
-                                                      hasMoreHistory: layout.hasMoreHistory)
+                    if let point = scrollController.historyDidLayout(turnCount: layout.turnCount,
+                                                                     hasMoreHistory: layout.hasMoreHistory,
+                                                                     contentHeight: layout.contentHeight) {
+                        scrollPosition.scrollTo(point: point)
+                    }
                     if isFollowingLatest {
                         scrollPosition.scrollTo(edge: .bottom)
                     }

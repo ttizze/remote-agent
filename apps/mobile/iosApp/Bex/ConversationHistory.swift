@@ -15,12 +15,14 @@ extension ThreadScreen {
                     )
                     isFollowingLatest = false
                     model.loadOlderHistory(session) { succeeded, turns, hasMore in
-                        controller.historyLoaded(
+                        if let point = controller.historyLoaded(
                             request,
                             succeeded: succeeded,
                             turnCount: turns,
                             hasMoreHistory: hasMore
-                        )
+                        ) {
+                            scrollPosition.scrollTo(point: point)
+                        }
                     }
                 } label: {
                     HStack(spacing: 12) {
