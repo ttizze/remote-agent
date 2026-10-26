@@ -1,7 +1,9 @@
+import OSLog
 import UIKit
 
 /// Own the native scroll view's status-bar navigation and history insertion offset.
 final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
+    private static let logger = Logger(subsystem: "dev.remoteagent.mobile.ios", category: "HistoryScroll")
     private struct HistoryPage: Equatable {
         let turnCount: UInt64
         let hasMore: Bool
@@ -22,7 +24,10 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
     private var renderedPage: HistoryPage?
 
     func captureReadingPosition(turnCount: UInt64, hasMoreHistory: Bool) -> UUID? {
+        Self.logger.notice("capture attached=\(self.scrollView != nil) turns=\(turnCount) more=\(hasMoreHistory)")
         guard let scrollView else { return nil }
+        Self.logger
+            .notice("capture y=\(Double(scrollView.contentOffset.y)) height=\(Double(scrollView.contentSize.height))")
         let id = UUID()
         historyAnchor = ReadingPosition(id: id, offset: scrollView.contentOffset,
                                         height: scrollView.contentSize.height,
@@ -31,10 +36,16 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
     }
 
     func cancelHistoryRestoration() {
+        if historyAnchor != nil {
+            Self.logger.notice("cancel pending restoration")
+        }
         historyAnchor = nil
     }
 
     func historyLoaded(_ id: UUID?, succeeded: Bool, turnCount: UInt64, hasMoreHistory: Bool) {
+        let matched = id != nil && id == historyAnchor?.id
+        Self.logger.notice("loaded matched=\(matched) succeeded=\(succeeded)")
+        Self.logger.notice("loaded turns=\(turnCount) more=\(hasMoreHistory)")
         guard let id, var anchor = historyAnchor, anchor.id == id else { return }
         let page = HistoryPage(turnCount: turnCount, hasMore: hasMoreHistory)
         guard succeeded, page != anchor.page else {
@@ -47,6 +58,9 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
     }
 
     func historyDidLayout(turnCount: UInt64, hasMoreHistory: Bool) {
+        if historyAnchor != nil {
+            Self.logger.notice("layout turns=\(turnCount) more=\(hasMoreHistory)")
+        }
         renderedPage = HistoryPage(turnCount: turnCount, hasMore: hasMoreHistory)
         restoreReadingPosition()
     }
@@ -59,11 +73,19 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
         historyAnchor = nil
         let offset = CGPoint(x: anchor.offset.x,
                              y: anchor.offset.y + scrollView.contentSize.height - anchor.height)
+        Self.logger.notice("restore y=\(Double(scrollView.contentOffset.y)) target=\(Double(offset.y))")
+        Self.logger.notice("restore height=\(Double(scrollView.contentSize.height)) baseline=\(Double(anchor.height))")
         scrollView.setContentOffset(offset, animated: false)
+        Self.logger.notice("applied y=\(Double(scrollView.contentOffset.y))")
+        DispatchQueue.main.async { [weak scrollView] in
+            guard let scrollView else { return }
+            Self.logger.notice("next-turn y=\(Double(scrollView.contentOffset.y))")
+        }
     }
 
     func attach(to scroll: UIScrollView) {
         if scrollView !== scroll {
+            Self.logger.notice("attach \(NSStringFromClass(type(of: scroll)), privacy: .public)")
             detach()
             scrollView = scroll
         }
@@ -74,6 +96,9 @@ final class ConversationScrollObserver: NSObject, UIScrollViewDelegate {
     }
 
     func detach() {
+        if scrollView != nil {
+            Self.logger.notice("detach native scroll view")
+        }
         cancelHistoryRestoration()
         renderedPage = nil
         if scrollView?.delegate === self {

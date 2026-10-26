@@ -718,6 +718,13 @@ async fn worker(
                 acceptance.await
             };
             if *cancel.borrow() { return Err(supervision::interrupted()); }
+            if std::env::var("CI").as_deref() == Ok("true") {
+                let history_log = File::create(prefix.with_extension("history-scroll.log"))?;
+                let history = args!["xcrun", "simctl", "spawn", simulator, "log", "show", "--style", "compact", "--last", "30m", "--predicate", "subsystem == \"dev.remoteagent.mobile.ios\" AND category == \"HistoryScroll\""];
+                if let Err(error) = supervision::run(&history, &cwd, Io::Log(&history_log), &cancel, Duration::from_secs(30)).await {
+                    eprintln!("{label}: history geometry log collection failed: {error}");
+                }
+            }
             let summary = supervision::run(&args!["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", &bundle, "--format", "json"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let summary: Value = serde_json::from_slice(&summary.stdout)?;
             fs::write(prefix.with_extension("summary.json"), format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
