@@ -84,7 +84,7 @@ fn chrome_profiles() -> Result<Vec<(String, PathBuf)>, String> {
     }
     Ok(result)
 }
-impl Browser {
+impl BrowserPage {
     fn run_import(
         &mut self,
         work: impl FnOnce() -> Result<String, String> + Send + 'static,
@@ -160,7 +160,7 @@ impl Browser {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BrowserBookmark, fs, load, update};
     #[test]
     fn imports_merge_reopen_and_preserve_corrupt_storage() {
         let directory = tempfile::tempdir().unwrap();
