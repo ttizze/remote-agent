@@ -52,10 +52,51 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
         });
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = browser;
-        Err("Shared BEX browser currently requires a Unix Host.".into())
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let mut listener = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(browser.socket())
+            .map_err(|e| e.to_string())?;
+        let weak = Arc::downgrade(browser);
+        let stop = browser.stop.clone();
+        let address = browser.socket();
+        tokio::spawn(async move {
+            let capacity = Arc::new(tokio::sync::Semaphore::new(32));
+            let mut calls = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    Some(_) = calls.join_next(), if !calls.is_empty() => {},
+                    connected = listener.connect() => {
+                        if connected.is_err() { break; }
+                        let Ok(next) = ServerOptions::new().reject_remote_clients(true).create(&address) else { break; };
+                        let socket = std::mem::replace(&mut listener, next);
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
+                        let Some(browser) = weak.upgrade() else { break; };
+                        calls.spawn(async move {
+                            let _permit = permit;
+                            let (read, write) = tokio::io::split(socket);
+                            let mut input = JsonlReader::with_max_message_bytes(read, 64 * 1024);
+                            let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
+                            let Ok(Ok(Some(line))) = tokio::time::timeout(std::time::Duration::from_secs(5), input.read_line()).await else { return; };
+                            let Ok(request) = serde_json::from_str::<BridgeRequest>(&line) else { return; };
+                            let result = tokio::select! {
+                                result = browser.agent(&request.thread, request.action) => result,
+                                _ = input.read_line() => return,
+                                _ = browser.stop.cancelled() => return,
+                            };
+                            if let Ok(line) = serde_json::to_string(&result) { let _ = output.write_line(&line).await; }
+                        });
+                    }
+                }
+            }
+            calls.abort_all();
+            while calls.join_next().await.is_some() {}
+        });
+        Ok(())
     }
 }
 
@@ -264,26 +305,70 @@ pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
 
 async fn bridge(socket: &Path, request: BridgeRequest) -> Result<BrowserFrame, String> {
     #[cfg(unix)]
-    {
-        let socket = tokio::net::UnixStream::connect(socket)
-            .await
-            .map_err(|_| "BEX Hostに接続できません。会話を開き直してください。")?;
-        let (read, write) = socket.into_split();
-        let mut output = JsonlWriter::with_max_message_bytes(write, 64 * 1024);
-        output
-            .write_line(&serde_json::to_string(&request).map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| e.to_string())?;
-        let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
-            .read_line()
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or("BEX Hostとの接続が切れました。")?;
-        serde_json::from_str(&line).map_err(|_| "invalid browser response")?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (socket, request);
-        Err("Shared BEX browser currently requires a Unix Host.".into())
+    let socket = tokio::net::UnixStream::connect(socket)
+        .await
+        .map_err(|_| "BEX Hostに接続できません。会話を開き直してください。")?;
+    #[cfg(windows)]
+    let socket = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(socket) {
+                Ok(client) => return Ok(client),
+                Err(error) if error.raw_os_error() == Some(231) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "BEX browser connection timed out".to_owned())??;
+    let (read, write) = tokio::io::split(socket);
+    let mut output = JsonlWriter::with_max_message_bytes(write, 64 * 1024);
+    output
+        .write_line(&serde_json::to_string(&request).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?;
+    let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
+        .read_line()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("BEX Hostとの接続が切れました。")?;
+    serde_json::from_str(&line).map_err(|_| "invalid browser response")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_bridge_serves_multiple_clients_and_stops_with_host() {
+        let root = tempfile::tempdir().unwrap();
+        let browser = Browser::start(root.path().join("profile")).await.unwrap();
+        let address = browser.socket();
+        let call = || {
+            bridge(
+                &address,
+                BridgeRequest {
+                    thread: "claude:test".into(),
+                    action: BrowserAction::Navigate {
+                        url: "file:///private".into(),
+                    },
+                },
+            )
+        };
+        // Invalid navigation is rejected by the actual Host, without launching Chrome.
+        for _ in 0..3 {
+            assert_eq!(
+                call().await.unwrap_err(),
+                BrowserAction::Navigate {
+                    url: "file:///private".into()
+                }
+                .validate()
+                .unwrap_err()
+            );
+        }
+        browser.shutdown().await;
+        tokio::task::yield_now().await;
+        assert!(call().await.is_err());
     }
 }

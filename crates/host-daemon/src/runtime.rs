@@ -104,7 +104,6 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         )
         .await
         .context("cannot initialize Live Activity notifications")?;
-    #[cfg(unix)]
     service
         .enable_browser(directory.join("browser"))
         .await

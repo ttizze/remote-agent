@@ -61,7 +61,8 @@ test("SDK callbacks wait for Host answers and cancel when the SDK aborts", async
   const input = channel();
   const output = channel();
   let options;
-  input.push(JSON.stringify({ type: "initialize", program: "/fixture/claude", cwd: "/fixture", sessionId: "session", resume: true }));
+  const browser = { command: "C:/BEX/host-daemon.exe", args: ["browser-mcp", "--socket", "pipe", "--thread", "claude:session"] };
+  input.push(JSON.stringify({ type: "initialize", program: "/fixture/claude", cwd: "/fixture", sessionId: "session", resume: true, browser }));
   const events = [];
   const messages = output[Symbol.asyncIterator]();
   const bridge = runBridge(input, (event) => events.push(event), ({ options: configured }) => {
@@ -74,6 +75,7 @@ test("SDK callbacks wait for Host answers and cancel when the SDK aborts", async
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(options.resume, "session");
+  assert.deepEqual(options.mcpServers, { bex_browser: browser });
   assert.deepEqual(await options.onUserDialog({ dialogKind: "unknown" }), { behavior: "cancelled" });
   await assert.rejects(options.canUseTool("Bash", { command: "あ".repeat(12_000) }, {
     requestId: "oversized", signal: new AbortController().signal,

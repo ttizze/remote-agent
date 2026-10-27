@@ -1,4 +1,3 @@
-#![cfg(unix)]
 use agent_transport::peer::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{path::PathBuf, process::Stdio, time::Duration};
@@ -164,6 +163,7 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn cancelled_mcp_call_keeps_the_bridge_responsive() {
     use agent_protocol::browser::BrowserFrame;
     let root = tempfile::Builder::new()
