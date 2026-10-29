@@ -117,7 +117,7 @@ dependencies {
     implementation("com.revenuecat.purchases:placeholder:1.0.4")
     implementation("org.jetbrains.compose.foundation:foundation:1.12.2")
     // Compose Multiplatform publishes material3 for its 1.12 line only as alphas.
-    implementation("org.jetbrains.compose.material3:material3:1.12.0-alpha03")
+    implementation("org.jetbrains.compose.material3:material3:1.13.0-alpha02")
     implementation("org.jetbrains.compose.ui:ui:1.12.2")
     implementation("androidx.camera:camera-camera2:1.6.2")
     implementation("androidx.camera:camera-lifecycle:1.6.2")
