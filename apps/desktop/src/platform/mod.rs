@@ -106,8 +106,21 @@ impl Connections {
                 Store::connect(endpoint, &ticket, snapshot, None).await?,
             ));
         }
-        let store = Arc::new(self.connect_local(snapshot).await?);
-        self.recover_local(store.clone());
+        let store = Arc::new(self.connect_local(snapshot, true).await?);
+        self.recover_local(store.clone(), true);
+        Ok(store)
+    }
+
+    /// PairRemoteHost dials the invitation through its management session's
+    /// endpoint. Use the same network-capable endpoint as remote conversations
+    /// so pairing can reach LAN addresses and relays with the correct identity.
+    pub(crate) async fn connect_management(
+        self: &Arc<Self>,
+        snapshot: Snapshot,
+    ) -> anyhow::Result<Arc<Store>> {
+        let _startup = self.startup.lock().await;
+        let store = Arc::new(self.connect_local(snapshot, false).await?);
+        self.recover_local(store.clone(), false);
         Ok(store)
     }
 
@@ -145,7 +158,7 @@ impl Connections {
         Ok(endpoint)
     }
 
-    async fn connect_local(&self, snapshot: Snapshot) -> anyhow::Result<Store> {
+    async fn connect_local(&self, snapshot: Snapshot, local: bool) -> anyhow::Result<Store> {
         let isolated = isolated_host()?;
         let mut child = None;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -155,7 +168,7 @@ impl Connections {
                 let location = discover_local_host().await?;
                 match &location.state {
                     LocalHostState::Ready(ticket) => {
-                        let endpoint = self.endpoint_for(&location.directory, true).await?;
+                        let endpoint = self.endpoint_for(&location.directory, local).await?;
                         let attempt = tokio::time::timeout(
                             Duration::from_secs(1),
                             Store::connect(endpoint, ticket, snapshot.clone(), None),
@@ -195,7 +208,7 @@ impl Connections {
         ready
     }
 
-    fn recover_local(self: &Arc<Self>, store: Arc<Store>) {
+    fn recover_local(self: &Arc<Self>, store: Arc<Store>, local: bool) {
         let connections = self.clone();
         tokio::spawn(async move {
             let mut snapshots = store.subscribe();
@@ -218,7 +231,7 @@ impl Connections {
                     let LocalHostState::Ready(ticket) = &location.state else {
                         return Err(anyhow::anyhow!("Local Host is not ready"));
                     };
-                    let endpoint = connections.endpoint_for(&location.directory, true).await?;
+                    let endpoint = connections.endpoint_for(&location.directory, local).await?;
                     store.resume(endpoint, ticket).await?;
                     Ok::<_, anyhow::Error>(())
                 })
