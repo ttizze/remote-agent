@@ -1,14 +1,17 @@
+import AgentCore
 import AVFoundation
 import UIKit
 
 final class QrCaptureViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    private let language: UiLanguage
     private let completion: (String) -> Void
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "agent.qr-capture")
     private let previewLayer = AVCaptureVideoPreviewLayer()
     private var hasCompleted = false
 
-    init(completion: @escaping (String) -> Void) {
+    init(language: UiLanguage, completion: @escaping (String) -> Void) {
+        self.language = language
         self.completion = completion
         super.init(nibName: nil, bundle: nil)
     }
@@ -84,7 +87,7 @@ final class QrCaptureViewController: UIViewController, AVCaptureMetadataOutputOb
 
     private func showCameraError(_ message: String, offersSettings: Bool = false) {
         let label = UILabel()
-        label.text = message
+        label.text = localizedUiText(language: language, source: message)
         label.textColor = .white
         label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true
@@ -96,7 +99,7 @@ final class QrCaptureViewController: UIViewController, AVCaptureMetadataOutputOb
         stack.spacing = 20
         if offersSettings {
             let settings = UIButton(type: .system)
-            settings.setTitle("設定を開く", for: .normal)
+            settings.setTitle(localizedUiText(language: language, source: "設定を開く"), for: .normal)
             settings.accessibilityIdentifier = "scanner.settings"
             settings.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
             stack.addArrangedSubview(settings)

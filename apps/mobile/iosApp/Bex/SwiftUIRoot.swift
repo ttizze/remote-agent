@@ -263,7 +263,7 @@ struct AppNotice: View {
     let text: String
 
     var body: some View {
-        Text(text)
+        AppText(text)
             .foregroundColor(.red)
             .accessibilityIdentifier("notice")
     }
@@ -289,10 +289,11 @@ private struct QrScannerSheet: View {
 }
 
 private struct QrScannerController: UIViewControllerRepresentable {
+    @Environment(\.locale) private var locale
     let completion: (String) -> Void
 
     func makeUIViewController(context _: Context) -> QrCaptureViewController {
-        QrCaptureViewController(completion: completion)
+        QrCaptureViewController(language: locale.appLanguage, completion: completion)
     }
 
     func updateUIViewController(_: QrCaptureViewController, context _: Context) {}

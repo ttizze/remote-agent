@@ -5,6 +5,7 @@ import SwiftUIIntrospect
 import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
+    @Environment(\.locale) private var locale
     @ObservedObject var model: AppViewModel
     let conversation: ConversationPresentation?
     var isSideChat = false
@@ -94,8 +95,9 @@ struct ThreadScreen: View {
                     composerFocused = true
                 }
             }
-            .navigationTitle(LocalizedStringKey(isSideChat ? "サイドチャット" : conversation?
-                    .title ?? (model.isNewThread ? "新しいタスク" : "タスク")))
+            .navigationTitle(isSideChat ? Text("サイドチャット") : conversationTitleText(
+                conversation?.title, fallback: model.isNewThread ? "新しいタスク" : "タスク"
+            ))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !isSideChat {
@@ -277,7 +279,7 @@ extension ThreadScreen {
         let directory = model.selectedDirectory
         return VStack(spacing: 2) {
             HStack(spacing: 6) {
-                Text(conversation?.title ?? (model.isNewThread ? "チャット" : "タスク"))
+                conversationTitleText(conversation?.title, fallback: model.isNewThread ? "チャット" : "タスク")
                     .font(.headline).lineLimit(1)
                 if model.isConnecting {
                     ProgressView().controlSize(.small)
@@ -320,6 +322,7 @@ extension ThreadScreen {
 
     private var newThreadContext: some View {
         let directory = model.selectedDirectory
+        let emptyFolderLabel = localizedUiText(language: locale.appLanguage, source: "チャット")
         return VStack(spacing: 24) {
             VStack(spacing: 8) {
                 Text("何を作りましょうか？")
@@ -341,13 +344,14 @@ extension ThreadScreen {
                     }
                 } label: {
                     Text(project?
-                        .name ?? (directory.isEmpty ? "チャット" : URL(fileURLWithPath: directory).lastPathComponent))
+                        .name ??
+                        (directory.isEmpty ? emptyFolderLabel : URL(fileURLWithPath: directory).lastPathComponent))
                         .lineLimit(2)
                         .truncationMode(.middle)
                         .frame(minWidth: 44, minHeight: 44)
                 }
                 .accessibilityLabel(
-                    LocalizedStringKey("フォルダ: \(project?.name ?? (directory.isEmpty ? "チャット" : directory))")
+                    "フォルダ: \(project?.name ?? (directory.isEmpty ? emptyFolderLabel : directory))"
                 )
                 .accessibilityIdentifier("task.folder")
             }
@@ -375,7 +379,9 @@ extension ThreadScreen {
             }
             .font(.subheadline)
             .foregroundColor(.secondary)
-            .accessibilityLabel(LocalizedStringKey("環境: \(model.selectedProfileName ?? "未選択")"))
+            .accessibilityLabel(
+                "環境: \(model.selectedProfileName ?? localizedUiText(language: locale.appLanguage, source: "未選択"))"
+            )
             .accessibilityIdentifier("task.environment")
         }
         .multilineTextAlignment(.center)
@@ -384,4 +390,8 @@ extension ThreadScreen {
         .disabled(model.transferring || preparingMedia || model.sending || dictation.isRecording || dictation
             .requestingPermission || model.transcribing)
     }
+}
+
+private func conversationTitleText(_ title: String?, fallback: LocalizedStringKey) -> Text {
+    title.map { Text(verbatim: $0) } ?? Text(fallback)
 }

@@ -67,9 +67,15 @@ struct AppText: View {
 
     var body: some View {
         Text(verbatim: localizedUiText(
-            language: locale.language.languageCode?.identifier == "ja" ? .japanese : .english,
+            language: locale.appLanguage,
             source: source
         ))
+    }
+}
+
+extension Locale {
+    var appLanguage: UiLanguage {
+        language.languageCode?.identifier == "ja" ? .japanese : .english
     }
 }
 

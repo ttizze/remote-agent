@@ -74,7 +74,7 @@ struct ConversationImage: View {
                 Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
                     .frame(maxWidth: .infinity, maxHeight: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .accessibilityLabel(LocalizedStringKey(label.isEmpty ? "画像" : label))
+                    .accessibilityLabel(label.isEmpty ? Text("画像") : Text(verbatim: label))
                     .accessibilityIdentifier(identifier)
                     .onTapGesture {
                         guard !preparingPreview, let original else { return }
