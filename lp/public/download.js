@@ -2,7 +2,7 @@
 (() => {
   const SRC = 'https://github.com/ttizze/remote-agent/blob/main/README.md';
   const DL = window.BEX_DL = {
-    mac:     { name: 'macOS',         file: { ja: 'Apple Silicon · macOS 26 · .zip 34MB', en: 'Apple Silicon · macOS 26 · .zip 34MB' }, url: 'https://github.com/ttizze/remote-agent/releases/download/prd-74/bex-74-macOS-arm64.zip', ready: true },
+    mac:     { name: 'macOS',         file: { ja: 'Apple Silicon · macOS 26 · .zip 78MB', en: 'Apple Silicon · macOS 26 · .zip 78MB' }, url: 'https://github.com/ttizze/remote-agent/releases/download/prd-95/bex-macOS-arm64.zip', ready: true },
     ios:     { name: 'iPhone', file: { ja: 'iOS 26 · TestFlightで配布中', en: 'iOS 26 · via TestFlight' }, url: 'https://testflight.apple.com/join/UJbK9Ww7', ready: true, cta: { ja: 'TestFlightで入手', en: 'Get on TestFlight' } },
     win:     { name: 'Windows',       file: { ja: 'Windows 11 · x86-64 · EXE（プレビュー）', en: 'Windows 11 · x86-64 · preview EXE' }, url: 'https://github.com/TooriG/remote-agent/releases/download/windows-preview-20261020-storage-notice/bex-windows-x86_64-setup.exe', ready: true },
     android: { name: 'Android',       file: { ja: 'Android 8.0以降 · 64-bit · APK（プレビュー）', en: 'Android 8.0+ · 64-bit · preview APK' }, url: 'https://github.com/TooriG/remote-agent/releases/download/android-preview-69/bex-android-preview.apk', ready: true, cta: { ja: 'Androidで使う', en: 'Use on Android' } },
