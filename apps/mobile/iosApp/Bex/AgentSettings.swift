@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AgentSettingsScreen: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.locale) private var locale
     @ObservedObject var model: AppViewModel
     @State var provider: ProviderKind?
     let close: () -> Void
@@ -16,7 +17,9 @@ struct AgentSettingsScreen: View {
     @State private var pollingLogin: Task<Void, Never>?
     @State private var signOutId: String?
     private var providerName: String {
-        guard let provider = login?.provider ?? provider else { return "エージェント" }
+        guard let provider = login?.provider ?? provider else {
+            return localizedUiText(language: locale.appLanguage, source: "エージェント")
+        }
         return provider.bexName
     }
 

@@ -113,22 +113,6 @@
         }
       }
     },
-    "%lld件のファイル": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld件のファイル"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld files"
-          }
-        }
-      }
-    },
     "1 / 2 環境とAI": {
       "localizations": {
         "ja": {
@@ -14737,86 +14721,6 @@
         }
       }
     },
-    "残り %@%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "残り %@%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@% remaining"
-          }
-        }
-      }
-    },
-    "残り %lld%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "残り %lld%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld% remaining"
-          }
-        }
-      }
-    },
-    "残り %lld%%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "残り %lld%%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld%% remaining"
-          }
-        }
-      }
-    },
-    "残り %llu%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "残り %llu%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%llu% remaining"
-          }
-        }
-      }
-    },
-    "残り %u%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "残り %u%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%u% remaining"
-          }
-        }
-      }
-    },
     "残り %u%%": {
       "localizations": {
         "ja": {
@@ -16769,86 +16673,6 @@
         }
       }
     },
-    "週間残量 %@%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "週間残量 %@%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Weekly remaining: %@%"
-          }
-        }
-      }
-    },
-    "週間残量 %lld%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "週間残量 %lld%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Weekly remaining: %lld%"
-          }
-        }
-      }
-    },
-    "週間残量 %lld%%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "週間残量 %lld%%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Weekly remaining: %lld%%"
-          }
-        }
-      }
-    },
-    "週間残量 %llu%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "週間残量 %llu%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Weekly remaining: %llu%"
-          }
-        }
-      }
-    },
-    "週間残量 %u%": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "週間残量 %u%"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Weekly remaining: %u%"
-          }
-        }
-      }
-    },
     "週間残量 %u%%": {
       "localizations": {
         "ja": {
@@ -17693,6 +17517,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Select file ({0})"
+          }
+        }
+      }
+    },
+    "%llu件のファイル": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%llu件のファイル"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%llu files"
+          }
+        }
+      }
+    },
+    "%@ 更新": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 更新"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updated %@"
+          }
+        }
+      }
+    },
+    "リセット: %@": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リセット: %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resets: %@"
           }
         }
       }

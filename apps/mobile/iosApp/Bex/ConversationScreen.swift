@@ -369,7 +369,7 @@ extension ThreadScreen {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "laptopcomputer")
-                    Text(model.selectedProfileName ?? "環境を選択")
+                    Text(model.selectedProfileName ?? localizedUiText(language: locale.appLanguage, source: "環境を選択"))
                         .lineLimit(1).truncationMode(.middle)
                     if model.isConnecting {
                         ProgressView().controlSize(.small).tint(.red)

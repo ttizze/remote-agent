@@ -70,6 +70,7 @@ struct SwiftUIRoot: View {
 }
 
 private struct PairingScreen: View {
+    @Environment(\.locale) private var locale
     let canCancel: Bool
     let connecting: Bool
     let error: String?
@@ -86,6 +87,8 @@ private struct PairingScreen: View {
     @FocusState private var editingContents: Bool
 
     var body: some View {
+        let recipients = aiRecipients.isEmpty
+            ? localizedUiText(language: locale.appLanguage, source: "未設定") : aiRecipients.joined(separator: "、")
         Form {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
@@ -115,7 +118,7 @@ private struct PairingScreen: View {
                 }
                 Section {
                     Text("メッセージ・添付ファイル・作業に必要なプロジェクトの内容を、このPCと利用するAIサービスに送信します。")
-                    Text("AI処理：" + (aiRecipients.isEmpty ? "未設定" : aiRecipients.joined(separator: "、")))
+                    Text(verbatim: localizedUiText(language: locale.appLanguage, source: "AI処理：") + recipients)
                         .accessibilityIdentifier("pairing.recipients")
                     if let recipient = transcriptionRecipient {
                         Text("音声入力：\(recipient)（文字起こし）")
