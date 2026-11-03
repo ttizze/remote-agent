@@ -130,7 +130,7 @@ extension LaunchUITests {
             assertTerminalReady(app)
         }
         let composer = app.textFields["task.message"]
-        replaceFieldText(composer, text: "Keep my draft")
+        composer.tap(); composer.typeText("Keep my draft")
         let chat = app.descendants(matching: .any)["task.empty"]
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
         let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0))
@@ -183,72 +183,68 @@ extension LaunchUITests {
         XCTAssertFalse(app.staticTexts["notice"].exists)
     }
 
-    func testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation() throws {
+    func testSimulatorExpandsSearchesAndRefreshesWorkspaceFiles() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Native project disclosure")
+        try startSimulatorConversation(app, promptText: "[success] Workspace file tree")
         let answer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(answer.waitForExistence(timeout: 25))
         openFiles(app)
         let nested = app.buttons["file.nested"]
         XCTAssertTrue(nested.waitForExistence(timeout: 10))
-        let pathField = app.textFields["絶対パス"]
-        let navigation = app.navigationBars["ファイル"]
-        XCTAssertTrue(navigation.exists)
-        XCTAssertLessThan(pathField.frame.minY - navigation.frame.maxY, 60)
-        XCTAssertLessThan(app.buttons["親ディレクトリ"].frame.minY - pathField.frame.maxY, 30)
-        captureScreen(app, named: "Compact root directory layout")
-        nested.tap()
+        let hello = app.buttons["file.hello.txt"]
         let child = app.buttons["file.child.txt"]
-        XCTAssertTrue(child.waitForExistence(timeout: 10))
-        XCTAssertEqual(app.navigationBars.count, 1)
-        captureScreen(app, named: "Native directory navigation")
-        let navigationBar = app.navigationBars["nested"]
-        XCTAssertTrue(navigationBar.waitForExistence(timeout: 5))
-        let start = navigationBar.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
-            .withOffset(CGVector(dx: 0, dy: 100))
-        start.press(
-            forDuration: 0.1,
-            thenDragTo: start.withOffset(CGVector(dx: navigationBar.frame.width * 0.9, dy: 0)),
-            withVelocity: .fast,
-            thenHoldForDuration: 0
-        )
-        XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
+        let navigation = app.navigationBars.firstMatch.identifier
+        XCTAssertTrue(hello.exists)
         XCTAssertFalse(child.exists)
-        try verifyAbsoluteDirectoryNavigation(app, child: child)
-        let path = app.textFields["絶対パス"]
-        replaceFieldText(path, text: "relative-path")
-        app.buttons["files.open-path"].tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "絶対パスを入力"))
-            .firstMatch.waitForExistence(timeout: 10))
+        nested.tap()
+        XCTAssertTrue(child.waitForExistence(timeout: 10))
+        XCTAssertEqual(child.label, "nested/child.txt")
+        XCTAssertTrue(hello.exists, "Expanding a folder keeps the root files on the same screen")
+        XCTAssertEqual(app.navigationBars.count, 1)
+        XCTAssertEqual(app.navigationBars.firstMatch.identifier, navigation)
+        captureScreen(app, named: "Expanded workspace file tree")
+        nested.tap()
+        XCTAssertFalse(child.exists)
+
+        verifyWorkspaceFileSearch(app)
+        XCTAssertTrue(hello.waitForExistence(timeout: 10))
+        XCTAssertTrue(child.exists, "Opening a search result reveals its parent in the tree")
+        let tree = app.scrollViews.containing(.button, identifier: "file.nested").firstMatch
+        tree.swipeDown(velocity: .slow)
+        let refreshed = expectation(for: NSPredicate(format: "exists == false"),
+                                    evaluatedWith: tree.progressIndicators.firstMatch)
+        wait(for: [refreshed], timeout: 10)
+        XCTAssertTrue(child.exists, "Pull refresh preserves expanded folders")
+        XCTAssertTrue(hello.exists)
+        XCTAssertEqual(app.navigationBars.count, 1)
+        XCTAssertEqual(app.navigationBars.firstMatch.identifier, navigation)
+        hello.tap()
+        let editor = app.textViews["file.editor"]
+        wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "日本語のファイル"),
+                               evaluatedWith: editor)], timeout: 10)
+        app.buttons["file.close"].tap()
         closeWorkbench(app)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
     }
 
-    private func verifyAbsoluteDirectoryNavigation(_ app: XCUIApplication, child: XCUIElement) throws {
-        let path = app.textFields["絶対パス"]
-        let root = try XCTUnwrap(path.value as? String)
-        XCTAssertTrue(root.hasPrefix("/"))
-        replaceFieldText(path, text: root + "/nested")
-        for _ in 0 ..< 2 {
-            XCTAssertEqual(path.value as? String, root + "/nested")
-            app.buttons["files.open-path"].tap()
-            XCTAssertTrue(child.waitForExistence(timeout: 10))
-            XCTAssertEqual(app.navigationBars.count, 1)
-            app.navigationBars["nested"].buttons.element(boundBy: 0).tap()
-            XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
-            XCTAssertFalse(child.exists)
-        }
-    }
-
-    private func replaceFieldText(_ field: XCUIElement, text: String) {
-        field.tap()
-        if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
-            field.typeKey("a", modifierFlags: .command)
-            field.typeText(XCUIKeyboardKey.delete.rawValue)
-            XCTAssertEqual(field.value as? String, field.placeholderValue)
-        }
-        field.typeText(text)
+    private func verifyWorkspaceFileSearch(_ app: XCUIApplication) {
+        let search = app.searchFields["Search files"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10))
+        search.tap(); search.typeText("child.txt\n")
+        let child = app.buttons["file.child.txt"]
+        XCTAssertTrue(child.waitForExistence(timeout: 10), "Search finds files inside collapsed folders")
+        XCTAssertTrue(app.buttons["file.nested"].exists)
+        XCTAssertFalse(app.buttons["file.hello.txt"].exists)
+        captureScreen(app, named: "Workspace search includes the matching file and its parent")
+        child.tap()
+        let editor = app.textViews["file.editor"]
+        wait(for: [expectation(for: NSPredicate(format: "value CONTAINS %@", "Nested directory navigation fixture."),
+                               evaluatedWith: editor)], timeout: 10)
+        app.buttons["file.close"].tap()
+        search.tap()
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText(XCUIKeyboardKey.delete.rawValue + "\n")
     }
 
     func testPhysicalDeviceCanPairWithManualPayload() throws {

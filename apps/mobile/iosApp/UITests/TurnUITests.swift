@@ -332,7 +332,7 @@ extension LaunchUITests {
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
         XCTAssertTrue((editor.value as? String ?? "").contains("Saved from iPhone"))
         app.buttons["file.close"].tap()
-        app.buttons["変更済み"].tap()
+        openWorkbenchTool(app, "diff")
         let savedDiff = app.staticTexts
             .matching(NSPredicate(format: "label BEGINSWITH '+' AND label CONTAINS 'Saved from iPhone'")).firstMatch
         XCTAssertTrue(savedDiff.waitForExistence(timeout: 10))

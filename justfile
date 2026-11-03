@@ -131,7 +131,7 @@ conversation-ui *options:
         testSimulatorOpensQrScannerWhileAddingHost \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
-        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
+        testSimulatorExpandsSearchesAndRefreshesWorkspaceFiles \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorNativeTerminalPastesMultilineText \
         testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
@@ -150,7 +150,7 @@ conversation-ui *options:
         testSimulatorSendsQuestionChoiceOnTap \
         testSimulatorCanSkipQuestion \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
-        testSimulatorLoadsEarlierHistoryOnTapAndRetriesFailedPage \
+        testSimulatorLoadsEarlierHistoryOnTapAtTheReadingPosition \
         testSimulatorWorkbenchStartsEmptyAndOwnsOnlyOpenedTabs \
         testSimulatorBrowserUsesOneSharedImportMenu
 

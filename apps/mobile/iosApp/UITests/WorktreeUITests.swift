@@ -222,7 +222,7 @@ extension LaunchUITests {
         XCTAssertTrue(changes.waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["notice"].exists)
         openFiles(app)
-        XCTAssertTrue(app.buttons["files.open-path"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["file.tracked.txt"].waitForExistence(timeout: 10))
         openWorkbenchTool(app, "diff")
         XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
         closeWorkbench(app)
@@ -245,14 +245,14 @@ extension LaunchUITests {
 
     private func assertWorkspaceDiffTabs(_ app: XCUIApplication) {
         XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["files.open-path"].exists)
+        XCTAssertFalse(app.buttons["file.tracked.txt"].exists)
         let card = app.buttons["diff.file.tracked.txt"]
         card.tap()
         XCTAssertFalse(app.staticTexts["+Session worktree first"].exists)
         card.tap()
         XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
         openWorkbenchTool(app, "files")
-        XCTAssertTrue(app.buttons["files.open-path"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["file.tracked.txt"].waitForExistence(timeout: 10))
         openWorkbenchTool(app, "diff")
         XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["+Session worktree second"].exists)
@@ -266,7 +266,7 @@ extension LaunchUITests {
         app.buttons["task.diff"].tap()
         let retry = app.buttons["files.diff.retry"]
         XCTAssertTrue(retry.waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["files.open-path"].exists)
+        XCTAssertFalse(app.buttons["file.tracked.txt"].exists)
         try simulatorFixture("worktree/restore")
         retry.tap()
     }

@@ -24,26 +24,11 @@ extension LaunchUITests {
             XCTAssertTrue(image.isHittable)
             XCTAssertFalse(app.staticTexts["生成画像"].exists, "Generated images must not render a redundant caption")
         }
-        func openLink(_ label: String) {
-            let link = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
-            for _ in 0 ..< 12 {
-                if link.exists, link.isHittable {
-                    break
-                }
-                app.swipeUp()
-            }
-            XCTAssertTrue(link.waitForExistence(timeout: 10)); link.tap()
-            let done = app.buttons["conversation.preview.close"]
-            XCTAssertTrue(done.waitForExistence(timeout: 15), "The Host file did not open in Quick Look")
-            let screenshot = XCTAttachment(screenshot: app.screenshot())
-            screenshot.name = label; screenshot.lifetime = .keepAlways; add(screenshot)
-            done.tap()
-        }
         showGeneratedImage("inline")
         showGeneratedImage("saved")
         captureScreen(app, named: "Generated image outside collapsed work")
-        openLink("生成画像を開く")
-        openLink("ファイルを開く")
+        verifyWorkspaceFileLink(app, index: 0, filename: "fixture image.png")
+        verifyWorkspaceFileLink(app, index: 1, filename: "hello.txt")
         app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         let number = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
@@ -52,7 +37,31 @@ extension LaunchUITests {
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         showGeneratedImage("inline")
         showGeneratedImage("saved")
-        openLink("生成画像を開く")
+        verifyWorkspaceFileLink(app, index: 0, filename: "fixture image.png")
+    }
+
+    private func verifyWorkspaceFileLink(_ app: XCUIApplication, index: Int, filename: String) {
+        // File chips replace the authored link captions. The fixture lists the image, text file, then website.
+        let link = prefixedElement(app, prefix: "item.fixture-final-").links.element(boundBy: index)
+        for _ in 0 ..< 12 {
+            if link.exists, link.isHittable {
+                break
+            }
+            app.swipeUp()
+        }
+        XCTAssertTrue(link.waitForExistence(timeout: 10)); link.tap()
+        let done = app.buttons["file.close"]
+        XCTAssertTrue(done.waitForExistence(timeout: 15), "The Host file did not open in the file editor")
+        XCTAssertTrue(app.textViews["file.editor"].exists)
+        XCTAssertTrue(app.navigationBars[filename].exists)
+        captureScreen(app, named: filename)
+        done.tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: done)], timeout: 5)
+        let top = app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
+        top.press(forDuration: 0.1,
+                  thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)))
+        wait(for: [expectation(for: NSPredicate(format: "isHittable == true"),
+                               evaluatedWith: app.textFields["task.message"])], timeout: 10)
     }
 
     func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {

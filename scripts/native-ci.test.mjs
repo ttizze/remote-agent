@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -135,5 +135,22 @@ test('Android acceptance counts include every test declared by its selected clas
       return count + [...source.matchAll(/^\s*@Test\b/gm)].length;
     }, 0);
     assert.equal(Number(expected), count, `${label} acceptance count is out of date`);
+  }
+});
+
+test('iPhone acceptance lists select existing Simulator tests', () => {
+  const directory = new URL('../apps/mobile/iosApp/UITests/', import.meta.url);
+  const declarations = new Set(readdirSync(directory)
+    .filter(name => name.endsWith('.swift'))
+    .flatMap(name => [...readFileSync(new URL(name, directory), 'utf8')
+      .matchAll(/^\s*func\s+(testSimulator\w+)\s*\(/gm)].map(match => match[1])));
+  assert.ok(declarations.size > 0, 'Simulator test declarations must be discovered');
+  for (const path of ['../justfile', './ios-e2e.sh']) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    const selected = new Set(source.match(/\btestSimulator\w+\b/g));
+    assert.ok(selected.size > 0, `${path} must select Simulator tests`);
+    for (const name of selected) {
+      assert.ok(declarations.has(name), `${path} selects missing Simulator test: ${name}`);
+    }
   }
 });
