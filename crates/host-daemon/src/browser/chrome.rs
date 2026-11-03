@@ -41,7 +41,10 @@ pub struct Browser {
     executable: PathBuf,
     state: Mutex<State>,
     pub(super) stop: tokio_util::sync::CancellationToken,
+    #[cfg(unix)]
     bridge_directory: tempfile::TempDir,
+    #[cfg(windows)]
+    bridge_pipe: PathBuf,
 }
 impl Drop for Browser {
     fn drop(&mut self) {
@@ -53,19 +56,24 @@ impl Browser {
     pub async fn start(profile: PathBuf) -> Result<Arc<Self>, String> {
         let executable = std::env::var_os("AGENT_BROWSER_EXECUTABLE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("chromium"));
+            .unwrap_or_else(default_executable);
+        #[cfg(unix)]
         let bridge_directory = tempfile::Builder::new()
             .prefix("agent-browser-")
             // macOS Unix sockets have a 104-byte path limit. Nix's TMPDIR may
             // be nested under a long checkout path; keep the socket root short.
             .tempdir_in("/tmp")
             .map_err(|e| e.to_string())?;
+        #[cfg(unix)]
         agent_local_host::create_state_directory(bridge_directory.path())
             .map_err(|e| e.to_string())?;
         let browser = Arc::new(Self {
             profile,
             executable,
+            #[cfg(unix)]
             bridge_directory,
+            #[cfg(windows)]
+            bridge_pipe: PathBuf::from(format!(r"\\.\pipe\agent-browser-{}", uuid::Uuid::new_v4())),
             state: Mutex::new(State::default()),
             stop: Default::default(),
         });
@@ -85,6 +93,9 @@ impl Browser {
         )
     }
     pub(super) fn socket(&self) -> PathBuf {
+        #[cfg(windows)]
+        return self.bridge_pipe.clone();
+        #[cfg(unix)]
         self.bridge_directory.path().join("bridge.sock")
     }
     pub async fn shutdown(&self) {
@@ -422,6 +433,25 @@ impl Browser {
             renderer_id: String::new(),
         })
     }
+}
+
+fn default_executable() -> PathBuf {
+    #[cfg(windows)]
+    for (root, relative) in [
+        ("PROGRAMFILES(X86)", "Microsoft/Edge/Application/msedge.exe"),
+        ("PROGRAMFILES", "Microsoft/Edge/Application/msedge.exe"),
+        ("PROGRAMFILES", "Google/Chrome/Application/chrome.exe"),
+        ("PROGRAMFILES(X86)", "Google/Chrome/Application/chrome.exe"),
+        ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+    ] {
+        if let Some(root) = std::env::var_os(root) {
+            let candidate = PathBuf::from(root).join(relative);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("chromium")
 }
 
 fn validate_password_origin(current: Option<&str>, requested: &str) -> Result<(), String> {

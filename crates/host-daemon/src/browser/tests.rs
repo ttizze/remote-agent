@@ -366,13 +366,16 @@ async fn shared_browser_live() {
 #[tokio::test]
 async fn credential_import_and_vault_access_are_explicit_client_actions() {
     let root = tempfile::tempdir().unwrap();
-    // Agent credential requests must fail before starting Chrome or the Unix MCP bridge.
+    // Agent credential requests must fail before starting Chrome or the MCP bridge.
     let browser = Browser {
         profile: root.path().join("profile"),
         executable: "unused-browser".into(),
         state: Default::default(),
         stop: Default::default(),
+        #[cfg(unix)]
         bridge_directory: root,
+        #[cfg(windows)]
+        bridge_pipe: r"\\.\pipe\agent-browser-unused".into(),
     };
     for action in [
         BrowserAction::Credentials,
