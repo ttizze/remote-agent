@@ -154,3 +154,10 @@ test('iPhone acceptance lists select existing Simulator tests', () => {
     }
   }
 });
+
+test('focused iPhone runs reach acceptance even though repository checks are skipped', () => {
+  // A job without `if` is skipped whenever any upstream job was skipped.
+  const job = workflow.match(/^ {2}iphone-tests:\n((?: {4}.*\n|\n)+)/m)?.[1];
+  assert.ok(job, 'iPhone acceptance job must exist');
+  assert.match(job, /^ {4}if: \$\{\{ !cancelled\(\) && needs\.iphone\.result == 'success' \}\}$/m);
+});

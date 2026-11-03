@@ -400,6 +400,8 @@ jobs:
   iphone-tests:
     name: iPhone ${{ matrix.label }}
     needs: iphone
+    # Focused manual runs skip repository checks; depend on the shared build only.
+    if: ${{ !cancelled() && needs.iphone.result == 'success' }}
     concurrency:
       group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-iphone-tests-{1}', github.run_id, matrix.label) }}
       cancel-in-progress: false
