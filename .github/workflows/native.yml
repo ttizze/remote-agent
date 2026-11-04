@@ -207,7 +207,7 @@ jobs:
         id: save-gradle-cache
         if: ${{ github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-primary-key != '' && steps.gradle-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: *gradle-cache-paths
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
@@ -350,7 +350,7 @@ jobs:
         id: save-local-rust-cache
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && !inputs.ios-tests && steps.finish-local-rust-cache.outcome == 'success' && steps.local-rust-cache.outputs.cache-primary-key != '' && steps.local-rust-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: *local-rust-cache-paths
           key: ${{ steps.local-rust-cache.outputs.cache-primary-key }}
@@ -454,7 +454,7 @@ jobs:
         id: save-ios-cache
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && !inputs.ios-tests && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AGENT_IOS_SWIFT_CACHE_PATHS }}
           key: ${{ steps.ios-cache.outputs.cache-primary-key }}
