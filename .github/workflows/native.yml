@@ -489,7 +489,7 @@ jobs:
     timeout-minutes: 120
     env:
       AGENT_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      AGENT_IOS_TEST_WORKERS: 1
+      AGENT_IOS_TEST_WORKERS: 2
       AGENT_IOS_TEST_SHARD: ${{ matrix.shard }}
       AGENT_IOS_TEST_SHARDS: ${{ inputs.ios-tests && 1 || 3 }}
       # The nightly measurement repeats every test in fresh Simulator and Host rounds.
