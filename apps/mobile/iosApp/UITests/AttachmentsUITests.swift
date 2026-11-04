@@ -80,7 +80,8 @@ extension LaunchUITests {
         app.buttons["task.send"].tap()
         let photo = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image.")).firstMatch
         XCTAssertTrue(photo.waitForExistence(timeout: 30), "Uploaded image did not decode in the conversation")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "添付:")).firstMatch
+        // Sent messages render as selectable text views.
+        XCTAssertTrue(app.textViews.matching(NSPredicate(format: "label CONTAINS %@", "添付:")).firstMatch
             .waitForExistence(timeout: 20))
         XCTAssertEqual(removals.count, 0)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
