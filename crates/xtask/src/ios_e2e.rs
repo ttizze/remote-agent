@@ -146,7 +146,7 @@ fn needs_media_fixtures(tests: &[String]) -> bool {
             test.as_str(),
             "testSimulatorCanAddASecondPhoto"
                 | "testSimulatorCanAttachPhotosAndVideos"
-                | "testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery"
+                | "testSimulatorRetriesPhotoUploadAfterAttachmentStorageRecovery"
         )
     })
 }
@@ -1892,7 +1892,7 @@ esac
         for test in [
             "testSimulatorCanAddASecondPhoto",
             "testSimulatorCanAttachPhotosAndVideos",
-            "testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery",
+            "testSimulatorRetriesPhotoUploadAfterAttachmentStorageRecovery",
         ] {
             let mut mixed = conversation.clone();
             mixed.push(test.to_owned());

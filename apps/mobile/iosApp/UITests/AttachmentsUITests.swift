@@ -94,21 +94,19 @@ extension LaunchUITests {
         captureScreen(app, named: "Uploaded photo and video in chat history")
     }
 
-    func testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery() throws {
-        let app = try connectedSimulatorApp(expandProject: false)
-        try useSimulatorListFixture("worktree-conversation/upload")
-        app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
-        expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-upload-thread"]
-        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+    func testSimulatorRetriesPhotoUploadAfterAttachmentStorageRecovery() throws {
+        let app = try connectedSimulatorApp()
+        let compose = app.buttons["tasks.new.project.simulator-project"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
         let prompt = app.textFields["task.message"]
         XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        chooseFixtureModel(app)
         prompt.tap(); prompt.typeText("[success] Retry selected photos")
-        try simulatorFixture("worktree/upload/unavailable")
+        try simulatorFixture("attachments/unavailable")
         var unavailable = true
         addTeardownBlock {
             if unavailable {
-                try self.simulatorFixture("worktree/upload/restore")
+                try self.simulatorFixture("attachments/restore")
             }
         }
         selectPhotos([.photo, .video], in: app)
@@ -121,7 +119,7 @@ extension LaunchUITests {
         let removals = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "を外す"))
         XCTAssertEqual(removals.count, 0)
         XCTAssertEqual(prompt.value as? String, "[success] Retry selected photos")
-        try simulatorFixture("worktree/upload/restore"); unavailable = false
+        try simulatorFixture("attachments/restore"); unavailable = false
         selectPhotos([.photo, .video], in: app)
         confirmPhotoSelection(in: app)
         let attached = expectation(for: NSPredicate(format: "count == 2"), evaluatedWith: removals)
@@ -134,7 +132,10 @@ extension LaunchUITests {
         XCTAssertEqual(removals.count, 0)
         XCTAssertNotEqual(prompt.value as? String, "[success] Retry selected photos")
         app.terminate(); _ = try connectedSimulatorApp()
-        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        let number = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
+        let row = try app
+            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")]
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[finalID].waitForExistence(timeout: 20))
         XCTAssertTrue(app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image."))
             .firstMatch.waitForExistence(timeout: 15))

@@ -129,24 +129,6 @@ fn route(
             serde_json::to_vec(&json!({"threadId":session_identity(root, native)?}))?,
         ));
     }
-    // Each test names its own worktree conversation so attachments and
-    // checkout state from one test never reach another on a shared Host.
-    if let Some(name) = path.strip_prefix("/worktree-conversation/") {
-        worktree_conversation(root, name)?;
-        return Ok((204, Vec::new()));
-    }
-    if let Some((name, state)) = path
-        .strip_prefix("/worktree/")
-        .and_then(|rest| rest.split_once('/'))
-    {
-        let readable = match state {
-            "unavailable" => false,
-            "restore" => true,
-            _ => return Err("unknown worktree fixture state".into()),
-        };
-        set_worktree_access(&root.join(format!("{name}-worktree")), readable)?;
-        return Ok((204, Vec::new()));
-    }
     match path {
         "/auth-token/unavailable" => fs::write(root.join("auth-token-unavailable"), [])?,
         "/auth-token/reset" => {
@@ -154,6 +136,11 @@ fn route(
                 fs::remove_file(root.join("auth-token-unavailable"))?;
             }
         }
+        "/worktree-conversation" => worktree_conversation(root)?,
+        "/worktree/unavailable" => set_worktree_access(root, false)?,
+        "/worktree/restore" => set_worktree_access(root, true)?,
+        "/attachments/unavailable" => set_attachment_storage(root, false)?,
+        "/attachments/restore" => set_attachment_storage(root, true)?,
         "/merge-worktree/fresh" | "/merge-worktree/merged" | "/merge-worktree/new-work"
         | "/merge-worktree/dirty" | "/merge-worktree/clean" => {
             merge_worktree(root, path)?
@@ -341,11 +328,11 @@ fn merge_worktree(root: &Path, path: &str) -> Result<()> {
     )
 }
 
-fn worktree_conversation(root: &Path, name: &str) -> Result<()> {
+fn worktree_conversation(root: &Path) -> Result<()> {
     // Bex creates session worktrees from a project repository and records
     // their origin; that record places the conversation in the project.
-    let repository = root.join(format!("project/{name}-repository"));
-    let worktree = root.join(format!("{name}-worktree"));
+    let repository = root.join("project/review-repository");
+    let worktree = root.join("review-worktree");
     fs::create_dir(&repository)?;
     let git = |arguments: &[&str]| -> Result<()> {
         let output = std::process::Command::new("git")
@@ -393,7 +380,7 @@ fn worktree_conversation(root: &Path, name: &str) -> Result<()> {
     write_json(
         root.join("list-fixture.json"),
         &json!([{
-            "id":format!("fixture-{name}-thread"), "cwd":root.join("project"),
+            "id":"fixture-worktree-thread", "cwd":root.join("project"),
             "readCwd":worktree, "name":"Worktree conversation", "createdAt":10000,
             "updatedAt":10000,"status":{"type":"idle"}
         }]),
@@ -403,16 +390,38 @@ fn worktree_conversation(root: &Path, name: &str) -> Result<()> {
 // The Host shows a deleted worktree as unchanged because input recreates it,
 // so an unreadable checkout is what makes its review fail.
 #[cfg(unix)]
-fn set_worktree_access(worktree: &Path, readable: bool) -> Result<()> {
+fn set_worktree_access(root: &Path, readable: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if readable { 0o755 } else { 0o000 };
-    fs::set_permissions(worktree, fs::Permissions::from_mode(mode))?;
+    fs::set_permissions(
+        root.join("review-worktree"),
+        fs::Permissions::from_mode(mode),
+    )?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn set_worktree_access(_: &Path, _: bool) -> Result<()> {
     Err("worktree access fixtures require Unix permissions".into())
+}
+
+// The Host recreates its attachment directory with private permissions on
+// every upload, so a file in its place is what makes uploads fail.
+fn set_attachment_storage(root: &Path, available: bool) -> Result<()> {
+    let storage = root.join("bex-attachments");
+    let held = root.join("bex-attachments-held");
+    if available {
+        fs::remove_file(&storage)?;
+        if held.exists() {
+            fs::rename(held, storage)?;
+        }
+    } else {
+        if storage.exists() {
+            fs::rename(&storage, held)?;
+        }
+        fs::write(storage, [])?;
+    }
+    Ok(())
 }
 
 fn list_fixture(root: &Path, path: &str) -> Result<()> {

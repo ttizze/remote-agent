@@ -203,10 +203,10 @@ extension LaunchUITests {
 
     func testSimulatorReviewsTheOpenSessionsWorktree() throws {
         let app = try connectedSimulatorApp(expandProject: false)
-        try useSimulatorListFixture("worktree-conversation/review")
+        try useSimulatorListFixture("worktree-conversation")
         refreshSimulatorTaskList(app)
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-review-thread"]
+        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-worktree-thread"]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let changes = app.buttons["task.diff"]
         XCTAssertTrue(changes.waitForExistence(timeout: 15))
@@ -264,18 +264,18 @@ extension LaunchUITests {
     }
 
     private func openDiffAfterRetry(_ app: XCUIApplication) throws {
-        try simulatorFixture("worktree/review/unavailable")
+        try simulatorFixture("worktree/unavailable")
         var unavailable = true
         addTeardownBlock {
             if unavailable {
-                try self.simulatorFixture("worktree/review/restore")
+                try self.simulatorFixture("worktree/restore")
             }
         }
         app.buttons["task.diff"].tap()
         let retry = app.buttons["files.diff.retry"]
         XCTAssertTrue(retry.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["file.tracked.txt"].exists)
-        try simulatorFixture("worktree/review/restore"); unavailable = false
+        try simulatorFixture("worktree/restore"); unavailable = false
         retry.tap()
     }
 }

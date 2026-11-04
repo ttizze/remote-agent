@@ -86,7 +86,7 @@ if [[ $# == 0 ]]; then
         testSimulatorCanAttachDownloadAndPrepareAIEdit \
         testSimulatorCanAddASecondPhoto \
         testSimulatorCanAttachPhotosAndVideos \
-        testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery \
+        testSimulatorRetriesPhotoUploadAfterAttachmentStorageRecovery \
         testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening \
         testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening
 fi
