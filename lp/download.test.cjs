@@ -36,7 +36,7 @@ async function renderDownloads({ language = 'en', platform = 'Win32', userAgent,
 
 for (const language of ['ja', 'en']) {
   test(`Android phone ${language} prominently links to the published preview APK`, async () => {
-    const apk = 'https://github.com/TooriG/remote-agent/releases/download/android-preview-69/bex-android-preview.apk';
+    const apk = 'https://github.com/TooriG/remote-agent/releases/download/android-preview-79/bex-android-preview.apk';
     const result = await renderDownloads({ language, platform: 'Linux arm64', userAgent: 'Android 17 Mobile', assets: [{ name: 'bex-android-preview.apk', state: 'uploaded', browser_download_url: apk }] });
     assert.equal(result.isMobile, true);
     assert.equal(result.primary[0].href, apk);
@@ -50,7 +50,7 @@ test('Android download remains direct when the upstream release API is offline',
   const result = await renderDownloads({ platform: 'Linux arm64', userAgent: 'Android 17 Mobile', fail: true });
   assert.equal(result.isMobile, true);
   assert.match(result.mobile[0].innerHTML, /Use on Android/);
-  assert.equal(result.mobile[0].href, 'https://github.com/TooriG/remote-agent/releases/download/android-preview-69/bex-android-preview.apk');
+  assert.equal(result.mobile[0].href, 'https://github.com/TooriG/remote-agent/releases/download/android-preview-79/bex-android-preview.apk');
   assert.ok(!result.mobile[0].innerHTML.includes('coming soon'));
 });
 
