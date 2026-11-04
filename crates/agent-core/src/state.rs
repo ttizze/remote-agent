@@ -816,6 +816,10 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
 
         Intent::SetFileDraft { path, text } => {
+            if previous.workspace.file.as_ref().is_some_and(|file| file.path == path && file.truncated) {
+                next.error = Some("ファイルが大きすぎるため編集できません。".into());
+                return (next, Vec::new());
+            }
             let revision = previous
                 .file_drafts
                 .get(&path)

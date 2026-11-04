@@ -215,6 +215,7 @@ struct FileContent {
     pub revision: String,
     pub text: String,
     pub size: u64,
+    pub truncated: bool,
 }
 #[uniffi::remote(Record)]
 struct WorktreeSettings {

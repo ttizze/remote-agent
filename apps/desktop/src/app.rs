@@ -89,6 +89,11 @@ enum Update {
         scope: ErrorScope,
         result: Result<(), String>,
     },
+    FilePreview {
+        generation: u64,
+        scope: ErrorScope,
+        result: Result<files::DownloadedPreview, String>,
+    },
     OnboardingCompleted(Result<(), String>),
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -838,6 +843,13 @@ impl Desktop {
                 }
                 self.accept_snapshot(window, cx);
             }
+            Update::FilePreview {
+                generation,
+                scope,
+                result,
+            } => {
+                self.complete_file_preview(generation, scope, result, cx);
+            }
             Update::PersistenceError(error) => {
                 self.local_errors.insert(ErrorScope::Application, error);
             }
@@ -1194,6 +1206,7 @@ impl Desktop {
             self.snapshot
                 .file_drafts
                 .get(&file.path)
+                .filter(|_| !file.truncated)
                 .map_or(file.text.as_str(), |draft| draft.text.as_str())
         });
         if let Some(value) = self.editor.show(file.map(|file| file.path.as_str()), text) {
@@ -1797,15 +1810,27 @@ impl Desktop {
         self.tab = Tab::Chat;
         cx.notify();
     }
-    fn edit(&mut self, path: String, discard_draft: bool) {
+    fn open_file(
+        &mut self,
+        path: String,
+        line: Option<u32>,
+        discard_draft: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.file_open_generation += 1;
         self.editor.pending_line = None;
+        if agent_core::presentation::files::file_preview_mime_type(path.clone()).is_some() {
+            self.preview_file(path, cx);
+            return false;
+        }
+        self.editor.pending_line = line.map(|line| (path.clone(), line));
         self.panels
             .open(self.panel_scope(), Panel::File, Some(path.clone()));
         self.dispatch(Intent::ReadFile(op::ReadFile {
             path,
             discard_draft,
         }));
+        true
     }
     fn save_file(&mut self) {
         let Some(path) = self.editor.path.clone() else {

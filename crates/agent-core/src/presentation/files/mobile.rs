@@ -66,7 +66,7 @@ pub fn mobile_file_menu(
         path: path.clone(),
     });
     // Source metadata uses the literal final extension, including a position suffix.
-    if let Some(mime_type) = share_mime_type(&target) {
+    if let Some(mime_type) = super::preview::file_mime_type(&target) {
         items.push(MobileFileMenuItem {
             mime_type: Some(mime_type.into()),
             action: MobileFileAction::SaveOrShare,
@@ -102,117 +102,9 @@ pub fn mobile_file_open_request(
     })
 }
 
-fn share_mime_type(path: &str) -> Option<&'static str> {
-    let name = super::super::markdown::file_basename(path);
-    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
-    SHARE_MIME_TYPES
-        .iter()
-        .find(|(suffix, _)| *suffix == extension)
-        .map(|(_, mime)| *mime)
-}
-
-/// Resolved binary files use authenticated downloads and the platform viewer,
-/// bypassing the UTF-8 editor's size limit. HTML and notebook JSON stay editable.
-#[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn mobile_file_preview_mime_type(path: String) -> Option<String> {
-    if path.ends_with(['/', '\\']) {
-        return None;
-    }
-    share_mime_type(&path)
-        .filter(|mime| !matches!(*mime, "text/html" | "application/x-ipynb+json"))
-        .map(str::to_owned)
-}
-
-const SHARE_MIME_TYPES: &[(&str, &str)] = &[
-    ("aac", "audio/aac"),
-    ("aiff", "audio/aiff"),
-    ("avi", "video/x-msvideo"),
-    ("avif", "image/avif"),
-    ("bmp", "image/bmp"),
-    ("db", "application/vnd.sqlite3"),
-    (
-        "docx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ),
-    ("epub", "application/epub+zip"),
-    ("flac", "audio/flac"),
-    ("gif", "image/gif"),
-    ("gz", "application/gzip"),
-    ("heic", "image/heic"),
-    ("heif", "image/heif"),
-    ("htm", "text/html"),
-    ("html", "text/html"),
-    ("ico", "image/x-icon"),
-    ("ipynb", "application/x-ipynb+json"),
-    ("jar", "application/java-archive"),
-    ("jpeg", "image/jpeg"),
-    ("jpg", "image/jpeg"),
-    ("m4a", "audio/mp4"),
-    ("m4v", "video/mp4"),
-    ("mkv", "video/x-matroska"),
-    ("mov", "video/quicktime"),
-    ("mp3", "audio/mpeg"),
-    ("mp4", "video/mp4"),
-    ("odp", "application/vnd.oasis.opendocument.presentation"),
-    ("ods", "application/vnd.oasis.opendocument.spreadsheet"),
-    ("odt", "application/vnd.oasis.opendocument.text"),
-    ("oga", "audio/ogg"),
-    ("ogg", "audio/ogg"),
-    ("ogv", "video/ogg"),
-    ("opus", "audio/ogg"),
-    ("otf", "font/otf"),
-    ("pdf", "application/pdf"),
-    ("png", "image/png"),
-    (
-        "pptx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ),
-    ("rtf", "application/rtf"),
-    ("sqlite", "application/vnd.sqlite3"),
-    ("sqlite3", "application/vnd.sqlite3"),
-    ("svg", "image/svg+xml"),
-    ("tar", "application/x-tar"),
-    ("tgz", "application/gzip"),
-    ("tif", "image/tiff"),
-    ("tiff", "image/tiff"),
-    ("ttf", "font/ttf"),
-    ("wav", "audio/wav"),
-    ("weba", "audio/webm"),
-    ("webm", "video/webm"),
-    ("webm-audio", "audio/webm"),
-    ("webp", "image/webp"),
-    ("woff", "font/woff"),
-    ("woff2", "font/woff2"),
-    (
-        "xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ),
-    ("zip", "application/zip"),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[rstest::rstest]
-    #[case("/Users/tt/Movies/bex-promo-ja.mp4", Some("video/mp4"))]
-    #[case(r"C:\Movies\CLIP.MOV", Some("video/quicktime"))]
-    #[case("/repo/voice.m4a", Some("audio/mp4"))]
-    #[case("/repo/photo.PNG", Some("image/png"))]
-    #[case("/repo/document.pdf", Some("application/pdf"))]
-    #[case("/repo/archive.zip", Some("application/zip"))]
-    #[case("/repo/source.rs", None)]
-    #[case("/repo/notes.md", None)]
-    #[case("/repo/plain.txt", None)]
-    #[case("/repo/index.HTML", None)]
-    #[case("/repo/index.htm", None)]
-    #[case("/repo/notebook.ipynb", None)]
-    #[case("/repo/video.mp4.txt", None)]
-    #[case("/repo/video.mp4/readme", None)]
-    #[case("/repo/video.mp4/", None)]
-    fn binary_files_bypass_text_reads(#[case] path: &str, #[case] mime: Option<&str>) {
-        assert_eq!(mobile_file_preview_mime_type(path.into()).as_deref(), mime);
-    }
-
     #[test]
     fn only_authored_relative_basenames_request_workspace_lookup() {
         let request = mobile_file_open_request("main.rs:12".into(), "/repo".into(), None).unwrap();

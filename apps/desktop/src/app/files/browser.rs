@@ -196,8 +196,9 @@ impl Desktop {
         browser.opened = request.id;
         browser.reveal = None;
         let path = agent_core::presentation::files::file_tree_path(&key.root, &request.path);
-        browser.selected_panel = Some(path.clone());
-        self.edit(path, false);
+        if self.open_file(path.clone(), None, false, cx) {
+            self.file_browser.as_mut().unwrap().selected_panel = Some(path);
+        }
         cx.notify();
     }
     fn open_tree_keyboard_menu(

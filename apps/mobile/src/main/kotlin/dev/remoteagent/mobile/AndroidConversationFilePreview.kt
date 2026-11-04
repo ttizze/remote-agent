@@ -36,6 +36,7 @@ import dev.remoteagent.core.MarkdownFileKind
 import dev.remoteagent.core.MarkdownFileReference
 import dev.remoteagent.core.Outcome
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -177,7 +178,7 @@ internal suspend fun downloadPreview(
             }
             return
         }
-        checkNotNull(perform) { "ホストに接続してください" }
+        if (perform == null) throw IOException("ホストに接続してください")
         suspendCancellableCoroutine<Unit> { continuation ->
             perform(Intent.DownloadFile(DownloadFile(path, target.path))) { result ->
                 if (continuation.isActive) continuation.resumeWith(result.map { Unit }) else target.delete()
@@ -190,7 +191,7 @@ internal suspend fun fileOperation(
     intent: Intent,
     perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)?,
 ): Outcome {
-    checkNotNull(perform) { "ホストに接続してください" }
+    if (perform == null) throw IOException("ホストに接続してください")
     return suspendCancellableCoroutine { continuation ->
         perform(intent) { result -> if (continuation.isActive) continuation.resumeWith(result) }
     }

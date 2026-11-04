@@ -157,6 +157,12 @@ fn needs_browser_fixture(tests: &[String]) -> bool {
         .any(|test| test == "testSimulatorBrowserUsesOneSharedImportMenu")
 }
 
+fn needs_file_preview_fixtures(tests: &[String]) -> bool {
+    tests
+        .iter()
+        .any(|test| test == "testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening")
+}
+
 /// Select the newest stable iOS 26 runtime: its identifier and root file system.
 fn runtime(runtimes: &Value) -> Result<(String, PathBuf)> {
     let mut selected = None;
@@ -644,6 +650,13 @@ async fn worker(
     let host_log = File::create(prefix.with_extension("host.log"))?;
     let temporary = tempfile::Builder::new().prefix("agent-ios-").tempdir()?;
     let root = temporary.path();
+    if needs_file_preview_fixtures(&tests) {
+        fs::create_dir(root.join("host"))?;
+        for entry in fs::read_dir(records.join("file-previews"))? {
+            let entry = entry?;
+            fs::copy(entry.path(), root.join("host").join(entry.file_name()))?;
+        }
+    }
     let cwd = std::env::current_dir()?;
     let codex = if without_codex {
         "--without-codex".into()
@@ -1178,13 +1191,40 @@ pub async fn run(
     let groups = (0..workers)
         .map(|index| partition_tests(&tests, index, workers))
         .collect::<Result<Vec<_>>>()?;
-    if needs_media_fixtures(&tests) {
+    for (needed, name, seconds) in [
+        (needs_media_fixtures(&tests), "attachment-video.mov", "1"),
+        (
+            needs_file_preview_fixtures(&tests),
+            "preview-movie.mp4",
+            "10",
+        ),
+    ] {
+        if !needed {
+            continue;
+        }
         supervision::run(
             &args![
                 "xcrun",
                 "swift",
                 "apps/mobile/iosApp/UITests/Fixtures/create-video.swift",
-                records.join("attachment-video.mov")
+                records.join(name),
+                seconds
+            ],
+            &cwd,
+            Io::Log(&log),
+            &cancel,
+            SETUP_TIMEOUT,
+        )
+        .await?;
+    }
+    if needs_file_preview_fixtures(&tests) {
+        supervision::run(
+            &args![
+                "xcrun",
+                "swift",
+                "apps/mobile/iosApp/UITests/Fixtures/create-file-previews.swift",
+                records.join("file-previews"),
+                records.join("preview-movie.mp4")
             ],
             &cwd,
             Io::Log(&log),
@@ -1896,6 +1936,7 @@ esac
             "testSimulatorOpensLongInterruptedHistoryAtLatestMessage".to_owned(),
             "testSimulatorOpensOnlyTheTappedImageAndSavesIt".to_owned(),
             "testSimulatorCanAttachDownloadAndPrepareAIEdit".to_owned(),
+            "testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening".to_owned(),
         ];
         assert!(!needs_media_fixtures(&conversation));
         for test in [
@@ -1907,6 +1948,18 @@ esac
             mixed.push(test.to_owned());
             assert!(needs_media_fixtures(&mixed));
         }
+    }
+
+    #[test]
+    fn only_file_link_tests_need_native_preview_files() {
+        let mut tests = vec![
+            "testSimulatorCanAttachPhotosAndVideos".to_owned(),
+            "testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopeningExtra".to_owned(),
+        ];
+        assert!(!needs_file_preview_fixtures(&[]));
+        assert!(!needs_file_preview_fixtures(&tests));
+        tests.push("testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening".to_owned());
+        assert!(needs_file_preview_fixtures(&tests));
     }
 
     #[test]

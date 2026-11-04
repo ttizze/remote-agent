@@ -374,6 +374,8 @@ pub struct FileContent {
     pub revision: String,
     pub text: String,
     pub size: u64,
+    /// Only a prefix is present; it must never be edited or written back.
+    pub truncated: bool,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

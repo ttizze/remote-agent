@@ -7,7 +7,7 @@ use agent_core::presentation::{
 };
 
 pub(in crate::app) enum ReferenceAction {
-    Panel(u64),
+    Open(u64),
     Menu(FileAction),
 }
 pub(in crate::app) struct ReferenceRequest {
@@ -77,7 +77,7 @@ impl Desktop {
             modifier,
         );
         match action {
-            FilePrimaryAction::Panel => self.open_reference_panel(target, window, cx),
+            FilePrimaryAction::Open => self.open_reference(target, window, cx),
             FilePrimaryAction::Editor => self.activate_file_action(
                 &target,
                 FileAction::OpenEditor { editor: None },
@@ -89,7 +89,7 @@ impl Desktop {
             }
         }
     }
-    pub(in crate::app) fn open_reference_panel(
+    pub(in crate::app) fn open_reference(
         &mut self,
         target: FileMenuTarget,
         window: &mut Window,
@@ -107,7 +107,7 @@ impl Desktop {
             self.open_resolved_reference(target.path, directory, target.line, window, cx);
             return;
         }
-        self.resolve_reference_action(target, ReferenceAction::Panel(self.file_open_generation));
+        self.resolve_reference_action(target, ReferenceAction::Open(self.file_open_generation));
     }
     pub(super) fn resolve_reference_action(&self, target: FileMenuTarget, action: ReferenceAction) {
         self.perform(
@@ -116,7 +116,7 @@ impl Desktop {
                 path: target.path.clone(),
                 root: target.root.clone(),
                 lookup_path: target.lookup_path.clone(),
-                inspect_directory: matches!(action, ReferenceAction::Panel(_)),
+                inspect_directory: matches!(action, ReferenceAction::Open(_)),
             }),
             OperationCompletion::FileReference(Box::new(ReferenceRequest {
                 epoch: self.snapshot.epoch,
@@ -133,7 +133,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         if request.epoch != self.snapshot.epoch
-            || matches!(request.action, ReferenceAction::Panel(id) if id != self.file_open_generation)
+            || matches!(request.action, ReferenceAction::Open(id) if id != self.file_open_generation)
         {
             return;
         }
@@ -143,7 +143,7 @@ impl Desktop {
                 target.path = path;
                 target.relative = file_workspace_relative_path(&target.path, &target.root);
                 match request.action {
-                    ReferenceAction::Panel(_) => self.open_resolved_reference(
+                    ReferenceAction::Open(_) => self.open_resolved_reference(
                         target.path,
                         directory,
                         target.line,
@@ -174,8 +174,7 @@ impl Desktop {
             self.browse(path, cx);
         } else {
             self.reveal_file_in_tree(Some(&path), false);
-            self.edit(path.clone(), false);
-            self.editor.pending_line = line.map(|line| (path, line));
+            self.open_file(path, line, false, cx);
             self.sync_inputs(window, cx);
             cx.notify();
         }

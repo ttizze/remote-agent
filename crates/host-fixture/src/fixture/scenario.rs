@@ -448,6 +448,23 @@ fn response_content<'a>(
                 "生成画像を表示しました。\n\n[生成画像を開く](<{}>)\n\n[ファイルを開く](hello.txt:1)\n\n[Webサイトを開く](https://example.com)",
                 path.display()
             );
+            if home.join("fixture video.mp4").is_file() {
+                for name in [
+                    "video.mp4",
+                    "audio.wav",
+                    "animation.gif",
+                    "vector.svg",
+                    "document.pdf",
+                    "archive.zip",
+                    "large.txt",
+                    "unknown.bin",
+                ] {
+                    response_text.push_str(&format!(
+                        "\n\n[{name}](<{}>)",
+                        home.join(format!("fixture {name}")).display()
+                    ));
+                }
+            }
         }
     }
     ResponseContent {

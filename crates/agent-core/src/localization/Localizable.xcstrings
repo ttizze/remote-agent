@@ -1,6 +1,22 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "先頭1 MiBだけ表示しています。全文はダウンロードできます。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "先頭1 MiBだけ表示しています。全文はダウンロードできます。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Showing only the first 1 MiB. Download the file to read it in full."
+          }
+        }
+      }
+    },
     "開始中…": {
       "localizations": {
         "en": {

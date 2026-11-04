@@ -607,7 +607,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     use agent_core::state::{FileDraft, Intent, Navigation, Workspace};
     let file: Arc<agent_protocol::models::FileContent> = Arc::new(
         serde_json::from_value(json!({
-            "path":"/old/file", "revision":"r1", "text":"saved", "size":5
+            "path":"/old/file", "revision":"r1", "text":"saved", "size":5, "truncated":false
         }))
         .unwrap(),
     );

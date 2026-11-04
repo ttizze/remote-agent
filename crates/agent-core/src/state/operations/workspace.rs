@@ -112,6 +112,16 @@ impl Operation for SaveFile {
     }
     type Input = Arc<FileDraft>;
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        if snapshot
+            .workspace
+            .file
+            .as_ref()
+            .is_some_and(|file| file.path == self.path && file.truncated)
+        {
+            return Err(PeerError::InvalidMessage(
+                "ファイルが大きすぎるため編集できません。".into(),
+            ));
+        }
         snapshot
             .file_drafts
             .get(&self.path)
@@ -347,12 +357,49 @@ impl Operation for LoadVisualization {
 mod read_result_tests {
     use super::*;
     #[test]
+    fn truncated_reads_keep_old_drafts_but_reject_edits_and_save_requests() {
+        let path = "/large.txt".to_owned();
+        let original = Arc::new(FileDraft {
+            revision: "original".into(),
+            text: "unsaved work".into(),
+        });
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.file_drafts).insert(path.clone(), original.clone());
+        ReadFile {
+            path: path.clone(),
+            discard_draft: false,
+        }
+        .apply(
+            &mut snapshot,
+            FileContent {
+                path: path.clone(),
+                revision: "prefix".into(),
+                text: "preview".into(),
+                size: 2_000_000,
+                truncated: true,
+            },
+        );
+        assert!(SaveFile { path: path.clone() }.capture(&snapshot).is_err());
+        let (edited, effects) = crate::state::reduce(
+            &snapshot,
+            Event::Intent(Intent::SetFileDraft {
+                path: path.clone(),
+                text: "replace with prefix".into(),
+            }),
+        );
+        assert!(effects.is_empty());
+        assert!(edited.error.is_some());
+        assert_eq!(edited.file_drafts[&path], original);
+        assert_eq!(edited.workspace.file.as_ref().unwrap().text, "preview");
+    }
+    #[test]
     fn each_read_receipt_keeps_its_content_when_another_file_replaces_the_editor_snapshot() {
         let file = |path: &str, text: &str| FileContent {
             path: path.into(),
             text: text.into(),
             revision: "r1".into(),
             size: text.len() as u64,
+            truncated: false,
         };
         let mut parent = file("/repo/parent.md", "[child](child.md)");
         let receipt = ReadFile::outcome(&mut parent);

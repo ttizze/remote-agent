@@ -6,10 +6,11 @@ mod icons;
 mod metadata;
 mod mobile;
 mod mobile_icons;
+mod preview;
 pub use mobile::{
     MobileFileAction, MobileFileMenuItem, mobile_file_menu, mobile_file_open_request,
-    mobile_file_preview_mime_type,
 };
+pub use preview::{file_preview_mime_type, file_preview_truncation_notice};
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn mobile_file_icon(path: String) -> String {

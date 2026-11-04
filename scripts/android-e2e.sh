@@ -141,6 +141,6 @@ adb -P "$server_port" -s "$serial" shell settings put secure show_ime_with_hard_
 adb -P "$server_port" -s "$serial" shell am instrument -w \
     -e class dev.remoteagent.mobile.VoiceInputTest,dev.remoteagent.mobile.MarkdownLinkTest,dev.remoteagent.mobile.FileViewerTest,dev.remoteagent.mobile.MessageActionsTest,dev.remoteagent.mobile.UnknownSubmissionTest,dev.remoteagent.mobile.ModelSelectionTest,dev.remoteagent.mobile.ComposerStopTest,dev.remoteagent.mobile.ComposerKeyboardTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.ui.log"
-grep -qx 'OK (25 tests)' "$log.ui.log"
+grep -qx 'OK (26 tests)' "$log.ui.log"
 fi
 echo "Android API 37: $mode checks passed; records at $log.*"

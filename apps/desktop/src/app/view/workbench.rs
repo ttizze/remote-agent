@@ -20,6 +20,7 @@ struct WorkbenchModel {
     explorer_width: f32,
     explorer_max: f32,
     file: Option<String>,
+    file_truncated: bool,
     saving: bool,
     file_failed: bool,
     review: Option<(u64, u64, usize)>,
@@ -310,6 +311,13 @@ impl Desktop {
             explorer_max: agent_core::presentation::files::explorer_max_width(
                 self.file_explorer.available,
             ),
+            file_truncated: file.is_some()
+                && self
+                    .snapshot
+                    .workspace
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.truncated),
             file,
             saving: kind == Panel::File && self.busy > 0,
             file_failed: self
@@ -505,6 +513,7 @@ impl Desktop {
         failed: bool,
         input: &Entity<gpui_kit::component::input::EditorState>,
         saving: bool,
+        truncated: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
         let language = crate::localization::language(cx);
@@ -545,9 +554,13 @@ impl Desktop {
         }
         if path.is_some() {
             editor = editor
+                .when(truncated, |editor| editor.child(div().text_xs().child(
+                    language.text(&agent_core::presentation::files::file_preview_truncation_notice()).to_owned()
+                )))
                 .child(
                     div().flex_1().min_h_0().child(
                         Editor::new(input)
+                            .readonly(truncated)
                             .h_full()
                             .aria_label(language.text("ファイル編集")),
                     ),
@@ -561,16 +574,16 @@ impl Desktop {
                                 s.save_file()
                             })
                             .primary()
-                            .disabled(saving),
+                            .disabled(saving || truncated),
                         )
                         .child(icon_button(
                             "reload-file",
                             IconName::RotateCw,
                             language.text("再読み込み・下書きを破棄"),
                             cx,
-                            |s, _, _| {
+                            |s, _, cx| {
                                 if let Some(file) = &s.snapshot.workspace.file {
-                                    s.edit(file.path.clone(), true);
+                                    s.open_file(file.path.clone(), None, true, cx);
                                 }
                             },
                         ))
@@ -897,6 +910,7 @@ impl Desktop {
                                         model.file_failed,
                                         &model.editor_input,
                                         model.saving,
+                                        model.file_truncated,
                                         cx,
                                     )),
                             )

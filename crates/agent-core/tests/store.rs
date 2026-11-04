@@ -1353,7 +1353,7 @@ async fn failed_new_task_admission_keeps_retryable_input() {
 }
 
 fn file(path: &str, revision: &str, text: &str) -> Value {
-    json!({"path":path,"revision":revision,"text":text,"size":text.len()})
+    json!({"path":path,"revision":revision,"text":text,"size":text.len(),"truncated":false})
 }
 
 #[tokio::test]

@@ -1,9 +1,13 @@
 import AgentCore
+import AVKit
 import QuickLook
 import SwiftUI
+import UIKit
+import WebKit
 
 private struct WorkspaceFilePreview: View {
     let entry: FileEntry
+    let mimeType: String
     let download: @MainActor (String) async throws -> URL
     let aiEdit: (String) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -16,13 +20,8 @@ private struct WorkspaceFilePreview: View {
             VStack(alignment: .leading) {
                 Text(entry.path).font(.caption).foregroundStyle(.secondary)
                     .textSelection(.enabled).padding(.horizontal)
-                if let url = file?.url {
-                    if QLPreviewController.canPreview(url as NSURL) {
-                        ConversationFilePreview(url: url)
-                            .accessibilityIdentifier("file.preview")
-                    } else {
-                        AppNotice(text: "このファイル形式はプレビューできません").padding()
-                    }
+                if let file {
+                    preview(file).frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let error {
                     AppNotice(text: error).padding()
                 } else {
@@ -44,6 +43,7 @@ private struct WorkspaceFilePreview: View {
                     if let url = file?.url {
                         ShareLink(item: url) { Image(systemName: "square.and.arrow.up") }
                             .accessibilityLabel("保存・共有")
+                            .accessibilityIdentifier("file.share")
                     }
                 }
             }
@@ -52,7 +52,7 @@ private struct WorkspaceFilePreview: View {
             guard file == nil else { return }
             error = nil
             do {
-                let downloaded = try await DownloadedFile(url: download(entry.path))
+                let downloaded = try await DownloadedFile(url: download(entry.path), mimeType: mimeType)
                 guard !Task.isCancelled else { return }
                 file = downloaded
             } catch {
@@ -63,16 +63,69 @@ private struct WorkspaceFilePreview: View {
         }
     }
 
-    /// Quick Look can temporarily cover the sheet with a full-screen player.
-    /// Keep its file for the lifetime of the preview, independent of appearance.
+    @ViewBuilder private func preview(_ file: DownloadedFile) -> some View {
+        if let playback = file.playback {
+            switch playback {
+            case let .success(player):
+                VideoPlayer(player: player).accessibilityIdentifier("file.preview.media")
+            case let .failure(error):
+                AppNotice(text: error.localizedDescription).padding()
+            }
+        } else if mimeType.hasPrefix("image/") {
+            if ["image/svg+xml", "image/gif"].contains(mimeType) {
+                FileWebPreview(url: file.url)
+            } else {
+                ConversationImagePreview(url: file.url)
+            }
+        } else if QLPreviewController.canPreview(file.url as NSURL) {
+            ConversationFilePreview(url: file.url)
+        } else {
+            AppNotice(text: "このファイル形式はプレビューできません").padding()
+        }
+    }
+
+    /// Native players can temporarily cover the sheet. Retain both the file
+    /// and playback resources until the preview itself is released.
     private final class DownloadedFile {
         let url: URL
+        let playback: Result<AVPlayer, Error>?
+        private let audioConfiguration: AudioSessionConfiguration?
 
-        init(url: URL) {
+        init(url: URL, mimeType: String) {
             self.url = url
+            if mimeType.hasPrefix("video/") || mimeType.hasPrefix("audio/") {
+                let session = AVAudioSession.sharedInstance()
+                // An active dictation session already supports playback and
+                // retains ownership of the microphone's audio configuration.
+                let previous = [AVAudioSession.Category.record, .playAndRecord].contains(session.category)
+                    ? nil : AudioSessionConfiguration(
+                        category: session.category, mode: session.mode, options: session.categoryOptions
+                    )
+                let result = Result {
+                    if previous != nil {
+                        try session.setCategory(
+                            .playback,
+                            mode: mimeType.hasPrefix("video/") ? .moviePlayback : .default
+                        )
+                    }
+                    return AVPlayer(url: url)
+                }
+                playback = result
+                audioConfiguration = (try? result.get()) == nil ? nil : previous
+            } else {
+                playback = nil
+                audioConfiguration = nil
+            }
         }
 
         deinit {
+            if case let .success(player)? = playback {
+                player.pause()
+            }
+            if let audioConfiguration, AVAudioSession.sharedInstance().category == .playback {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                try? audioConfiguration.restore()
+            }
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
         }
     }
@@ -106,8 +159,8 @@ struct WorkspaceFileSheet: View {
     }
 
     var body: some View {
-        if mobileFilePreviewMimeType(path: entry.path) != nil {
-            WorkspaceFilePreview(entry: entry, download: download, aiEdit: aiEdit)
+        if let mimeType = filePreviewMimeType(path: entry.path) {
+            WorkspaceFilePreview(entry: entry, mimeType: mimeType, download: download, aiEdit: aiEdit)
         } else {
             editor
         }
@@ -118,15 +171,21 @@ struct WorkspaceFileSheet: View {
             VStack(alignment: .leading) {
                 Text(entry.path).font(.caption).foregroundColor(.secondary).textSelection(.enabled).padding(.horizontal)
                 if let error {
-                    AppNotice(text: error).padding(.horizontal)
+                    AppNotice(text: error).padding(.horizontal).accessibilityIdentifier("file.error")
                 }
                 if busy {
                     ProgressView().padding()
                 }
-                BufferedTextInput(value: $text) { TextEditor(text: $0, selection: $selection) }.font(.body.monospaced())
-                    .textInputAutocapitalization(.never).disableAutocorrection(true)
-                    .accessibilityIdentifier("file.editor")
-                    .disabled(revision.isEmpty)
+                if let file, file.truncated {
+                    AppText(filePreviewTruncationNotice()).font(.caption).padding(.horizontal)
+                    FileTextPreview(text: file.text, line: line)
+                } else {
+                    BufferedTextInput(value: $text) { TextEditor(text: $0, selection: $selection) }
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.never).disableAutocorrection(true)
+                        .accessibilityIdentifier("file.editor")
+                        .disabled(revision.isEmpty)
+                }
                 HStack {
                     Button("再読込") {
                         if text != savedText {
@@ -135,7 +194,7 @@ struct WorkspaceFileSheet: View {
                             load(restoreDraft: false)
                         }
                     }
-                    Button("ダウンロード") { share(entry.path) }
+                    Button("ダウンロード") { share(entry.path) }.accessibilityIdentifier("file.download")
                     Button("AIで編集") { aiEdit(entry.path) }.accessibilityIdentifier("file.ai-edit")
                 }.padding()
             }
@@ -153,7 +212,8 @@ struct WorkspaceFileSheet: View {
                                 error = failure.localizedDescription
                             }
                         }
-                    }.disabled(busy || revision.isEmpty || text == savedText).accessibilityIdentifier("file.save")
+                    }.disabled(busy || revision.isEmpty || file?.truncated == true || text == savedText)
+                        .accessibilityIdentifier("file.save")
                 }
             }
             .onChange(of: file?.revision) { moveToLine() }
@@ -172,8 +232,7 @@ struct WorkspaceFileSheet: View {
 
     private func moveToLine() {
         guard let line else { return }
-        let starts = [text.startIndex] + text.indices.filter { text[$0] == "\n" }.map { text.index(after: $0) }
-        let start = starts[min(max(0, Int(line) - 1), starts.count - 1)]
+        let start = fileLineStart(text, line: line)
         selection = TextSelection(range: start ..< start)
     }
 
@@ -189,6 +248,52 @@ struct WorkspaceFileSheet: View {
                (snapshot.fileDraft(path: entry.path)?.revision ?? file.revision) != file.revision {
                 error = "ホストのファイルが変更されています。下書きは保持しました。再読込すると下書きを破棄します。"
             }
+        }
+    }
+}
+
+private struct FileWebPreview: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context _: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        return WKWebView(frame: .zero, configuration: configuration)
+    }
+
+    func updateUIView(_ view: WKWebView, context _: Context) {
+        guard view.url != url else { return }
+        view.loadFileURL(url, allowingReadAccessTo: url)
+    }
+}
+
+private func fileLineStart(_ text: String, line: UInt32) -> String.Index {
+    let starts = [text.startIndex] + text.indices.filter { text[$0] == "\n" }.map { text.index(after: $0) }
+    return starts[min(max(0, Int(line) - 1), starts.count - 1)]
+}
+
+private struct FileTextPreview: UIViewRepresentable {
+    let text: String
+    let line: UInt32?
+
+    func makeUIView(context _: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.backgroundColor = .clear
+        view.font = .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .body).pointSize, weight: .regular)
+        view.adjustsFontForContentSizeCategory = true
+        view.accessibilityIdentifier = "file.preview.text"
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context _: Context) {
+        guard view.text != text else { return }
+        view.text = text
+        if let line {
+            let start = fileLineStart(text, line: line)
+            view.scrollRangeToVisible(NSRange(start ..< start, in: text))
         }
     }
 }

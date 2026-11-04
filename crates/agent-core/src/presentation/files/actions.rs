@@ -5,12 +5,12 @@ use agent_protocol::editors::{EditorId, FileManagerRevealKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePrimaryAction {
-    Panel,
+    Open,
     Editor,
     Options,
 }
 
-/// T3's desktop priority with the approved media/browser previews removed.
+/// Source files use the workbench; known binary files use a native viewer.
 /// `path` is a resolved Host path without a line/column suffix.
 pub fn desktop_file_primary_action(
     path: &str,
@@ -22,54 +22,21 @@ pub fn desktop_file_primary_action(
     if local_shell && editor_modifier {
         return FilePrimaryAction::Editor;
     }
+    if super::file_preview_mime_type(path.into()).is_some() {
+        return FilePrimaryAction::Open;
+    }
     let in_workspace =
         super::super::markdown::file_workspace_relative_path(path, workspace_root).is_some();
     let host_path = agent_protocol::paths::is_absolute_host_path(path)
         || path.starts_with("~/")
         || path.starts_with("~\\");
-    if has_thread && (in_workspace || (host_path && !image_or_video_path(path))) {
-        FilePrimaryAction::Panel
+    if has_thread && (in_workspace || host_path) {
+        FilePrimaryAction::Open
     } else if local_shell {
         FilePrimaryAction::Editor
     } else {
         FilePrimaryAction::Options
     }
-}
-
-fn image_or_video_path(path: &str) -> bool {
-    let basename = path
-        .trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path);
-    let extension = basename
-        .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase());
-    matches!(
-        extension.as_deref(),
-        Some(
-            "avif"
-                | "bmp"
-                | "heic"
-                | "heif"
-                | "gif"
-                | "ico"
-                | "jpeg"
-                | "jpg"
-                | "png"
-                | "svg"
-                | "tif"
-                | "tiff"
-                | "webp"
-                | "avi"
-                | "m4v"
-                | "mkv"
-                | "mov"
-                | "mp4"
-                | "ogv"
-                | "webm"
-        )
-    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +65,6 @@ impl FileMenuItem {
     }
 }
 
-/// Media and browser preview entries are intentionally omitted by product choice.
 pub fn file_reference_menu(
     local_shell: bool,
     preferred_editor: Option<EditorId>,
@@ -195,7 +161,7 @@ mod tests {
             let path = format!("/workspace/{file}");
             assert_eq!(
                 desktop_file_primary_action(&path, "/workspace", true, false, false),
-                FilePrimaryAction::Panel
+                FilePrimaryAction::Open
             );
             assert_eq!(
                 desktop_file_primary_action(&path, "/workspace", true, true, true),
@@ -203,7 +169,7 @@ mod tests {
             );
             assert_eq!(
                 desktop_file_primary_action(&path, "/workspace", true, false, true),
-                FilePrimaryAction::Panel
+                FilePrimaryAction::Open
             );
         }
         assert_eq!(
@@ -214,16 +180,16 @@ mod tests {
                 false,
                 false
             ),
-            FilePrimaryAction::Panel
+            FilePrimaryAction::Open
         );
     }
 
     #[test]
-    fn outside_images_and_videos_fall_back_to_the_editor_or_options_and_audio_is_a_file() {
+    fn outside_media_uses_native_open_including_without_a_thread() {
         for path in ["~/voice.mp3", r"~\voice.mp3"] {
             assert_eq!(
                 desktop_file_primary_action(path, "/workspace", true, false, false),
-                FilePrimaryAction::Panel
+                FilePrimaryAction::Open
             );
         }
         for extension in [
@@ -233,11 +199,23 @@ mod tests {
             let path = format!("/other/file.{}", extension.to_uppercase());
             assert_eq!(
                 desktop_file_primary_action(&path, "/workspace", true, true, false),
-                FilePrimaryAction::Editor
+                FilePrimaryAction::Open
             );
             assert_eq!(
                 desktop_file_primary_action(&path, "/workspace", true, false, false),
-                FilePrimaryAction::Options
+                FilePrimaryAction::Open
+            );
+        }
+        for local in [false, true] {
+            assert_eq!(
+                desktop_file_primary_action(
+                    "/outside/video.mp4",
+                    "/workspace",
+                    false,
+                    local,
+                    false
+                ),
+                FilePrimaryAction::Open
             );
         }
         for file in [
@@ -256,7 +234,7 @@ mod tests {
                     false,
                     false
                 ),
-                FilePrimaryAction::Panel
+                FilePrimaryAction::Open
             );
         }
         assert_eq!(

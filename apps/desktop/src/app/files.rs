@@ -5,8 +5,10 @@ mod explorer;
 pub(super) use browser::{FileBrowser, FileBrowserModel};
 pub(super) use explorer::FileExplorer;
 mod menu;
+mod preview;
 mod reference;
 pub(super) use menu::run_file_menu_command;
+pub(super) use preview::DownloadedPreview;
 pub(super) use reference::{ReferenceAction, ReferenceRequest};
 
 impl Desktop {

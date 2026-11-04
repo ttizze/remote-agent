@@ -34,8 +34,6 @@ internal fun rememberFileSharer(
                 failure(error.displayMessage() ?: "ファイルを共有できません")
             } catch (error: IOException) {
                 failure(error.displayMessage() ?: "ファイルを共有できません")
-            } catch (error: IllegalStateException) {
-                failure(error.displayMessage() ?: "ファイルを共有できません")
             }
         }
     }

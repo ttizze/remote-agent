@@ -32,6 +32,9 @@ pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 
 #[cfg(test)]
+#[path = "workspace_files/read_tests.rs"]
+mod read_tests;
+#[cfg(test)]
 #[path = "workspace_files/transfer_tests.rs"]
 mod transfer_tests;
 
@@ -225,7 +228,7 @@ impl WorkspaceFiles {
             Call::ReadFile(params) => {
                 let requested = absolute_path(&params.path)?;
                 let path = dunce::canonicalize(&requested)?;
-                read_editable(&path, &requested).map(Body::from)
+                read_file(&path, &requested).map(Body::from)
             }
             Call::WriteFile(params) => {
                 let requested = absolute_path(&params.path)?;
@@ -282,7 +285,7 @@ impl WorkspaceFiles {
                         }
                         atomicwrites::Error::User(error) => error,
                     })?;
-                read_editable(&path, &requested).map(Body::from)
+                read_file(&path, &requested).map(Body::from)
             }
             Call::Upload(params) => {
                 // Attachments outlive worktrees. Linked workspace files still
@@ -489,11 +492,33 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn read_editable(path: &Path, requested: &Path) -> Result<FileContent> {
-    let bytes = read_bounded(path, EDIT_LIMIT)?;
+fn read_file(path: &Path, requested: &Path) -> Result<FileContent> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(anyhow!("通常のファイルではありません。"));
+    }
+    let mut bytes = Vec::new();
+    file.take(EDIT_LIMIT + 1).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() as u64 > EDIT_LIMIT;
+    let size = if truncated {
+        metadata.len().max(bytes.len() as u64)
+    } else {
+        bytes.len() as u64
+    };
+    bytes.truncate(EDIT_LIMIT as usize);
     let bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
-    let text = std::str::from_utf8(if bom { &bytes[3..] } else { &bytes })
-        .context("UTF-8以外のファイルは表示できません。ダウンロードして開いてください。")?;
+    let source = if bom { &bytes[3..] } else { &bytes };
+    let text = match std::str::from_utf8(source) {
+        Ok(text) => text,
+        Err(error) if truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&source[..error.valid_up_to()])?
+        }
+        Err(error) => {
+            return Err(anyhow!(error)
+                .context("UTF-8以外のファイルは表示できません。ダウンロードして開いてください。"));
+        }
+    };
     if text.contains('\0') {
         return Err(anyhow!("binary file; download it instead"));
     }
@@ -503,7 +528,8 @@ fn read_editable(path: &Path, requested: &Path) -> Result<FileContent> {
         path: requested.to_str().context("file path is not UTF-8")?.into(),
         revision: hash(&bytes),
         text: text.into(),
-        size: bytes.len() as u64,
+        size,
+        truncated,
     })
 }
 fn line_ending(text: &str) -> &'static str {

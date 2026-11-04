@@ -61,6 +61,80 @@ class FileViewerTest {
     }
 
     @Test
+    fun truncatedTextSharesTheFullResolvedFileInsteadOfItsPreview() {
+        val opened = mutableListOf<AndroidIntent>()
+        val downloads = mutableListOf<File>()
+        val original = "preview\n" + "x".repeat(1024 * 1024) + "full file tail"
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        compose.setContent {
+            val activity = LocalContext.current
+            val exportContext = remember {
+                object : ContextWrapper(activity) {
+                    override fun startActivity(intent: AndroidIntent) {
+                        opened.add(intent)
+                    }
+                }
+            }
+            AppTheme {
+                CompositionLocalProvider(LocalContext provides exportContext) {
+                    ConversationFileViewer(
+                        MarkdownFileReference("large.txt", "large.txt", MarkdownFileKind.FILE, null, null),
+                        source = "large.txt",
+                        workspaceRoot = "/repo",
+                        perform = { intent, complete ->
+                            when (intent) {
+                                is Intent.ResolveFileReference ->
+                                    complete(
+                                        Result.success(Outcome.FileReferenceResolved("/repo/nested/large.txt", false))
+                                    )
+                                is Intent.ReadFile ->
+                                    complete(
+                                        Result.success(
+                                            Outcome.FileRead(
+                                                FileContent(
+                                                    intent.v1.path,
+                                                    "prefix",
+                                                    "preview",
+                                                    original.length.toULong(),
+                                                    true,
+                                                )
+                                            )
+                                        )
+                                    )
+                                is Intent.DownloadFile -> {
+                                    assertEquals("/repo/nested/large.txt", intent.v1.source)
+                                    downloads.add(File(intent.v1.destination).apply { writeText(original) })
+                                    complete(Result.success(Outcome.Applied))
+                                }
+                                else -> error("unexpected request: $intent")
+                            }
+                        },
+                        dismiss = {},
+                    )
+                }
+            }
+        }
+        try {
+            compose.onNodeWithText("preview").assertIsDisplayed()
+            compose.onNodeWithText("ダウンロード").performClick()
+            compose.runOnIdle {
+                val chooser = opened.single()
+                assertEquals(AndroidIntent.ACTION_CHOOSER, chooser.action)
+                val share =
+                    checkNotNull(chooser.getParcelableExtra(AndroidIntent.EXTRA_INTENT, AndroidIntent::class.java))
+                assertEquals(AndroidIntent.ACTION_SEND, share.action)
+                val uri =
+                    checkNotNull(share.getParcelableExtra(AndroidIntent.EXTRA_STREAM, android.net.Uri::class.java))
+                context.contentResolver.openInputStream(uri).use { stream ->
+                    assertEquals(original, checkNotNull(stream).bufferedReader().readText())
+                }
+            }
+        } finally {
+            downloads.forEach { it.delete() }
+        }
+    }
+
+    @Test
     fun videoRetriesTransferAndOpensNativeViewerWithAReadableContentUri() {
         val requests = mutableListOf<Intent>()
         val opened = mutableListOf<AndroidIntent>()
@@ -139,7 +213,9 @@ class FileViewerTest {
                                     val text = if (path.endsWith("parent.md")) parent else "Child body"
                                     complete(
                                         Result.success(
-                                            Outcome.FileRead(FileContent(path, "r1", text, text.length.toULong()))
+                                            Outcome.FileRead(
+                                                FileContent(path, "r1", text, text.length.toULong(), false)
+                                            )
                                         )
                                     )
                                 }

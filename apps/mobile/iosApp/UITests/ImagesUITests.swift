@@ -1,6 +1,11 @@
 import Foundation
 import XCTest
 
+private enum WorkspacePreview {
+    case image, media, web, document, download, truncated, unavailable
+    case text(String)
+}
+
 /// XCTest selectors remain on LaunchUITests for the fixture runner.
 extension LaunchUITests {
     func testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening() throws {
@@ -28,7 +33,14 @@ extension LaunchUITests {
         showGeneratedImage("saved")
         captureScreen(app, named: "Generated image outside collapsed work")
         verifyWorkspaceFileLink(app, index: 0, filename: "fixture image.png")
-        verifyWorkspaceFileLink(app, index: 1, filename: "hello.txt", text: "日本語のファイル")
+        verifyWorkspaceFileLink(app, index: 1, filename: "hello.txt", expected: .text("日本語のファイル"))
+        for (offset, fixture) in [
+            ("video.mp4", WorkspacePreview.media), ("audio.wav", .media),
+            ("animation.gif", .web), ("vector.svg", .web), ("document.pdf", .document),
+            ("archive.zip", .download), ("large.txt", .truncated), ("unknown.bin", .unavailable)
+        ].enumerated() {
+            verifyWorkspaceFileLink(app, index: offset + 3, filename: "fixture \(fixture.0)", expected: fixture.1)
+        }
         app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         let number = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
@@ -40,7 +52,9 @@ extension LaunchUITests {
         verifyWorkspaceFileLink(app, index: 0, filename: "fixture image.png")
     }
 
-    private func verifyWorkspaceFileLink(_ app: XCUIApplication, index: Int, filename: String, text: String? = nil) {
+    private func verifyWorkspaceFileLink(
+        _ app: XCUIApplication, index: Int, filename: String, expected: WorkspacePreview = .image
+    ) {
         // File chips replace the authored link captions. The fixture lists the image, text file, then website.
         let link = prefixedElement(app, prefix: "item.fixture-final-").links.element(boundBy: index)
         for _ in 0 ..< 12 {
@@ -52,24 +66,67 @@ extension LaunchUITests {
         XCTAssertTrue(link.waitForExistence(timeout: 10)); link.tap()
         let done = app.buttons["file.close"]
         XCTAssertTrue(done.waitForExistence(timeout: 15), "The Host file did not open")
-        let editor = app.textViews["file.editor"]
         XCTAssertTrue(app.navigationBars[filename].exists)
-        if let text {
-            XCTAssertTrue(editor.exists)
-            let loaded = expectation(for: NSPredicate(format: "value CONTAINS %@", text), evaluatedWith: editor)
-            wait(for: [loaded], timeout: 10)
-        } else {
-            XCTAssertTrue(app.descendants(matching: .any)["file.preview"].waitForExistence(timeout: 15))
-            XCTAssertFalse(editor.exists, "Binary files must bypass the text editor")
-            XCTAssertTrue(app.buttons["file.reload"].exists)
-            XCTAssertTrue(app.buttons["file.ai-edit"].exists)
-        }
+        verifyWorkspacePreview(app, expected: expected)
         captureScreen(app, named: filename)
         done.tap()
         wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: done)], timeout: 5)
         tapWhenStable(app.navigationBars.buttons["閉じる"])
         wait(for: [expectation(for: NSPredicate(format: "isHittable == true"),
                                evaluatedWith: app.textFields["task.message"])], timeout: 10)
+    }
+
+    private func verifyWorkspacePreview(_ app: XCUIApplication, expected: WorkspacePreview) {
+        switch expected {
+        case let .text(text):
+            let editor = app.textViews["file.editor"]
+            XCTAssertTrue(editor.exists)
+            wait(
+                for: [expectation(for: NSPredicate(format: "value CONTAINS %@", text), evaluatedWith: editor)],
+                timeout: 10
+            )
+        case .truncated:
+            let preview = app.textViews["file.preview.text"]
+            XCTAssertTrue(preview.waitForExistence(timeout: 15))
+            XCTAssertTrue((preview.value as? String)?.hasPrefix("Large text fixture") == true)
+            XCTAssertFalse((preview.value as? String)?.contains("END OF FULL FILE") == true)
+            XCTAssertFalse(app.buttons["file.save"].isEnabled)
+            XCTAssertTrue(app.buttons["file.download"].exists)
+            XCTAssertFalse(app.textViews["file.editor"].exists)
+        case .unavailable:
+            XCTAssertTrue(app.staticTexts["file.error"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.buttons["file.download"].exists)
+            XCTAssertFalse(app.buttons["file.save"].isEnabled)
+        default:
+            verifyNativeWorkspacePreview(app, expected: expected)
+        }
+    }
+
+    private func verifyNativeWorkspacePreview(_ app: XCUIApplication, expected: WorkspacePreview) {
+        XCTAssertTrue(app.buttons["file.share"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.textViews["file.editor"].exists, "Binary files must bypass the text editor")
+        XCTAssertTrue(app.buttons["file.reload"].exists)
+        XCTAssertTrue(app.buttons["file.ai-edit"].exists)
+        switch expected {
+        case .image:
+            let preview = app.images["conversation.preview.image"]
+            XCTAssertTrue(preview.waitForExistence(timeout: 15))
+            XCTAssertTrue(preview.isHittable)
+        case .media:
+            let play = app.buttons.matching(NSPredicate(format: "label IN %@", ["Play", "再生"])).firstMatch
+            XCTAssertTrue(play.waitForExistence(timeout: 15), "The native player must load real media controls")
+            XCTAssertTrue(play.isHittable)
+            play.tap()
+        case .web:
+            let content = app.webViews.firstMatch
+            XCTAssertTrue(content.waitForExistence(timeout: 15))
+            XCTAssertTrue(content.isHittable)
+            XCTAssertGreaterThan(content.frame.height, 100)
+        case .document:
+            XCTAssertFalse(app.staticTexts["このファイル形式はプレビューできません"].exists)
+        default:
+            break
+        }
     }
 
     func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {

@@ -168,7 +168,9 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
                 }
                 do {
                     let session = AVAudioSession.sharedInstance()
-                    self.previousAudioConfiguration = AudioSessionConfiguration(session)
+                    self.previousAudioConfiguration = AudioSessionConfiguration(
+                        category: session.category, mode: session.mode, options: session.categoryOptions
+                    )
                     try session.setCategory(.record, mode: .measurement)
                     try session.setActive(true)
                     self.audioSessionActive = true
@@ -280,16 +282,10 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
     }
 }
 
-private struct AudioSessionConfiguration {
+struct AudioSessionConfiguration {
     let category: AVAudioSession.Category
     let mode: AVAudioSession.Mode
     let options: AVAudioSession.CategoryOptions
-
-    init(_ session: AVAudioSession) {
-        category = session.category
-        mode = session.mode
-        options = session.categoryOptions
-    }
 
     func restore() throws {
         try AVAudioSession.sharedInstance().setCategory(category, mode: mode, options: options)

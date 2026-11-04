@@ -274,7 +274,7 @@ struct ConversationPreview: View {
     }
 }
 
-private struct ConversationImagePreview: View {
+struct ConversationImagePreview: View {
     let url: URL
     @State private var image: UIImage?
     @State private var loadFailed = false
@@ -364,10 +364,14 @@ struct ConversationFilePreview: UIViewControllerRepresentable {
         return controller
     }
 
-    func updateUIViewController(_: QLPreviewController, context _: Context) {}
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        guard context.coordinator.url != url else { return }
+        context.coordinator.url = url
+        controller.reloadData()
+    }
 
     final class Coordinator: NSObject, QLPreviewControllerDataSource {
-        let url: URL
+        var url: URL
         init(url: URL) {
             self.url = url
         }

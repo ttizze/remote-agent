@@ -556,7 +556,7 @@ mod file_panel_tests {
         files::ReferenceRequest {
             epoch,
             target: view.reference_target(&file, lookup_path.as_deref()),
-            action: files::ReferenceAction::Panel(view.file_open_generation),
+            action: files::ReferenceAction::Open(view.file_open_generation),
         }
     }
     fn start_reference(
@@ -567,16 +567,16 @@ mod file_panel_tests {
     ) -> files::ReferenceRequest {
         Arc::make_mut(&mut view.snapshot).connected = true;
         let request = reference_request(view, source, view.snapshot.epoch);
-        view.open_reference_panel(request.target, window, cx);
+        view.open_reference(request.target, window, cx);
         reference_request(view, source, view.snapshot.epoch)
     }
 
     #[gpui::test]
-    fn file_references_use_the_panel_without_previews_or_implicit_downloads(
+    fn text_panels_and_native_files_keep_their_draft_and_resolution_boundaries(
         cx: &mut TestAppContext,
     ) {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("large.PNG");
+        let path = directory.path().join("large.txt");
         let cwd = directory.path().to_string_lossy().into_owned();
         let source = path.to_string_lossy().into_owned();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -620,8 +620,8 @@ mod file_panel_tests {
                 view.file_browser.as_mut().unwrap().model.tree =
                     Arc::new(agent_core::presentation::files::FileTreeView {
                         rows: vec![agent_core::presentation::files::FileTreeRow {
-                            path: "large.PNG".into(),
-                            label: "large.PNG".into(),
+                            path: "large.txt".into(),
+                            label: "large.txt".into(),
                             kind: agent_protocol::file_tree::EntryKind::File,
                             depth: 0,
                             expanded: false,
@@ -649,7 +649,7 @@ mod file_panel_tests {
                     &key,
                     &agent_core::presentation::files::FileTreeRequest {
                         id: 1,
-                        path: "large.PNG".into(),
+                        path: "large.txt".into(),
                     },
                     cx,
                 );
@@ -664,7 +664,7 @@ mod file_panel_tests {
             desktop.update(cx, |view, cx| {
                 assert!(
                     view.media.gallery.is_none(),
-                    "file references must not open a media preview"
+                    "text references must not open a media preview"
                 );
                 assert_eq!(view.panels.get(view.panel_scope()).kind(), Panel::File);
                 assert_eq!(
@@ -704,15 +704,12 @@ mod file_panel_tests {
                     "duplicate projections and closed tree owners cannot reopen a file"
                 );
                 for name in [
-                    "large.PNG",
-                    "clip.mp4",
-                    "song.mp3",
-                    "document.pdf",
+                    "large.txt",
                     "installer.EXE",
-                    "archive.zip",
-                    "notes.docx",
-                    "font.ttf",
                     "readme.txt",
+                    "source.rs",
+                    "index.html",
+                    "notebook.ipynb",
                 ] {
                     let target = directory.path().join(name).to_string_lossy().into_owned();
                     view.panels.set_open(view.panel_scope(), false);
@@ -773,7 +770,7 @@ mod file_panel_tests {
                     Some(winner.as_str())
                 );
                 let stale = start_reference(view, "older.rs", window, cx);
-                view.edit(source.clone(), false);
+                view.open_file(source.clone(), None, false, cx);
                 view.operation_completed(
                     OperationCompletion::FileReference(Box::new(stale)),
                     Ok(resolved("/stale.rs", false)),
@@ -809,7 +806,12 @@ mod file_panel_tests {
                 );
                 // The existing gallery remains available to its explicit image
                 // entry points; only file-reference routing is being replaced.
-                view.open_image_gallery(Arc::new(source.clone()), false, cx);
+                let image = directory
+                    .path()
+                    .join("explicit.png")
+                    .to_string_lossy()
+                    .into_owned();
+                view.open_image_gallery(Arc::new(image.clone()), false, cx);
                 assert_eq!(
                     view.media
                         .gallery
@@ -818,7 +820,7 @@ mod file_panel_tests {
                         .current_image()
                         .0
                         .as_str(),
-                    source
+                    image
                 );
                 view.media.gallery = None;
                 let request = start_reference(view, "~/Documents", window, cx);
@@ -847,6 +849,65 @@ mod file_panel_tests {
                 assert_eq!(view.panels.get(view.panel_scope()), before);
             });
         });
+        for (index, name) in [
+            "picture.PNG",
+            "clip.MP4",
+            "song.mp3",
+            "document.pdf",
+            "notes.docx",
+            "archive.zip",
+            "font.ttf",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let target = directory.path().join(name);
+            window.update(|window, cx| {
+                desktop.update(cx, |view, cx| {
+                    let before = view.panels.get(view.panel_scope());
+                    let request = start_reference(view, target.to_str().unwrap(), window, cx);
+                    view.operation_completed(
+                        OperationCompletion::FileReference(Box::new(request)),
+                        Ok(resolved(target.to_str().unwrap(), false)),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(
+                        view.panels.get(view.panel_scope()),
+                        before,
+                        "native files must not open a text panel"
+                    );
+                    assert_eq!(
+                        view.composer.input.read(cx).value().as_ref(),
+                        "Keep this draft"
+                    );
+                    assert_eq!(view.busy, 0, "local files do not require downloading");
+                })
+            });
+            assert_eq!(
+                window.opened_url(),
+                Some(url::Url::from_file_path(&target).unwrap().into())
+            );
+            let name = format!("tree {name}");
+            let target = directory.path().join(&name);
+            window.update(|_, cx| {
+                desktop.update(cx, |view, cx| {
+                    let key = view.file_browser.as_ref().unwrap().model.key.clone();
+                    view.open_file_from_tree(
+                        &key,
+                        &agent_core::presentation::files::FileTreeRequest {
+                            id: index as u64 + 10,
+                            path: name,
+                        },
+                        cx,
+                    );
+                })
+            });
+            assert_eq!(
+                window.opened_url(),
+                Some(url::Url::from_file_path(target).unwrap().into())
+            );
+        }
     }
 
     #[gpui::test]
