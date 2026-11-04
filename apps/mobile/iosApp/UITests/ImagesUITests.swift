@@ -94,7 +94,7 @@ extension LaunchUITests {
             XCTAssertTrue(app.buttons["file.download"].exists)
             XCTAssertFalse(app.textViews["file.editor"].exists)
         case .unavailable:
-            XCTAssertTrue(app.staticTexts["file.error"].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.descendants(matching: .any)["file.error"].waitForExistence(timeout: 15))
             XCTAssertTrue(app.buttons["file.download"].exists)
             XCTAssertFalse(app.buttons["file.save"].isEnabled)
         default:
