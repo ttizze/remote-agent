@@ -135,7 +135,10 @@ extension ConversationScrollTests {
         await layout(controller)
         check(abs(view.layoutAttributesForItem(at: IndexPath(item: 1, section: 0))!.size.height - 1000) < 1,
               "Detached-tail growth must actually remeasure the visible cell")
-        check(abs(position(1, in: controller) - reading) < 1, "Tail growth must preserve the detached reading point")
+        let afterGrowth = position(1, in: controller)
+        check(abs(afterGrowth - reading) < 1,
+              "Tail growth must preserve the detached reading point: before=\(reading), "
+                  + "after=\(afterGrowth), \(geometry(view))")
         ids.append(.message("appended"))
         update(1000)
         await layout(controller)
@@ -246,8 +249,10 @@ extension ConversationScrollTests {
         let narrow = view.layoutAttributesForItem(at: path)!.size
         check(narrow.width < wide.width && narrow.height > wide.height,
               "A width change must remeasure the SwiftUI row: wide=\(wide), narrow=\(narrow), \(geometry(view))")
-        check(abs(narrow.width - (view.bounds.width - view.adjustedContentInset.left
-                - view.adjustedContentInset.right - 32)) < 1, "Native safe-area insets must be outside the row margins")
+        let expectedWidth = view.bounds.width - view.adjustedContentInset.left - view.adjustedContentInset.right - 32
+        check(abs(narrow.width - expectedWidth) < 1,
+              "Native safe-area insets must be outside the row margins: actual=\(narrow.width), "
+                  + "expected=\(expectedWidth), \(geometry(view))")
         check(abs(view.contentOffset.y + view.bounds.height - view.adjustedContentInset.bottom
                   - view.layoutAttributesForItem(at: path)!.frame.maxY - 6) < 1,
         "Following must survive width changes in a long message")
