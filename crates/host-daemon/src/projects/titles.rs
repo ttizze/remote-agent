@@ -189,7 +189,6 @@ impl<'a> TitleList<'a> {
                 }
                 TitleQuery::Project { id, .. } => project.id == id,
             })
-            .cloned()
             .collect();
         projects.sort_by_key(|project| {
             positions
@@ -237,22 +236,24 @@ impl<'a> TitleList<'a> {
         let mut counts = HashMap::<Option<String>, usize>::new();
         let limit = self.limit();
         self.data.retain(|thread| {
-            let id = thread.project_id.as_ref().cloned();
-            let count = counts.entry(id.clone()).or_default();
-            *count += 1;
             let maximum = match self.query {
                 TitleQuery::Project { .. } => limit,
-                TitleQuery::Root { .. } => id
+                TitleQuery::Root { .. } => thread
+                    .project_id
                     .as_ref()
                     .map_or(limit, |id| limits.get(id).copied().unwrap_or(0)),
             };
+            let count = counts
+                .entry(thread.project_id.as_ref().cloned())
+                .or_default();
+            *count += 1;
             *count <= maximum
         });
         ThreadList {
             revision: 0,
             limit: limit as u32,
             data: self.data,
-            projects,
+            projects: projects.into_iter().cloned().collect(),
             has_more,
             has_more_projects,
             project_pages,
@@ -442,7 +443,14 @@ mod tests {
     #[test]
     fn root_project_headers_page_independently_from_standalone_chats() {
         let projects = (1..=4)
-            .map(|id| project(&format!("p{id}")))
+            .map(|id| Project {
+                list_revision: id,
+                favicon_png: Some(format!("thumbnail-{id}")),
+                roots: vec![agent_protocol::models::ProjectRoot {
+                    path: format!("/workspace/p{id}"),
+                }],
+                ..project(&format!("p{id}"))
+            })
             .collect::<Vec<_>>();
         let mut titles = TitleList::new(
             &projects,
@@ -471,13 +479,7 @@ mod tests {
                 .id,
             "chat"
         );
-        assert_eq!(
-            page.projects
-                .iter()
-                .map(|project| project.id.as_str())
-                .collect::<Vec<_>>(),
-            ["p4", "p3"]
-        );
+        assert_eq!(page.projects, [projects[3].clone(), projects[2].clone()]);
         assert!(page.has_more_projects);
     }
 

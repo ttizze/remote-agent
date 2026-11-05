@@ -12,11 +12,11 @@ pub fn desktop_file_icon(path: &str) -> &'static str {
     if let Some(icon) = lookup(CUSTOM_NAMES, &name) {
         return icon;
     }
-    let extensions: Vec<_> = name
-        .match_indices('.')
-        .map(|(index, _)| &name[index + 1..])
-        .collect();
-    for extension in &extensions {
+    let mut extensions =
+        std::iter::successors(name.split_once('.').map(|(_, suffix)| suffix), |suffix| {
+            suffix.split_once('.').map(|(_, suffix)| suffix)
+        });
+    for extension in extensions.clone() {
         if let Some(icon) = lookup(CUSTOM_EXTENSIONS, extension) {
             return icon;
         }
@@ -25,7 +25,6 @@ pub fn desktop_file_icon(path: &str) -> &'static str {
         return icon;
     }
     extensions
-        .iter()
         .find_map(|extension| lookup(BUILTIN_EXTENSIONS, extension))
         .unwrap_or("file-tree-builtin-default")
 }
@@ -378,6 +377,11 @@ mod tests {
             ("tsconfig.app.json", "file-tree-builtin-json"),
             ("app.tsx", "file-tree-builtin-react"),
             ("page.mdx.tsx", "file-tree-builtin-markdown"),
+            ("report.md.pdf", "t3-file-icon-pdf"),
+            ("report.pdf.md", "file-tree-builtin-markdown"),
+            (".gitignore", "file-tree-builtin-git"),
+            (".rs", "file-tree-builtin-rust"),
+            ("src/file..rs", "file-tree-builtin-rust"),
             ("a.PDF", "t3-file-icon-pdf"),
             ("a.csv", "t3-file-icon-spreadsheet"),
             ("a.kt", "t3-file-icon-kotlin"),

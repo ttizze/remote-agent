@@ -305,10 +305,12 @@ impl FormInput {
                 format,
                 ..
             } => value.as_str().is_some_and(|value| {
-                let length = value.chars().count() as u64;
-                min_length.is_none_or(|min| length >= min)
-                    && max_length.is_none_or(|max| length <= max)
-                    && format.is_none_or(|format| format.accepts(value))
+                let length_valid = (min_length.is_none() && max_length.is_none()) || {
+                    let length = value.chars().count() as u64;
+                    min_length.is_none_or(|min| length >= min)
+                        && max_length.is_none_or(|max| length <= max)
+                };
+                length_valid && format.is_none_or(|format| format.accepts(value))
             }),
             Self::Number {
                 integer,
@@ -374,6 +376,44 @@ impl StringFormat {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn string_forms_keep_scalar_bounds_formats_and_types_when_limits_are_absent() {
+        for (min_length, max_length, format, text, accepted) in [
+            (None, None, None, "", true),
+            (None, None, None, "🦀éa", true),
+            (Some(3), Some(3), None, "🦀éa", true),
+            (Some(4), None, None, "🦀éa", false),
+            (None, Some(2), None, "🦀éa", false),
+            (Some(0), None, None, "", true),
+            (Some(1), None, None, "", false),
+            (Some(2), Some(1), None, "aa", false),
+            (None, Some(0), None, "", true),
+            (None, Some(0), None, "a", false),
+            (Some(u64::MAX), None, None, "a", false),
+            (None, Some(u64::MAX), None, "🦀éa", true),
+            (None, None, Some(StringFormat::Date), "2026-11-05", true),
+            (None, None, Some(StringFormat::Date), "2026-02-29", false),
+            (None, None, Some(StringFormat::Email), "not-an-email", false),
+        ] {
+            let input = FormInput::String {
+                min_length,
+                max_length,
+                format,
+                default: None,
+            };
+            assert_eq!(input.accepts(&json!(text)), accepted, "{input:?}: {text}");
+        }
+        let input = FormInput::String {
+            min_length: None,
+            max_length: None,
+            format: None,
+            default: None,
+        };
+        for value in [Value::Null, json!(42), json!(true), json!([]), json!({})] {
+            assert!(!input.accepts(&value), "{value}");
+        }
+    }
 
     #[test]
     fn every_question_needs_its_own_text_or_offered_choices() {

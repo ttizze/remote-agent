@@ -144,18 +144,29 @@ impl ClientSession {
     /// The queue and ready transition share one lock, preserving input order.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
         let (complete, result) = oneshot::channel();
-        let mut phase = self.phase.lock().unwrap();
-        match &mut *phase {
-            Phase::Loading(pending) => pending.push((intent, complete)),
-            Phase::Ready { store, runtime, .. } => {
-                Self::dispatch_to(store, runtime, intent, complete)
-            }
-            Phase::Failed(reason) => return Err(reason.clone()),
-        }
         let completion = async move { result.await.map_err(error)? }.boxed().shared();
-        let mut operations = self.operations.lock().unwrap();
-        operations.retain(|operation| operation.peek().is_none());
-        operations.push(completion.clone());
+        let ready = {
+            let mut phase = self.phase.lock().unwrap();
+            let ready = match &mut *phase {
+                Phase::Loading(pending) => {
+                    pending.push((intent, complete));
+                    None
+                }
+                Phase::Ready { store, runtime, .. } => {
+                    Some((store.clone(), runtime.clone(), intent, complete))
+                }
+                Phase::Failed(reason) => return Err(reason.clone()),
+            };
+            let mut operations = self.operations.lock().unwrap();
+            operations.retain(|operation| operation.peek().is_none());
+            operations.push(completion.clone());
+            ready
+        };
+        // Publication may synchronously resume native observers that read this
+        // session or flush accepted work. Track it first, then release the locks.
+        if let Some((store, runtime, intent, complete)) = ready {
+            Self::dispatch_to(&store, &runtime, intent, complete);
+        }
         Ok(Arc::new(Receipt {
             result: Mutex::new(Some(Box::pin(completion))),
         }))
@@ -398,6 +409,48 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn publication_allows_reentrant_session_reads_and_flush() {
+        struct NativeRead {
+            session: Arc<ClientSession>,
+            observed: Mutex<Option<(String, bool)>>,
+        }
+        impl futures_util::task::ArcWake for NativeRead {
+            fn wake_by_ref(this: &Arc<Self>) {
+                let readable = this.session.phase.try_lock().is_ok();
+                if !readable {
+                    *this.observed.lock().unwrap() = Some(("session lock held".into(), false));
+                    return;
+                }
+                let cwd = this.session.snapshot().navigation.cwd.clone();
+                let flush_pending = this.session.clone().flush().now_or_never().is_none();
+                *this.observed.lock().unwrap() = Some((cwd, flush_pending));
+            }
+        }
+        let session = open(Arc::new(Storage::default()));
+        let store = session.clone().ready().await.unwrap();
+        let probe = Arc::new(NativeRead {
+            session: session.clone(),
+            observed: Mutex::new(None),
+        });
+        let waker = futures_util::task::waker(probe.clone());
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut waiting = Box::pin(store.next_snapshot(store.snapshot()));
+        assert!(std::future::Future::poll(waiting.as_mut(), &mut context).is_pending());
+        let receipt = session
+            .dispatch(Intent::NewChat {
+                cwd: "/reentrant".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            *probe.observed.lock().unwrap(),
+            Some(("/reentrant".into(), true))
+        );
+        drop(waiting);
+        receipt.wait().await.unwrap();
+        session.shutdown().await.unwrap();
+    }
 
     #[derive(Default)]
     struct Gate {

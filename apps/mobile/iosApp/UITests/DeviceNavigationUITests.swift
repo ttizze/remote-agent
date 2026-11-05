@@ -108,7 +108,8 @@ extension LaunchUITests {
         XCTAssertTrue(copy.waitForExistence(timeout: 5)); copy.tap()
         closeWorkbench(app)
         let composer = app.textFields["task.message"]
-        composer.tap()
+        // Project drafts survive earlier tests and app relaunches.
+        replaceFieldText(composer, text: "")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         composer.press(forDuration: 1.2)
         let paste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
@@ -277,7 +278,9 @@ extension LaunchUITests {
             field.typeText(XCUIKeyboardKey.delete.rawValue)
             XCTAssertEqual(field.value as? String, field.placeholderValue)
         }
-        field.typeText(text)
+        if !text.isEmpty {
+            field.typeText(text)
+        }
     }
 
     func testPhysicalDeviceCanPairWithManualPayload() throws {

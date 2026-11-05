@@ -14,10 +14,12 @@ pub(super) fn focused_path(
 ) -> Option<String> {
     let query = desktop_query(query);
     if !query.is_empty() {
-        return rows
-            .iter()
-            .filter(|row| matches_query_path(&row.path, row.kind, &query))
-            .find(|row| Some(row.path.as_str()) == focused)
+        return focused
+            .and_then(|focused| {
+                rows.iter().find(|row| {
+                    row.path == focused && matches_query_path(&row.path, row.kind, &query)
+                })
+            })
             .or_else(|| {
                 rows.iter()
                     .find(|row| matches_query_path(&row.path, row.kind, &query))
@@ -283,6 +285,49 @@ pub(super) fn selection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_focus_keeps_only_matching_visible_paths_and_otherwise_uses_the_first_match() {
+        let rows: Vec<_> = [
+            ("src/First.rs", EntryKind::File),
+            ("src/子", EntryKind::Directory),
+            ("src/İ.rs", EntryKind::File),
+            ("src/Second.rs", EntryKind::File),
+        ]
+        .into_iter()
+        .map(|(path, kind)| FileTreeRow {
+            path: path.into(),
+            label: path.into(),
+            kind,
+            depth: 1,
+            expanded: false,
+            selected: false,
+            ignored: false,
+            loading: false,
+        })
+        .collect();
+        for (focused, query, expected) in [
+            (None, "rs", Some("src/First.rs")),
+            (Some("src/Second.rs"), "rs", Some("src/Second.rs")),
+            (Some("src/子"), "rs", Some("src/First.rs")),
+            (Some("src/second.rs"), "rs", Some("src/First.rs")),
+            (Some("src/missing.rs"), "rs", Some("src/First.rs")),
+            (Some("src/İ.rs"), "  I\u{307}.RS  ", Some("src/İ.rs")),
+            (Some("src/Second.rs"), "子/", Some("src/子")),
+            (Some("src/Second.rs"), " SRC\\ ", Some("src/Second.rs")),
+            (None, "missing", None),
+            (Some("src/Second.rs"), "missing", None),
+            (Some("src/Second.rs"), "", Some("src/Second.rs")),
+            (None, "", Some("src/First.rs")),
+        ] {
+            assert_eq!(
+                focused_path(&rows, focused, query).as_deref(),
+                expected,
+                "{focused:?} {query:?}"
+            );
+        }
+        assert_eq!(focused_path(&[], Some("src/First.rs"), "rs"), None);
+    }
 
     #[test]
     fn queries_match_literal_paths_and_a_directorys_virtual_trailing_slash() {

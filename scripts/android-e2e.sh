@@ -35,6 +35,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$ANDROID_AVD_HOME" "$ANDROID_USER_HOME"
+# Keep Rust compilation off the emulator's resource-heavy first boot.
+cargo build --locked -p xtask
 adb -P "$server_port" start-server
 case $(uname -m) in arm64|aarch64) abi=arm64-v8a ;; *) abi=x86_64 ;; esac
 avd="agent-os-$$"
@@ -65,7 +67,8 @@ done
 for scale in window_animation_scale transition_animation_scale animator_duration_scale; do
     adb -P "$server_port" -s "$serial" shell settings put global "$scale" 0
 done
-adb -P "$server_port" -s "$serial" shell input keyevent 82
+# MENU reaches the launcher and can leave its input-dispatch ANR over the app.
+adb -P "$server_port" -s "$serial" shell wm dismiss-keyguard
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/debug/mobile-debug.apk
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/androidTest/debug/mobile-debug-androidTest.apk
 adb -P "$server_port" -s "$serial" shell am start -W -a android.intent.action.MAIN -c android.intent.category.HOME | tee "$log.home.log"
