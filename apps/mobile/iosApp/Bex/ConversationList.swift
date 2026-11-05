@@ -163,7 +163,6 @@ final class ConversationListController: UIViewController, UICollectionViewDelega
                 guard let self, active else { return }
                 applying = false
                 refreshVisibleRows()
-                restoreReadingPosition()
                 applyPending()
             }
         } else {
@@ -180,7 +179,7 @@ final class ConversationListController: UIViewController, UICollectionViewDelega
             }
         }
         collectionView.layoutIfNeeded()
-        positionViewport()
+        positionViewport(restoringReadingPosition: true)
         publishVisibility()
     }
 
@@ -209,31 +208,27 @@ final class ConversationListController: UIViewController, UICollectionViewDelega
             captureAnchor(allowed: indices)
         }
         applyPending()
-        positionViewport()
+        positionViewport(restoringReadingPosition: false)
         publishVisibility()
     }
 
-    /// Intrinsic-content updates do not necessarily use the layout's target-offset hook.
-    /// Follow the measured bottom after UIKit has laid out the actual cells.
-    private func positionViewport() {
-        guard !applying, !source.ids.isEmpty,
-              let edge = requestedEdge ?? (following ? .bottom : nil) else { return }
-        requestedEdge = nil
-        let offset = edge == .bottom ? layout.bottomOffset(in: collectionView) : -collectionView.adjustedContentInset
-            .top
-        let target = CGPoint(x: -collectionView.adjustedContentInset.left, y: offset)
+    /// Row content can resize without a new snapshot. Refreshing measured cells
+    /// restores a detached reader's anchor as well as positioning a following viewport.
+    private func positionViewport(restoringReadingPosition: Bool) {
+        guard !applying, !source.ids.isEmpty else { return }
+        let target: CGPoint
+        if let edge = requestedEdge ?? (following ? .bottom : nil) {
+            requestedEdge = nil
+            let insets = collectionView.adjustedContentInset
+            let offset = edge == .bottom ? layout.bottomOffset(in: collectionView) : -insets.top
+            target = CGPoint(x: -insets.left, y: offset)
+        } else {
+            guard restoringReadingPosition, layout.anchor != nil else { return }
+            target = layout.targetContentOffset(forProposedContentOffset: collectionView.contentOffset)
+        }
         if collectionView.contentOffset != target {
             collectionView.setContentOffset(target, animated: false)
         }
-    }
-
-    private func restoreReadingPosition() {
-        guard !following, layout.anchor != nil else { return }
-        collectionView.layoutIfNeeded()
-        collectionView.setContentOffset(
-            layout.targetContentOffset(forProposedContentOffset: collectionView.contentOffset),
-            animated: false
-        )
     }
 
     private func latestIsVisible() -> Bool {

@@ -20,7 +20,9 @@ final class ConversationListLayout: UICollectionViewCompositionalLayout {
         let section = NSCollectionLayoutSection(group: group)
         section.interGroupSpacing = 12
         section.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
-        return ConversationListLayout(section: section)
+        let configuration = UICollectionViewCompositionalLayoutConfiguration()
+        configuration.contentInsetsReference = .none
+        return ConversationListLayout(section: section, configuration: configuration)
     }
 
     override func prepare() {
