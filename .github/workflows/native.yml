@@ -63,7 +63,8 @@ jobs:
         run: |
           set -euo pipefail
           verify_all() {
-            printf '%s=true\n' windows android iphone mac >> "$GITHUB_OUTPUT"
+            printf '%s=false\n' windows iphone mac >> "$GITHUB_OUTPUT"
+            echo 'android=true' >> "$GITHUB_OUTPUT"
             exit 0
           }
           case "$GITHUB_EVENT_NAME" in

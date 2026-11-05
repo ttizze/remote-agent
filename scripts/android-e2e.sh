@@ -22,7 +22,7 @@ cleanup() {
             -s TestRunner:V AndroidRuntime:E ActivityManager:I ActivityTaskManager:I libc:F '*:S' \
             >"$log.failure.log" 2>&1 || true
     fi
-    if [[ -n $host ]]; then kill -INT "$host" 2>/dev/null || true; wait "$host" || true; fi
+    if [[ -n $host ]]; then kill -TERM "$host" 2>/dev/null || true; wait "$host" || true; fi
     if [[ -n $emulator_pid ]]; then
         kill "$emulator_pid" 2>/dev/null || true
         wait "$emulator_pid" 2>/dev/null || true
@@ -108,7 +108,7 @@ prepare_pairing() {
 }
 if [[ $mode == all ]]; then
 prepare_pairing
-adb -P "$server_port" -s "$serial" shell am instrument -w -r -e cwd "$fixture/host/project" \
+adb -P "$server_port" -s "$serial" shell am instrument -w -r -e listener dev.remoteagent.mobile.HangDiagnosticsListener -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.StorePersistenceTest,dev.remoteagent.mobile.ConversationRecoveryTest,dev.remoteagent.mobile.MarkdownTableTest,dev.remoteagent.mobile.ConversationNavigationTest,dev.remoteagent.mobile.ThreadListTest,dev.remoteagent.mobile.ComposerControlsTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.store.log"
 adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.final.png"
@@ -116,7 +116,7 @@ grep -qx 'OK (14 tests)' "$log.store.log"
 # Each paired test gets a fresh single-use invitation and isolated credentials.
 
 prepare_pairing
-adb -P "$server_port" -s "$serial" shell am instrument -w -r -e cwd "$fixture/host/project" \
+adb -P "$server_port" -s "$serial" shell am instrument -w -r -e listener dev.remoteagent.mobile.HangDiagnosticsListener -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.VisualizationTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.visualize.log"
 adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.visualize-final.png"
@@ -131,7 +131,7 @@ adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mob
 fi
 
 prepare_pairing
-adb -P "$server_port" -s "$serial" shell am instrument -w -r -e cwd "$fixture/host/project" \
+adb -P "$server_port" -s "$serial" shell am instrument -w -r -e listener dev.remoteagent.mobile.HangDiagnosticsListener -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.NativeTerminalTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.terminal.log"
 if ! grep -qx 'OK (1 test)' "$log.terminal.log"; then
@@ -143,7 +143,7 @@ adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mob
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-retained.png "$log.terminal-retained.png"
 if [[ $mode == all ]]; then
 adb -P "$server_port" -s "$serial" shell settings put secure show_ime_with_hard_keyboard 1
-adb -P "$server_port" -s "$serial" shell am instrument -w -r \
+adb -P "$server_port" -s "$serial" shell am instrument -w -r -e listener dev.remoteagent.mobile.HangDiagnosticsListener \
     -e class dev.remoteagent.mobile.VoiceInputTest,dev.remoteagent.mobile.MarkdownLinkTest,dev.remoteagent.mobile.FileViewerTest,dev.remoteagent.mobile.MessageActionsTest,dev.remoteagent.mobile.UnknownSubmissionTest,dev.remoteagent.mobile.ModelSelectionTest,dev.remoteagent.mobile.ComposerStopTest,dev.remoteagent.mobile.ComposerKeyboardTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.ui.log"
 grep -qx 'OK (26 tests)' "$log.ui.log"
