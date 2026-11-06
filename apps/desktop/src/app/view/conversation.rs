@@ -2871,7 +2871,11 @@ mod rendering_tests {
             ConversationView::new(Snapshot::default(), source, window, cx)
         });
         window.run_until_parked();
-        assert!(window.debug_bounds("work-turn").is_some());
+        assert!(
+            window
+                .debug_bounds("work-turn:occurrence:0:turn:turn:0")
+                .is_some()
+        );
         assert!(
             window.debug_bounds("conversation-in-progress").is_none(),
             "the in-progress header must not be followed by a second progress row"
@@ -3049,7 +3053,9 @@ mod rendering_tests {
             window.debug_bounds("change-files-0").is_none(),
             "completed work starts collapsed"
         );
-        let group = window.debug_bounds("work-turn").unwrap();
+        let group = window
+            .debug_bounds("work-turn:occurrence:0:turn:turn:0")
+            .unwrap();
         window.simulate_click(
             gpui_kit::point(group.left() + px(20.), group.center().y),
             gpui_kit::Modifiers::default(),
