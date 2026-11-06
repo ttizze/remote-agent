@@ -83,7 +83,7 @@ extension LaunchUITests {
 
     func testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] [selection] Verify assistant selection")
+        startSimulatorConversation(app, promptText: "[success] [selection] Verify assistant selection")
         let answer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(answer.waitUntilExists(timeout: 30))
         let text = answer.textViews["message.assistant-text"]
@@ -119,7 +119,7 @@ extension LaunchUITests {
 
     func testSimulatorOpensSideChatWithoutLosingOriginalDraft() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] [selection] Original conversation")
+        startSimulatorConversation(app, promptText: "[success] [selection] Original conversation")
         let original = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(original.waitUntilExists(timeout: 30))
         let originalID = original.identifier
@@ -182,7 +182,7 @@ extension LaunchUITests {
     func testSimulatorCopiesSelectedOrWholeUserMessageText() throws {
         let app = try connectedSimulatorApp()
         let text = "Needle Alpha Bravo [success]"
-        try startSimulatorConversation(app, promptText: text)
+        startSimulatorConversation(app, promptText: text)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 30))
         let sent = app.textViews.matching(NSPredicate(
             format: "identifier == %@ AND value == %@", "message.user-text", text
@@ -254,7 +254,7 @@ extension LaunchUITests {
 
     func testSimulatorApprovalEditorAndDraftSurviveReconnect() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[approval] Verify approvals")
+        startSimulatorConversation(app, promptText: "[approval] Verify approvals")
         let accept = app.buttons["request.accept"]
         XCTAssertTrue(accept.waitUntilExists(timeout: 15))
         accept.tap()

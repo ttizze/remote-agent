@@ -89,7 +89,7 @@ extension LaunchUITests {
 
     func testSimulatorRendersVisualizationAndReopensIt() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] [visualize] Compare twelve icons")
+        startSimulatorConversation(app, promptText: "[success] [visualize] Compare twelve icons")
         let expand = app.buttons["visualize.expand"]
         XCTAssertTrue(expand.waitUntilExists(timeout: 30))
         let message = app.descendants(matching: .any)["task.message"]
@@ -118,7 +118,7 @@ extension LaunchUITests {
 
     func testSimulatorRendersMarkdownTableAndReopensIt() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] [markdown-table] Render the table")
+        startSimulatorConversation(app, promptText: "[success] [markdown-table] Render the table")
         let answer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(answer.waitUntilExists(timeout: 30))
         let message = app.descendants(matching: .any)["task.message"]
@@ -173,7 +173,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only isolated Markdown stream fixture")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[long-markdown] Render the complete stream")
+        startSimulatorConversation(app, promptText: "[long-markdown] Render the complete stream")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         let completed = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", "MARKDOWN_STREAM_COMPLETE"))
@@ -245,7 +245,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only conversation display E2E")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[history] Reopen history")
+        startSimulatorConversation(app, promptText: "[history] Reopen history")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
         XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").waitUntilExists(timeout: 10))
 

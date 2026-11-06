@@ -35,7 +35,7 @@ extension LaunchUITests {
 
     func testSimulatorComposerGrowsToFitWrappedDraft() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] [immediate] Verify composer wrapping")
+        startSimulatorConversation(app, promptText: "[success] [immediate] Verify composer wrapping")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
         let input = app.descendants(matching: .any)["task.message"]
         input.tap()
@@ -60,7 +60,7 @@ extension LaunchUITests {
         XCTAssertTrue(compose.waitUntilExists(timeout: 10)); compose.tap()
         let input = app.descendants(matching: .any)["task.message"]
         XCTAssertTrue(input.waitUntilExists(timeout: 10))
-        XCTAssertTrue(input.isHittable)
+        waitForStableFrame(input)
         XCTAssertTrue(app.navigationBars["新しいタスク"].exists)
         XCTAssertFalse(app.buttons["task.send"].isEnabled)
         let prompt = app.staticTexts["task.prompt"]
@@ -78,9 +78,7 @@ extension LaunchUITests {
         XCTAssertEqual(environment.frame.midX, emptyChat.frame.midX, accuracy: 2)
         XCTAssertEqual((prompt.frame.minY + environment.frame.maxY) / 2, emptyChat.frame.midY, accuracy: 8)
         captureScreen(app, named: "New conversation centers the prompt project and environment above composer")
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 10))
-        try startSimulatorConversation(app, promptText: "[success] [immediate] Start the simulator conversation")
+        submitSimulatorConversation(app, promptText: "[success] [immediate] Start the simulator conversation")
 
         let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 15), "Final answer did not stream into the conversation")
@@ -99,7 +97,7 @@ extension LaunchUITests {
 
     func testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[groups] Inspect grouped live activity")
+        startSimulatorConversation(app, promptText: "[groups] Inspect grouped live activity")
         let first = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
         XCTAssertTrue(first.waitUntilExists(timeout: 10))
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
@@ -145,7 +143,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only conversation display E2E")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[retry] Retry stream")
+        startSimulatorConversation(app, promptText: "[retry] Retry stream")
 
         let retrying = app.staticTexts["サーバーが混み合っています。再接続しています"]
         XCTAssertTrue(retrying.waitUntilExists(timeout: 10), "Retrying stream error was not visible")
@@ -161,7 +159,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only conversation display E2E")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[failed] Fail turn")
+        startSimulatorConversation(app, promptText: "[failed] Fail turn")
 
         XCTAssertTrue(app.staticTexts["コンテキストの上限に達しました"].waitUntilExists(timeout: 15))
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
@@ -177,7 +175,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only conversation display E2E")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[request] Ask user")
+        startSimulatorConversation(app, promptText: "[request] Ask user")
 
         let request = prefixedElement(app, prefix: "request.")
         XCTAssertTrue(request.waitUntilExists(timeout: 10), "Pending request was not visible")
@@ -215,7 +213,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only conversation display E2E")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[request] [choice] Tap an answer")
+        startSimulatorConversation(app, promptText: "[request] [choice] Tap an answer")
 
         let choice = app.buttons["続ける"]
         XCTAssertTrue(choice.waitUntilExists(timeout: 10))
@@ -233,7 +231,7 @@ extension LaunchUITests {
             throw XCTSkip("Simulator-only conversation display E2E")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[request] [skip] Skip this question")
+        startSimulatorConversation(app, promptText: "[request] [skip] Skip this question")
 
         let skip = app.buttons["request.skip"]
         XCTAssertTrue(skip.waitUntilExists(timeout: 10))

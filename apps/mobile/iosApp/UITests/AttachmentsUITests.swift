@@ -206,7 +206,7 @@ extension LaunchUITests {
 
     func testSimulatorCanAttachDownloadAndPrepareAIEdit() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Prepare file operations")
+        startSimulatorConversation(app, promptText: "[success] Prepare file operations")
         XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").waitUntilExists(timeout: 20))
         selectAttachmentFixture(in: app)
         XCTAssertTrue(app.staticTexts["attachment-fixture.txt"].waitUntilExists(timeout: 15))

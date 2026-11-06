@@ -22,7 +22,7 @@ private func renderedTextContrast(_ image: CGImage, region: CGRect) -> Int {
 extension LaunchUITests {
     func testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[generated-images] Show generated images and links")
+        startSimulatorConversation(app, promptText: "[generated-images] Show generated images and links")
         let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 25))
         let finalID = finalAnswer.identifier
@@ -181,7 +181,7 @@ extension LaunchUITests {
 
     func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[generated-images] [gallery] Open only the tapped image")
+        startSimulatorConversation(app, promptText: "[generated-images] [gallery] Open only the tapped image")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
         let image = app.images.matching(NSPredicate(
             format: "identifier BEGINSWITH %@",
@@ -211,7 +211,7 @@ extension LaunchUITests {
 
     func testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[images] Display the attached images")
+        startSimulatorConversation(app, promptText: "[images] Display the attached images")
         let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 25))
         let finalID = finalAnswer.identifier

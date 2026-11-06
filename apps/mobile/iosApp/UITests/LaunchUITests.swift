@@ -198,17 +198,25 @@ final class LaunchUITests: XCTestCase {
         return "tasks.row.\(session.provider):\(session.id)"
     }
 
-    func startSimulatorConversation(_ app: XCUIApplication, promptText: String) throws {
+    func startSimulatorConversation(_ app: XCUIApplication, promptText: String) {
         let projectCompose = app.buttons["tasks.new.project.simulator-project"]
         XCTAssertTrue(
             projectCompose.waitUntilExists(timeout: 10),
             "No project creation button appeared: \(app.debugDescription)"
         )
         projectCompose.tap()
+        submitSimulatorConversation(app, promptText: promptText)
+    }
 
+    func submitSimulatorConversation(_ app: XCUIApplication, promptText: String) {
         let prompt = app.descendants(matching: .any)["task.message"]
         XCTAssertTrue(prompt.waitUntilExists(timeout: 10))
-        chooseFixtureModel(app)
+        expandComposer(app)
+        // Model-picker interaction has its own native journey. Other tests only
+        // need the fixture's default Codex model, regardless of a prior choice.
+        if app.buttons["model.settings"].value as? String != "Fixture Model" {
+            chooseFixtureModel(app)
+        }
         prompt.tap()
         prompt.typeText(promptText)
 

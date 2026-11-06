@@ -61,7 +61,7 @@ extension LaunchUITests {
             throw XCTSkip("This test uses the isolated Simulator fixture")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Establish a conversation before retry")
+        startSimulatorConversation(app, promptText: "[success] Establish a conversation before retry")
         let firstAnswer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(firstAnswer.waitUntilExists(timeout: 25))
         let firstAnswerID = firstAnswer.identifier
@@ -130,7 +130,7 @@ extension LaunchUITests {
             throw XCTSkip("This test uses the isolated Simulator fixture")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Open before background update")
+        startSimulatorConversation(app, promptText: "[success] Open before background update")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
         let detail = app.descendants(matching: .any)["task.detail"]
         let composer = app.textFields["task.message"]
@@ -177,7 +177,7 @@ extension LaunchUITests {
             throw XCTSkip("This test uses the isolated Simulator fixture")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Keep another conversation open")
+        startSimulatorConversation(app, promptText: "[success] Keep another conversation open")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
         let identifier = try simulatorTaskRowIdentifier("background-task")
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -193,7 +193,7 @@ extension LaunchUITests {
         #endif
         let app = try connectedSimulatorApp()
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "value == %@", "完了・未確認")).firstMatch.exists)
-        try startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
+        startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let row = prefixedElement(app, prefix: "tasks.row.codex:bex-task:")
         XCTAssertTrue(row.waitUntilExists(timeout: 10))
@@ -218,7 +218,7 @@ extension LaunchUITests {
 
     func testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[approval] [deferred-steer] Hold this turn")
+        startSimulatorConversation(app, promptText: "[approval] [deferred-steer] Hold this turn")
         XCTAssertTrue(app.buttons["request.accept"].waitUntilExists(timeout: 15))
         let command = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
         let message = app.textFields["task.message"]

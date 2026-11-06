@@ -49,7 +49,7 @@ extension LaunchUITests {
 
     func testSimulatorBrowserUsesOneSharedImportMenu() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Shared browser import menu")
+        startSimulatorConversation(app, promptText: "[success] Shared browser import menu")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 30))
         app.buttons["task.tools"].tap()
         openWorkbenchTool(app, "browser")
@@ -222,7 +222,7 @@ extension LaunchUITests {
 
     func testSimulatorUsesNativeProjectDisclosureAndWorkspaceTree() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Native project disclosure")
+        startSimulatorConversation(app, promptText: "[success] Native project disclosure")
         let answer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(answer.waitUntilExists(timeout: 25))
         openFiles(app)

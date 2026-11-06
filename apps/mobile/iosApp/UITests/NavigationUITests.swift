@@ -264,12 +264,18 @@ extension LaunchUITests {
         wait(for: [dismissed], timeout: 10)
     }
 
-    /// An idle reply composer shows its model controls once focused.
+    /// Focus reveals model controls; their catalog must resolve before native taps.
     func expandComposer(_ app: XCUIApplication) {
         let settings = app.buttons["model.settings"]
         if !settings.exists {
             app.textFields["task.message"].tap()
             XCTAssertTrue(settings.waitUntilExists(timeout: 5))
+        }
+        // Catalog arrival adds the effort and speed controls beside this
+        // button. Wait for that state before resolving its tap coordinates.
+        if settings.value as? String == "モデル" {
+            let loaded = expectation(for: NSPredicate(format: "value != %@", "モデル"), evaluatedWith: settings)
+            wait(for: [loaded], timeout: 10)
         }
     }
 
