@@ -124,8 +124,6 @@ final class ConversationListController: UIViewController {
         collectionView.delegate = self
         collectionView.backgroundColor = .clear
         collectionView.alwaysBounceVertical = true
-        // Its interactive strip otherwise covers actions near the bottom of a vertical conversation.
-        collectionView.showsHorizontalScrollIndicator = false
         collectionView.keyboardDismissMode = .interactive
         collectionView.addGestureRecognizer(KeyboardDismissingTap())
         collectionView.isPrefetchingEnabled = false

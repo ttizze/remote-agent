@@ -125,7 +125,7 @@ extension ThreadScreen {
                     .map { id in { model.forkAndOpen(through: id) { _ in } } },
                 forking: turnId.map { model.conversationContext.forkPhase(turn: $0) == .running } ?? false,
                 forkError: turnId.flatMap { model.conversationContext.forkError(turn: $0) }
-            ).equatable()
+            )
         case let (.activityHeader(activity), _): activityHeader(activity)
         case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
         case let (.error(error), _): ThreadErrorRow(error: error)
@@ -142,7 +142,7 @@ extension ThreadScreen {
             timestampMs: timestampMs,
             restoreUnknown: { model.restoreUnknownSubmission($0) },
             discardUnknown: { model.discardUnknownSubmission($0) }
-        ).equatable()
+        )
     }
 
     func activityItem(_ item: ConversationItem, turnId: String) -> some View {
