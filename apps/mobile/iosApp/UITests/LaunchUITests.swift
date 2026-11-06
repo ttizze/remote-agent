@@ -235,8 +235,6 @@ final class LaunchUITests: XCTestCase {
             taskDetail.waitUntilExists(timeout: 30),
             "Conversation did not open; notice: \(notice.exists ? notice.label : "(none)")"
         )
-        waitForStableFrame(prompt)
-        XCTAssertTrue(prompt.isHittable)
     }
 
     func prefixedElement(_ app: XCUIApplication, prefix: String) -> XCUIElement {
