@@ -316,40 +316,45 @@ extension LaunchUITests {
         }
         XCTAssertTrue(activity.exists && activity.isHittable)
         activity.tap()
-        let copy = app.buttons["回答をコピー"].firstMatch
-        let clipboard = UIPasteboard.general.changeCount
-        copy.tap()
-        let confirmed = app.buttons["コピーしました"].firstMatch.waitUntilExists(timeout: 5)
-        let changed = UIPasteboard.general.changeCount != clipboard
-        if !confirmed {
-            print("Copy diagnostic first: clipboardChanged=\(changed)\n\(app.debugDescription)")
-            diagnoseCopyFailure(app, copy: copy)
-        }
-        XCTAssertTrue(
-            confirmed,
-            "The first copy tap must show its confirmation; clipboardChanged=\(changed)"
-        )
+        assertCopyFeedback(app)
 
         try verifyUncachedHistoryDetails(app, fullOutput: fullOutput)
     }
 
-    private func diagnoseCopyFailure(_ app: XCUIApplication, copy: XCUIElement) {
-        for mode in ["stable", "held", "edge"] {
-            let clipboard = UIPasteboard.general.changeCount
-            switch mode {
-            case "stable": tapWhenStable(copy)
-            case "held": copy.press(forDuration: 0.4)
-            default:
-                copy.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+    private func assertCopyFeedback(_ app: XCUIApplication) {
+        let copy = app.buttons["回答をコピー"].firstMatch
+        let feedback = app.buttons["コピーしました"].firstMatch
+        let clipboard = UIPasteboard.general.changeCount
+        copy.tap()
+        let confirmed = feedback.waitUntilExists(timeout: 5)
+        let changed = UIPasteboard.general.changeCount != clipboard
+        if !confirmed {
+            print("Copy diagnostic first: clipboardChanged=\(changed)\n\(app.debugDescription)")
+            for mode in ["stable", "held", "edge"] {
+                let clipboard = UIPasteboard.general.changeCount
+                let frame = copy.frame
+                switch mode {
+                case "stable": tapWhenStable(copy)
+                case "held": copy.press(forDuration: 0.4)
+                default:
+                    copy.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+                }
+                let retryConfirmed = feedback.waitUntilExists(timeout: 3)
+                print("Copy diagnostic \(mode): clipboardChanged=\(UIPasteboard.general.changeCount != clipboard), "
+                    + "confirmed=\(retryConfirmed), frame=\(frame)")
+                if retryConfirmed {
+                    break
+                }
             }
-            let confirmed = app.buttons["コピーしました"].firstMatch.waitUntilExists(timeout: 3)
-            print(
-                "Copy diagnostic \(mode): clipboardChanged=\(UIPasteboard.general.changeCount != clipboard), confirmed=\(confirmed), frame=\(copy.frame)"
-            )
-            if confirmed {
-                return
+            if !feedback.exists {
+                let clipboard = UIPasteboard.general.changeCount
+                app.buttons["発言をコピー"].firstMatch.tap()
+                let userConfirmed = feedback.waitUntilExists(timeout: 3)
+                print("Copy diagnostic user: clipboardChanged=\(UIPasteboard.general.changeCount != clipboard), "
+                    + "confirmed=\(userConfirmed)")
             }
         }
+        XCTAssertTrue(confirmed, "The first copy tap must show its confirmation; clipboardChanged=\(changed)")
     }
 
     private func verifyUncachedHistoryDetails(_ app: XCUIApplication, fullOutput: XCUIElement) throws {
