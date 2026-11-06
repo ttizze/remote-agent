@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runBridge, probeOptions } from "./bridge.ts";
-import { spawn } from "node:child_process";
-import { mkdtemp, symlink, rm } from "node:fs/promises";
+import { spawn, execFileSync } from "node:child_process";
+import { mkdtemp, symlink, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,13 +96,19 @@ test("SDK callbacks wait for Host answers and cancel when the SDK aborts", async
   await bridge;
 });
 
-test("the bundled runtime starts through a symlink", async () => {
+test("the production build includes its license and starts through a symlink outside the checkout", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-sdk-entry-"));
   try {
+    const builtRuntime = join(root, "built runtime");
+    execFileSync(process.execPath, [
+      fileURLToPath(new URL("../../../../../../scripts/build-claude-sdk.ts", import.meta.url)), builtRuntime,
+    ], { cwd: root, stdio: "pipe", env: { ...process.env, NODE_ENV: "production" } });
+    assert.equal(await readFile(join(builtRuntime, "Claude-Agent-SDK-LICENSE.md"), "utf8"),
+      await readFile(new URL("./node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md", import.meta.url), "utf8"));
     const directory = join(root, "runtime");
-    await symlink(fileURLToPath(new URL(".", import.meta.url)), directory, "junction");
-    const entry = join(directory, "bridge.bundle.mjs");
-    const child = spawn(process.execPath, [entry], { stdio: ["pipe", "pipe", "pipe"] });
+    await symlink(builtRuntime, directory, "junction");
+    const entry = join(directory, "agent-claude-sdk.mjs");
+    const child = spawn(process.execPath, [entry], { cwd: root, stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
     child.stdout.setEncoding("utf8").on("data", (text) => { output += text; });
     const closed = new Promise((resolve, reject) => {

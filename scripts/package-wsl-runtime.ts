@@ -53,5 +53,5 @@ for (const [path, name] of executables) {
   copyWritable(path, target);
   execFileSync(patchelf, ["--force-rpath", "--set-rpath", "$ORIGIN/lib", target]);
 }
-execFileSync(process.execPath, ["scripts/install-claude-sdk.ts", output], { stdio: "inherit" });
+execFileSync(process.execPath, ["scripts/build-claude-sdk.ts", output], { stdio: "inherit" });
 writeFileSync(join(output, "revision"), `${revision}\n`);

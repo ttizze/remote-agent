@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "vendor": "node vendor.ts",
     "test": "node --test bridge.test.mjs"
   },
   "dependencies": {

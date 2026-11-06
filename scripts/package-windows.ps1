@@ -95,8 +95,8 @@ try {
             Copy-Item -LiteralPath (Join-Path $buildDirectory $executable) -Destination $bundle
         }
         Copy-Item -LiteralPath $WslRuntimeDirectory -Destination (Join-Path $bundle "wsl-runtime") -Recurse
-        # Claude's bridge and its license must travel with the Host.
-        & node scripts/install-claude-sdk.ts $bundle
+        # Build Claude's bridge and include its license with the Host.
+        & node scripts/build-claude-sdk.ts $bundle
         if ($LASTEXITCODE -ne 0) { throw "Claude SDK packaging failed." }
         Copy-Item -LiteralPath "docs/WINDOWS.md" -Destination (Join-Path $bundle "README.md")
         @{ revision = $revision; profile = $Profile; target = "x86_64-pc-windows-msvc" } |

@@ -920,7 +920,7 @@ async fn build_test_bundle(
         ("isolated Host fixtures", host_build),
         (
             "SDK runtime",
-            args![vec; "node", "scripts/install-claude-sdk.ts", target.join("debug")],
+            args![vec; "node", "scripts/build-claude-sdk.ts", target.join("debug")],
         ),
     ] {
         println!("Building {phase}");

@@ -31,7 +31,7 @@ unit-tests *targets:
     node --test crates/agent-protocol/src/browser_input.test.cjs crates/host-daemon/src/browser/password-fill.test.cjs apps/desktop/src/browser/native/snapshot.test.cjs || failed=1
     pwsh -NoLogo -NoProfile -NonInteractive -File tools/windows-fxc/update.test.ps1 || failed=1
     npm --prefix crates/host-daemon/src/providers/claude/sdk test || failed=1
-    node scripts/install-claude-sdk.ts "${CARGO_TARGET_DIR:-target}/debug" || failed=1
+    node scripts/build-claude-sdk.ts "${CARGO_TARGET_DIR:-target}/debug" || failed=1
     cargo build --locked -p agent-process --bin agent-provider-supervisor || failed=1
     cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings "$@" &
     rust_pid=$!
@@ -39,7 +39,7 @@ unit-tests *targets:
     wait "$rust_pid" || failed=1
     exit "$failed"
 
-# Check source types and regenerate scripts embedded in native clients and the SDK.
+# Check source types and regenerate scripts embedded in native clients.
 typescript:
     npm ci --ignore-scripts --no-audit --no-fund
     npm --prefix crates/host-daemon/src/providers/claude/sdk ci --ignore-scripts --no-audit --no-fund
