@@ -50,7 +50,7 @@ final class LaunchUITests: XCTestCase {
 
     func closeSearch(_ app: XCUIApplication) {
         app.buttons.matching(NSPredicate(
-            format: "identifier == %@ OR label IN %@", "close", ["Close", "閉じる"]
+            format: "identifier == %@ OR label IN %@", "close", ["close", "Close", "閉じる"]
         )).firstMatch.tap()
     }
 
