@@ -5,8 +5,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 // A producer publishes the runner before building the app. Both artifacts belong
-// to its exact build attempt. Rerunning only a consumer keeps the last producer;
-// rerunning the producer must never consume that producer's older artifacts.
+// to its actual producer execution. GitHub copies successful jobs into a new
+// attempt with the new run_attempt but their original started_at. Compare that
+// start time so a consumer-only rerun can reuse its producer, while a restarted
+// producer never consumes artifacts from before it started.
 const [kind, output, timeout = '3600'] = process.argv.slice(2);
 const repository = process.env.GITHUB_REPOSITORY!;
 const run = process.env.GITHUB_RUN_ID!;
@@ -57,23 +59,28 @@ try {
   console.log(`Waiting for ${kind} from run ${run}`);
   let artifactName!: string;
   for (;;) {
-    const jobs = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${run}/jobs?filter=latest&per_page=100`])) as { jobs?: { name: string; status: string; conclusion?: string; run_attempt: number }[] };
+    const jobs = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${run}/jobs?filter=latest&per_page=100`])) as { jobs?: { name: string; status: string; conclusion?: string; started_at?: string }[] };
     if (!Array.isArray(jobs.jobs)) throw new Error('GitHub did not return jobs');
     const producer = jobs.jobs.find(job => job.name === 'iPhone build');
     if (producer?.status === 'completed' && producer.conclusion !== 'success') {
       throw new Error(`iPhone build ended with ${producer.conclusion}`);
     }
-    if (producer) {
-      if (!Number.isSafeInteger(producer.run_attempt) || producer.run_attempt < 1 || producer.run_attempt > Number(attempt)) {
-        throw new Error('iPhone build did not identify its run attempt');
+    if (producer && ['in_progress', 'completed'].includes(producer.status)) {
+      const started = Date.parse(producer.started_at ?? '');
+      if (!Number.isFinite(started)) throw new Error('iPhone build did not identify its start time');
+      const pages = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${run}/artifacts?per_page=100`, '--paginate', '--slurp'])) as { artifacts?: { name: string; expired: boolean; created_at: string }[] }[];
+      if (!Array.isArray(pages) || pages.some(page => !Array.isArray(page.artifacts))) throw new Error('GitHub did not return artifacts');
+      const matches = pages.flatMap(page => page.artifacts!).filter(artifact => {
+        const suffix = artifact.name.slice(kind.length + 1);
+        return artifact.name.startsWith(`${kind}-`) && /^[1-9][0-9]*$/.test(suffix) &&
+          Number(suffix) <= Number(attempt) && !artifact.expired && Date.parse(artifact.created_at) >= started;
+      });
+      if (matches.length > 1) throw new Error(`More than one ${kind} was published for this build`);
+      if (matches.length === 1) {
+        artifactName = matches[0]!.name;
+        break;
       }
-      artifactName = `${kind}-${producer.run_attempt}`;
-      const artifacts = JSON.parse(await gh(['api', `repos/${repository}/actions/runs/${run}/artifacts?name=${artifactName}`])) as { artifacts?: { name: string; expired: boolean }[] };
-      if (!Array.isArray(artifacts.artifacts)) throw new Error('GitHub did not return artifacts');
-      const matches = artifacts.artifacts.filter(artifact => artifact.name === artifactName && !artifact.expired);
-      if (matches.length > 1) throw new Error(`More than one ${artifactName} was published`);
-      if (matches.length === 1) break;
-      if (producer.status === 'completed') throw new Error(`iPhone build did not publish ${artifactName}`);
+      if (producer.status === 'completed') throw new Error(`iPhone build did not publish ${kind}`);
     }
     // Three consumers share the repository's GitHub API quota while building.
     await delay(30_000, undefined, { signal: controller.signal });

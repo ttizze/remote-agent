@@ -35,15 +35,26 @@ if (args[0] === 'api' && ['transient', 'network-outage'].includes(mode)) {
 }
 if (args[0] === 'api') {
   if (args[1].includes('/artifacts?')) {
-    let artifacts = [{name: process.env.ARTIFACT_TEST_KIND + (mode === 'rerun-consumer' ? '-1' : '-2'), expired: false}];
+    const reused = ['rerun-consumer', 'rerun-copied-producer'].includes(mode);
+    let artifacts = [{name: process.env.ARTIFACT_TEST_KIND + (reused ? '-1' : '-2'), expired: false,
+      created_at: reused ? '2026-01-01T01:00:00Z' : '2026-01-02T01:00:00Z'}];
     if (['missing', 'waiting', 'failed'].includes(mode)) artifacts = [];
-    if (mode === 'stale') artifacts[0].name = process.env.ARTIFACT_TEST_KIND + '-1';
+    if (mode === 'stale') {
+      artifacts[0].name = process.env.ARTIFACT_TEST_KIND + '-1';
+      artifacts[0].created_at = '2026-01-01T01:00:00Z';
+    }
+    if (mode === 'future') artifacts[0].name = process.env.ARTIFACT_TEST_KIND + '-3';
     if (mode === 'expired') artifacts[0].expired = true;
     if (mode === 'duplicate') artifacts.push(artifacts[0]);
-    console.log(JSON.stringify({artifacts}));
+    const pages = [{artifacts}];
+    if (mode === 'paginated') pages.unshift({artifacts: [{name: 'unrelated', expired: false, created_at: '2026-01-02T01:00:00Z'}]});
+    console.log(JSON.stringify(pages));
   } else {
     const running = ['ready', 'waiting', 'cancel-download'].includes(mode);
-    console.log(JSON.stringify({jobs: [{name: 'iPhone build', run_attempt: mode === 'rerun-consumer' ? 1 : 2, status: running ? 'in_progress' : 'completed', conclusion: mode === 'failed' ? 'failure' : 'success'}]}));
+    const reused = ['rerun-consumer', 'rerun-copied-producer'].includes(mode);
+    console.log(JSON.stringify({jobs: [{name: 'iPhone build', run_attempt: mode === 'rerun-consumer' ? 1 : 2,
+      started_at: ['invalid-start', 'queued'].includes(mode) ? undefined : reused ? '2026-01-01T00:00:00Z' : '2026-01-02T00:00:00Z',
+      status: mode === 'queued' ? 'queued' : running ? 'in_progress' : 'completed', conclusion: mode === 'failed' ? 'failure' : 'success'}]}));
   }
 } else {
   const dir = args[args.indexOf('--dir') + 1];
@@ -87,7 +98,8 @@ test('runner and app artifacts can arrive before the producer finishes, from thi
       assert.equal(result.status, 0, result.stderr);
       assert.equal(readFileSync(f.output, 'utf8'), 'current build');
       const commands = f.commands();
-      assert.ok(commands.some(args => args[1] === `repos/fixture/repo/actions/runs/123/artifacts?name=${kind}-2`));
+      assert.deepEqual(commands.find(args => args[1].includes('/artifacts?')),
+        ['api', 'repos/fixture/repo/actions/runs/123/artifacts?per_page=100', '--paginate', '--slurp']);
       assert.ok(commands.some(args => args[1] === 'repos/fixture/repo/actions/runs/123/jobs?filter=latest&per_page=100'));
       assert.deepEqual(commands.find(args => args[0] === 'run').slice(0, 8),
         ['run', 'download', '123', '--repo', 'fixture/repo', '--name', `${kind}-2`, '--dir']);
@@ -96,13 +108,23 @@ test('runner and app artifacts can arrive before the producer finishes, from thi
   }
 });
 
-test('rerunning only a consumer uses the successful producer attempt', async t => {
-  const f = fixture(t, 'rerun-consumer');
+test('consumer reruns keep the actual producer even when GitHub copies it into the new attempt', async t => {
+  for (const mode of ['rerun-consumer', 'rerun-copied-producer']) {
+    await t.test(mode, async t => {
+      const f = fixture(t, mode);
+      const result = await f.start().completed;
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(f.output, 'utf8'), 'current build');
+      assert.equal(f.commands().find(args => args[0] === 'run')[6], 'iphone-test-build-1');
+    });
+  }
+});
+
+test('artifact lookup reads all pages and ignores unrelated artifacts', async t => {
+  const f = fixture(t, 'paginated');
   const result = await f.start().completed;
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(f.output, 'utf8'), 'current build');
-  assert.ok(f.commands().some(args => args[1] === 'repos/fixture/repo/actions/runs/123/artifacts?name=iphone-test-build-1'));
-  assert.equal(f.commands().find(args => args[0] === 'run')[6], 'iphone-test-build-1');
 });
 
 test('transient jobs and artifact metadata connection failures recover within one reception', async t => {
@@ -123,8 +145,8 @@ test('metadata authentication failures are reported without retrying', async t =
   assert.ok(!existsSync(f.output));
 });
 
-test('failed producers, missing, expired, duplicate and earlier-attempt artifacts never start a download', async t => {
-  for (const mode of ['failed', 'missing', 'expired', 'duplicate', 'stale']) {
+test('failed producers and missing, expired, duplicate, old or future artifacts never start a download', async t => {
+  for (const mode of ['failed', 'missing', 'expired', 'duplicate', 'stale', 'future']) {
     await t.test(mode, async t => {
       const f = fixture(t, mode);
       const result = await f.start().completed;
@@ -155,6 +177,19 @@ test('waiting has a deadline and does not publish an output', async t => {
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /Timed out waiting/);
   assert.ok(!existsSync(f.output));
+});
+
+test('queued producers wait for an execution, while a started producer must identify its start time', async t => {
+  for (const mode of ['queued', 'invalid-start']) {
+    await t.test(mode, async t => {
+      const f = fixture(t, mode);
+      const result = await f.start({}, '1').completed;
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, mode === 'queued' ? /Timed out waiting/ : /did not identify its start time/);
+      assert.ok(f.commands().every(args => args[1].includes('/jobs?')));
+      assert.ok(!existsSync(f.output));
+    });
+  }
 });
 
 test('a network outage cannot extend the reception deadline', async t => {
