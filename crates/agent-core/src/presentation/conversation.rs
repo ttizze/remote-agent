@@ -1420,6 +1420,14 @@ mod tests {
     #[case::distinct_turns(false)]
     #[case::repeated_turn_ids(true)]
     fn reopening_history_retains_each_answer_and_its_native_row_identity(#[case] repeated: bool) {
+        let user = |text: &str| models::ItemBody::UserMessage {
+            text: Some(text.into()),
+            content: Vec::new(),
+        };
+        let reply = |text: &str, phase| models::ItemBody::AssistantText {
+            text: text.into(),
+            phase,
+        };
         let source = Arc::new(models::Thread {
             turns: Some(
                 [("old", "Earlier answer"), ("latest", "Latest answer")]
@@ -1428,14 +1436,43 @@ mod tests {
                         Arc::new(models::Turn {
                             id: if repeated { "repeated" } else { id }.into(),
                             status: models::TurnStatus::Completed,
-                            items: Some(vec![Arc::new(models::Item::new(
-                                id.into(),
-                                Default::default(),
-                                models::ItemBody::AssistantText {
-                                    text: text.into(),
-                                    phase: models::AssistantPhase::Final,
-                                },
-                            ))]),
+                            items: Some(
+                                [
+                                    ("question", user("First question")),
+                                    (
+                                        "work",
+                                        models::ItemBody::CommandExecution {
+                                            command: "pwd".into(),
+                                            cwd: None,
+                                            output: "/fixture".into(),
+                                            exit_code: Some(0),
+                                        },
+                                    ),
+                                    (
+                                        "early",
+                                        reply("Earlier reply", models::AssistantPhase::Unknown),
+                                    ),
+                                    ("followup", user("Next question")),
+                                    (
+                                        "commentary",
+                                        reply(
+                                            "Reply before the next instruction",
+                                            models::AssistantPhase::Commentary,
+                                        ),
+                                    ),
+                                    ("last-question", user("One more question")),
+                                    ("answer", reply(text, models::AssistantPhase::Final)),
+                                ]
+                                .into_iter()
+                                .map(|(item_id, body)| {
+                                    Arc::new(models::Item::new(
+                                        format!("{id}-{item_id}").into(),
+                                        Default::default(),
+                                        body,
+                                    ))
+                                })
+                                .collect(),
+                            ),
                             ..Default::default()
                         })
                     })
@@ -1471,7 +1508,17 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(answers, ["Earlier answer", "Latest answer"]);
+            assert_eq!(
+                answers,
+                [
+                    "Earlier reply",
+                    "Reply before the next instruction",
+                    "Earlier answer",
+                    "Earlier reply",
+                    "Reply before the next instruction",
+                    "Latest answer",
+                ]
+            );
             assert_eq!(
                 rows.iter().map(|row| &row.id).collect::<HashSet<_>>().len(),
                 rows.len()

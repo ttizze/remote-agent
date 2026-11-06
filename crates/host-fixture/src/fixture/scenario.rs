@@ -117,7 +117,6 @@ impl ScenarioTurn {
             "items",
             "history",
             "duplicate",
-            "followups",
         ]
         .into_iter()
         .find(|name| lower.contains(&format!("[{name}]")))
@@ -267,18 +266,6 @@ impl ScenarioTurn {
         }
         if scenario == "interrupted" {
             return context.finish(thread, turn, "interrupted", None);
-        }
-        if scenario == "followups" {
-            for item in [
-                json!({"id":"history-answer-1","type":"agentMessage","text":"Earlier answer remains visible."}),
-                json!({"id":"history-followup-1","type":"userMessage","content":[{"type":"text","text":"Next question"}]}),
-                json!({"id":"history-answer-2","type":"agentMessage","phase":"commentary","text":"Reply before the next instruction."}),
-                json!({"id":"history-followup-2","type":"userMessage","content":[{"type":"text","text":"One more question"}]}),
-            ] {
-                let index = turn.borrow()["items"].as_array().unwrap().len();
-                context.stream_item(&thread_id, turn, item)?;
-                complete(context, &thread_id, turn, index)?;
-            }
         }
         let response_text = self.prepare_response(&thread_id, &prompt, scenario, image.as_ref())?;
         let final_id = format!("fixture-final-{suffix}");
