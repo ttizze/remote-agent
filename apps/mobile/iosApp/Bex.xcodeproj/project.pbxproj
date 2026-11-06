@@ -336,7 +336,7 @@
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-        C30000000000000000000005 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git"; requirement = {kind = exactVersion; version = 1.99.1; }; };
+        C30000000000000000000005 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git"; requirement = {kind = exactVersion; version = 1.99.2; }; };
 /* End XCRemoteSwiftPackageReference section */
 /* Begin XCSwiftPackageProductDependency section */
         C30000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = C30000000000000000000005; productName = SwiftTerm; };
