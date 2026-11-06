@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 
 /// XCTest selectors remain on LaunchUITests for the fixture runner.
@@ -315,13 +316,40 @@ extension LaunchUITests {
         }
         XCTAssertTrue(activity.exists && activity.isHittable)
         activity.tap()
-        app.buttons["回答をコピー"].firstMatch.tap()
+        let copy = app.buttons["回答をコピー"].firstMatch
+        let clipboard = UIPasteboard.general.changeCount
+        copy.tap()
+        let confirmed = app.buttons["コピーしました"].firstMatch.waitUntilExists(timeout: 5)
+        let changed = UIPasteboard.general.changeCount != clipboard
+        if !confirmed {
+            print("Copy diagnostic first: clipboardChanged=\(changed)\n\(app.debugDescription)")
+            diagnoseCopyFailure(app, copy: copy)
+        }
         XCTAssertTrue(
-            app.buttons["コピーしました"].firstMatch.waitUntilExists(timeout: 5),
-            "Copy must show its confirmation.\n\(app.debugDescription)"
+            confirmed,
+            "The first copy tap must show its confirmation; clipboardChanged=\(changed)"
         )
 
         try verifyUncachedHistoryDetails(app, fullOutput: fullOutput)
+    }
+
+    private func diagnoseCopyFailure(_ app: XCUIApplication, copy: XCUIElement) {
+        for mode in ["stable", "held", "edge"] {
+            let clipboard = UIPasteboard.general.changeCount
+            switch mode {
+            case "stable": tapWhenStable(copy)
+            case "held": copy.press(forDuration: 0.4)
+            default:
+                copy.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+            }
+            let confirmed = app.buttons["コピーしました"].firstMatch.waitUntilExists(timeout: 3)
+            print(
+                "Copy diagnostic \(mode): clipboardChanged=\(UIPasteboard.general.changeCount != clipboard), confirmed=\(confirmed), frame=\(copy.frame)"
+            )
+            if confirmed {
+                return
+            }
+        }
     }
 
     private func verifyUncachedHistoryDetails(_ app: XCUIApplication, fullOutput: XCUIElement) throws {
