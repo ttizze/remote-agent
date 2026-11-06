@@ -138,8 +138,11 @@ async fn abandoning_side_chat_creation_does_not_keep_its_pane_alive() {
     store.close().await.unwrap();
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_pane() {
+async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_pane(
+    #[values("", "Closed selection")] selection: &str,
+) {
     let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
     let original = store.snapshot().pane.navigation.draft_key.clone();
     store
@@ -152,10 +155,8 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
     let pane = store.open_pane("/fixture".into()).unwrap();
     let preparing = tokio::spawn({
         let pane = pane.clone();
-        async move {
-            pane.prepare_side_chat(None, "Closed selection".into())
-                .await
-        }
+        let selection = selection.to_owned();
+        async move { pane.prepare_side_chat(None, selection).await }
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/session/create");
