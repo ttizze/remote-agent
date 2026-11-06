@@ -217,7 +217,10 @@ final class LaunchUITests: XCTestCase {
         if app.buttons["model.settings"].value as? String != "Fixture Model" {
             chooseFixtureModel(app)
         }
-        prompt.tap()
+        // New drafts focus the field themselves; a picker round trip can dismiss it.
+        if !app.keyboards.firstMatch.exists {
+            prompt.tap()
+        }
         prompt.typeText(promptText)
 
         let start = app.buttons["task.send"]
