@@ -49,7 +49,7 @@ notaries+=("$!")
 # Apple processes the Mac submission while the iPhone archive builds locally.
 archive="$output/Bex.xcarchive"
 auth=(-authenticationKeyPath "$AGENT_ASC_PRIVATE_KEY_FILE" -authenticationKeyID "$AGENT_ASC_KEY_ID" -authenticationKeyIssuerID "$AGENT_ASC_ISSUER_ID")
-node scripts/apple-provisioning.mjs
+node scripts/apple-provisioning.ts
 ios_bundle=$(jq -er .bundleId "$output/plan.json")
 export_method=$(jq -er .method "$output/provisioning.json")
 profile_specifier="AGENT_IOS_PROFILE_SPECIFIER=$(jq -er .prefix "$output/provisioning.json") \$(PRODUCT_BUNDLE_IDENTIFIER)"
@@ -91,7 +91,7 @@ for destination in "${destinations[@]}"; do
         "OTHER_CODE_SIGN_FLAGS=--keychain $AGENT_CODE_SIGN_KEYCHAIN"
 done
 if [[ $AGENT_RELEASE_CHANNEL == stable ]]; then
-    node scripts/apple-release.mjs record-delivery "$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" "$output/upload-start"
+    node scripts/apple-release.ts record-delivery "$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" "$output/upload-start"
 else
     ipas=("$output/export/"*.ipa)
     [[ ${#ipas[@]} == 1 && -f ${ipas[0]} ]]

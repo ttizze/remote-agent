@@ -1,0 +1,15 @@
+{
+  "name": "bex-typescript",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.12.0" },
+  "scripts": {
+    "check": "tsc -p tsconfig.json && tsc -p tsconfig.browser.json",
+    "build": "node scripts/build-browser-scripts.ts && npm --prefix crates/host-daemon/src/providers/claude/sdk run vendor"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

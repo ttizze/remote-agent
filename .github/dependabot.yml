@@ -43,6 +43,20 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
   - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: thursday
+      time: "04:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 7
+    groups:
+      typescript-tooling-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: npm
     directory: "/crates/host-daemon/src/visualize"
     schedule:
       interval: weekly

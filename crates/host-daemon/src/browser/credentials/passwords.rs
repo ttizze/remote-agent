@@ -158,7 +158,7 @@ pub(super) fn script(origin: &str, username: &str) -> Result<Zeroizing<String>, 
     let password = Zeroizing::new(serde_json::to_string(&login.password).unwrap());
     Ok(Zeroizing::new(format!(
         "({})({origin},{},{})",
-        include_str!("../password-fill.js"),
+        include_str!("../password-fill.generated.js"),
         username.as_str(),
         password.as_str()
     )))

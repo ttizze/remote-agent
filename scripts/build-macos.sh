@@ -21,7 +21,7 @@ fi
 keychains=()
 if [[ -n ${AGENT_CODE_SIGN_KEYCHAIN:-} ]]; then keychains+=("$AGENT_CODE_SIGN_KEYCHAIN"); fi
 identity=$(/usr/bin/security find-identity -v -p codesigning "${keychains[@]}" |
-    node scripts/apple-signing.mjs identity "${AGENT_CODE_SIGN_IDENTITY:-}")
+    node scripts/apple-signing.ts identity "${AGENT_CODE_SIGN_IDENTITY:-}")
 output="$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)/$directory"
 export AGENT_BUILD_REVISION
 AGENT_BUILD_REVISION=$(git rev-parse HEAD)
@@ -39,7 +39,7 @@ sign() {
 verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 cargo build --locked --profile "$profile" "${packages[@]}"
 if [[ $product == host ]]; then
-    node scripts/install-claude-sdk.mjs "$output"
+    node scripts/install-claude-sdk.ts "$output"
     sign --identifier app.bex.provider-supervisor "$output/agent-provider-supervisor"
     verify "$output/agent-provider-supervisor"
     sign --identifier app.bex.host "$output/host-daemon"

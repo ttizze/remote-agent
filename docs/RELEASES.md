@@ -76,7 +76,7 @@ the current packaging workflow. After it succeeds, resume package verification
 and publication with:
 
 ```sh
-GITHUB_REPOSITORY=ttizze/remote-agent scripts/dev-env.sh node scripts/release-candidate.mjs seal nightly-N
+GITHUB_REPOSITORY=ttizze/remote-agent scripts/dev-env.sh node scripts/release-candidate.ts seal nightly-N
 ```
 
 Android Nightly and Stable use the same distribution key and package ID. Older

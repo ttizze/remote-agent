@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { productionStatus, submitProduction } from './app-store-release.mjs';
+import { productionStatus, submitProduction } from './app-store-release.ts';
 
 function fixture({ state = 'PREPARE_FOR_SUBMISSION', selected = 'candidate', valid = true, submission = null, failOnce = false } = {}) {
   let version = state === 'NOT_CREATED' ? null : { id: 'version', attributes: { versionString: '1.0.1', appStoreState: state } };

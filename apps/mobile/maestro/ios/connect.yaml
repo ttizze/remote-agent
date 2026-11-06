@@ -14,7 +14,7 @@ appId: dev.remoteagent.mobile.ios
 - tapOn:
     id: pairing.contents
 - runScript:
-    file: input-pairing.js
+    file: input-pairing.generated.js
     env:
       REFRESH_PAIRING: "true"
 - tapOn:
@@ -30,7 +30,7 @@ appId: dev.remoteagent.mobile.ios
     id: pairing.recipients
 - assertTrue: ${maestro.copiedText.length > 0}
 - runScript:
-    file: assert-absent.js
+    file: assert-absent.generated.js
     env:
       ABSENT_ID: ^(pairing.scan|tasks.list)$
 - takeScreenshot: pairing-before-consent

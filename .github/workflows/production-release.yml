@@ -25,7 +25,7 @@ jobs:
         name: Select the latest published Nightly source
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/dev-env.sh node scripts/release-candidate.mjs resolve
+        run: scripts/dev-env.sh node scripts/release-candidate.ts resolve
   build:
     needs: source
     permissions:
@@ -63,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           AGENT_ASC_KEY_ID: ${{ secrets.BEX_ASC_KEY_ID }}
           AGENT_ASC_ISSUER_ID: ${{ secrets.BEX_ASC_ISSUER_ID }}
-        run: scripts/dev-env.sh node scripts/release-candidate.mjs sync
+        run: scripts/dev-env.sh node scripts/release-candidate.ts sync
       - name: Remove the API credential
         if: always()
         run: rm -f "$RUNNER_TEMP/bex-asc.p8"

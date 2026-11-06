@@ -55,7 +55,7 @@ jobs:
           echo "ZDOTDIR=$RUNNER_TEMP/agent-zsh" >> "$GITHUB_ENV"
       - name: Receive the runner from this build attempt
         run: >-
-          nix develop .#ios-test --command node scripts/receive-iphone-artifact.mjs
+          nix develop .#ios-test --command node scripts/receive-iphone-artifact.ts
           iphone-test-runner target/qa/ios-runner.tar.gz
       - name: Restore the runner independently of the app binaries
         run: tar -xpzf target/qa/ios-runner.tar.gz -C target/qa

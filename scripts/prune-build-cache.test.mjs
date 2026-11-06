@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { replacedBuildCaches, replacedDependencyCaches } from './prune-build-cache.mjs';
+import { replacedBuildCaches, replacedDependencyCaches } from './prune-build-cache.ts';
 
 const prefix = 'bex-gradle-v1-Linux-X64-toolchain-';
 const current = prefix + 'a'.repeat(40);

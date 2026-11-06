@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { distributionProfiles } from './apple-provisioning.mjs';
+import { distributionProfiles } from './apple-provisioning.ts';
 
 const ids = ['dev.remoteagent.mobile.ios', 'dev.remoteagent.mobile.ios.TaskActivity'];
 const serial = 'ABC123';

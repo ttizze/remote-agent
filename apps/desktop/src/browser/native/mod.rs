@@ -993,7 +993,7 @@ async fn run(
                 let expression = |operation: &str| {
                     format!(
                         "({})({},{},{})",
-                        include_str!("element.js"),
+                        include_str!("element.generated.js"),
                         serde_json::to_string(selector).unwrap(),
                         serde_json::to_string(operation).unwrap(),
                         serde_json::to_string(value).unwrap()
@@ -1086,7 +1086,7 @@ async fn capture_frame(
             if matches!(capture, Capture::Snapshot) && frame.dialog.is_none() {
                 frame.page_text = platform::receive(platform::evaluate(
                     &ticket.view,
-                    include_str!("snapshot.js"),
+                    include_str!("snapshot.generated.js"),
                     true,
                 ))
                 .await?

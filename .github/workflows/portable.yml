@@ -32,16 +32,15 @@ jobs:
         run: |
           nix develop .#repository --command bash -euo pipefail <<'CHECKS'
           actionlint
+          just typescript
           pwsh -NoLogo -NoProfile -NonInteractive -File tools/windows-fxc/update.test.ps1
           node --test lp/download.test.cjs scripts/*.test.mjs
           node --test crates/agent-protocol/src/browser_input.test.cjs crates/host-daemon/src/browser/password-fill.test.cjs apps/desktop/src/browser/native/snapshot.test.cjs
           npm --prefix crates/host-daemon/src/visualize ci --ignore-scripts --no-audit
           npm --prefix crates/host-daemon/src/visualize run vendor
           git diff --exit-code -- crates/host-daemon/src/visualize
-          npm --prefix crates/host-daemon/src/providers/claude/sdk ci --ignore-scripts --no-audit --no-fund
-          npm --prefix crates/host-daemon/src/providers/claude/sdk run vendor
           npm --prefix crates/host-daemon/src/providers/claude/sdk test
-          git diff --exit-code -- crates/host-daemon/src/providers/claude/sdk/bridge.bundle.mjs crates/host-daemon/src/providers/claude/sdk/SDK-LICENSE.md
+          git diff --exit-code -- ':(glob)**/*.generated.js' crates/host-daemon/src/providers/claude/sdk/bridge.bundle.mjs crates/host-daemon/src/providers/claude/sdk/SDK-LICENSE.md
           just complexity
           CHECKS
   linux:
@@ -72,7 +71,7 @@ jobs:
       - name: Build desktop, Host and CLI
         run: nix develop .#native --command cargo build --locked --features agent-core/bindings -p codex-app-server -p agent-process -p agent-desktop -p host-daemon -p agent-cli
       - name: Install the SDK runtime beside the Host
-        run: nix develop .#native --command node scripts/install-claude-sdk.mjs target/debug
+        run: nix develop .#native --command node scripts/install-claude-sdk.ts target/debug
       - name: Core contracts and isolated iroh Host
         run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p agent-process -p agent-protocol -p agent-transport -p agent-local-host -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Documentation examples

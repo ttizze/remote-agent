@@ -50,14 +50,14 @@ name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
       id: notice
     timeout: 5000
 - runScript:
-    file: assert-absent.js
+    file: assert-absent.generated.js
     env:
       # XCUIElementTypeKeyboard from Xcode's public XCUIElementTypes.h.
       ABSENT_ELEMENT_TYPE: "19"
 - tapOn:
     id: pairing.contents
 - runScript:
-    file: input-pairing.js
+    file: input-pairing.generated.js
     env:
       REFRESH_PAIRING: "true"
 - tapOn:
@@ -73,7 +73,7 @@ name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
 - tapOn:
     id: pairing.contents
 - runScript:
-    file: input-pairing.js
+    file: input-pairing.generated.js
     env:
       REFRESH_PAIRING: "false"
 - tapOn:
@@ -89,7 +89,7 @@ name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
     id: pairing.recipients
 - assertTrue: ${maestro.copiedText.length > 0}
 - runScript:
-    file: assert-absent.js
+    file: assert-absent.generated.js
     env:
       ABSENT_ID: ^(pairing.scan|tasks.list)$
 - tapOn:
@@ -102,7 +102,7 @@ name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
       id: tasks.list
     timeout: 30000
 - runScript:
-    file: assert-absent.js
+    file: assert-absent.generated.js
     env:
       ABSENT_ID: ^pairing.manual$
 - extendedWaitUntil:

@@ -32,7 +32,7 @@ jobs:
       - id: source
         name: Require release support in the verified revision
         run: |
-          if [[ -f scripts/release-candidate.mjs ]]; then
+          if [[ -f scripts/release-candidate.ts ]]; then
             echo 'supported=true' >> "$GITHUB_OUTPUT"
           fi
       - name: Require both workflows to verify this exact main commit

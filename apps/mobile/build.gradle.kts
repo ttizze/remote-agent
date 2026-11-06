@@ -42,7 +42,7 @@ val rustBuildInputs =
         "flake.nix",
         "flake.lock",
         ".cargo/config.toml",
-        "scripts/rust-build-inputs.mjs",
+        "scripts/rust-build-inputs.ts",
         "apps/mobile/build.gradle.kts",
         "build.gradle.kts",
         "settings.gradle.kts",
@@ -52,7 +52,7 @@ val rustMetadata =
     providers
         .exec {
             workingDir(rootProject.projectDir)
-            commandLine("node", "scripts/rust-build-inputs.mjs", "agent-core", "agent-bindgen", "agent-ffi")
+            commandLine("node", "scripts/rust-build-inputs.ts", "agent-core", "agent-bindgen", "agent-ffi")
         }
         .standardOutput
         .asText
@@ -81,11 +81,11 @@ val buildAgentAndroid =
         commandLine(
             listOf(
                 "node",
-                "scripts/build-agent-android.mjs",
+                "scripts/build-agent-android.ts",
                 rootProject.relativePath(layout.buildDirectory.dir("generated/jniLibs").get().asFile),
             ) + nativeAbis
         )
-        inputs.file(rootProject.file("scripts/build-agent-android.mjs")).withPathSensitivity(PathSensitivity.RELATIVE)
+        inputs.file(rootProject.file("scripts/build-agent-android.ts")).withPathSensitivity(PathSensitivity.RELATIVE)
         inputs.property("nativeAbis", nativeAbis)
         inputs.file("$ndkHome/source.properties").withPathSensitivity(PathSensitivity.NONE)
         inputs

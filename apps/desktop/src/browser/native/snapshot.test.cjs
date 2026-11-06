@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 
-const source = readFileSync(`${__dirname}/snapshot.js`, 'utf8');
+const source = readFileSync(`${__dirname}/snapshot.generated.js`, 'utf8');
 
 function element(tagName, { attributes = {}, text = '', children = [], ...properties } = {}) {
     return {

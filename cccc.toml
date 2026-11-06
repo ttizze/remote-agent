@@ -4,6 +4,7 @@ max-cyclomatic = 40
 exclude = [
   ".git/**",
   "vendor/**",
+  "**/*.generated.js",
   "crates/host-daemon/src/providers/claude/sdk/bridge.bundle.mjs",
   "crates/host-daemon/src/visualize/lucide.min.js",
 ]

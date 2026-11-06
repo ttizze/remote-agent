@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mergeDecision } from './dependabot-merge.mjs';
+import { mergeDecision } from './dependabot-merge.ts';
 
 const head = 'da896023d1b4ca723efa29279f5c969cc61e32d4';
 const metadata = entries => [

@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { latestNightly, packages, releaseNumber, validateRelease, verifyPackages } from './release-candidate.mjs';
+import { latestNightly, packages, releaseNumber, validateRelease, verifyPackages } from './release-candidate.ts';
 
 test('production tags identify one numbered candidate without accepting branches or shell syntax', () => {
   assert.equal(releaseNumber('prd-145', 'prd'), '145');
@@ -88,7 +88,7 @@ globalThis.fetch = async (url, options) => {
   writeFileSync(key, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
   const run = (command, tag, expectedStatus = 0) => {
     const args = [command, tag].filter(value => value !== undefined);
-    const result = spawnSync(process.execPath, ['--import', stub, fileURLToPath(new URL('./release-candidate.mjs', import.meta.url)), ...args], {
+    const result = spawnSync(process.execPath, ['--import', stub, fileURLToPath(new URL('./release-candidate.ts', import.meta.url)), ...args], {
       encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RELEASE_FIXTURE: root,
         GITHUB_OUTPUT: join(root, 'outputs'), GITHUB_REPOSITORY: 'fixture/repo', AGENT_ASC_KEY_ID: 'fixture', AGENT_ASC_ISSUER_ID: 'fixture', AGENT_ASC_PRIVATE_KEY_FILE: key },
     });

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const script = fileURLToPath(new URL('./finish-ci-rust-cache.mjs', import.meta.url));
+const script = fileURLToPath(new URL('./finish-ci-rust-cache.ts', import.meta.url));
 
 async function fixture(t, failCommand = '') {
   const root = mkdtempSync(join(tmpdir(), 'finish compiler cache '));

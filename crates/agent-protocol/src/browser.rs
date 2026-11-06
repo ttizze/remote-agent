@@ -9,7 +9,7 @@ pub const MAX_WIDTH: u32 = 7680;
 pub const MAX_HEIGHT: u32 = 4320;
 
 /// Observe only the focused editor's kind, never its value or selection.
-pub const INPUT_KIND_SCRIPT: &str = include_str!("browser_input.js");
+pub const INPUT_KIND_SCRIPT: &str = include_str!("browser_input.generated.js");
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserRequest {

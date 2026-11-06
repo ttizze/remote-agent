@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sourceDirectories, compilerEnvironment } from './rust-build-inputs.mjs';
+import { sourceDirectories, compilerEnvironment } from './rust-build-inputs.ts';
 
 test('normal and build dependencies include transitive path patches through registry and git crates', () => {
   const packages = [

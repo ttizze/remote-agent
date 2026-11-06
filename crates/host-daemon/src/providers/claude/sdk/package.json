@@ -3,13 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "vendor": "node vendor.mjs",
+    "vendor": "node vendor.ts",
     "test": "node --test bridge.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.318"
-  },
-  "devDependencies": {
-    "esbuild": "0.28.2"
   }
 }

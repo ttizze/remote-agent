@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { appForBundleId, ascClient, deliveryId, distributeBuild, iosDistribution, listAll, nextBuildNumber, nextMarketingVersion, parseBuildStatus } from './apple-release.mjs';
+import { appForBundleId, ascClient, deliveryId, distributeBuild, iosDistribution, listAll, nextBuildNumber, nextMarketingVersion, parseBuildStatus } from './apple-release.ts';
 
 test('release waits for pending checks and requires both workflows to pass for the exact revision', (t) => {
   const workflow = readFileSync(new URL('../.github/workflows/nightly-release.yml', import.meta.url), 'utf8');
@@ -204,7 +204,7 @@ test('receipt recording reads recent Xcode bundles and preserves the plan on amb
     const planPath = join(output, 'plan.json');
     const plan = { appId: 'fixture-app', version: '78', sha: 'fixture-source' };
     writeFileSync(planPath, JSON.stringify(plan));
-    const run = () => spawnSync(process.execPath, [fileURLToPath(new URL('./apple-release.mjs', import.meta.url)),
+    const run = () => spawnSync(process.execPath, [fileURLToPath(new URL('./apple-release.ts', import.meta.url)),
       'record-delivery', native, marker], { cwd: root, encoding: 'utf8' });
     const result = run();
     assert.equal(result.status, 0, result.stderr);
@@ -251,7 +251,7 @@ test('planning separates Preview and stable identities and preserves an approved
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const key = join(root, 'fixture.p8');
   writeFileSync(key, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
-  const script = fileURLToPath(new URL('./apple-release.mjs', import.meta.url));
+  const script = fileURLToPath(new URL('./apple-release.ts', import.meta.url));
   const planPath = join(root, 'target/apple-release/plan.json');
   for (const [channel, state, status] of [['nightly', 'PENDING_DEVELOPER_RELEASE', 0], ['stable', 'PENDING_DEVELOPER_RELEASE', 1], ['stable', 'READY_FOR_DISTRIBUTION', 0]]) {
     const before = channel === 'stable' ? readFileSync(planPath, 'utf8') : null;

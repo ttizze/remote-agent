@@ -920,7 +920,7 @@ async fn build_test_bundle(
         ("isolated Host fixtures", host_build),
         (
             "SDK runtime",
-            args![vec; "node", "scripts/install-claude-sdk.mjs", target.join("debug")],
+            args![vec; "node", "scripts/install-claude-sdk.ts", target.join("debug")],
         ),
     ] {
         println!("Building {phase}");
@@ -1196,7 +1196,7 @@ async fn receive_test_bundle(
     supervision::run(
         &args![
             "node",
-            "scripts/receive-iphone-artifact.mjs",
+            "scripts/receive-iphone-artifact.ts",
             "iphone-test-build",
             &archive
         ],

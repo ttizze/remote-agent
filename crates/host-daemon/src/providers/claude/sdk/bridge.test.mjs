@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runBridge, probeOptions } from "./bridge.mjs";
+import { runBridge, probeOptions } from "./bridge.ts";
 import { spawn } from "node:child_process";
 import { mkdtemp, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sessionStateStream } from "./session-state.mjs";
+import { sessionStateStream } from "./session-state.ts";
 
 function channel() {
   const values = [];

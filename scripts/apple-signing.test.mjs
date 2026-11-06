@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { macSigningIdentity } from './apple-signing.mjs';
+import { macSigningIdentity } from './apple-signing.ts';
 
 const developerId = 'A'.repeat(40);
 const renewedId = 'B'.repeat(40);
@@ -38,7 +38,7 @@ test('certificate renewal keeps the same team and authority and requires an expl
 });
 
 test('the build entry point resolves an identity without CI credentials and rejects a development override', () => {
-  const script = fileURLToPath(new URL('./apple-signing.mjs', import.meta.url));
+  const script = fileURLToPath(new URL('./apple-signing.ts', import.meta.url));
   for (const [requested, status] of [['', 0], [developerId, 0], [developmentId, 1]]) {
     const result = spawnSync(process.execPath, [script, 'identity', requested], {
       input: `${development}\n${developer}`, encoding: 'utf8', env: {},

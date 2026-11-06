@@ -65,15 +65,15 @@ On Linux, build the WSL payload from the same clean commit as the Windows app:
 
 ```sh
 scripts/dev-env.sh --native cargo build --locked -p host-daemon -p agent-process --bin host-daemon --bin agent-provider-supervisor
-scripts/dev-env.sh --native node scripts/package-wsl-runtime.mjs target/debug target/wsl-runtime
-scripts/dev-env.sh --native node scripts/verify-wsl-runtime.mjs target/wsl-runtime
+scripts/dev-env.sh --native node scripts/package-wsl-runtime.ts target/debug target/wsl-runtime
+scripts/dev-env.sh --native node scripts/verify-wsl-runtime.ts target/wsl-runtime
 ```
 
 Copy `target/wsl-runtime` to the Windows builder. CI supplies this payload
 automatically; release packages build it with the release profile.
 
 ```powershell
-# First build scripts/package-wsl-runtime.mjs on Linux from this same commit,
+# First build scripts/package-wsl-runtime.ts on Linux from this same commit,
 # then supply the resulting runtime directory:
 ./scripts/package-windows.ps1 -WslRuntimeDirectory C:\build\wsl-runtime
 # Faster local development package:

@@ -1,6 +1,6 @@
 name: Dependabot merge
 # Merges a Dependabot pull request once Portable checks and Native clients passed for its
-# current head and every update keeps the existing API (scripts/dependabot-merge.mjs). Main has
+# current head and every update keeps the existing API (scripts/dependabot-merge.ts). Main has
 # no required checks, so sessions can push directly; GitHub auto-merge would need them and is
 # not used.
 on:
@@ -48,7 +48,7 @@ jobs:
           done
           for number in $(jq -r '.[].number' <<< "$PULL_REQUESTS"); do
             gh pr view "$number" --json state,isDraft,baseRefName,author,headRefOid,commits,title,body > pull-request.json
-            decision=$(node scripts/dependabot-merge.mjs "$HEAD_SHA" < pull-request.json)
+            decision=$(node scripts/dependabot-merge.ts "$HEAD_SHA" < pull-request.json)
             echo "#$number: $(jq -r .reason <<< "$decision")"
             if [[ $(jq -r .merge <<< "$decision") == true ]]; then
               gh pr merge "$number" --merge --match-head-commit "$HEAD_SHA"

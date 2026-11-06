@@ -2,7 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const vm = require("node:vm");
-const source = readFileSync(`${__dirname}/password-fill.js`, "utf8");
+const source = readFileSync(`${__dirname}/password-fill.generated.js`, "utf8");
 
 function page({ origin = "https://example.test", action = "/login", frame = false, hidden = false, readOnly = false, multiple = false } = {}) {
   class Input {

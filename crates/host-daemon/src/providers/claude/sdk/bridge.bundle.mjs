@@ -1,4 +1,4 @@
-// main.mjs
+// main.ts
 import { createInterface } from "node:readline";
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
@@ -29261,7 +29261,7 @@ async function M5e(e10, t, n) {
   return await e10.append({ projectKey: r, sessionId: i }, s), { sessionId: i };
 }
 
-// session-state.mjs
+// session-state.ts
 import { spawn } from "node:child_process";
 import { Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -29314,7 +29314,7 @@ function spawnClaudeCodeProcess({ command, args, ...options }) {
   return child;
 }
 
-// bridge.mjs
+// bridge.ts
 import { existsSync as existsSync2 } from "node:fs";
 var managedMcpPath = process.platform === "darwin" ? "/Library/Application Support/ClaudeCode/managed-mcp.json" : process.platform === "win32" ? "C:\\Program Files\\ClaudeCode\\managed-mcp.json" : "/etc/claude-code/managed-mcp.json";
 function probeOptions(managedMcpConfig, environment) {
@@ -29488,7 +29488,7 @@ async function runBridge(lines, emit2, startQuery = l5e, fork = R2t) {
   }
 }
 
-// main.mjs
+// main.ts
 var input = createInterface({ input: process.stdin });
 var emit = (event) => process.stdout.write(`${JSON.stringify(event)}
 `);

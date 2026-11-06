@@ -19,7 +19,7 @@ function fixture(t, jobs, mode = 'parallel') {
   const bin = join(root, 'bin');
   mkdirSync(bin);
   mkdirSync(join(root, 'scripts'));
-  copyFileSync('scripts/build-agent-android.mjs', join(root, 'scripts/build-agent-android.mjs'));
+  copyFileSync('scripts/build-agent-android.ts', join(root, 'scripts/build-agent-android.ts'));
   mkdirSync(join(root, 'native output'));
   writeFileSync(join(root, 'native output/retired.so'), 'previous build');
   writeFileSync(join(root, 'events'), '');
@@ -80,7 +80,7 @@ syncBuiltinESMExports();
 `);
     bootstrap.push('--import', loader);
   }
-  const child = spawn(process.execPath, [...bootstrap, 'scripts/build-agent-android.mjs', join(root, 'native output'), 'arm64-v8a', 'x86_64'], {
+  const child = spawn(process.execPath, [...bootstrap, 'scripts/build-agent-android.ts', join(root, 'native output'), 'arm64-v8a', 'x86_64'], {
     cwd: root, detached: true,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CARGO_BUILD_JOBS: jobs, ANDROID_BUILD_ROOT: root, ANDROID_BUILD_MODE: mode },
   });

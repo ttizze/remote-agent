@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 
-const source = readFileSync(`${__dirname}/browser_input.js`, 'utf8');
+const source = readFileSync(`${__dirname}/browser_input.generated.js`, 'utf8');
 const observe = activeElement => vm.runInNewContext(source, {
     document: { activeElement }, getComputedStyle: element => element.style || {},
 });

@@ -126,7 +126,7 @@ test('only affected native clients run while repository-only changes stay lightw
     [['scripts/native-ci.test.mjs', 'tools/windows-fxc/update.test.ps1'], []],
     [['crates/agent-protocol/src/browser_input.test.cjs', 'crates/host-daemon/src/browser/password-fill.test.cjs', 'apps/desktop/src/browser/native/snapshot.test.cjs'], []],
     [['apps/mobile/src/main/kotlin/Conversation.kt'], ['android']],
-    [['apps/mobile/build.gradle.kts', 'gradle.properties', 'scripts/android-e2e.sh', 'scripts/build-agent-android.mjs'], ['android']],
+    [['apps/mobile/build.gradle.kts', 'gradle.properties', 'scripts/android-e2e.sh', 'scripts/build-agent-android.ts'], ['android']],
     [['apps/mobile/iosApp/Bex/ConversationView.swift'], ['iphone']],
     [['apps/mobile/iosApp/UITests/HistoryUITests.swift'], ['iphone']],
     [['.swiftformat', '.swiftlint.yml', 'scripts/build-agent-ios.sh'], ['iphone']],

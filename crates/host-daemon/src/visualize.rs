@@ -40,7 +40,7 @@ pub fn visualization_document(fragment: &str) -> String {
         "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\"><style>{}</style><script>{}</script><script>{}</script></head><body><details><summary>Bexでの表示について</summary>選択とプレビューは利用できます。Tweakの調整パネル、Codex専用操作、外部通信は利用できません。選択状態は開き直すと初期値に戻ります。</details>{fragment}</body></html>",
         include_str!("visualize/style.css"),
         include_str!("visualize/lucide.min.js"),
-        include_str!("visualize/runtime.js")
+        include_str!("visualize/runtime.generated.js")
     );
     let escaped = inner
         .replace('&', "&amp;")

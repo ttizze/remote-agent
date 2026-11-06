@@ -26,18 +26,25 @@ unit-tests *targets:
     #!/usr/bin/env bash
     set -uo pipefail
     failed=0
+    just typescript || failed=1
     node --test scripts/*.test.mjs || failed=1
     node --test crates/agent-protocol/src/browser_input.test.cjs crates/host-daemon/src/browser/password-fill.test.cjs apps/desktop/src/browser/native/snapshot.test.cjs || failed=1
     pwsh -NoLogo -NoProfile -NonInteractive -File tools/windows-fxc/update.test.ps1 || failed=1
-    npm --prefix crates/host-daemon/src/providers/claude/sdk ci --ignore-scripts --no-audit --no-fund || failed=1
     npm --prefix crates/host-daemon/src/providers/claude/sdk test || failed=1
-    node scripts/install-claude-sdk.mjs "${CARGO_TARGET_DIR:-target}/debug" || failed=1
+    node scripts/install-claude-sdk.ts "${CARGO_TARGET_DIR:-target}/debug" || failed=1
     cargo build --locked -p agent-process --bin agent-provider-supervisor || failed=1
     cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings "$@" &
     rust_pid=$!
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/agent-peer" cargo test --locked --no-fail-fast --manifest-path tools/agent-peer/Cargo.toml || failed=1
     wait "$rust_pid" || failed=1
     exit "$failed"
+
+# Check source types and regenerate scripts embedded in native clients and the SDK.
+typescript:
+    npm ci --ignore-scripts --no-audit --no-fund
+    npm --prefix crates/host-daemon/src/providers/claude/sdk ci --ignore-scripts --no-audit --no-fund
+    npm run check
+    npm run build
 
 # macOS-only unit tests; CI runs these separately from portable validation.
 apple-unit-tests: macos-unit-tests ios-unit-tests

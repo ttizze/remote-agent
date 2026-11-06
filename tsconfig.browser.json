@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": [
+    "crates/agent-protocol/src/browser_input.ts",
+    "crates/host-daemon/src/browser/password-fill.ts",
+    "crates/host-daemon/src/visualize/runtime.ts",
+    "apps/desktop/src/browser/native/*.ts",
+    "apps/mobile/maestro/ios/*.ts",
+    "lp/public/*.ts"
+  ]
+}

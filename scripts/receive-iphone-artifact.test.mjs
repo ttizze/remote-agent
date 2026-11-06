@@ -58,7 +58,7 @@ if (args[0] === 'api') {
 `);
   chmodSync(gh, 0o755);
   function start(overrides = {}, timeout = '10') {
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./receive-iphone-artifact.mjs', import.meta.url)), kind, output, timeout], {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./receive-iphone-artifact.ts', import.meta.url)), kind, output, timeout], {
       env: {
         ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_REPOSITORY: 'fixture/repo',
         GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2',
