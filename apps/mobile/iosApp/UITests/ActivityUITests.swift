@@ -3,6 +3,36 @@ import XCTest
 
 /// XCTest selectors remain on LaunchUITests for the fixture runner.
 extension LaunchUITests {
+    func testSimulatorSendsWithOneTapWhileReadingHistory() throws {
+        let app = try connectedSimulatorApp()
+        let id = try useSimulatorConversationFixture("long-conversation")
+        app.terminate(); app.launch()
+        expandSimulatorProject(app)
+        let row = app.descendants(matching: .any)["tasks.row.codex:\(id)"]
+        XCTAssertTrue(row.waitUntilExists(timeout: 20)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["item.long-14-0"].waitUntilExists(timeout: 20))
+        let input = app.descendants(matching: .any)["task.message"]
+        for cycle in 0 ..< 4 {
+            if cycle.isMultiple(of: 2) {
+                tapStatusBar(app)
+            } else if app.buttons["task.latest"].exists {
+                app.buttons["task.latest"].tap()
+            }
+            input.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitUntilExists(timeout: 5))
+            input.typeText("[delayed-input] Single send tap \(cycle)")
+            let send = app.buttons["task.send"]
+            XCTAssertTrue(send.isEnabled)
+            send.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            captureScreen(app, named: "Single send tap from history \(cycle)")
+            let running = prefixedButton(app, prefix: "turn.interrupt.")
+            XCTAssertTrue(running.waitUntilExists(timeout: 10),
+                          "One tap must send while the keyboard is open; a second tap is never required")
+            try simulatorFixture("release-inputs")
+            XCTAssertTrue(running.waitForNonExistence(timeout: 20))
+        }
+    }
+
     func testSimulatorComposerGrowsToFitWrappedDraft() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[success] [immediate] Verify composer wrapping")

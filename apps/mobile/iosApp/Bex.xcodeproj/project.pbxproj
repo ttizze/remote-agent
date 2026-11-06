@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0DE00000000000000000B01 /* NavigationAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000B02 /* NavigationAppearance.swift */; };
 		EB35FB642FBD2BAAE63C4417 /* ConversationMediaPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB82712EB6C081752DD49DF7 /* ConversationMediaPresentation.swift */; };
 		144475AC4BF43F9C23481CEA /* ConversationListLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CF4B0B87EF0B5062C0FDD15 /* ConversationListLayout.swift */; };
         F11E00000000000000000001 /* file-icons in Resources */ = {isa = PBXBuildFile; fileRef = F11E00000000000000000002 /* file-icons */; };
@@ -86,6 +87,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C0DE00000000000000000B02 /* NavigationAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationAppearance.swift; sourceTree = "<group>"; };
 		AB82712EB6C081752DD49DF7 /* ConversationMediaPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMediaPresentation.swift; sourceTree = "<group>"; };
 		3CF4B0B87EF0B5062C0FDD15 /* ConversationListLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListLayout.swift; sourceTree = "<group>"; };
         F11E00000000000000000002 /* file-icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "file-icons"; path = "../file-icons"; sourceTree = "<group>"; };
@@ -221,6 +223,7 @@
 				C0DE00000000000000000902 /* AgentError.swift */,
 				A10000000000000000000013 /* QRCodeScanner.swift */,
 				A10000000000000000000017 /* SwiftUIRoot.swift */,
+				C0DE00000000000000000B02 /* NavigationAppearance.swift */,
 				5DCF44CEC164E07252AA639F /* ErrorNotices.swift */,
 				8550A6EE10FA45896134CE4D /* ConversationComposer.swift */,
 				C0DE00000000000000000A02 /* ConversationAttachments.swift */,
@@ -412,6 +415,7 @@
 				C0DE00000000000000000901 /* AgentError.swift in Sources */,
 				A10000000000000000000003 /* QRCodeScanner.swift in Sources */,
 				A10000000000000000000006 /* SwiftUIRoot.swift in Sources */,
+				C0DE00000000000000000B01 /* NavigationAppearance.swift in Sources */,
 				36EC1BF85BB52BB71505A303 /* ErrorNotices.swift in Sources */,
 				D9577A51AE685A04BA449953 /* ConversationComposer.swift in Sources */,
 				C0DE00000000000000000A01 /* ConversationAttachments.swift in Sources */,

@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 private enum WorkspacePreview {
-    case quickLook, media, web, download, truncated, unavailable
+    case quickLook, video, media, web, download, truncated, unavailable
     case text(String)
 }
 
@@ -47,7 +47,7 @@ extension LaunchUITests {
         verifyWorkspaceFileLink(app, index: 0, filename: "fixture image.png")
         verifyWorkspaceFileLink(app, index: 1, filename: "hello.txt", expected: .text("日本語のファイル"))
         for (offset, fixture) in [
-            ("video.mp4", WorkspacePreview.media), ("audio.wav", .media),
+            ("video.mp4", WorkspacePreview.video), ("audio.wav", .media),
             ("animation.gif", .quickLook), ("vector.svg", .web), ("document.pdf", .quickLook),
             ("archive.zip", .download), ("large.txt", .truncated), ("unknown.bin", .unavailable)
         ].enumerated() {
@@ -71,6 +71,10 @@ extension LaunchUITests {
         let link = prefixedElement(app, prefix: "item.fixture-final-").links.element(boundBy: index)
         showConversationElement(link, in: app, upward: true)
         link.tap()
+        if case .video = expected {
+            verifyConversationVideoPreview(app)
+            return
+        }
         let done = app.buttons["file.close"]
         XCTAssertTrue(done.waitUntilExists(timeout: 15), "The Host file did not open")
         XCTAssertTrue(app.navigationBars[filename].exists)
@@ -82,6 +86,23 @@ extension LaunchUITests {
         done.tap()
         wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: done)], timeout: 5)
         tapWhenStable(app.navigationBars.buttons["閉じる"])
+        wait(for: [expectation(for: NSPredicate(format: "isHittable == true"),
+                               evaluatedWith: app.textFields["task.message"])], timeout: 10)
+    }
+
+    private func verifyConversationVideoPreview(_ app: XCUIApplication) {
+        let done = app.buttons["conversation.preview.close"]
+        XCTAssertTrue(done.waitUntilExists(timeout: 15), "Video links must open the preview directly")
+        let preview = app.descendants(matching: .any)["conversation.preview.content"]
+        XCTAssertTrue(preview.waitUntilExists(timeout: 15))
+        XCTAssertTrue(app.buttons["conversation.preview.share"].exists)
+        XCTAssertFalse(app.buttons["conversation.preview.save"].exists)
+        XCTAssertFalse(app.buttons["file.close"].exists)
+        XCTAssertFalse(app.buttons["file.reload"].exists)
+        XCTAssertFalse(app.buttons["file.ai-edit"].exists)
+        verifyMediaPlayback(app, preview: preview)
+        captureScreen(app, named: "Video opens directly without file editing controls")
+        done.tap()
         wait(for: [expectation(for: NSPredicate(format: "isHittable == true"),
                                evaluatedWith: app.textFields["task.message"])], timeout: 10)
     }
@@ -132,7 +153,7 @@ extension LaunchUITests {
             XCTAssertFalse(app.staticTexts["このファイル形式はプレビューできません"].exists)
         case .media:
             XCTAssertTrue(app.otherElements["file.preview.media"].waitUntilExists(timeout: 15))
-            verifyMediaPlayback(app)
+            verifyMediaPlayback(app, preview: app.otherElements["file.preview.media"])
         case .web:
             let content = app.webViews.firstMatch
             XCTAssertTrue(content.waitUntilExists(timeout: 15))
@@ -143,12 +164,12 @@ extension LaunchUITests {
         }
     }
 
-    private func verifyMediaPlayback(_ app: XCUIApplication) {
+    private func verifyMediaPlayback(_ app: XCUIApplication, preview: XCUIElement) {
         let play = app.buttons.matching(NSPredicate(format: "label IN %@", ["Play", "再生"])).firstMatch
         if play.exists {
             play.tap()
         } else {
-            app.otherElements["file.preview.media"].tap()
+            preview.tap()
         }
         let toggle = app.buttons["Play/Pause"]
         wait(for: [expectation(for: NSPredicate(format: "label IN %@", ["Pause", "一時停止"]),
@@ -168,11 +189,16 @@ extension LaunchUITests {
         )).firstMatch
         showConversationElement(image, in: app, upward: false)
         image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        // QuickLook zooms only the tapped image; the native toolbar shares or saves it.
+        // QuickLook zooms only the tapped image; saving is available directly in its toolbar.
         let done = app.buttons["conversation.preview.close"]
         XCTAssertTrue(done.waitUntilExists(timeout: 10))
         app.windows.firstMatch.pinch(withScale: 2, velocity: 1)
         captureScreen(app, named: "Only the tapped image opens even in a conversation with many images")
+        let directSave = app.buttons["conversation.preview.save"]
+        XCTAssertTrue(directSave.exists)
+        directSave.tap()
+        wait(for: [expectation(for: NSPredicate(format: "enabled == false AND label IN %@", ["Saved", "保存済み"]),
+                               evaluatedWith: directSave)], timeout: 20)
         app.buttons["conversation.preview.share"].tap()
         let save = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label IN %@", ["Save Image", "画像を保存"])).firstMatch

@@ -39,6 +39,11 @@ struct ConversationList: UIViewControllerRepresentable {
 private final class ConversationCollectionView: UICollectionView {
     var didLayout: (() -> Void)?
 
+    /// Content remains visible beneath the composer, but its controls own those touches.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        super.point(inside: point, with: event) && bounds.inset(by: adjustedContentInset).contains(point)
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         didLayout?()

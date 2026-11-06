@@ -8,6 +8,7 @@ struct SwiftUIRoot: View {
         @Bindable var model = model
         NavigationStack(path: $model.navigationPath) {
             ThreadsScreen(model: model)
+                .background(NavigationAppearance(didAppear: model.threadListDidAppear))
                 .navigationDestination(for: AppScreen.self) { screen in
                     switch screen {
                     case .thread:

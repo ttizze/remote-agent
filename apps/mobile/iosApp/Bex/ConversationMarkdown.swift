@@ -52,6 +52,7 @@ struct ConversationMarkdown: View {
             linkTarget = url.absoluteString
             sharedPath = nil
             media.presentation.openLink(url.absoluteString, resolve: media.resolve,
+                                        download: media.download,
                                         openDirectory: media.openDirectory, openFile: media.openFile)
             return .handled
         })

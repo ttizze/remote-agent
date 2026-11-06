@@ -380,6 +380,10 @@ extension ConversationScrollTests {
                   "Conversation must draw behind the composer and home indicator")
             check(abs(view.adjustedContentInset.bottom - height - controller.view.safeAreaInsets.bottom) < 1,
                   "Native insets must reserve the composer and home indicator once: \(geometry(view))")
+            check(view.hitTest(CGPoint(x: view.bounds.midX, y: view.bounds.minY + 20), with: nil) != nil,
+                  "Visible conversation content must retain its taps")
+            check(view.hitTest(CGPoint(x: view.bounds.midX, y: view.bounds.maxY - height / 2), with: nil) == nil,
+                  "Drawing beneath the composer must not receive its taps")
             let last = view.layoutAttributesForItem(at: IndexPath(item: 0, section: 0))!
             check(abs(view.contentOffset.y + view.bounds.height - view.adjustedContentInset.bottom
                       - last.frame.maxY - 6) < 1,

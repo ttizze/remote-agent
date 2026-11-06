@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise UIKit scroll geometry on macOS without a Simulator or Host.
+# Exercise UIKit navigation and scroll geometry on macOS without a Simulator or Host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 sdk=$(xcrun --sdk macosx --show-sdk-path)
@@ -51,5 +51,6 @@ PLIST
     fi
     "$executable"
 }
+run_test navigation-tests apps/mobile/iosApp/Bex/NavigationAppearance.swift
 run_test scroll-tests apps/mobile/iosApp/Bex/ConversationList.swift apps/mobile/iosApp/Bex/ConversationListLayout.swift
 run_test text-view-tests apps/mobile/iosApp/Bex/ConversationTextLayout.swift

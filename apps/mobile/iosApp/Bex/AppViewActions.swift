@@ -40,10 +40,18 @@ extension AppViewModel {
     func showThreadList() {
         if navigationPath.isEmpty {
             // The initial Host restore can select a thread while the native path is already at its root.
-            perform(.showThreadList)
+            threadListDidAppear()
         } else {
             navigationPath = []
         }
+    }
+
+    func threadListDidAppear() {
+        guard navigationPath.isEmpty else { return }
+        cancelPairing()
+        // Clearing the selected conversation also rebuilds its history and composer. Keep the
+        // outgoing screen intact until UIKit finishes the pop, including a cancelled edge swipe.
+        perform(.showThreadList)
     }
 
     func refreshTaskList() {

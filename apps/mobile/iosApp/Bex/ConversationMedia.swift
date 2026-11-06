@@ -1,5 +1,6 @@
 import AgentCore
 import ImageIO
+import Photos
 import QuickLook
 import SwiftUI
 import UIKit
@@ -171,6 +172,71 @@ func writeConversationImage(_ data: Data) async throws -> URL {
         throw CancellationError()
     }
     return local
+}
+
+struct ConversationPreview: View {
+    let file: SharedFile
+    @Environment(\.dismiss) private var dismiss
+    @State private var saving = false
+    @State private var saved = false
+    @State private var saveError: String?
+
+    var body: some View {
+        NavigationStack {
+            ConversationFilePreview(url: file.url)
+                .accessibilityIdentifier("conversation.preview.content")
+                .navigationTitle(file.url.lastPathComponent)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("閉じる", systemImage: "xmark") { dismiss() }
+                            .labelStyle(.iconOnly)
+                            .disabled(saving)
+                            .accessibilityIdentifier("conversation.preview.close")
+                    }
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        if UTType(filenameExtension: file.url.pathExtension)?.conforms(to: .image) == true {
+                            Button {
+                                saving = true
+                                Task { await save() }
+                            } label: {
+                                Image(systemName: saved ? "checkmark" : "arrow.down.to.line")
+                            }
+                            .disabled(saving || saved)
+                            .accessibilityLabel(LocalizedStringKey(saved ? "保存済み" : "保存"))
+                            .accessibilityIdentifier("conversation.preview.save")
+                        }
+                        ShareLink(item: file.url) { Image(systemName: "square.and.arrow.up") }
+                            .accessibilityLabel("保存・共有")
+                            .accessibilityIdentifier("conversation.preview.share")
+                    }
+                }
+                .alert("画像を保存できません", isPresented: Binding(get: { saveError != nil }, set: {
+                    if !$0 {
+                        saveError = nil
+                    }
+                })) {
+                    Button("OK") { saveError = nil }
+                } message: { AppText(saveError ?? "") }
+        }
+        .interactiveDismissDisabled(saving)
+    }
+
+    @MainActor private func save() async {
+        defer { saving = false }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else {
+            saveError = "設定でBexの写真への追加を許可してください。"
+            return
+        }
+        do {
+            let url = file.url
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: url, options: nil)
+            }
+            saved = true
+        } catch { saveError = error.localizedDescription }
+    }
 }
 
 struct ConversationFilePreview: UIViewControllerRepresentable {

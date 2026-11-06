@@ -1,3 +1,4 @@
+import AgentCore
 import Observation
 import SwiftUI
 
@@ -13,7 +14,7 @@ import SwiftUI
         let message: String
     }
 
-    var image: SharedFile?
+    var preview: SharedFile?
     var sharedFile: SharedFile?
     var visualization: Visualization?
     var imageError: String?
@@ -28,7 +29,7 @@ import SwiftUI
     func openImage(_ data: Data) {
         imageError = nil
         load { try await writeConversationImage(data) } present: {
-            self.image = $0
+            self.preview = $0
         } failed: { self.imageError = $0 }
     }
 
@@ -41,6 +42,7 @@ import SwiftUI
 
     func openLink(_ target: String,
                   resolve: @escaping @MainActor (String) async throws -> ConversationMediaAccess.ResolvedFile,
+                  download: @escaping @MainActor (String) async throws -> URL,
                   openDirectory: @escaping @MainActor (String) -> Void,
                   openFile: @escaping @MainActor (String, UInt32?) -> Void) {
         linkFailure = nil
@@ -49,6 +51,10 @@ import SwiftUI
             try Task.checkCancellation()
             if entry.isDirectory {
                 openDirectory(entry.path)
+            } else if filePreviewMimeType(path: entry.path)?.hasPrefix("video/") == true {
+                let file = try await SharedFile(url: download(entry.path))
+                try Task.checkCancellation()
+                self.preview = file
             } else {
                 openFile(entry.path, entry.line)
             }
@@ -91,7 +97,7 @@ import SwiftUI
 
     func reset() {
         cancelPending()
-        image = nil
+        preview = nil
         sharedFile = nil
         visualization = nil
         imageError = nil
@@ -105,22 +111,8 @@ struct ConversationMediaPresenter: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .fullScreenCover(item: $presentation.image) { image in
-                NavigationStack {
-                    ConversationFilePreview(url: image.url)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("閉じる") { presentation.image = nil }
-                                    .accessibilityIdentifier("conversation.preview.close")
-                            }
-                            ToolbarItem(placement: .primaryAction) {
-                                ShareLink(item: image.url) { Image(systemName: "square.and.arrow.up") }
-                                    .accessibilityLabel("保存・共有")
-                                    .accessibilityIdentifier("conversation.preview.share")
-                            }
-                        }
-                }
+            .fullScreenCover(item: $presentation.preview) { file in
+                ConversationPreview(file: file)
             }
             .sheet(item: $presentation.sharedFile) { ShareSheet(file: $0) }
             .sheet(item: $presentation.visualization) { document in

@@ -16,14 +16,7 @@ final class AppViewModel {
     private(set) var notices: [ErrorScope: [ErrorNotice]] = [:]
     /// NavigationStack writes its own path during interactive transitions. Keep that path as the
     /// native source of truth rather than reconstructing it and discarding nonempty writes.
-    var navigationPath: [AppScreen] = [] {
-        didSet {
-            if navigationPath.isEmpty, !oldValue.isEmpty {
-                cancelPairing()
-                perform(.showThreadList)
-            }
-        }
-    }
+    var navigationPath: [AppScreen] = []
 
     var connections: [String: Task<Void, Never>] = [:]
     var pairingConnection: Task<Void, Never>?
