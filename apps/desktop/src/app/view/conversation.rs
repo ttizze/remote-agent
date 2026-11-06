@@ -2683,7 +2683,8 @@ mod rendering_tests {
                     .contains_key("answer-0")
             );
         });
-        let first_message = "conversation-row-history-item:long-turn:answer-0:occurrence:0";
+        let first_message =
+            "conversation-row-history-item:long-turn:answer-0:occurrence:0:turn:long%2Dturn:0";
         let before = window.debug_bounds(first_message).unwrap().top();
         view.update(window, |view, cx| {
             view.desktop.update(cx, |desktop, cx| {
@@ -2836,7 +2837,9 @@ mod rendering_tests {
                 if status == "running" {
                     let progress = progress.expect("background work must remain visible");
                     let response = window
-                        .debug_bounds("conversation-row-history-item:turn:answer:occurrence:0")
+                        .debug_bounds(
+                            "conversation-row-history-item:turn:answer:occurrence:0:turn:turn:0",
+                        )
                         .expect("the response must remain visible while background work runs");
                     assert!(window.debug_bounds("response-copy").is_none());
                     assert!(progress.top() >= response.bottom());
@@ -3003,7 +3006,9 @@ mod rendering_tests {
         view.update(window, |_, cx| cx.notify());
         window.run_until_parked();
         let last = window
-            .debug_bounds("conversation-row-history-item:turn-19:answer-19:occurrence:0")
+            .debug_bounds(
+                "conversation-row-history-item:turn-19:answer-19:occurrence:0:turn:turn%2D19:0",
+            )
             .unwrap();
         view.update(window, |view, cx| {
             let desktop = view.0.read(cx);
