@@ -1354,6 +1354,131 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
 
+    #[rstest::rstest]
+    #[case::plan(json!({"plan":{"text":"Plan"}}), true)]
+    #[case::mcp(json!({"toolCall":{"kind":"mcp","tool":"read","arguments":{},"content":[]}}), true)]
+    #[case::dynamic(json!({"toolCall":{"kind":"dynamic","tool":"search","arguments":{},"content":[]}}), true)]
+    #[case::subagent(json!({"subagent":{"tool":"spawn_agent","receivers":[],"states":[]}}), true)]
+    #[case::web(json!({"webSearch":{"query":"Query"}}), true)]
+    #[case::image(json!({"imageGeneration":{"savedPath":"/fixture/image.png"}}), true)]
+    #[case::compaction(json!({"compaction":{}}), true)]
+    #[case::sleep(json!({"sleep":{}}), false)]
+    #[case::reasoning(json!({"reasoning":{"content":["private"],"summary":[]}}), false)]
+    #[case::review_entered(json!({"review":{"entering":true,"text":"Review"}}), false)]
+    #[case::review_left(json!({"review":{"entering":false,"text":"Review"}}), false)]
+    fn item_families_project_visible_content_without_exposing_state_only_events(
+        #[case] body: serde_json::Value,
+        #[case] visible: bool,
+        #[values(models::TurnStatus::Running, models::TurnStatus::Completed)]
+        status: models::TurnStatus,
+    ) {
+        let source = Arc::new(models::Thread {
+            turns: Some(vec![Arc::new(models::Turn {
+                id: "work".into(),
+                status,
+                items: Some(vec![
+                    Arc::new(models::Item::new(
+                        "family".into(),
+                        Default::default(),
+                        serde_json::from_value(body).unwrap(),
+                    )),
+                    Arc::new(models::Item::new(
+                        "answer".into(),
+                        Default::default(),
+                        models::ItemBody::AssistantText {
+                            text: "Final answer".into(),
+                            phase: models::AssistantPhase::Final,
+                        },
+                    )),
+                ]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        let snapshot = Snapshot::default();
+        let rendered = project_conversation(
+            &snapshot.pane.navigation.draft_key,
+            &snapshot.sessions.pending_submissions,
+            source,
+            &None,
+        );
+        let ids = rendered.turns[0]
+            .items()
+            .map(|item| item.data.native_id.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            if visible {
+                vec!["family", "answer"]
+            } else {
+                vec!["answer"]
+            }
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::distinct_turns(false)]
+    #[case::repeated_turn_ids(true)]
+    fn reopening_history_retains_each_answer_and_its_native_row_identity(#[case] repeated: bool) {
+        let source = Arc::new(models::Thread {
+            turns: Some(
+                [("old", "Earlier answer"), ("latest", "Latest answer")]
+                    .into_iter()
+                    .map(|(id, text)| {
+                        Arc::new(models::Turn {
+                            id: if repeated { "repeated" } else { id }.into(),
+                            status: models::TurnStatus::Completed,
+                            items: Some(vec![Arc::new(models::Item::new(
+                                id.into(),
+                                Default::default(),
+                                models::ItemBody::AssistantText {
+                                    text: text.into(),
+                                    phase: models::AssistantPhase::Final,
+                                },
+                            ))]),
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        let snapshot = Snapshot::default();
+        let live = project_conversation(
+            &snapshot.pane.navigation.draft_key,
+            &snapshot.sessions.pending_submissions,
+            source.clone(),
+            &None,
+        );
+        let restored: Arc<models::Thread> =
+            Arc::new(serde_json::from_slice(&serde_json::to_vec(&source).unwrap()).unwrap());
+        for previous in [None, Some(live)] {
+            let reopened = project_conversation(
+                &snapshot.pane.navigation.draft_key,
+                &snapshot.sessions.pending_submissions,
+                restored.clone(),
+                &previous,
+            );
+            let rows = reopened
+                .turns
+                .iter()
+                .flat_map(|turn| turn.conversation_rows())
+                .collect::<Vec<_>>();
+            let answers = rows
+                .iter()
+                .filter_map(|row| match &row.content {
+                    ConversationRowContent::Response { item, .. } => item.data.body.as_deref(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(answers, ["Earlier answer", "Latest answer"]);
+            assert_eq!(
+                rows.iter().map(|row| &row.id).collect::<HashSet<_>>().len(),
+                rows.len()
+            );
+        }
+    }
+
     #[test]
     fn work_expansion_requires_an_explicit_choice_for_the_current_status() {
         let statuses = ["running", "completed", "failed", "interrupted", "unknown"];

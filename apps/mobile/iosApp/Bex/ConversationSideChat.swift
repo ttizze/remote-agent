@@ -15,7 +15,6 @@ final class SideChatRequest {
     private(set) var chat: ConversationModel?
     private(set) var preparing = false
     private(set) var error: ErrorText?
-    private var draftInitialized = false
 
     init(text: String, host: String, originalThreadId: SessionRef, cwd: String,
          session: ClientSession, provider: ProviderKind?) {
@@ -33,32 +32,16 @@ final class SideChatRequest {
         error = nil
         defer { preparing = false }
         do {
-            let model: ConversationModel
-            if let chat {
-                model = chat
+            let pane: AgentPane
+            if let existing = chat?.pane {
+                pane = existing
             } else {
                 let store = try await session.ready()
-                let pane = try await store.openPane(cwd: cwd)
-                model = ConversationModel(host: host, session: session, pane: pane)
-                chat = model
+                pane = try await store.openPane(cwd: cwd)
+                chat = ConversationModel(host: host, session: session, pane: pane)
             }
-            if model.selectedThreadId == nil {
-                guard let provider = provider ?? model.settings.provider()
-                else {
-                    throw NSError(domain: "Bex", code: 1,
-                                  userInfo: [NSLocalizedDescriptionKey: "利用可能なエージェントを選択してください。"])
-                }
-                _ = try await model.outcome(for: .createSession(CreateSession(
-                    provider: provider, cwd: cwd, model: nil, initialInput: nil
-                )))
-            }
-            if !draftInitialized {
-                if !text.isEmpty {
-                    model.draft = ConversationModel.selectionQuote(text)
-                }
-                draftInitialized = true
-            }
-            model.composerFocusRequest = UUID()
+            try await pane.prepareSideChat(provider: provider, text: text)
+            chat?.composerFocusRequest = UUID()
         } catch {
             if !Task.isCancelled {
                 self.error = errorText(error: error.localizedDescription)
@@ -69,13 +52,8 @@ final class SideChatRequest {
 
 extension ConversationModel {
     func addSelectionToChat(_ text: String) {
-        let quote = Self.selectionQuote(text)
-        draft = draft.isEmpty ? quote : draft + "\n\n" + quote
+        draft = appendSelectionToDraft(draft: draft, selection: text)
         composerFocusRequest = UUID()
-    }
-
-    static func selectionQuote(_ text: String) -> String {
-        text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n") + "\n\n"
     }
 
     func askSelectionInSideChat(_ text: String) {

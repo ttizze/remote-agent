@@ -3,7 +3,7 @@ import XCTest
 
 /// XCTest selectors remain on LaunchUITests for the fixture runner.
 extension LaunchUITests {
-    func testSimulatorOpensTasksBeforeHistoryReadFinishes() throws {
+    func testSimulatorShowsHistoryLoadingBeforeHostReplies() throws {
         let app = try connectedSimulatorApp()
         try useSimulatorListFixture("external-conversation")
         addTeardownBlock { _ = try self.simulatorFixture("release-history-reads") }
@@ -22,28 +22,7 @@ extension LaunchUITests {
         let firstAnswer = app.descendants(matching: .any)["item.answer-fixture-external-thread"]
         XCTAssertTrue(firstAnswer.waitUntilExists(timeout: 15))
         XCTAssertFalse(app.staticTexts["notice"].exists)
-        let composer = app.textFields["task.message"]
-        composer.tap(); composer.typeText("Keep this opening draft")
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(row.waitUntilExists(timeout: 10))
-        app.terminate(); app.launch()
-        expandSimulatorProject(app)
-        XCTAssertTrue(row.waitUntilExists(timeout: 15))
-        try simulatorFixture("background-reply")
-        try simulatorFixture("hold-history-reads")
-        row.tap()
-        // The device copy and the Host transcript answer without native history,
-        // so held native reads do not delay the reopened conversation.
-        XCTAssertTrue(firstAnswer.waitUntilExists(timeout: 5),
-                      "After relaunch, the saved conversation shows while the local draft remains available")
-        XCTAssertEqual(composer.value as? String, "Keep this opening draft")
-        captureScreen(app, named: "Local draft survives relaunch with the saved conversation")
-        try simulatorFixture("release-history-reads")
-        // A reply written to native history outside the Host waits for a re-import.
-        let latest = app.descendants(matching: .any)["item.fixture-external-final"]
-        XCTAssertFalse(latest.waitUntilExists(timeout: 3))
-        XCTAssertEqual(composer.value as? String, "Keep this opening draft")
-        XCTAssertFalse(app.staticTexts["notice"].exists)
+        captureScreen(app, named: "History loading transitions to the native conversation")
     }
 
     func testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft() throws {

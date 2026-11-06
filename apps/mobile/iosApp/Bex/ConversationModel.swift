@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 final class ConversationModel {
     let host: String
     @ObservationIgnored let session: ClientSession
-    @ObservationIgnored private let pane: AgentPane?
+    @ObservationIgnored let pane: AgentPane?
     @ObservationIgnored private(set) var publication = Presentation.empty()
     @ObservationIgnored private(set) var snapshot = AgentCore.Snapshot.empty()
     private(set) var settings = Presentation.empty().settings()

@@ -248,8 +248,9 @@ pub(super) fn append_to_composer(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let value = append_quote(composer.read(cx).value().as_ref(), text);
-    set_composer_text(composer, value, window, cx);
+    let value =
+        agent_core::composer::append_selection_to_draft(composer.read(cx).value().as_ref(), text);
+    set_composer_text(composer, value.into(), window, cx);
 }
 
 pub(super) fn set_composer_text(
@@ -264,19 +265,6 @@ pub(super) fn set_composer_text(
         input.set_selected_range(end..end, cx);
         input.focus(window, cx);
     });
-}
-
-pub(super) fn append_quote(draft: &str, text: &str) -> SharedString {
-    let quote = text
-        .split('\n')
-        .map(|line| format!("> {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if draft.is_empty() {
-        format!("{quote}\n\n").into()
-    } else {
-        format!("{draft}\n\n{quote}\n\n").into()
-    }
 }
 
 #[cfg(test)]

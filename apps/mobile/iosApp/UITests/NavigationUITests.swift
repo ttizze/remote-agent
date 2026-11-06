@@ -6,6 +6,8 @@ extension LaunchUITests {
     private func openConnectionSettings(_ app: XCUIApplication) {
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.settings"].tap()
+        XCTAssertTrue(app.buttons["settings.providers"].waitUntilExists(timeout: 10))
+        XCTAssertFalse(app.buttons["settings.models"].exists)
         app.buttons["settings.connections"].tap()
         XCTAssertTrue(app.buttons["profiles.add"].waitUntilExists(timeout: 10))
     }

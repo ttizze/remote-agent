@@ -476,6 +476,13 @@ fn switching_providers_restores_their_last_options_without_rewriting_other_draft
             .as_deref(),
         Some("fast")
     );
+    let restored = restart(&next);
+    assert_eq!(restored.input.drafts, next.input.drafts);
+    assert_eq!(
+        restored.catalog.model_preferences,
+        next.catalog.model_preferences
+    );
+    assert_eq!(restored.input.drafts[&original].text, "unsent request");
 }
 
 #[test]

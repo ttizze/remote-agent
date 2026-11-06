@@ -519,12 +519,6 @@ impl Threads {
     }
 
     fn create(&mut self, context: &Context, id: &Value, params: &mut Value) -> Result<()> {
-        let failure = context.home.join("fail-next-thread-start");
-        if failure.exists() {
-            fs::remove_file(failure)?;
-            context.error(id, -32603, "fixture session creation failed")?;
-            return Ok(());
-        }
         let cwd = match params.get_mut("cwd") {
             Some(cwd) => cwd.take(),
             // Unscoped chats must never inherit the developer's

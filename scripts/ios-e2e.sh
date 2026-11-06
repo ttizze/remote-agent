@@ -33,15 +33,13 @@ if [[ $# == 0 ]]; then
         testSimulatorFetchesNewTaskWhenReturningToList \
         testSimulatorFetchesNewTaskAfterForeground \
         testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground \
-        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorShowsHistoryLoadingBeforeHostReplies \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorReconnectClearsHistoryFailureAndPreservesDraft \
         testSimulatorUpdatesAnOpenConversationFromAnotherClient \
         testSimulatorReviewsTheOpenSessionsWorktree \
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
-        testSimulatorLastModelSelectionPersistsAndKeepsExistingDrafts \
-        testSimulatorWeeklyUsageNamesFableAndSettingsOmitModelDefaults \
         testSimulatorModelPickerUsesNativeFormAndAgentPicker \
         testSimulatorSignsInDirectlyFromModelSettings \
         testSimulatorGoesBackFromAccountLoginAndCanStartAgain \
@@ -63,19 +61,14 @@ if [[ $# == 0 ]]; then
         testSimulatorCopiesSelectedOrWholeUserMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
         testSimulatorOpensSideChatWithoutLosingOriginalDraft \
-        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorApprovalEditorAndDraftSurviveReconnect \
         testSimulatorKeepsInputRequestVisibleUntilResolved \
-        testSimulatorQuestionChoiceReturnsTypedAnswerToDraft \
         testSimulatorSendsQuestionChoiceOnTap \
         testSimulatorCanSkipQuestion \
         testSimulatorShowsRetryingStreamErrorThenRecovers \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
-        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorReopensCompletedHistoryCollapsed \
-        testSimulatorKeepsEarlierAnswersBetweenFollowupsWhenReopening \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \

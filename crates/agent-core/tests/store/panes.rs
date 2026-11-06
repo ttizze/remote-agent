@@ -1,5 +1,186 @@
 use super::*;
 
+#[rstest::rstest]
+#[case::default_provider(None, "Needle\nsecond", "codex", "> Needle\n> second\n\n")]
+#[case::original_provider(Some(ProviderKind::Claude), "Needle", "claude", "> Needle\n\n")]
+#[case::empty_side_chat(None, "", "codex", "")]
+#[tokio::test]
+async fn side_chat_retries_creation_and_initializes_its_quote_once(
+    #[case] provider: Option<ProviderKind>,
+    #[case] selection: &str,
+    #[case] expected_provider: &str,
+    #[case] expected_draft: &str,
+    #[values(false, true)] abandon_waiter: bool,
+) {
+    let mut initial = authenticated_snapshot();
+    let original = initial.pane.navigation.draft_key.clone();
+    Arc::make_mut(&mut initial.input.drafts).insert(
+        original.clone(),
+        Arc::new(Draft {
+            text: "Keep the original draft".into(),
+            ..Default::default()
+        }),
+    );
+    let (store, mut reader, mut writer) = setup(initial).await;
+    let original_draft = store.snapshot().input.drafts[&original].clone();
+    let pane = store.open_pane("/fixture".into()).unwrap();
+    let failed = tokio::spawn({
+        let pane = pane.clone();
+        let selection = selection.to_owned();
+        async move { pane.prepare_side_chat(provider, selection).await }
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/session/create");
+    assert_eq!(request["params"]["provider"], expected_provider);
+    assert_eq!(request["params"]["cwd"], "/fixture");
+    assert!(request["params"]["initialInput"].is_null());
+    writer.reply(&request, json!({"error":{"code":"request_failed","message":"fixture failure","delivery":"notSent"}})).await.unwrap();
+    assert!(failed.await.unwrap().is_err());
+    assert!(pane.snapshot().unwrap().pane.error.is_none());
+    assert!(pane.snapshot().unwrap().pane.navigation.thread_id.is_none());
+    assert_eq!(store.snapshot().input.drafts[&original], original_draft);
+
+    let retry = tokio::spawn({
+        let pane = pane.clone();
+        let selection = selection.to_owned();
+        async move { pane.prepare_side_chat(provider, selection).await }
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/session/create");
+    if abandon_waiter {
+        retry.abort();
+    }
+    let concurrent = pane.prepare_side_chat(provider, "Must not replace the first quote".into());
+    tokio::pin!(concurrent);
+    assert!(futures_util::poll!(concurrent.as_mut()).is_pending());
+    writer.reply(&request, json!({"result":{"thread":{
+        "id":{"provider":expected_provider,"id":"side"},"cwd":"/fixture","turns":[],"status":"idle"
+    }}})).await.unwrap();
+    if abandon_waiter {
+        assert!(retry.await.unwrap_err().is_cancelled());
+    } else {
+        retry.await.unwrap().unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), concurrent)
+        .await
+        .unwrap()
+        .unwrap();
+    let key = pane.snapshot().unwrap().pane.navigation.draft_key.clone();
+    assert!(pane.snapshot().unwrap().pane.error.is_none());
+    assert_eq!(
+        pane.snapshot().unwrap().input.drafts[&key].text,
+        expected_draft
+    );
+
+    pane.dispatch(Intent::SetDraftText {
+        thread_id: key.clone(),
+        text: "Keep the side draft".into(),
+    })
+    .await
+    .unwrap();
+    pane.prepare_side_chat(provider, selection.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        pane.snapshot().unwrap().input.drafts[&key].text,
+        "Keep the side draft"
+    );
+    assert_eq!(store.snapshot().input.drafts[&original], original_draft);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn side_chat_without_an_agent_or_after_close_cannot_change_input() {
+    let store = Arc::new(Store::offline(Snapshot::default()));
+    let pane = store.open_pane("/fixture".into()).unwrap();
+    let before = pane.snapshot().unwrap();
+    let error = pane
+        .prepare_side_chat(None, "Needle".into())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "利用可能なエージェントを選択してください。"
+    );
+    assert_eq!(pane.snapshot().unwrap(), before);
+    pane.close();
+    assert!(
+        pane.prepare_side_chat(Some(ProviderKind::Codex), "Needle".into())
+            .await
+            .is_err()
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn abandoning_side_chat_creation_does_not_keep_its_pane_alive() {
+    let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
+    let pane = store.open_pane("/fixture".into()).unwrap();
+    let weak = Arc::downgrade(&pane);
+    let id = pane.id().to_owned();
+    let preparing = tokio::spawn({
+        let pane = pane.clone();
+        async move {
+            pane.prepare_side_chat(None, "Abandoned selection".into())
+                .await
+        }
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/session/create");
+    preparing.abort();
+    assert!(preparing.await.unwrap_err().is_cancelled());
+    drop(pane);
+    assert!(weak.upgrade().is_none());
+    assert!(store.snapshot().for_pane(&id).is_none());
+    writer.reply(&request, json!({"result":{"thread":{
+        "id":{"provider":"codex","id":"abandoned-side"},"cwd":"/fixture","turns":[],"status":"idle"
+    }}})).await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_pane() {
+    let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
+    let original = store.snapshot().pane.navigation.draft_key.clone();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: original.clone(),
+            text: "Keep the original draft".into(),
+        })
+        .await
+        .unwrap();
+    let pane = store.open_pane("/fixture".into()).unwrap();
+    let preparing = tokio::spawn({
+        let pane = pane.clone();
+        async move {
+            pane.prepare_side_chat(None, "Closed selection".into())
+                .await
+        }
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/session/create");
+    pane.close();
+    writer.reply(&request, json!({"result":{"thread":{
+        "id":{"provider":"codex","id":"closed-side"},"cwd":"/fixture","turns":[],"status":"idle"
+    }}})).await.unwrap();
+    assert!(preparing.await.unwrap().is_err());
+    let snapshot = store.snapshot();
+    assert_eq!(
+        snapshot.input.drafts[&original].text,
+        "Keep the original draft"
+    );
+    let closed = SessionRef::new(ProviderKind::Codex, "closed-side".into()).unwrap();
+    assert!(
+        snapshot
+            .input
+            .drafts
+            .get(&closed.into())
+            .is_none_or(|draft| draft.text.is_empty())
+    );
+    assert!(pane.snapshot().is_err());
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn closing_the_primary_view_does_not_close_the_host_or_accept_more_view_actions() {
     let store = Arc::new(Store::offline(Snapshot::default()));

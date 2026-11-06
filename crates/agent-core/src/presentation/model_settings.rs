@@ -318,6 +318,45 @@ mod tests {
     use crate::state::Draft;
     use std::sync::Arc;
 
+    #[rstest::rstest]
+    #[case(ProviderKind::Codex, "shared", vec![("週間枠", 86)])]
+    #[case(ProviderKind::Claude, "shared", vec![("Fable · 週間枠", 66), ("Sonnet · 週間枠", 42)])]
+    #[case(ProviderKind::Codex, "missing", vec![])]
+    fn weekly_limits_keep_the_account_provider_and_model_scope(
+        #[case] provider: ProviderKind,
+        #[case] id: &str,
+        #[case] expected: Vec<(&str, u32)>,
+    ) {
+        let mut accounts: agent_protocol::operations::Accounts =
+            serde_json::from_value(serde_json::json!({
+                "accounts":[
+                    {"id":"shared","provider":"codex","usage":{"fetchedAt":1,"windows":[
+                        {"label":"5時間枠","remainingPercent":72},
+                        {"label":"週間枠","remainingPercent":86}
+                    ]}},
+                    {"id":"shared","provider":"claude","usage":{"fetchedAt":1,"windows":[
+                        {"label":"Fable · 5時間枠","remainingPercent":50},
+                        {"label":"Fable · 週間枠","remainingPercent":66},
+                        {"label":"Sonnet · 週間枠","remainingPercent":42}
+                    ]}}
+                ],"selected":{}
+            }))
+            .unwrap();
+        let windows = weekly_usage(Some(&accounts), provider, id);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| (window.label.as_str(), window.remaining_percent))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for account in &mut accounts.accounts {
+            account.usage.as_mut().unwrap().error = Some("unavailable".into());
+        }
+        assert!(weekly_usage(Some(&accounts), provider, id).is_empty());
+        assert!(weekly_usage(None, provider, id).is_empty());
+    }
+
     #[test]
     fn speed_choices_preserve_native_multipliers_and_select_each_tier() {
         let model: Model = serde_json::from_value(serde_json::json!({
@@ -582,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_controls_use_capabilities_and_saved_values_without_inventing_quotas() {
+    fn quick_controls_use_capabilities_and_saved_values() {
         let mut snapshot = Snapshot {
             catalog: crate::state::Catalog {
                 models: Arc::new(serde_json::from_value(serde_json::json!([
@@ -636,32 +675,6 @@ mod tests {
         assert!(
             snapshot
                 .models_matching(Some(ProviderKind::Codex), "haiku".into())
-                .is_empty()
-        );
-        Arc::make_mut(&mut snapshot.catalog.account).accounts = Some(Arc::new(
-            serde_json::from_value(serde_json::json!({"accounts":[
-            {"id":"a","provider":"codex","usage":{"fetchedAt":1,"windows":[
-                {"label":"5時間枠","remainingPercent":72},{"label":"週間枠","remainingPercent":42},
-                {"label":"Opus 週間枠","remainingPercent":12}]}}
-        ],"selected":{}}))
-            .unwrap(),
-        ));
-        assert_eq!(
-            snapshot
-                .account_weekly_usage(ProviderKind::Codex, "a".into())
-                .len(),
-            2
-        );
-        let accounts = Arc::make_mut(
-            Arc::make_mut(&mut snapshot.catalog.account)
-                .accounts
-                .as_mut()
-                .unwrap(),
-        );
-        accounts.accounts[0].usage.as_mut().unwrap().error = Some("unavailable".into());
-        assert!(
-            snapshot
-                .account_weekly_usage(ProviderKind::Codex, "a".into())
                 .is_empty()
         );
     }

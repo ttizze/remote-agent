@@ -1,6 +1,21 @@
 use crate::state::Snapshot;
 use agent_protocol::composer::*;
 
+/// Keep selected lines quoted and leave room for the user's question.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn append_selection_to_draft(draft: &str, selection: &str) -> String {
+    let quote = selection
+        .split('\n')
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if draft.is_empty() {
+        format!("{quote}\n\n")
+    } else {
+        format!("{draft}\n\n{quote}\n\n")
+    }
+}
+
 pub fn candidate_label(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -125,6 +140,23 @@ mod tests {
     use super::*;
     use crate::state::{Draft, Event, Intent, reduce};
     use agent_protocol::operations::Input;
+
+    #[rstest::rstest]
+    #[case("", "Needle", "> Needle\n\n")]
+    #[case(
+        "Keep my draft",
+        "first\nsecond",
+        "Keep my draft\n\n> first\n> second\n\n"
+    )]
+    #[case("入力", "行🌱\n", "入力\n\n> 行🌱\n> \n\n")]
+    #[case("", "", "> \n\n")]
+    fn selections_preserve_existing_input_and_quote_every_selected_line(
+        #[case] draft: &str,
+        #[case] selection: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(append_selection_to_draft(draft, selection), expected);
+    }
 
     fn skill() -> Invocation {
         Invocation {

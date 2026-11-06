@@ -636,6 +636,9 @@ impl Operation for RetryPreparation {
 }
 
 impl Operation for CreateSession {
+    // Creation flows present their returned error. Do not also leave an
+    // unrelated application notice behind after the user successfully retries.
+    const REPORT_ERROR: bool = false;
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.sessions.subscriptions)

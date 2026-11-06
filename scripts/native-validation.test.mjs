@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+
+test('native acceptance selectors name implemented UI tests', () => {
+  const root = 'apps/mobile/iosApp/UITests';
+  const implemented = new Set(readdirSync(root).filter(name => name.endsWith('.swift')).flatMap(name =>
+    [...readFileSync(join(root, name), 'utf8').matchAll(/^\s*func (testSimulator\w+)\(/gm)].map(match => match[1])));
+  for (const path of ['justfile', 'scripts/ios-e2e.sh']) {
+    const selected = [...readFileSync(path, 'utf8').matchAll(/\btestSimulator\w+/g)].map(match => match[0]);
+    assert.ok(selected.length > 0, path);
+    for (const name of selected) assert.ok(implemented.has(name), `${path}: missing ${name}`);
+  }
+});
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'native-validation-'));

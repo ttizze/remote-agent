@@ -99,11 +99,9 @@ android-e2e:
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 
-# Native conversation acceptance; interleaved shards balance measured CI durations.
+# Native journeys cover navigation, rendering and OS integration; agent-core owns state contracts.
 conversation-ui *options:
     scripts/ios-e2e.sh "$@" \
-        testSimulatorWeeklyUsageNamesFableAndSettingsOmitModelDefaults \
-        testSimulatorLastModelSelectionPersistsAndKeepsExistingDrafts \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
@@ -113,12 +111,10 @@ conversation-ui *options:
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorReopensCompletedHistoryCollapsed \
-        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorOpensQrScannerWhileAddingHost \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
-        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorUsesNativeProjectDisclosureAndWorkspaceTree \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorNativeTerminalCopiesTextOnLongPress \
@@ -127,15 +123,13 @@ conversation-ui *options:
         testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
         testSimulatorOpensOnlyTheTappedImageAndSavesIt \
         testSimulatorCanStartAConversationInAProject \
-        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorShowsHistoryLoadingBeforeHostReplies \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorModelPickerUsesNativeFormAndAgentPicker \
-        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
         testSimulatorKeepsInputRequestVisibleUntilResolved \
-        testSimulatorQuestionChoiceReturnsTypedAnswerToDraft \
         testSimulatorSendsQuestionChoiceOnTap \
         testSimulatorCanSkipQuestion \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
