@@ -249,24 +249,6 @@ final class LaunchUITests: XCTestCase {
             .firstMatch
     }
 
-    func waitForPrefixedElement(
-        _ app: XCUIApplication,
-        prefix: String,
-        scrolling scrollView: XCUIElement
-    ) -> Bool {
-        let element = prefixedElement(app, prefix: prefix)
-        if element.waitUntilExists(timeout: 1) {
-            return true
-        }
-        for _ in 0 ..< 14 {
-            scrollView.swipeUp()
-            if element.waitUntilExists(timeout: 1) {
-                return true
-            }
-        }
-        return false
-    }
-
     func allowFirstSystemPermissionIfPresent() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let alert = springboard.alerts.firstMatch
