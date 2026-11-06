@@ -138,15 +138,19 @@ struct ModelSettingsScreen: View {
             AppText(model.settings.modelsLoading(provider: provider) ? "モデルを読み込み中…" : "利用可能なモデルがありません")
                 .foregroundStyle(.secondary)
         }
-        ForEach(choices, id: \.model) { choice in
-            Button { model.chooseModel(choice.model) } label: {
-                ModelChoiceRow(label: choice.displayName, selected: model.selectedModel == choice.model)
+        Picker("モデル", selection: Binding(get: { model.selectedModel }, set: {
+            if let choice = $0 {
+                model.chooseModel(choice)
             }
-            .foregroundStyle(.primary)
-            .accessibilityIdentifier("model.choice." + choice.id)
-            .accessibilityValue(model.selectedModel == choice.model ? "選択中" : "")
-            .disabled(disabled)
+        })) {
+            ForEach(choices, id: \.model) { choice in
+                Text(choice.displayName).tag(Optional(choice.model))
+                    .accessibilityIdentifier("model.choice." + choice.id)
+            }
         }
+        .pickerStyle(.inline)
+        .labelsHidden()
+        .disabled(disabled)
         ForEach(model.settings.modelErrorMessages(provider: provider), id: \.self) { error in
             ErrorTextView(text: errorText(error: error)).font(.caption).foregroundStyle(.red)
                 .accessibilityIdentifier("model.error")
@@ -159,21 +163,5 @@ struct ModelSettingsScreen: View {
         if let choice = model.settings.modelForProvider(provider: provider) {
             model.chooseModel(choice)
         }
-    }
-}
-
-struct ModelChoiceRow: View {
-    let label: String
-    let selected: Bool
-
-    var body: some View {
-        HStack {
-            Text(label).fontWeight(selected ? .medium : .regular)
-            Spacer()
-            if selected {
-                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
-            }
-        }
-        .contentShape(Rectangle())
     }
 }

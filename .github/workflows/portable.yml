@@ -65,7 +65,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop .#native --command {0}
-          key: ${{ hashFiles('flake.lock') }}
+          key: ${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}
+          cache-targets: false
+          cache-directories: ~/.cargo/targets
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Build desktop, Host and CLI
@@ -73,9 +75,13 @@ jobs:
       - name: Build the SDK runtime beside the Host
         run: nix develop .#native --command node scripts/build-claude-sdk.ts target/debug
       - name: Core contracts and isolated iroh Host
+        env:
+          AGENT_RUNTIME_DIRECTORY: ${{ github.workspace }}/target/debug
         run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p agent-process -p agent-protocol -p agent-transport -p agent-local-host -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Documentation examples
         run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p agent-process -p agent-protocol -p agent-transport -p agent-local-host -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
+        env:
+          AGENT_RUNTIME_DIRECTORY: ${{ github.workspace }}/target/debug
         run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored

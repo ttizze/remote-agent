@@ -63,14 +63,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop . --command {0}
-          key: android-download-${{ hashFiles('flake.lock') }}
+          key: android-download-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}
+          cache-targets: false
+          cache-directories: ~/.cargo/targets
           cache-on-failure: true
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
       - name: Initialize pinned tooling before loading signing credentials
-        run: |
-          # Cargo cache pruning can leave empty directories for Nix's Git fetch cache.
-          rm -rf target/tool-cache/nix
-          scripts/dev-env.sh true
+        run: scripts/dev-env.sh true
       - name: Configure stable distribution signing and version
         env:
           AGENT_ANDROID_KEYSTORE_BASE64: ${{ secrets.BEX_ANDROID_KEYSTORE_BASE64 }}

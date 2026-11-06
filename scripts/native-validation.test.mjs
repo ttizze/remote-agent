@@ -41,7 +41,7 @@ if [[ -n \${NATIVE_VALIDATION_FAIL:-} && "$name $*" == "$NATIVE_VALIDATION_FAIL"
       const result = spawnSync('/bin/bash', [join(root, script), ...args], {
         cwd: root,
         encoding: 'utf8',
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CARGO_TARGET_DIR: target, NATIVE_VALIDATION_LOG: log, NATIVE_VALIDATION_FAIL: failure, AGENT_REMOTE_BUILDER: '', ...overrides },
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NATIVE_VALIDATION_LOG: log, NATIVE_VALIDATION_FAIL: failure, AGENT_REMOTE_BUILDER: '', ...overrides },
       });
       assert.ifError(result.error);
       return { ...result, commands: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
@@ -83,7 +83,7 @@ test('Rust quality validates contracts without native builds, acceptance or clea
   assert.ok(result.commands.includes('cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings'));
   assert.ok(!result.commands.some(command => command.startsWith('remote-run ')));
   assert.ok(result.commands.at(-1).startsWith('just unit-tests '));
-  assert.ok(!result.commands.some(command => /macos-e2e|conversation-ui|clean-builds/.test(command)));
+  assert.ok(!result.commands.some(command => /macos-e2e|conversation-ui/.test(command)));
 });
 
 test('Swift quality checks sources without compiling or starting a Simulator', (t) => {

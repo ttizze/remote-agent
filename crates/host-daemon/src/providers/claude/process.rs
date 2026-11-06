@@ -42,30 +42,30 @@ pub(super) fn executable(
 pub(super) fn runtime() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let path = std::env::var_os("PATH");
     let node = std::env::var_os("AGENT_NODE");
-    let host = std::env::current_exe().map_err(|error| error.to_string())?;
-    runtime_from(&host, node.as_deref(), path.as_deref())
+    let directory = agent_process::runtime_directory().map_err(|error| error.to_string())?;
+    runtime_from(&directory, node.as_deref(), path.as_deref())
 }
 
 fn runtime_from(
-    host: &Path,
+    directory: &Path,
     node: Option<&std::ffi::OsStr>,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    let companion = agent_process::companion_path(host, "agent-claude-sdk.mjs")
-        .map_err(|error| error.to_string())?;
-    let directory = companion.parent().expect("companion has a parent");
     // macOS treats Contents/MacOS as nested code. JavaScript belongs in the
     // sealed Resources directory, rather than alongside its Mach-O executables.
     let (default_node, bridge) = if directory.ends_with("Contents/MacOS") {
         (
-            agent_local_host::bundled_node_path(host).expect("Mac bundle has a runtime path"),
+            agent_local_host::bundled_node_path(directory).expect("Mac bundle has a runtime path"),
             directory
                 .parent()
                 .expect("Contents exists")
                 .join("Resources/agent-claude-sdk.mjs"),
         )
     } else {
-        (std::path::PathBuf::from("node"), companion)
+        (
+            std::path::PathBuf::from("node"),
+            directory.join("agent-claude-sdk.mjs"),
+        )
     };
     let node = executable(node.map(Path::new).unwrap_or(&default_node), path)?;
     if !bridge.is_file() {
@@ -165,7 +165,6 @@ mod tests {
         let resources = root.path().join("Bex Dev.app/Contents/Resources");
         std::fs::create_dir_all(&executables).unwrap();
         std::fs::create_dir_all(&resources).unwrap();
-        let host = executables.join("host-daemon");
         let bundled = root
             .path()
             .join("Bex Dev.app/Contents/Helpers/Bex Node.app/Contents/MacOS")
@@ -175,7 +174,7 @@ mod tests {
         std::fs::write(&bundled, b"bundled runtime").unwrap();
         std::fs::write(&bridge, b"SDK bridge").unwrap();
         assert_eq!(
-            runtime_from(&host, None, None).unwrap(),
+            runtime_from(&executables, None, None).unwrap(),
             (bundled.clone(), bridge.clone())
         );
 
@@ -184,31 +183,31 @@ mod tests {
         let installed = path_directory.join(format!("node{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&installed, b"installed runtime").unwrap();
         let path = std::env::join_paths([&path_directory]).unwrap();
-        assert_eq!(runtime_from(&host, None, Some(&path)).unwrap().0, bundled);
         assert_eq!(
-            runtime_from(&host, Some(installed.as_os_str()), None)
+            runtime_from(&executables, None, Some(&path)).unwrap().0,
+            bundled
+        );
+        assert_eq!(
+            runtime_from(&executables, Some(installed.as_os_str()), None)
                 .unwrap()
                 .0,
             installed
         );
         let missing = path_directory.join("missing-node");
-        assert!(runtime_from(&host, Some(missing.as_os_str()), Some(&path)).is_err());
+        assert!(runtime_from(&executables, Some(missing.as_os_str()), Some(&path)).is_err());
         std::fs::remove_file(&bundled).unwrap();
-        assert!(runtime_from(&host, None, Some(&path)).is_err());
+        assert!(runtime_from(&executables, None, Some(&path)).is_err());
 
-        let standalone = path_directory.join("host-daemon");
         let standalone_bridge = path_directory.join("agent-claude-sdk.mjs");
         std::fs::write(&standalone_bridge, b"SDK bridge").unwrap();
-        for host in [&standalone, &path_directory.join("deps/claude-test")] {
-            assert_eq!(
-                runtime_from(host, None, Some(&path)).unwrap(),
-                (installed.clone(), standalone_bridge.clone())
-            );
-        }
-        assert!(runtime_from(&standalone, None, None).is_err());
+        assert_eq!(
+            runtime_from(&path_directory, None, Some(&path)).unwrap(),
+            (installed.clone(), standalone_bridge.clone())
+        );
+        assert!(runtime_from(&path_directory, None, None).is_err());
         std::fs::remove_file(path_directory.join("agent-claude-sdk.mjs")).unwrap();
         assert!(
-            runtime_from(&standalone, None, Some(&path))
+            runtime_from(&path_directory, None, Some(&path))
                 .unwrap_err()
                 .contains("agent-claude-sdk.mjs")
         );

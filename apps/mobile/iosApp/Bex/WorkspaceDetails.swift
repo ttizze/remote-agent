@@ -26,8 +26,7 @@ struct WorkspaceDiffScreen: View {
                     }.padding(12)
                 }
             } else if files != nil {
-                Text("変更はありません").foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ContentUnavailableView("変更はありません", systemImage: "checkmark.circle")
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -61,23 +60,8 @@ struct WorkspaceDiffCard: View {
     @State private var expanded = true
 
     var body: some View {
-        LazyVStack(spacing: 0) {
-            Button { expanded.toggle() } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
-                    if let additions = file.additions {
-                        Text("+\(additions)").foregroundColor(.green)
-                    }
-                    if let deletions = file.deletions {
-                        Text("−\(deletions)").foregroundColor(.red)
-                    }
-                }.font(.subheadline).padding(12).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("diff.file.\(file.path)")
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
-            if expanded {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(spacing: 0) {
                 if file.rows.isEmpty {
                     Text("テキスト差分はありません").font(.caption).foregroundColor(.secondary).padding()
                 }
@@ -103,9 +87,23 @@ struct WorkspaceDiffCard: View {
                         row.kind == "@" ? Color.secondary.opacity(0.12) : Color.clear)
                 }
             }
+            .background(Color(uiColor: .systemBackground))
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
+                if let additions = file.additions {
+                    Text("+\(additions)").foregroundColor(.green)
+                }
+                if let deletions = file.deletions {
+                    Text("−\(deletions)").foregroundColor(.red)
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            .accessibilityIdentifier("diff.file.\(file.path)")
         }
-        .background(Color(uiColor: .systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -113,12 +111,16 @@ struct WorkspaceAgentsScreen: View {
     let agents: [AgentSummary]
 
     var body: some View {
+        if agents.isEmpty {
+            ContentUnavailableView("サブエージェントが起動するとここに表示されます。", systemImage: "network")
+        } else {
+            agentList
+        }
+    }
+
+    private var agentList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if agents.isEmpty {
-                    Text("サブエージェントが起動するとここに表示されます。")
-                        .foregroundStyle(.secondary)
-                }
                 ForEach(agents, id: \.key) { agent in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {

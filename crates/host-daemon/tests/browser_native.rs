@@ -114,13 +114,7 @@ async fn wait(browser: &Browser, thread: &SessionRef, expression: &str, expected
 #[tokio::test]
 #[ignore = "explicit native UI check; build agent-desktop first"]
 async fn shared_browser_live() {
-    let target = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_owned();
+    let target = agent_process::runtime_directory().unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut desktop = tokio::process::Command::new(target.join("agent-desktop"))
         .env("AGENT_STATE_DIR", root.path())

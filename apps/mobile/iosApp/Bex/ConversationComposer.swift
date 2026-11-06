@@ -66,13 +66,13 @@ struct ConversationComposer: View {
             if !isSideChat, !model.isNewThread, let review = model.files.review(), review.fileCount() > 0 {
                 Button { openTools?(.diff) } label: {
                     HStack(spacing: 10) {
-                        Text("\(review.fileCount())件のファイル")
+                        Text("\(review.fileCount())件のファイル").foregroundStyle(.tint)
                         Text("+\(review.additions())").foregroundColor(.green)
                         Text("−\(review.deletions())").foregroundColor(.red)
                     }
                     .font(.subheadline.monospacedDigit())
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("task.diff")
             }
@@ -139,12 +139,7 @@ struct ConversationComposer: View {
             .padding(7)
             .glassEffect(.regular, in: .rect(cornerRadius: 26))
         }
-        .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
-        .background(LinearGradient(
-            colors: [.clear, Color(UIColor.systemBackground)],
-            startPoint: .top,
-            endPoint: .bottom
-        ))
+        .padding(.horizontal, 12)
     }
 
     /// The expanded composer's attachment, model, and primary actions.
@@ -234,9 +229,10 @@ struct ConversationComposer: View {
                 model.send()
             }
         } label: {
-            Image(systemName: "arrow.up")
+            Image(systemName: "arrow.up").font(.system(size: 16, weight: .semibold))
         }
-        .buttonStyle(ComposerActionButtonStyle())
+        .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.circle)
         .accessibilityLabel(LocalizedStringKey(dictation.isRecording ? "文字起こしして送信" : "送信"))
         .disabled(!model.isConnected || (!model.isNewThread && !hasConversation) || model
             .composerControls.provider == nil || model

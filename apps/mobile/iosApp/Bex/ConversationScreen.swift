@@ -30,7 +30,7 @@ struct ThreadScreen: View {
             .onChange(of: model.draftKey) {
                 expandedItemIds.removeAll()
                 activityExpansionOverrides.removeAll()
-                scroll.goTo(.bottom)
+                scroll.following = true
                 openedDirectory = nil
                 mediaPresentation.reset()
             }
@@ -40,21 +40,10 @@ struct ThreadScreen: View {
             .navigationTitle(isSideChat ? Text("サイドチャット") : conversationTitleText(
                 model.conversationContext.title(), fallback: model.isNewThread ? "新しいタスク" : "タスク"
             ))
+            .navigationSubtitle(ifPresent: isSideChat ? nil : conversationSubtitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !isSideChat {
-                    if !model.isNewThread {
-                        ToolbarItem(placement: .principal) {
-                            Button {
-                                scroll.goTo(.top)
-                            } label: {
-                                conversationTitle
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("会話の先頭へ")
-                            .accessibilityIdentifier("task.top")
-                        }
-                    }
                     ToolbarItemGroup(placement: .navigationBarTrailing) {
                         Button {
                             UIApplication.shared.sendAction(
@@ -89,36 +78,27 @@ struct ThreadScreen: View {
                 let rows = conversationRows(thread.rows, expansion: activityExpansionOverrides)
                 let hasHistory = thread.id != nil && history != nil
                 let ids: [ConversationList.RowID] = (hasHistory ? [.history] : []) + rows.map { .message($0.id) }
-                ConversationList(ids: ids, scroll: scroll, following: scroll.following, request: scroll.request,
-                                 accessibilityValue: threadAccessibilityValue(thread)) { index in
-                    let row = index - (hasHistory ? 1 : 0)
-                    return AnyView(Group {
-                        if row < 0, let session = thread.id, let history {
-                            historyControl(history, session: session)
-                        } else if rows.indices.contains(row) {
-                            conversationRow(rows[row])
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                let showLatest = !scroll.latestVisible && !rows.isEmpty
+                GeometryReader { geometry in
+                    ConversationList(ids: ids, scroll: scroll, following: scroll.following,
+                                     accessibilityValue: threadAccessibilityValue(thread),
+                                     viewportHeight: geometry.size.height) { index in
+                        let row = index - (hasHistory ? 1 : 0)
+                        return AnyView(Group {
+                            if row < 0, let session = thread.id, let history {
+                                historyControl(history, session: session)
+                            } else if rows.indices.contains(row) {
+                                conversationRow(rows[row])
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .environment(\.locale, locale))
                     }
-                    .buttonStyle(.plain)
-                    .environment(\.locale, locale))
+                    .ignoresSafeArea(.container, edges: .bottom)
                 }
                 .id(model.draftKey)
-                .overlay(alignment: .bottom) {
-                    if !scroll.latestVisible, !rows.isEmpty {
-                        Button {
-                            scroll.goTo(.bottom)
-                        } label: {
-                            Image(systemName: "arrow.down").font(.title3.weight(.medium))
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(.glass)
-                        .buttonBorderShape(.circle)
-                        .accessibilityLabel("最新のメッセージへ")
-                        .accessibilityIdentifier("task.latest")
-                        .padding(.bottom, 6)
-                    }
-                }
+                .overlay(alignment: .bottom) { latestButton(visible: showLatest).padding(.bottom, 6) }
             } else if model.isNewThread {
                 ScrollView {
                     newThreadContext
@@ -147,6 +127,19 @@ struct ThreadScreen: View {
                                  isSideChat: isSideChat, openTools: openTools)
         }
     }
+
+    @ViewBuilder private func latestButton(visible: Bool) -> some View {
+        if visible {
+            Button { scroll.following = true } label: {
+                Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("最新のメッセージへ")
+            .accessibilityIdentifier("task.latest")
+        }
+    }
 }
 
 /// Conversation navigation
@@ -156,26 +149,14 @@ extension ThreadScreen {
         return environment.list?.projects.first { $0.roots.contains { $0.path == directory } }
     }
 
-    var conversationTitle: some View {
+    /// The project and environment beneath the title, followed by the connection state while it connects.
+    var conversationSubtitle: String {
         let directory = model.selectedDirectory
-        return VStack(spacing: 2) {
-            HStack(spacing: 6) {
-                conversationTitleText(model.conversationContext.title(), fallback: model.isNewThread ? "チャット" : "タスク")
-                    .font(.headline).lineLimit(1)
-                if environment.connecting {
-                    ProgressView().controlSize(.small)
-                        .tint(.red)
-                        .accessibilityLabel("接続中")
-                        .accessibilityIdentifier("connection.progress")
-                }
-            }
-            Text([
-                project?.name ?? (directory.isEmpty ? "" : URL(fileURLWithPath: directory).lastPathComponent),
-                environment.hostName ?? "Mac"
-            ].filter { !$0.isEmpty }.joined(separator: " · "))
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
+        return [
+            project?.name ?? (directory.isEmpty ? "" : URL(fileURLWithPath: directory).lastPathComponent),
+            environment.hostName ?? "Mac",
+            environment.connecting ? localizedUiText(language: locale.appLanguage, source: "接続中…") : ""
+        ].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     var conversationActions: some View {
@@ -209,17 +190,17 @@ extension ThreadScreen {
                 Text("何を作りましょうか？")
                     .accessibilityIdentifier("task.prompt")
                 Menu {
-                    Button { model.openNewThread(cwd: "") } label: {
-                        Label("チャット", systemImage: "bubble.left.and.bubble.right")
-                    }
-                    ForEach(environment.list?.projects ?? [], id: \.id) { project in
-                        ForEach(project.roots, id: \.path) { root in
-                            Button { model.openNewThread(cwd: root.path) } label: {
-                                Label(project.roots.count == 1 ? project.name : root.path,
-                                      systemImage: root.path == directory ? "checkmark" : "folder")
+                    Picker("フォルダ", selection: Binding(get: { directory }, set: { model.openNewThread(cwd: $0) })) {
+                        Label("チャット", systemImage: "bubble.left.and.bubble.right").tag("")
+                        ForEach(environment.list?.projects ?? [], id: \.id) { project in
+                            ForEach(project.roots, id: \.path) { root in
+                                Label(project.roots.count == 1 ? project.name : root.path, systemImage: "folder")
+                                    .tag(root.path)
                             }
                         }
                     }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
                     if environment.list?.hasMoreProjects == true {
                         Button("さらにプロジェクトを読み込む") { model.perform(.expandProjects) }
                     }
@@ -238,15 +219,13 @@ extension ThreadScreen {
             }
             .font(.title2)
             Menu {
-                ForEach(environment.profiles, id: \.id) { profile in
-                    Button { environment.selectHost?(profile.id) } label: {
-                        if profile.id == model.host {
-                            Label(profile.name, systemImage: "checkmark")
-                        } else {
-                            Text(profile.name)
-                        }
+                Picker("環境", selection: Binding(get: { model.host }, set: { environment.selectHost?($0) })) {
+                    ForEach(environment.profiles, id: \.id) { profile in
+                        Text(profile.name).tag(profile.id)
                     }
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "laptopcomputer")
@@ -274,4 +253,15 @@ extension ThreadScreen {
 
 private func conversationTitleText(_ title: String?, fallback: LocalizedStringKey) -> Text {
     title.map { Text(verbatim: $0) } ?? Text(fallback)
+}
+
+private extension View {
+    /// Side chats keep only their title.
+    @ViewBuilder func navigationSubtitle(ifPresent subtitle: String?) -> some View {
+        if let subtitle {
+            navigationSubtitle(Text(verbatim: subtitle))
+        } else {
+            self
+        }
+    }
 }

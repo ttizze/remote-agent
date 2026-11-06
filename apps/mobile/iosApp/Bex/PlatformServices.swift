@@ -292,19 +292,44 @@ struct AudioSessionConfiguration {
     }
 }
 
-struct SharedFile: Identifiable {
+/// Owns one temporary directory while a preview or share sheet still uses its file.
+final class SharedFile: Identifiable {
     let id = UUID()
     let url: URL
+
+    init(url: URL) {
+        self.url = url
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    }
 }
 
-struct FileShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context _: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-        controller.completionWithItemsHandler = { _, _, _, _ in
-            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+/// Keep UIKit's Copy command available beside primary actions without duplicating it.
+@MainActor func splitCopyCommand(_ elements: [UIMenuElement]) -> (copy: UICommand?, others: [UIMenuElement]) {
+    var copy: UICommand?
+    let others = elements.compactMap { element -> UIMenuElement? in
+        if let command = element as? UICommand,
+           command.action == #selector(UIResponderStandardEditActions.copy(_:)) {
+            copy = copy ?? command
+            return nil
         }
-        return controller
+        if let menu = element as? UIMenu {
+            let children = splitCopyCommand(menu.children)
+            copy = copy ?? children.copy
+            return children.others.isEmpty ? nil : menu.replacingChildren(children.others)
+        }
+        return element
+    }
+    return (copy, others)
+}
+
+struct ShareSheet: UIViewControllerRepresentable {
+    let file: SharedFile
+
+    func makeUIViewController(context _: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [file.url], applicationActivities: nil)
     }
 
     func updateUIViewController(_: UIActivityViewController, context _: Context) {}

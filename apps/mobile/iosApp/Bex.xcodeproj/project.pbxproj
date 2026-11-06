@@ -11,14 +11,12 @@
         F11E00000000000000000001 /* file-icons in Resources */ = {isa = PBXBuildFile; fileRef = F11E00000000000000000002 /* file-icons */; };
         BEE100000000000000000001 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = BEE100000000000000000002; };
 		36EC1BF85BB52BB71505A303 /* ErrorNotices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DCF44CEC164E07252AA639F /* ErrorNotices.swift */; };
-        D80000000000000000000001 /* SwiftUIIntrospect in Frameworks */ = {isa = PBXBuildFile; productRef = D80000000000000000000002; };
 		C0DE00000000000000000801 /* ConversationList.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000802 /* ConversationList.swift */; };
         C0DE00000000000000000701 /* BrowserScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000702 /* BrowserScreen.swift */; };
         C0DE00000000000000000703 /* BrowserCredentialsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000704 /* BrowserCredentialsSheet.swift */; };
 		C0DE00000000000000000601 /* ConversationTextLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000602 /* ConversationTextLayout.swift */; };
 		C0DE0000000000000000029A /* ModelSelectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE0000000000000000039A /* ModelSelectionUITests.swift */; };
 		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
-        D60000000000000000000001 /* SkeletonUI in Frameworks */ = {isa = PBXBuildFile; productRef = D60000000000000000000002; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
@@ -28,11 +26,12 @@
 		A10000000000000000000001 /* IOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* IOSApp.swift */; };
 		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
 		C0DE00000000000000000901 /* AgentError.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000902 /* AgentError.swift */; };
-		A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* QRCodeCaptureViewController.swift */; };
+		A10000000000000000000003 /* QRCodeScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* QRCodeScanner.swift */; };
 		A10000000000000000000006 /* SwiftUIRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* SwiftUIRoot.swift */; };
 		B20000000000000000000001 /* LaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* LaunchUITests.swift */; };
 		FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBDDA3779489C57B929936E /* AppViewModel.swift */; };
 		D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04926FF582DA33DFFF64E6C5 /* TaskList.swift */; };
+		95B75077B9D9E4103B4A851A /* ProjectIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09EF00CA36D34A5FAA72C2F7 /* ProjectIcon.swift */; };
 		665D9C527D3738090B08598A /* TaskConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = C566DFC61A2F26347BE616E6 /* TaskConnections.swift */; };
 		CB49F882BDB040D193481C41 /* ConnectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C92E660B9BEE4F45B54F9762; };
 		FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613A5AAB450EC067108110F3 /* ConversationScreen.swift */; };
@@ -107,13 +106,14 @@
 		A10000000000000000000011 /* IOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* PlatformServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformServices.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000902 /* AgentError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentError.swift; sourceTree = "<group>"; };
-		A10000000000000000000013 /* QRCodeCaptureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeCaptureViewController.swift; sourceTree = "<group>"; };
+		A10000000000000000000013 /* QRCodeScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScanner.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000017 /* SwiftUIRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIRoot.swift; sourceTree = "<group>"; };
 		B20000000000000000000010 /* UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B20000000000000000000011 /* LaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchUITests.swift; sourceTree = "<group>"; };
 		1DBDDA3779489C57B929936E /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		04926FF582DA33DFFF64E6C5 /* TaskList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskList.swift; sourceTree = "<group>"; };
+		09EF00CA36D34A5FAA72C2F7 /* ProjectIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectIcon.swift; sourceTree = "<group>"; };
 		C566DFC61A2F26347BE616E6 /* TaskConnections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConnections.swift; sourceTree = "<group>"; };
 		C92E660B9BEE4F45B54F9762 /* ConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettings.swift; sourceTree = "<group>"; };
 		613A5AAB450EC067108110F3 /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
@@ -167,7 +167,7 @@
 		A10000000000000000000021 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			files = (C30000000000000000000001 /* SwiftTerm in Frameworks */, D60000000000000000000001 /* SkeletonUI in Frameworks */, D80000000000000000000001 /* SwiftUIIntrospect in Frameworks */,);
+			files = (C30000000000000000000001 /* SwiftTerm in Frameworks */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		B20000000000000000000021 /* Frameworks */ = {
@@ -219,7 +219,7 @@
 				F70000000000000000000011 /* TaskLiveActivities.swift */,
 				A10000000000000000000012 /* PlatformServices.swift */,
 				C0DE00000000000000000902 /* AgentError.swift */,
-				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
+				A10000000000000000000013 /* QRCodeScanner.swift */,
 				A10000000000000000000017 /* SwiftUIRoot.swift */,
 				5DCF44CEC164E07252AA639F /* ErrorNotices.swift */,
 				8550A6EE10FA45896134CE4D /* ConversationComposer.swift */,
@@ -243,6 +243,7 @@
 				C0DE00000000000000000203 /* AccountViews.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
+				09EF00CA36D34A5FAA72C2F7 /* ProjectIcon.swift */,
 				C566DFC61A2F26347BE616E6 /* TaskConnections.swift */,
 				C92E660B9BEE4F45B54F9762 /* ConnectionSettings.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
@@ -303,7 +304,7 @@
 			);
 			buildRules = ();
 			dependencies = (F70000000000000000000050,);
-			packageProductDependencies = (C30000000000000000000002, D60000000000000000000002, D80000000000000000000002,);
+			packageProductDependencies = (C30000000000000000000002,);
             name = Bex;
 			productName = bex;
 			productReference = A10000000000000000000010 /* bex.app */;
@@ -338,13 +339,9 @@
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-        D80000000000000000000003 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/siteline/swiftui-introspect"; requirement = {kind = exactVersion; version = 27.1.0; }; };
-        D60000000000000000000003 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/CSolanaM/SkeletonUI.git"; requirement = {kind = exactVersion; version = 2.0.2; }; };
         C30000000000000000000005 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git"; requirement = {kind = exactVersion; version = 1.99.1; }; };
 /* End XCRemoteSwiftPackageReference section */
 /* Begin XCSwiftPackageProductDependency section */
-        D80000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = D80000000000000000000003; productName = SwiftUIIntrospect; };
-        D60000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = D60000000000000000000003; productName = SkeletonUI; };
         C30000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = C30000000000000000000005; productName = SwiftTerm; };
 /* End XCSwiftPackageProductDependency section */
 /* Begin PBXProject section */
@@ -367,7 +364,7 @@
 			productRefGroup = A10000000000000000000033 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-            packageReferences = (C30000000000000000000005, D60000000000000000000003, D80000000000000000000003,);
+            packageReferences = (C30000000000000000000005,);
 			targets = (A10000000000000000000040 /* Bex */, B20000000000000000000040 /* UITests */, F70000000000000000000040 /* TaskActivityExtension */,);
 		};
 /* End PBXProject section */
@@ -413,7 +410,7 @@
 				F70000000000000000000002 /* TaskActivityAttributes.swift in App Sources */,
 				A10000000000000000000002 /* PlatformServices.swift in Sources */,
 				C0DE00000000000000000901 /* AgentError.swift in Sources */,
-				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,
+				A10000000000000000000003 /* QRCodeScanner.swift in Sources */,
 				A10000000000000000000006 /* SwiftUIRoot.swift in Sources */,
 				36EC1BF85BB52BB71505A303 /* ErrorNotices.swift in Sources */,
 				D9577A51AE685A04BA449953 /* ConversationComposer.swift in Sources */,
@@ -437,6 +434,7 @@
 				C0DE00000000000000000202 /* AccountViews.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,
+				95B75077B9D9E4103B4A851A /* ProjectIcon.swift in Sources */,
 				665D9C527D3738090B08598A /* TaskConnections.swift in Sources */,
 				CB49F882BDB040D193481C41 /* ConnectionSettings.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,

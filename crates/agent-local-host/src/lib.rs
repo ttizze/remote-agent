@@ -90,8 +90,7 @@ pub fn bundled_host_path(executable: impl AsRef<Path>) -> PathBuf {
 
 /// The Mac runtime has its own background-only identity instead of inheriting
 /// the desktop app's foreground identity when npm or an MCP tool uses it.
-pub fn bundled_node_path(executable: &Path) -> Option<PathBuf> {
-    let directory = executable.parent()?;
+pub fn bundled_node_path(directory: &Path) -> Option<PathBuf> {
     directory.ends_with("Contents/MacOS").then(|| {
         directory
             .parent()

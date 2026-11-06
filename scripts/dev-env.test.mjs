@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,7 +13,7 @@ function put(root, path, content) {
 }
 
 function fixture(t, builder = '') {
-  const root = mkdtempSync(join(tmpdir(), 'dev-env-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'dev-env-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => {
     const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -23,7 +23,7 @@ function fixture(t, builder = '') {
   if (builder) git('config', 'bex.remoteBuilder', builder);
   for (const path of [
     'flake.nix', 'flake.lock', 'tools/github-release-binary.nix', 'tools/cccc/package.nix',
-    'tools/kache/package.nix', 'tools/node-runtime/package.nix',
+    'tools/cargo/package.nix', 'tools/node-runtime/package.nix',
   ]) put(root, path, '');
   copyFileSync('justfile', join(root, 'justfile'));
   put(root, 'scripts/remote-run.sh', '#!/usr/bin/env bash\nprintf "%s\\n" "$@"\nexit "${DEV_ENV_REMOTE_STATUS:-0}"\n');
@@ -43,7 +43,7 @@ printf 'export NIX_BUILD_TOP=$(mktemp -d)\\n'
   const archive = 'registry/cache/index.crates.io-fixture/archived-1.0.0.crate';
   put(root, `seed/${archive}`, 'archive');
   return {
-    archive, nixLog, sharedHome: join(root, 'seed'),
+    root, archive, nixLog, sharedHome: join(root, 'seed'),
     home: join(root, 'target/cargo-home'),
     run(args = ['true'], overrides = {}) {
       const result = spawnSync('bash', ['scripts/dev-env.sh', ...args], {
@@ -63,6 +63,44 @@ test('local commands reuse Cargo-owned dependency storage without copying it int
   assert.equal(result.stdout, build.sharedHome);
   assert.equal(readFileSync(join(build.sharedHome, build.archive), 'utf8'), 'archive');
   assert.ok(!existsSync(build.home));
+});
+
+test('the build volume owns shared Cargo storage unless CARGO_HOME is explicit', t => {
+  const build = fixture(t);
+  const volume = join(build.root, 'build volume');
+  mkdirSync(volume);
+  spawnSync('git', ['config', 'bex.buildRoot', volume], { cwd: build.root });
+  const command = ['bash', '-c', 'printf "%s" "$CARGO_HOME"'];
+  const result = build.run(command, { CARGO_HOME: '' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, join(volume, '.cargo'));
+  assert.equal(build.run(command).stdout, build.sharedHome);
+});
+
+test('an unavailable build volume fails before selecting tools or creating outputs', t => {
+  const build = fixture(t);
+  spawnSync('git', ['config', 'bex.buildRoot', join(build.root, 'unavailable')], { cwd: build.root });
+  const result = build.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Build storage is unavailable/);
+  assert.ok(!existsSync(build.nixLog));
+  assert.ok(!existsSync(join(build.root, 'target')));
+});
+
+test('test launchers supply public runtime resources without changing ordinary Cargo commands', t => {
+  const build = fixture(t);
+  put(build.root, 'bin/cargo', '#!/usr/bin/env bash\nprintf "%s" "${AGENT_RUNTIME_DIRECTORY-}"\n');
+  for (const args of [['cargo', 'test'], ['cargo', 'nextest', 'run'], ['env', '-u', 'UNUSED', 'cargo', 'test']]) {
+    const result = build.run(args, { AGENT_RUNTIME_DIRECTORY: '' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, join(build.root, 'target/debug'));
+    assert.equal(build.run(args, { AGENT_RUNTIME_DIRECTORY: build.root }).stdout, build.root);
+  }
+  for (const command of ['build', 'run']) {
+    const result = build.run(['cargo', command], { AGENT_RUNTIME_DIRECTORY: '' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+  }
 });
 
 test('portable builds and verification reach the builder and preserve failures', async (t) => {

@@ -452,13 +452,25 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     let cwd = selected.map_or(snapshot.pane.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    for _ in 0..2
-        + usize::from(snapshot.lists.threads.is_none())
-        + usize::from(snapshot.catalog.account.accounts.is_none())
-        + usize::from(selected.is_some())
-        + usize::from(!cwd.is_empty())
-    {
-        let request = read(&mut reader).await;
+    let mut updates = store.subscribe();
+    loop {
+        // Finish connection reads and their background decoration requests
+        // before handing the scripted Host to the individual test.
+        let ready = {
+            let current = updates.borrow_and_update();
+            current.lists.threads.is_some()
+                && current.lists.task_activity.is_some()
+                && current.catalog.account.accounts.is_some()
+                && current.operations.is_empty()
+                && (cwd.is_empty() || current.pane.workspace.review.is_some())
+        };
+        if ready {
+            break;
+        }
+        let request = tokio::select! {
+            request = read(&mut reader) => request,
+            changed = updates.changed() => { changed.unwrap(); continue; }
+        };
         let result = match request["method"].as_str().unwrap() {
             "host/session/list" => snapshot
                 .lists.threads
@@ -505,22 +517,6 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
             .unwrap();
         opening.await.unwrap();
     }
-    // Host state applies whenever it arrives, so tests start after the connection's reads.
-    wait_for(&store, |current| {
-        current.lists.threads.is_some()
-            && current.lists.task_activity.is_some()
-            && current.catalog.account.accounts.is_some()
-            && [
-                op::OperationKey::Models {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                },
-                op::OperationKey::Accounts,
-            ]
-            .iter()
-            .all(|key| !current.operations.contains_key(key))
-            && (cwd.is_empty() || current.pane.workspace.review.is_some())
-    })
-    .await;
     (store, reader, writer)
 }
 async fn read(reader: &mut host_fixture::Reader) -> host_fixture::Request {

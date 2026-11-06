@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -14,9 +14,6 @@ if ((configured !== undefined && !/^-?\d+$/.test(configured)) || !Number.isSafeI
 const jobs = Math.max(1, requested < 0 ? availableParallelism() + requested : requested);
 const cwd = fileURLToPath(new URL('..', import.meta.url));
 const output = resolve(destination);
-const target = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {
-  cwd, encoding: 'utf8',
-})).target_directory;
 mkdirSync(dirname(output), { recursive: true });
 const work = mkdtempSync(join(dirname(output), '.agent-android.'));
 const generated = join(work, 'cargo');
@@ -37,14 +34,12 @@ for (const [signal, status] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
 
 function build(abi: string, slots: number) {
   if (process.exitCode) return Promise.reject(new Error('Android build cancelled'));
-  // Cargo locks its build directory. Separate ABI caches also let Gradle's host
-  // metadata build use the conventional target directory without contention.
   const child = spawn('cargo', [
     'ndk', '--target', abi, '--output-dir', generated,
     'build', '--locked', '--package', 'agent-ffi', '--release',
   ], {
     cwd, detached: true, stdio: ['ignore', 'inherit', 'inherit'],
-    env: { ...process.env, CARGO_TARGET_DIR: join(target, 'android', abi), CARGO_BUILD_JOBS: String(slots) },
+    env: { ...process.env, CARGO_BUILD_JOBS: String(slots) },
   });
   if (child.pid) children.add(child);
   return new Promise<void>((resolve, reject) => {

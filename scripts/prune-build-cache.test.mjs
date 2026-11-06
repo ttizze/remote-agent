@@ -52,7 +52,7 @@ test('iPhone release snapshots retire only older releases for their Xcode versio
 });
 
 test('repository compiler snapshots preserve other jobs, toolchains and refs', () => {
-  const prefix = 'local-rust-macOS-ARM64-xcode-26.6-' + 'a'.repeat(64) + '-iphone-';
+  const prefix = 'cargo-build-macOS-ARM64-xcode-26.6-' + 'a'.repeat(64) + '-iphone-';
   const current = prefix + 'b'.repeat(40);
   const previous = prefix + 'c'.repeat(40);
   const snapshots = [

@@ -2,7 +2,7 @@
 # Usage: scripts/remote-run.sh [--native] SSH-DESTINATION COMMAND...
 # Run COMMAND through scripts/dev-env.sh on a Linux builder, against the files
 # a commit of this worktree would contain. The builder keeps one Git worktree
-# and Cargo target per local worktree. Afterwards, files the command created or
+# per local worktree; Cargo shares compilation outputs. Files created or
 # changed come back: sources, and reports under target/, but not Cargo profiles
 # or tool caches. An unreachable builder fails the command; nothing runs here.
 set -euo pipefail
@@ -75,7 +75,7 @@ git update-index -q --refresh
 {
     git ls-files -z --modified --others --exclude-standard
     find target \( -path target/tool-cache -o -path target/tmp -o -path 'target/.*' \
-        -o \( -type d -exec test -e '{}/.fingerprint' \; \) \) -prune -o -type f -newer "../$key.marker" -print0
+        -o \( -type d \( -exec test -e '{}/.fingerprint' \; -o -exec test -e '{}/.cargo-artifact-lock' \; \) \) \) -prune -o -type f -newer "../$key.marker" -print0
 } | while IFS= read -r -d '' path; do
     [[ -e $path ]] && printf '%s\0' "$path"
 done | tar --create --null --no-recursion --files-from=- --file="../$key.tar" || ((status)) || status=1

@@ -10,10 +10,10 @@ struct SettingsScreen: View {
                 NavigationLink {
                     ConnectionsScreen(model: model)
                 } label: {
-                    HStack {
+                    LabeledContent {
+                        Text("\(model.profiles.count)")
+                    } label: {
                         Label("環境", systemImage: "desktopcomputer")
-                        Spacer()
-                        Text("\(model.profiles.count)").foregroundStyle(.secondary)
                     }
                 }
                 .accessibilityIdentifier("settings.connections")

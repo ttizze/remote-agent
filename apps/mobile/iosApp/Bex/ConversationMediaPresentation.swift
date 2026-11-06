@@ -23,22 +23,19 @@ import SwiftUI
 
     isolated deinit {
         pending?.cancel()
-        for url in [image?.url, sharedFile?.url].compactMap(\.self) {
-            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-        }
     }
 
     func openImage(_ data: Data) {
         imageError = nil
         load { try await writeConversationImage(data) } present: {
-            self.image = SharedFile(url: $0)
+            self.image = $0
         } failed: { self.imageError = $0 }
     }
 
     func share(_ path: String, download: @escaping @MainActor (String) async throws -> URL) {
         shareFailure = nil
         load { try await download(path) } present: {
-            self.sharedFile = SharedFile(url: $0)
+            self.sharedFile = $0
         } failed: { self.shareFailure = FileFailure(path: path, message: $0) }
     }
 
@@ -59,15 +56,12 @@ import SwiftUI
     }
 
     private func load(_ operation: @escaping @MainActor () async throws -> URL,
-                      present: @escaping @MainActor (URL) -> Void,
+                      present: @escaping @MainActor (SharedFile) -> Void,
                       failed: @escaping @MainActor (String) -> Void) {
         perform({
-            let url = try await operation()
-            guard !Task.isCancelled else {
-                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-                return
-            }
-            present(url)
+            let file = try await SharedFile(url: operation())
+            guard !Task.isCancelled else { return }
+            present(file)
         }, failed: failed)
     }
 
@@ -90,16 +84,6 @@ import SwiftUI
         }
     }
 
-    func closeImage() {
-        remove(image)
-        image = nil
-    }
-
-    func closeShare() {
-        remove(sharedFile)
-        sharedFile = nil
-    }
-
     func cancelPending() {
         pending?.cancel()
         pending = nil
@@ -107,18 +91,12 @@ import SwiftUI
 
     func reset() {
         cancelPending()
-        closeImage()
-        closeShare()
+        image = nil
+        sharedFile = nil
         visualization = nil
         imageError = nil
         shareFailure = nil
         linkFailure = nil
-    }
-
-    private func remove(_ file: SharedFile?) {
-        if let file {
-            try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
-        }
     }
 }
 
@@ -127,12 +105,24 @@ struct ConversationMediaPresenter: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .fullScreenCover(item: $presentation.image, onDismiss: presentation.closeImage) { image in
-                ConversationPreview(url: image.url, isImage: true, close: presentation.closeImage)
+            .fullScreenCover(item: $presentation.image) { image in
+                NavigationStack {
+                    ConversationFilePreview(url: image.url)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("閉じる") { presentation.image = nil }
+                                    .accessibilityIdentifier("conversation.preview.close")
+                            }
+                            ToolbarItem(placement: .primaryAction) {
+                                ShareLink(item: image.url) { Image(systemName: "square.and.arrow.up") }
+                                    .accessibilityLabel("保存・共有")
+                                    .accessibilityIdentifier("conversation.preview.share")
+                            }
+                        }
+                }
             }
-            .sheet(item: $presentation.sharedFile, onDismiss: presentation.closeShare) { file in
-                FileShareSheet(url: file.url)
-            }
+            .sheet(item: $presentation.sharedFile) { ShareSheet(file: $0) }
             .sheet(item: $presentation.visualization) { document in
                 NavigationStack {
                     VisualizationWebView(html: document.html)

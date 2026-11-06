@@ -16,27 +16,27 @@ struct ConversationDestination: View {
     let model: ConversationModel
     let environment: ConversationEnvironment
     @State private var tools: WorkspaceDestination?
+    @State private var width: CGFloat = 0
 
     var body: some View {
-        GeometryReader { geometry in
-            ThreadScreen(model: model, environment: environment, conversation: model.conversation, openTools: openTools)
-                .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
-                    guard value.startLocation.x >= geometry.size.width - 32,
-                          value.translation.width < -60,
-                          abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
-                    openTools(nil)
-                })
-        }
-        .navigationDestination(item: $tools) { destination in
-            WorkspaceToolsScreen(
-                model: model,
-                environment: environment,
-                scope: destination.scope,
-                directory: destination.directory
-            ) {
-                tools = nil
+        ThreadScreen(model: model, environment: environment, conversation: model.conversation, openTools: openTools)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
+                guard value.startLocation.x >= width - 32,
+                      value.translation.width < -60,
+                      abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
+                openTools(nil)
+            })
+            .navigationDestination(item: $tools) { destination in
+                WorkspaceToolsScreen(
+                    model: model,
+                    environment: environment,
+                    scope: destination.scope,
+                    directory: destination.directory
+                ) {
+                    tools = nil
+                }
             }
-        }
     }
 
     private func openTools(_ kind: PanelKind?) {
@@ -150,46 +150,32 @@ private struct WorkspaceToolsScreen: View {
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                if panel.surfaces.isEmpty {
-                    Text(title).font(.headline)
-                } else {
-                    Menu {
-                        Section("開いているツール") {
-                            Picker("開いているツール", selection: Binding<UInt64?>(
-                                get: { panel.active },
-                                set: {
-                                    if let id = $0 {
-                                        model.activateWorkbench(id, scope: scope)
-                                    }
-                                }
-                            )) {
-                                ForEach(panel.surfaces, id: \.id) { surface in
-                                    Label(panelTitle(kind: surface.kind), systemImage: surface.kind.icon)
-                                        .tag(Optional(surface.id))
-                                        .accessibilityIdentifier("workbench.tab.\(surface.kind).\(surface.id)")
-                                }
+        .toolbarTitleMenu {
+            if !panel.surfaces.isEmpty {
+                Section("開いているツール") {
+                    Picker("開いているツール", selection: Binding<UInt64?>(
+                        get: { panel.active },
+                        set: {
+                            if let id = $0 {
+                                model.activateWorkbench(id, scope: scope)
                             }
-                            .pickerStyle(.inline).labelsHidden()
                         }
-                        if let selected {
-                            Button(role: .destructive) { model.closeWorkbench(selected, scope: scope) } label: {
-                                Label("このツールを閉じる", systemImage: "xmark")
-                            }
-                            .accessibilityIdentifier("workbench.close.\(selected.id)")
+                    )) {
+                        ForEach(panel.surfaces, id: \.id) { surface in
+                            Label(panelTitle(kind: surface.kind), systemImage: surface.kind.icon)
+                                .tag(Optional(surface.id))
                         }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(title).font(.headline)
-                            Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
-                                .accessibilityHidden(true)
-                        }
-                        .foregroundStyle(.primary)
                     }
-                    .accessibilityIdentifier("workbench.tabs")
+                    .pickerStyle(.inline).labelsHidden()
+                }
+                if let selected {
+                    Button(role: .destructive) { model.closeWorkbench(selected, scope: scope) } label: {
+                        Label("このツールを閉じる", systemImage: "xmark")
+                    }
                 }
             }
+        }
+        .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     ForEach(tools, id: \.key) { tool in

@@ -61,18 +61,12 @@ extension LaunchUITests {
         let latestButton = app.buttons["task.latest"]
         XCTAssertTrue(latestButton.waitUntilExists(timeout: 5))
         latestButton.tap()
-        for scrollToTop in [
-            { app.buttons["task.top"].tap() },
-            { app.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0))
-                .withOffset(CGVector(dx: 0, dy: 32)).tap() }
-        ] {
-            XCTAssertTrue(latest.isHittable)
-            XCTAssertFalse(latestButton.exists)
-            scrollToTop()
-            XCTAssertTrue(latestButton.waitUntilExists(timeout: 5))
-            XCTAssertFalse(latest.isHittable, "Top navigation must not snap back to the latest message")
-            latestButton.tap()
-        }
+        XCTAssertTrue(latest.isHittable)
+        XCTAssertFalse(latestButton.exists)
+        tapStatusBar(app)
+        XCTAssertTrue(latestButton.waitUntilExists(timeout: 5))
+        XCTAssertFalse(latest.isHittable, "Top navigation must not snap back to the latest message")
+        latestButton.tap()
     }
 
     func testSimulatorLoadsEarlierHistoryOnTapAtTheReadingPosition() throws {

@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 : "${ANDROID_HOME:?Run through nix develop .#android-test}"
 mode=${1:-all}
 [[ $mode == all || $mode == terminal ]] || { echo "usage: android-e2e.sh [all|terminal]" >&2; exit 2; }
-target=${CARGO_TARGET_DIR:-target}
+target=$PWD/target
 mkdir -p "$target/qa"
 target=$(cd "$target" && pwd -P)
 port_open() { (: <"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }

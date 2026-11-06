@@ -10,7 +10,7 @@ pub(crate) fn initialize() {
     let user = std::env::var_os("USER");
     let inherited = std::env::var_os("PATH");
     let path = provider_path(
-        &executable,
+        executable.parent().expect("Host executable directory"),
         base.as_ref().map(|base| base.home_dir()),
         user.as_deref(),
         inherited.as_deref(),
@@ -22,14 +22,14 @@ pub(crate) fn initialize() {
 }
 
 fn provider_path(
-    executable: &Path,
+    directory: &Path,
     home: Option<&Path>,
     user: Option<&OsStr>,
     inherited: Option<&OsStr>,
 ) -> Result<OsString, std::env::JoinPathsError> {
     let mut paths = Vec::new();
     // Provider scripts with an env-node shebang also use the bundled runtime.
-    if let Some(node) = agent_local_host::bundled_node_path(executable) {
+    if let Some(node) = agent_local_host::bundled_node_path(directory) {
         paths.push(node.parent().expect("Node has a parent").to_path_buf());
     }
     if let Some(home) = home {
@@ -66,8 +66,8 @@ mod tests {
     #[test]
     fn direct_host_launch_finds_user_tools_and_bundled_node_with_a_minimal_path() {
         let root = tempfile::tempdir().unwrap();
-        let host = root.path().join("Bex Dev.app/Contents/MacOS/host-daemon");
-        let node = agent_local_host::bundled_node_path(&host).unwrap();
+        let directory = root.path().join("Bex Dev.app/Contents/MacOS");
+        let node = agent_local_host::bundled_node_path(&directory).unwrap();
         let home = root.path().join("user");
         let claude = home.join(".nix-profile/bin/claude");
         for binary in [&node, &claude] {
@@ -76,7 +76,7 @@ mod tests {
         }
         let inherited = std::env::join_paths(["/usr/bin", "/bin", "/custom/bin"]).unwrap();
         let path = provider_path(
-            &host,
+            &directory,
             Some(&home),
             Some(OsStr::new("fixture-user")),
             Some(&inherited),
@@ -99,7 +99,7 @@ mod tests {
         );
         assert_eq!(
             provider_path(
-                &host,
+                &directory,
                 Some(&home),
                 Some(OsStr::new("fixture-user")),
                 Some(&path)

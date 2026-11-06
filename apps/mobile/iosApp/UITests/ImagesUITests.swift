@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 private enum WorkspacePreview {
-    case image, media, web, document, download, truncated, unavailable
+    case quickLook, media, web, download, truncated, unavailable
     case text(String)
 }
 
@@ -48,7 +48,7 @@ extension LaunchUITests {
         verifyWorkspaceFileLink(app, index: 1, filename: "hello.txt", expected: .text("日本語のファイル"))
         for (offset, fixture) in [
             ("video.mp4", WorkspacePreview.media), ("audio.wav", .media),
-            ("animation.gif", .web), ("vector.svg", .web), ("document.pdf", .document),
+            ("animation.gif", .quickLook), ("vector.svg", .web), ("document.pdf", .quickLook),
             ("archive.zip", .download), ("large.txt", .truncated), ("unknown.bin", .unavailable)
         ].enumerated() {
             verifyWorkspaceFileLink(app, index: offset + 3, filename: "fixture \(fixture.0)", expected: fixture.1)
@@ -65,7 +65,7 @@ extension LaunchUITests {
     }
 
     private func verifyWorkspaceFileLink(
-        _ app: XCUIApplication, index: Int, filename: String, expected: WorkspacePreview = .image
+        _ app: XCUIApplication, index: Int, filename: String, expected: WorkspacePreview = .quickLook
     ) {
         // File chips replace the authored link captions. The fixture lists the image, text file, then website.
         let link = prefixedElement(app, prefix: "item.fixture-final-").links.element(boundBy: index)
@@ -125,36 +125,37 @@ extension LaunchUITests {
         XCTAssertTrue(app.buttons["file.reload"].exists)
         XCTAssertTrue(app.buttons["file.ai-edit"].exists)
         switch expected {
-        case .image:
-            let preview = app.images["conversation.preview.image"]
+        case .quickLook:
+            let preview = app.descendants(matching: .any)["file.preview"]
             XCTAssertTrue(preview.waitUntilExists(timeout: 15))
             XCTAssertTrue(preview.isHittable)
+            XCTAssertFalse(app.staticTexts["このファイル形式はプレビューできません"].exists)
         case .media:
-            let play = app.buttons.matching(NSPredicate(format: "label IN %@", ["Play", "再生"])).firstMatch
-            if play.exists {
-                play.tap()
-            } else {
-                app.otherElements["file.preview.media"].tap()
-            }
-            // AVKit hides its controls during playback. Keep the control's stable identity across label changes
-            // and exercise it immediately after observing playback, before its chrome disappears.
-            let toggle = app.buttons["Play/Pause"]
-            let playing = expectation(for: NSPredicate(format: "label IN %@", ["Pause", "一時停止"]),
-                                      evaluatedWith: toggle)
-            wait(for: [playing], timeout: 15)
-            toggle.tap()
-            let paused = expectation(for: NSPredicate(format: "label IN %@", ["Play", "再生"]), evaluatedWith: toggle)
-            wait(for: [paused], timeout: 5)
+            XCTAssertTrue(app.otherElements["file.preview.media"].waitUntilExists(timeout: 15))
+            verifyMediaPlayback(app)
         case .web:
             let content = app.webViews.firstMatch
             XCTAssertTrue(content.waitUntilExists(timeout: 15))
             XCTAssertTrue(content.isHittable)
             XCTAssertGreaterThan(content.frame.height, 100)
-        case .document:
-            XCTAssertFalse(app.staticTexts["このファイル形式はプレビューできません"].exists)
         default:
             break
         }
+    }
+
+    private func verifyMediaPlayback(_ app: XCUIApplication) {
+        let play = app.buttons.matching(NSPredicate(format: "label IN %@", ["Play", "再生"])).firstMatch
+        if play.exists {
+            play.tap()
+        } else {
+            app.otherElements["file.preview.media"].tap()
+        }
+        let toggle = app.buttons["Play/Pause"]
+        wait(for: [expectation(for: NSPredicate(format: "label IN %@", ["Pause", "一時停止"]),
+                               evaluatedWith: toggle)], timeout: 15)
+        toggle.tap()
+        wait(for: [expectation(for: NSPredicate(format: "label IN %@", ["Play", "再生"]),
+                               evaluatedWith: toggle)], timeout: 5)
     }
 
     func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {
@@ -167,28 +168,18 @@ extension LaunchUITests {
         )).firstMatch
         showConversationElement(image, in: app, upward: false)
         image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(app.buttons["conversation.preview.close"].waitUntilExists(timeout: 10))
-        let preview = app.images["conversation.preview.image"]
-        XCTAssertTrue(preview.waitUntilExists(timeout: 10))
-        XCTAssertTrue(preview.isHittable)
-        preview.pinch(withScale: 2, velocity: 1)
-        XCTAssertFalse(app.staticTexts["conversation.preview.position"].exists)
-        let save = app.buttons["conversation.preview.save"]
-        let ready = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: save)
-        wait(for: [ready], timeout: 15)
+        // QuickLook zooms only the tapped image; the native toolbar shares or saves it.
+        let done = app.buttons["conversation.preview.close"]
+        XCTAssertTrue(done.waitUntilExists(timeout: 10))
+        app.windows.firstMatch.pinch(withScale: 2, velocity: 1)
         captureScreen(app, named: "Only the tapped image opens even in a conversation with many images")
+        app.buttons["conversation.preview.share"].tap()
+        let save = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label IN %@", ["Save Image", "画像を保存"])).firstMatch
+        XCTAssertTrue(save.waitUntilExists(timeout: 10))
         save.tap()
-        let saved = expectation(
-            for: NSPredicate(format: "label == %@ AND enabled == false", "保存済み"),
-            evaluatedWith: save
-        )
-        wait(for: [saved], timeout: 20)
-        app.swipeLeft()
-        app.swipeRight()
-        XCTAssertEqual(save.label, "保存済み")
-        XCTAssertFalse(save.isEnabled)
-        XCTAssertFalse(app.staticTexts["conversation.preview.position"].exists)
-        app.buttons["conversation.preview.close"].tap()
+        wait(for: [expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)], timeout: 20)
+        done.tap()
         XCTAssertTrue(image.waitUntilExists(timeout: 10))
     }
 
@@ -204,15 +195,11 @@ extension LaunchUITests {
         let inlineImage = app.images["インライン画像"]
         showConversationElement(inlineImage, in: app, upward: true)
         inlineImage.tap()
-        let save = app.buttons["conversation.preview.save"]
-        let close = app.buttons["conversation.preview.close"]
-        XCTAssertTrue(close.waitUntilExists(timeout: 10))
-        XCTAssertTrue(app.images["conversation.preview.image"].waitUntilExists(timeout: 10))
-        XCTAssertTrue(save.exists)
-        XCTAssertLessThan(save.frame.midX, close.frame.midX)
-        XCTAssertGreaterThan(save.frame.midX, app.frame.midX)
-        captureScreen(app, named: "Expanded image with Save and Close at top right")
-        close.tap()
+        let done = app.buttons["conversation.preview.close"]
+        XCTAssertTrue(done.waitUntilExists(timeout: 10))
+        XCTAssertTrue(app.buttons["conversation.preview.share"].exists)
+        captureScreen(app, named: "Expanded image in QuickLook")
+        done.tap()
         XCTAssertTrue(inlineImage.waitUntilExists(timeout: 5))
         captureScreen(app, named: "Markdown image decoded in the conversation")
         showConversationElement(hostImage, in: app, upward: false)

@@ -41,6 +41,7 @@ extension LaunchUITests {
         if fast.value as? String != "オン" {
             fast.tap()
         }
+        XCTAssertEqual(fast.value as? String, "オン", app.debugDescription)
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("Keep this existing draft")
         app.buttons["BackButton"].tap()

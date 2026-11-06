@@ -234,7 +234,11 @@ extension LaunchUITests {
                        "Streaming growth of the same row must keep its final text visible")
         assertConversationTextMargins(completed, in: app)
         captureScreen(app, named: "Long Markdown stream completed with draft preserved")
-        app.buttons["task.top"].tap()
+        tapStatusBar(app)
+        let viewport = app.descendants(matching: .any)["task.detail"]
+        XCTAssertGreaterThanOrEqual(viewport.frame.maxY, message.frame.maxY,
+                                    "Conversation must draw behind the translucent composer")
+        captureScreen(app, named: "Conversation behind diff and composer without keyboard")
         let code = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", "Markdown stream fixture"))
             .firstMatch
         XCTAssertTrue(code.waitUntilExists(timeout: 10))
@@ -243,6 +247,8 @@ extension LaunchUITests {
         message.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.5)).tap()
         message.typeText(" while reading")
         waitForDraftText(message, text: "Keep this draft while reading")
+        XCTAssertGreaterThanOrEqual(viewport.frame.maxY, message.frame.maxY)
+        captureScreen(app, named: "Conversation behind diff and composer with keyboard")
         let latest = app.buttons["task.latest"]
         XCTAssertTrue(latest.exists, "Editing must retain the older reading position")
         latest.tap()

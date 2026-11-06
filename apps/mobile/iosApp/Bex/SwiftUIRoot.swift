@@ -209,36 +209,6 @@ struct AppNotice: View {
     }
 }
 
-private struct QrScannerSheet: View {
-    let completion: (String?) -> Void
-
-    var body: some View {
-        NavigationStack {
-            QrScannerController(completion: completion)
-                .navigationTitle("QRコードを読み取る")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("キャンセル") { completion(nil) }
-                            .accessibilityIdentifier("scanner.cancel")
-                    }
-                }
-        }
-        .accessibilityIdentifier("scanner.sheet")
-    }
-}
-
-private struct QrScannerController: UIViewControllerRepresentable {
-    @Environment(\.locale) private var locale
-    let completion: (String) -> Void
-
-    func makeUIViewController(context _: Context) -> QrCaptureViewController {
-        QrCaptureViewController(language: locale.appLanguage, completion: completion)
-    }
-
-    func updateUIViewController(_: QrCaptureViewController, context _: Context) {}
-}
-
 /// Keep native editing ahead of Store publication; every edit still dispatches synchronously.
 struct BufferedTextInput<Content: View>: View {
     @Binding private var value: String

@@ -234,7 +234,8 @@ extension LaunchUITests {
         let screenshot = XCTAttachment(screenshot: reopened.screenshot())
         screenshot.name = "Downloaded file in native share sheet"; screenshot.lifetime = .keepAlways; add(screenshot)
         reopened.buttons["header.closeButton"].tap()
-        XCTAssertTrue(file.waitUntilExists(timeout: 10)); file.tap()
+        // Sharing returns to the file it shared.
+        XCTAssertTrue(reopened.textViews["file.editor"].waitUntilExists(timeout: 10))
         XCTAssertTrue(reopened.buttons["file.ai-edit"].waitUntilExists(timeout: 10))
         reopened.buttons["file.ai-edit"].tap()
         XCTAssertTrue(message.waitUntilExists(timeout: 10))

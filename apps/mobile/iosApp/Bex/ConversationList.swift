@@ -2,20 +2,10 @@ import Observation
 import SwiftUI
 import UIKit
 
+/// Following keeps the latest message in view; status-bar taps reach the start natively.
 @MainActor @Observable final class ConversationScrollState {
-    struct Request: Equatable {
-        let id = UUID()
-        let edge: VerticalEdge
-    }
-
     var following = true
     var latestVisible = true
-    private(set) var request: Request?
-
-    func goTo(_ edge: VerticalEdge) {
-        following = edge == .bottom
-        request = Request(edge: edge)
-    }
 }
 
 struct ConversationList: UIViewControllerRepresentable {
@@ -27,8 +17,8 @@ struct ConversationList: UIViewControllerRepresentable {
     let ids: [RowID]
     let scroll: ConversationScrollState
     let following: Bool
-    let request: ConversationScrollState.Request?
     let accessibilityValue: String
+    let viewportHeight: CGFloat
     let row: (Int) -> AnyView
 
     func makeUIViewController(context _: Context) -> ConversationListController {
@@ -36,8 +26,8 @@ struct ConversationList: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: ConversationListController, context _: Context) {
-        controller.update(ids: ids, following: following, request: request,
-                          accessibilityValue: accessibilityValue, row: row)
+        controller.viewportHeight = viewportHeight
+        controller.update(ids: ids, following: following, accessibilityValue: accessibilityValue, row: row)
     }
 
     static func dismantleUIViewController(_ controller: ConversationListController, coordinator _: ()) {
@@ -48,15 +38,6 @@ struct ConversationList: UIViewControllerRepresentable {
 /// Observe the collection's actual layout, including inset changes that do not resize its controller.
 private final class ConversationCollectionView: UICollectionView {
     var didLayout: (() -> Void)?
-
-    override var bounds: CGRect {
-        didSet {
-            // Bounds invalidation alone reuses compositional sections with their previous absolute width.
-            if bounds.width != oldValue.width {
-                collectionViewLayout.invalidateLayout()
-            }
-        }
-    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -86,6 +67,7 @@ final class ConversationListController: UIViewController {
     private let scroll: ConversationScrollState
     private let layout: ConversationListLayout
     let collectionView: UICollectionView
+    var viewportHeight: CGFloat?
     private var source = Source(ids: [], row: { _ in AnyView(EmptyView()) })
     private var indices: [ConversationList.RowID: Int] = [:]
     private var pending: Source?
@@ -95,8 +77,6 @@ final class ConversationListController: UIViewController {
     private var anchor: Anchor?
     private var lastLayout: (geometry: Geometry, offset: CGPoint)?
     private var scrollingToTop = false
-    private var requestedEdge: VerticalEdge?
-    private var request: ConversationScrollState.Request?
     private var visibilityUpdate: Task<Void, Never>?
     private var data: UICollectionViewDiffableDataSource<Int, ConversationList.RowID>!
 
@@ -137,16 +117,12 @@ final class ConversationListController: UIViewController {
         }
     }
 
-    func update(ids: [ConversationList.RowID], following: Bool, request: ConversationScrollState.Request?,
-                accessibilityValue: String, row: @escaping (Int) -> AnyView) {
+    func update(ids: [ConversationList.RowID], following: Bool, accessibilityValue: String,
+                row: @escaping (Int) -> AnyView) {
         loadViewIfNeeded()
         self.following = following
         if following {
-            anchor = nil
-        }
-        if self.request != request {
-            self.request = request
-            requestedEdge = request?.edge
+            // Returning to the latest message also ends an unfinished status-bar scroll.
             anchor = nil
             scrollingToTop = false
         }
@@ -172,7 +148,7 @@ final class ConversationListController: UIViewController {
         let changed = source.ids != pending.ids
         let nextIndices = changed
             ? Dictionary(uniqueKeysWithValues: pending.ids.enumerated().map { ($0.element, $0.offset) }) : indices
-        if !following, requestedEdge == nil,
+        if !following,
            anchor.flatMap({ nextIndices[$0.id] }) == nil {
             captureAnchor(allowed: nextIndices)
         }
@@ -214,10 +190,21 @@ final class ConversationListController: UIViewController {
 
     private func didLayoutCollectionView() {
         guard active else { return }
+        updateViewportInsets()
         applyPending()
         guard !applying else { return }
         positionViewport()
         publishVisibility()
+    }
+
+    /// SwiftUI lays out the composer; only the collection extends beneath its safe-area inset.
+    private func updateViewportInsets() {
+        guard let viewportHeight else { return }
+        let inherited = view.safeAreaInsets.bottom - additionalSafeAreaInsets.bottom
+        let bottom = max(0, view.bounds.height - viewportHeight - inherited)
+        if additionalSafeAreaInsets.bottom != bottom {
+            additionalSafeAreaInsets.bottom = bottom
+        }
     }
 
     private var geometry: Geometry {
@@ -232,7 +219,7 @@ final class ConversationListController: UIViewController {
     private func positionViewport() {
         guard !source.ids.isEmpty else { return }
         let moving = collectionView.isTracking || collectionView.isDragging || collectionView.isDecelerating
-        if !following, requestedEdge == nil, !scrollingToTop,
+        if !following, !scrollingToTop,
            anchor == nil || moving || (lastLayout?.geometry == geometry
                && lastLayout?.offset != collectionView.contentOffset) {
             captureAnchor(allowed: indices)
@@ -241,16 +228,14 @@ final class ConversationListController: UIViewController {
         guard !moving, !scrollingToTop else { return }
         let insets = collectionView.adjustedContentInset
         let bottom = layout.bottomOffset(viewportHeight: collectionView.bounds.height, insets: insets)
-        let edge = requestedEdge ?? (following ? .bottom : nil)
         let offset: CGFloat
-        if let edge {
-            offset = edge == .bottom ? bottom : -insets.top
+        if following {
+            offset = bottom
         } else if let anchor, let frame = geometry.anchorFrame {
             offset = max(-insets.top, min(bottom, frame.minY - anchor.displacement - insets.top))
         } else {
             return
         }
-        requestedEdge = nil
         let target = CGPoint(x: -insets.left, y: offset)
         if collectionView.contentOffset != target {
             collectionView.setContentOffset(target, animated: false)
@@ -346,7 +331,6 @@ extension ConversationListController: UICollectionViewDelegate {
     }
 
     func scrollViewWillBeginDragging(_: UIScrollView) {
-        requestedEdge = nil
         scroll.following = false
         following = false
         anchor = nil
@@ -365,7 +349,6 @@ extension ConversationListController: UICollectionViewDelegate {
     }
 
     func scrollViewShouldScrollToTop(_: UIScrollView) -> Bool {
-        requestedEdge = nil
         scroll.following = false
         following = false
         anchor = nil

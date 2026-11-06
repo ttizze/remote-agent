@@ -4,33 +4,18 @@ import UIKit
 final class ConversationListLayout: UICollectionViewCompositionalLayout {
     private var alignment: CGFloat = 0
 
+    /// Rows span the safe area's width minus their margins; UIKit resizes them with the viewport.
     static func make() -> ConversationListLayout {
-        let configuration = UICollectionViewCompositionalLayoutConfiguration()
-        configuration.contentInsetsReference = .none
-        // The compositional container omits UIScrollView's explicit horizontal insets.
-        // Read the actual viewport when UIKit requests a section, including after a resize.
-        weak var owner: ConversationListLayout?
-        let layout = ConversationListLayout(sectionProvider: { _, environment in
-            let width: CGFloat
-            if let view = owner?.collectionView {
-                let insets = view.adjustedContentInset
-                width = view.bounds.width - insets.left - insets.right
-            } else {
-                width = environment.container.effectiveContentSize.width
-            }
-            let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(
-                widthDimension: .fractionalWidth(1), heightDimension: .estimated(100)
-            ))
-            let group = NSCollectionLayoutGroup.vertical(layoutSize: NSCollectionLayoutSize(
-                widthDimension: .absolute(max(1, width - 32)), heightDimension: .estimated(100)
-            ), subitems: [item])
-            let section = NSCollectionLayoutSection(group: group)
-            section.interGroupSpacing = 12
-            section.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
-            return section
-        }, configuration: configuration)
-        owner = layout
-        return layout
+        let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1), heightDimension: .estimated(100)
+        ))
+        let group = NSCollectionLayoutGroup.vertical(layoutSize: NSCollectionLayoutSize(
+            widthDimension: .fractionalWidth(1), heightDimension: .estimated(100)
+        ), subitems: [item])
+        let section = NSCollectionLayoutSection(group: group)
+        section.interGroupSpacing = 12
+        section.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16)
+        return ConversationListLayout(section: section)
     }
 
     override func prepare() {
@@ -44,17 +29,13 @@ final class ConversationListLayout: UICollectionViewCompositionalLayout {
     }
 
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
-        // Even a fixed-width section depends on viewport height because short histories align to its bottom.
+        // Short histories align to the viewport's bottom, so its height matters as well as its width.
         super.shouldInvalidateLayout(forBoundsChange: newBounds)
             || newBounds.height != collectionView?.bounds.height
     }
 
     override var collectionViewContentSize: CGSize {
         var size = super.collectionViewContentSize
-        if let view = collectionView {
-            let insets = view.adjustedContentInset
-            size.width = max(0, view.bounds.width - insets.left - insets.right)
-        }
         size.height += alignment
         return size
     }

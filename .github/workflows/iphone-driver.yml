@@ -36,7 +36,8 @@ jobs:
         with:
           cmd-format: nix develop . --command {0}
           add-job-id-key: false
-          shared-key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}-macos
+          shared-key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}-macos
+          cache-targets: false
           save-if: false
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:

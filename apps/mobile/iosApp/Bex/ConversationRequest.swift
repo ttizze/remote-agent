@@ -68,14 +68,14 @@ struct RequestPanel: View {
                 responseEditor
             }
             FlowLayout {
-                Button("確認して送信") { submitResponse() }.buttonStyle(RequestButtonStyle(.primary))
-                Button("辞退") { respond(.elicitation(action: .decline)) }.buttonStyle(RequestButtonStyle(.danger))
+                Button("確認して送信") { submitResponse() }.requestButtonStyle(.primary)
+                Button("辞退") { respond(.elicitation(action: .decline)) }.requestButtonStyle(.danger)
                 Button("キャンセル") { respond(.elicitation(action: .cancel)) }
-                    .buttonStyle(RequestButtonStyle(.secondary))
+                    .requestButtonStyle(.secondary)
             }
         case .toolExecution:
             responseEditor
-            Button("実行結果を送信") { submitResponse() }.buttonStyle(RequestButtonStyle(.primary))
+            Button("実行結果を送信") { submitResponse() }.requestButtonStyle(.primary)
         }
     }
 
@@ -95,7 +95,7 @@ struct RequestPanel: View {
             FlowLayout {
                 ForEach(choices, id: \.id) { choice in
                     Button(choice.label) { respond(answer(choice.id)) }
-                        .buttonStyle(RequestButtonStyle(choiceTone(effect: choice.effect)))
+                        .requestButtonStyle(choiceTone(effect: choice.effect))
                         .accessibilityIdentifier(
                             choice.id == choices.first?.id ? "request.accept" : "request.choice.\(choice.id)"
                         )
@@ -116,29 +116,13 @@ struct RequestPanel: View {
     }
 }
 
-/// Request actions in the tone the core ranks them.
-struct RequestButtonStyle: ButtonStyle {
-    let tone: ActionTone
-    @Environment(\.isEnabled) private var isEnabled
-
-    init(_ tone: ActionTone) {
-        self.tone = tone
-    }
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(tone == .primary ? Color.white : tone == .danger ? Color.red : Color.primary)
-            .padding(.horizontal, 14).padding(.vertical, 12)
-            .background(background, in: RoundedRectangle(cornerRadius: 14))
-            .opacity(configuration.isPressed ? 0.7 : isEnabled ? 1 : 0.5)
-    }
-
-    private var background: Color {
+extension View {
+    /// Request actions in the tone the core ranks them.
+    @ViewBuilder func requestButtonStyle(_ tone: ActionTone) -> some View {
         switch tone {
-        case .primary: .accentColor
-        case .danger: .red.opacity(0.12)
-        case .secondary: Color(uiColor: .tertiarySystemFill)
+        case .primary: buttonStyle(.borderedProminent).controlSize(.large)
+        case .danger: buttonStyle(.bordered).tint(.red).controlSize(.large)
+        case .secondary: buttonStyle(.bordered).tint(.primary).controlSize(.large)
         }
     }
 }
@@ -267,9 +251,10 @@ struct QuestionPanel: View {
                 HStack {
                     Spacer(minLength: 0)
                     Button("スキップする", action: skip)
-                        .font(.body.weight(.semibold))
-                        .padding(.horizontal, 20).padding(.vertical, 12)
-                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .tint(.primary)
+                        .controlSize(.large)
                         .accessibilityIdentifier("request.skip")
                 }
             } else {
@@ -346,24 +331,18 @@ extension ConversationComposer {
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("request.back")
         }
-        let enabled = question.canAdvance && model.isConnected
-            && model.composer.requestPhase(id: question.requestId) != .running
         Button {
             // Commit native text before the answer is read.
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             composerFocused = false
             model.answerQuestion(question.requestId, .advance)
         } label: {
-            AppText(question.action)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(enabled ? Color.white : Color.primary)
-                .padding(.horizontal, 16)
-                .frame(height: 32)
-                .background(enabled ? Color.accentColor : Color(UIColor.systemGray4), in: Capsule())
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
+            AppText(question.action).font(.subheadline.weight(.semibold))
         }
-        .disabled(!enabled)
+        .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.capsule)
+        .disabled(!question.canAdvance || !model.isConnected
+            || model.composer.requestPhase(id: question.requestId) == .running)
         .accessibilityIdentifier("request.send")
     }
 

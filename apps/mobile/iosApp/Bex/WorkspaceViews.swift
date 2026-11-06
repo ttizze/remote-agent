@@ -100,9 +100,6 @@ private struct WorkspaceDirectoryScreen: View {
     @State private var refreshCompletion: CheckedContinuation<Void, Never>?
     @State private var selected: FileEntry?
     @State private var selectedLine: UInt32?
-    @State private var sharedFile: SharedFile?
-    @State private var error: ErrorText?
-    @State private var busy = false
 
     private var root: String {
         fileHostPath(path: directory, home: home)
@@ -115,29 +112,33 @@ private struct WorkspaceDirectoryScreen: View {
     var body: some View {
         let tree = files.fileTree(key: key)
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if let error = error ?? tree.error {
-                        AppNotice(text: error).padding(.horizontal, 16).padding(.vertical, 8)
+            List {
+                if let error = tree.error {
+                    AppNotice(text: error)
+                }
+                if tree.truncated {
+                    Text("ほかにも一致する項目があります。検索語を絞り込んでください。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(tree.rows, id: \.path) { row in
+                    Button { send(.click(path: row.path, additive: false, range: false)) } label: {
+                        fileRow(row)
                     }
-                    if tree.truncated {
-                        Text("ほかにも一致する項目があります。検索語を絞り込んでください。")
-                            .font(.caption).foregroundStyle(.secondary).padding(16)
-                    }
-                    if tree.rows.isEmpty {
-                        emptyState(pending: tree.pending, error: tree.error, query: tree.query)
-                    }
-                    ForEach(tree.rows, id: \.path) { row in
-                        Button { send(.click(path: row.path, additive: false, range: false)) } label: {
-                            fileRow(row)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(row.path)
-                        .accessibilityIdentifier("file.\(row.label)")
-                        .accessibilityAddTraits(row.selected ? .isSelected : [])
-                        .id(row.path)
-                    }
-                }.padding(.vertical, 8)
+                    .foregroundStyle(.primary)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16 + CGFloat(row.depth) * 18, bottom: 0, trailing: 16))
+                    .listRowBackground(row.selected ? Color.primary.opacity(0.08) : nil)
+                    .accessibilityLabel(row.path)
+                    .accessibilityIdentifier("file.\(row.label)")
+                    .accessibilityAddTraits(row.selected ? .isSelected : [])
+                    .id(row.path)
+                }
+            }
+            .listStyle(.plain)
+            .accessibilityIdentifier("files.list")
+            .overlay {
+                if tree.rows.isEmpty {
+                    emptyState(pending: tree.pending, error: tree.error, query: tree.query)
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
@@ -182,29 +183,31 @@ private struct WorkspaceDirectoryScreen: View {
         }
         .sheet(item: $selected) { entry in
             WorkspaceFileSheet(files: files, text: fileDraft(entry.path), perform: perform,
-                               entry: entry, line: selectedLine, download: downloadFile, share: download) { path in
+                               entry: entry, line: selectedLine, download: downloadFile) { path in
                 aiEdit(path)
                 selected = nil
                 close()
             }
         }
-        .sheet(item: $sharedFile) { item in FileShareSheet(url: item.url) }
     }
 
     @ViewBuilder private func emptyState(pending: Bool, error: ErrorText?, query: String) -> some View {
         if pending {
-            ProgressView().frame(maxWidth: .infinity).padding(20)
+            ProgressView()
+        } else if error != nil {
+            ContentUnavailableView {
+                Label { AppText("ファイルを表示できません") } icon: { Image(systemName: "exclamationmark.triangle") }
+            } actions: {
+                Button("再試行") { send(.refresh) }
+            }
+        } else if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            ContentUnavailableView.search(text: query)
         } else {
-            VStack(alignment: .leading, spacing: 4) {
-                AppText(error == nil ? "ファイルが見つかりません" : "ファイルを表示できません").fontWeight(.bold)
-                if error != nil {
-                    Button("再試行") { send(.refresh) }
-                } else {
-                    AppText(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        ? "作業スペースは空です。" : "別の語句で検索してください。").font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }.padding(16)
+            ContentUnavailableView {
+                Label { AppText("ファイルが見つかりません") } icon: { Image(systemName: "folder") }
+            } description: {
+                AppText("作業スペースは空です。")
+            }
         }
     }
 
@@ -232,10 +235,7 @@ private struct WorkspaceDirectoryScreen: View {
                 ProgressView().controlSize(.small)
             }
         }
-        .padding(.leading, 8 + CGFloat(row.depth) * 18).padding(.trailing, 8)
-        .frame(minHeight: 42)
-        .background(row.selected ? Color.primary.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 12))
-        .contentShape(Rectangle()).padding(.horizontal, 8)
+        .contentShape(Rectangle())
     }
 
     private func finishRefresh() {
@@ -245,17 +245,5 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func send(_ action: FileTreeAction) {
         perform(.fileTree(key: key, action: action)) { _, _ in }
-    }
-
-    private func download(_ path: String) {
-        guard !busy else { return }
-        busy = true; error = nil
-        Task {
-            defer { busy = false }
-            do {
-                let url = try await downloadFile(path)
-                selected = nil; sharedFile = SharedFile(url: url)
-            } catch { self.error = errorText(error: error.localizedDescription) }
-        }
     }
 }

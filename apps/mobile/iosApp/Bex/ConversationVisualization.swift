@@ -37,40 +37,37 @@ struct ConversationVisualization: View {
 }
 
 /// HTML receives no native message handlers, cookies, file origin or popup capability.
-struct VisualizationWebView: UIViewRepresentable {
+struct VisualizationWebView: View {
     let html: String
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+    @State private var page: WebPage?
 
-    func makeUIView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        let view = WKWebView(frame: .zero, configuration: configuration)
-        view.navigationDelegate = context.coordinator
-        view.isOpaque = false
-        view.accessibilityIdentifier = "visualize.webview"
-        return view
-    }
-
-    func updateUIView(_ view: WKWebView, context: Context) {
-        guard context.coordinator.html != html else { return }
-        context.coordinator.html = html
-        view.loadHTMLString(html, baseURL: nil)
-    }
-
-    static func dismantleUIView(_ view: WKWebView, coordinator _: Coordinator) {
-        view.stopLoading()
-        view.navigationDelegate = nil
-    }
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        var html: String?
-        func webView(_: WKWebView, decidePolicyFor action: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            let url = action.request.url
-            decisionHandler(url?.scheme == "about" && action.navigationType == .other ? .allow : .cancel)
+    var body: some View {
+        ZStack {
+            if let page {
+                WebView(page).webViewContentBackground(.hidden)
+            } else {
+                ProgressView()
+            }
         }
+        .accessibilityIdentifier("visualize.webview")
+        .task(id: html) {
+            let page = page ?? WebPage(configuration: Self.configuration, navigationDecider: InitialDocumentOnly())
+            self.page = page
+            page.load(html: html)
+        }
+    }
+
+    private static var configuration: WebPage.Configuration {
+        var configuration = WebPage.Configuration()
+        configuration.websiteDataStore = .nonPersistent()
+        return configuration
+    }
+}
+
+/// Pages stay on the document they were given; links and scripted navigation do not leave it.
+struct InitialDocumentOnly: WebPage.NavigationDeciding {
+    @MainActor func decidePolicy(for action: WebPage.NavigationAction,
+                                 preferences _: inout WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
+        action.request.url?.scheme == "about" && action.navigationType == .other ? .allow : .cancel
     }
 }

@@ -7,7 +7,7 @@ enum ConversationMarkdownContent {
 }
 
 enum ConversationAttributedText {
-    static func attributedText(_ blocks: [String], dark _: Bool, attachmentWidth _: CGFloat) -> NSAttributedString {
+    static func attributedText(_ blocks: [String], dark _: Bool) -> NSAttributedString {
         let text = NSMutableAttributedString()
         for (index, block) in blocks.enumerated() {
             let quoted = block.hasPrefix(">")
@@ -104,6 +104,9 @@ struct ConversationTextViewTests {
         check(reopened.frame.height < view.frame.height / 10, "Changed text must not reuse an old size")
         reopened.layoutIfNeeded()
         check(reopened.text == short.joined(separator: "\n"), "Changed text must not show an old layout")
+        reopened.update(blocks: ["Short answer"], dark: false, sizeCategory: .large)
+        check(reopened.measure(width: 320).width == 320,
+              "Short messages must fill the proposed column width instead of shrinking to their text")
         print("Conversation text view tests passed")
     }
 }

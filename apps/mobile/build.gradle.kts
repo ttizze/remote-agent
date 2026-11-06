@@ -41,6 +41,7 @@ val rustBuildInputs =
         "Cargo.lock",
         "flake.nix",
         "flake.lock",
+        "tools/cargo/package.nix",
         ".cargo/config.toml",
         "scripts/rust-build-inputs.ts",
         "apps/mobile/build.gradle.kts",

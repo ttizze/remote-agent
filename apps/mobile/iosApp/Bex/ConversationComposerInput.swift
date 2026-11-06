@@ -88,16 +88,13 @@ struct ComposerModelControls: View {
         .accessibilityIdentifier("model.settings")
         if !controls.efforts.isEmpty {
             Menu {
-                ForEach(controls.efforts, id: \.self) { effort in
-                    Button { model.chooseEffort(effort) } label: {
-                        if effort == controls.effort {
-                            Label(effort, systemImage: "checkmark")
-                        } else {
-                            Text(effort)
-                        }
+                Picker("推論の強度", selection: Binding(get: { controls.effort }, set: model.chooseEffort)) {
+                    ForEach(controls.efforts, id: \.self) { effort in
+                        Text(effort).tag(effort).accessibilityIdentifier("model.effort." + effort)
                     }
-                    .accessibilityIdentifier("model.effort." + effort)
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
             } label: {
                 ReasoningStrengthIcon(level: controls.effortLevel, count: controls.efforts.count)
                     .frame(width: 44, height: 44)
@@ -117,27 +114,13 @@ struct ComposerStopButton: View {
 
     var body: some View {
         Button { stop(turnId) } label: {
-            Image(systemName: "stop.fill").font(.system(size: 15))
+            Image(systemName: "stop.fill").font(.system(size: 15, weight: .semibold))
         }
-        .buttonStyle(ComposerActionButtonStyle(tint: .red))
+        .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.circle)
+        .tint(.red)
         .disabled(interrupting)
         .accessibilityLabel(LocalizedStringKey(interrupting ? "停止中" : "停止"))
         .accessibilityIdentifier("turn.interrupt.\(turnId)")
-    }
-}
-
-struct ComposerActionButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-    var tint: Color = .accentColor
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(isEnabled ? Color.white : Color.primary)
-            .frame(width: 32, height: 32)
-            .background(isEnabled ? tint : Color(UIColor.systemGray4), in: Circle())
-            .opacity(configuration.isPressed ? 0.7 : 1)
-            .frame(width: 44, height: 44)
-            .contentShape(Rectangle())
     }
 }

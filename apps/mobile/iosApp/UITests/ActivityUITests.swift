@@ -3,6 +3,24 @@ import XCTest
 
 /// XCTest selectors remain on LaunchUITests for the fixture runner.
 extension LaunchUITests {
+    func testSimulatorComposerGrowsToFitWrappedDraft() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[success] [immediate] Verify composer wrapping")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        let input = app.descendants(matching: .any)["task.message"]
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitUntilExists(timeout: 5))
+        waitForStableFrame(input)
+        let singleLineHeight = input.frame.height
+        let draft = String(repeating: "Keep this draft while reading the conversation. ", count: 5)
+        input.typeText(draft)
+        waitForDraftText(input, text: draft)
+        waitForStableFrame(input)
+        XCTAssertGreaterThan(input.frame.height, singleLineHeight + 20,
+                             "Wrapped text must expand the composer vertically")
+        captureScreen(app, named: "Wrapped draft expands the native composer")
+    }
+
     func testSimulatorCanStartAConversationInAProject() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This isolated conversation-start E2E runs only in the iOS Simulator")
@@ -41,6 +59,7 @@ extension LaunchUITests {
         XCTAssertFalse(app.buttons["task.send"].isEnabled, "Sent input must clear after completion")
         XCTAssertFalse((input.value as? String ?? "").contains("Start the simulator conversation"))
         XCTAssertFalse(app.staticTexts["notice"].exists, "Successful completion must not leave an error")
+        captureScreen(app, named: "Native composer enclosure and translucent change capsule")
         app.buttons["task.new"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["task.empty"].waitUntilExists(timeout: 10))
         XCTAssertTrue(input.isHittable)

@@ -10,6 +10,12 @@ threads-required = "num-test-threads"
 filter = 'test(=opening_a_task_uses_cached_history_while_the_host_read_is_pending)'
 threads-required = "num-test-threads"
 
+# Sidebar updates have a three-second propagation deadline for two clients.
+# Give the real Host and provider the same capacity as the other latency contracts.
+[[profile.default.overrides]]
+filter = 'test(=completed_conversations_refresh_the_sidebar_without_manual_reload)'
+threads-required = "num-test-threads"
+
 # Conformance cases own both provider processes; conversation cases also use
 # four Tokio workers. Preserve RPC deadlines without competing Host startups.
 [[profile.default.overrides]]

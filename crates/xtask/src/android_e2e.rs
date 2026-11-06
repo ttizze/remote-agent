@@ -128,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_fixture_is_available_to_instrumentation_and_rejects_incomplete_results() {
-        let fixture = Fixture::new().await;
+        let fixture = Fixture::new();
         let root = fixture.project("adb").await;
         let log = root.join("network.log");
         let program = Fixture::executable(&root);

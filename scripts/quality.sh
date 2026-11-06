@@ -20,7 +20,7 @@ if [[ $language == apple || $language == rust ]]; then
     integration_targets=(
         --test errors --test iroh --test iroh_host --test browser_bridge
         --test management --test codex_accounts --test claude --test adapter_conformance
-        --test crate_boundaries --test build_cleanup --test diagnostics
+        --test crate_boundaries --test diagnostics
     )
     just unit-tests "${integration_targets[@]}"
 fi

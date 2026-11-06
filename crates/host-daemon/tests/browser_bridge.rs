@@ -86,13 +86,7 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
     let root = tempfile::tempdir().unwrap();
     #[cfg(target_os = "macos")]
     let mut desktop = {
-        let target = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_owned();
+        let target = agent_process::runtime_directory().unwrap();
         let mut desktop = tokio::process::Command::new(target.join("agent-desktop"))
             .env("AGENT_STATE_DIR", root.path())
             .env("AGENT_ISOLATED_HOST", "1")

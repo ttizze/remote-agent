@@ -169,8 +169,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop .#android-build --command {0}
-          key: android-downloads-${{ hashFiles('flake.lock') }}
-          # Gradle caches the JNI libraries and bindings, without Cargo intermediates.
+          key: android-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}
+          cache-directories: ~/.cargo/targets
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
@@ -219,13 +219,6 @@ jobs:
         run: nix develop .#android-build --command node scripts/prune-build-cache.ts "$GRADLE_CACHE_KEY"
       - name: Enable emulator hardware acceleration
         run: sudo chmod a+rw /dev/kvm
-      - name: Restore Linux Host compiler dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          cmd-format: &host-rust-cache-command nix develop .#host-build --command {0}
-          shared-key: &host-rust-cache-key wsl-runtime-host-build-${{ hashFiles('flake.lock') }}
-          # The WSL job owns this cache; Android consumes its Host dependencies.
-          save-if: false
       - name: Build isolated Android Host fixtures
         run: nix develop .#host-build --command cargo build --locked -p host-fixture -p codex-app-server -p agent-process --bins
       - name: Free space for Android emulator userdata
@@ -289,38 +282,25 @@ jobs:
       - &apple-nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - *prepare-zsh
-      - id: dependency-cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop .#native --command {0}
-          key: macos-rust-xcode-26.6-${{ hashFiles('flake.lock') }}
+          key: macos-rust-xcode-26.6-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}
+          cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - &restore-local-rust-cache
-        name: Restore compiled repository Rust crates
-        id: local-rust-cache
+      - &restore-cargo-cache
+        name: Restore shared Cargo builds
+        id: cargo-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         env:
-          AGENT_LOCAL_RUST_CACHE_PREFIX: local-rust-${{ runner.os }}-${{ runner.arch }}-xcode-26.6-${{ hashFiles('flake.lock', '.kache.toml', 'tools/kache/package.nix', 'scripts/ci-rust-cache.sh') }}-${{ github.job }}
+          AGENT_CARGO_CACHE_PREFIX: cargo-build-${{ runner.os }}-${{ runner.arch }}-xcode-26.6-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}-${{ github.job }}
         with:
-          # Parent-directory metadata can still be updated by macOS housekeeping.
-          path: &local-rust-cache-paths ${{ runner.temp }}/kache-store/*
-          # Publish changed workspace sources too; preserve only the newest snapshot.
-          key: ${{ env.AGENT_LOCAL_RUST_CACHE_PREFIX }}-${{ github.sha }}
-          restore-keys: ${{ env.AGENT_LOCAL_RUST_CACHE_PREFIX }}-
+          path: &cargo-cache-paths ~/.cargo/targets
+          key: ${{ env.AGENT_CARGO_CACHE_PREFIX }}-${{ github.sha }}
+          restore-keys: ${{ env.AGENT_CARGO_CACHE_PREFIX }}-
       - name: Mac contracts and acceptance
-        env: &local-rust-cache-env
-          RUSTC_WRAPPER: ${{ github.workspace }}/scripts/ci-rust-cache.sh
-          AGENT_CI_DEPENDENCIES_RESTORED: ${{ steps.dependency-cache.outputs.cache-hit }}
-          KACHE_CACHE_DIR: ${{ runner.temp }}/kache-store
-          KACHE_RUNTIME_DIR: ${{ runner.temp }}/kache-runtime
-          # Hold a whole Mac build: a smaller store evicts its early, unchanged GPUI crates first.
-          KACHE_MAX_SIZE: 8GiB
-          # Bound the snapshot even when target/ still shares the cached files.
-          KACHE_GC_EVICT_SHARED: '1'
-          # Only the final sweep may change the store that is about to be archived.
-          KACHE_AUTO_GC: '0'
         run: |
           set -o pipefail
           mkdir -p target/qa
@@ -329,31 +309,22 @@ jobs:
           just macos-unit-tests
           just macos-e2e
           CHECKS
-      - &finish-local-rust-cache
-        name: Finish the local Rust compiler cache
-        id: finish-local-rust-cache
-        if: ${{ !cancelled() }}
-        # A cache failure must not prevent acceptance of the completed build.
-        # Save below only when shutdown succeeds; never snapshot a live store.
-        continue-on-error: true
-        env: *local-rust-cache-env
-        run: nix develop '.#${{ github.job == 'mac' && 'native' || 'ios-build' }}' --command node scripts/finish-ci-rust-cache.ts
-      - &save-local-rust-cache
-        name: Save compiled repository Rust crates
-        id: save-local-rust-cache
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && !inputs.ios-tests && steps.finish-local-rust-cache.outcome == 'success' && steps.local-rust-cache.outputs.cache-primary-key != '' && steps.local-rust-cache.outputs.cache-hit != 'true' }}
+      - &save-cargo-cache
+        name: Save shared Cargo builds
+        id: save-cargo-cache
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && !inputs.ios-tests && steps.cargo-cache.outputs.cache-primary-key != '' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: *local-rust-cache-paths
-          key: ${{ steps.local-rust-cache.outputs.cache-primary-key }}
-      - &prune-local-rust-cache
-        name: Retire replaced repository compiler snapshots
-        if: ${{ !cancelled() && steps.save-local-rust-cache.outcome == 'success' }}
+          path: *cargo-cache-paths
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+      - &prune-cargo-cache
+        name: Retire replaced Cargo build snapshots
+        if: ${{ !cancelled() && steps.save-cargo-cache.outcome == 'success' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          COMPILER_CACHE_KEY: ${{ steps.local-rust-cache.outputs.cache-primary-key }}
+          COMPILER_CACHE_KEY: ${{ steps.cargo-cache.outputs.cache-primary-key }}
         run: nix develop '.#${{ github.job == 'mac' && 'native' || 'ios-build' }}' --command node scripts/prune-build-cache.ts "$COMPILER_CACHE_KEY"
       - name: Retain Apple acceptance logs and result bundles
         if: always()
@@ -397,16 +368,16 @@ jobs:
       - *apple-xcode
       - *apple-nix
       - *prepare-zsh
-      - id: dependency-cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop .#ios-build --command {0}
           # Either Apple job may be unavailable; each must publish its own cache.
-          key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}
+          key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}
+          cache-targets: false
           # Focused tests may omit the desktop renderer; only full builds publish.
           save-if: ${{ github.ref == 'refs/heads/main' && !inputs.ios-tests }}
           cache-on-failure: true
-      - *restore-local-rust-cache
+      - *restore-cargo-cache
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         id: ios-cache
         continue-on-error: true
@@ -414,14 +385,13 @@ jobs:
           path: ${{ env.AGENT_IOS_SWIFT_CACHE_PATHS }}
           key: >-
             ios-swift-xcode-26.6-${{ hashFiles(
-              'flake.lock', 'Cargo.toml', 'Cargo.lock', '.cargo/config.toml',
+              'flake.lock', 'tools/cargo/package.nix', 'Cargo.toml', 'Cargo.lock', '.cargo/config.toml',
               'crates/agent-bindgen/**', 'crates/agent-core/Cargo.toml', 'crates/agent-core/uniffi.toml',
               'crates/agent-core/src/**', 'crates/agent-ffi/**',
               'crates/agent-protocol/Cargo.toml', 'crates/agent-protocol/src/**',
               'crates/xtask/src/ios_*.rs', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
           restore-keys: ios-swift-xcode-26.6-
       - name: Build the iPhone test runner before the app
-        env: *local-rust-cache-env
         run: |
           nix develop .#ios-build --command bash -euo pipefail <<'RUNNER'
           cargo build --locked -p xtask
@@ -437,10 +407,9 @@ jobs:
           compression-level: 0
           retention-days: 1
       - name: iPhone contracts and shared test build
-        env: *local-rust-cache-env
         run: |
           set -o pipefail
-          export AGENT_IOS_USE_CACHED_HOST_GRAPH="${{ steps.dependency-cache.outputs.cache-hit == 'true' && steps.local-rust-cache.outputs.cache-matched-key != '' }}"
+          export AGENT_IOS_USE_CACHED_HOST_GRAPH="${{ steps.cargo-cache.outputs.cache-matched-key != '' }}"
           mkdir -p target/qa
           nix develop .#ios-build --command just ios-unit-tests 2>&1 | tee target/qa/quality.log
           if [[ -n "$AGENT_IOS_TESTS" ]]; then
@@ -476,9 +445,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SWIFT_CACHE_KEY: ${{ steps.ios-cache.outputs.cache-primary-key }}
         run: nix develop .#ios-build --command node scripts/prune-build-cache.ts "$SWIFT_CACHE_KEY"
-      - *finish-local-rust-cache
-      - *save-local-rust-cache
-      - *prune-local-rust-cache
+      - *save-cargo-cache
+      - *prune-cargo-cache
       - name: Retain Apple acceptance logs and result bundles
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -525,8 +493,10 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          cmd-format: *host-rust-cache-command
-          shared-key: *host-rust-cache-key
+          cmd-format: nix develop .#host-build --command {0}
+          key: wsl-runtime-${{ hashFiles('flake.lock', 'tools/cargo/package.nix') }}
+          cache-targets: false
+          cache-directories: ~/.cargo/targets
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build and package the Linux Host for the Windows revision
         run: |
@@ -632,12 +602,16 @@ jobs:
         run: node scripts/build-claude-sdk.ts target/debug
       - name: Core contracts and isolated iroh Host
         if: ${{ !inputs.release-tag }}
+        env:
+          AGENT_RUNTIME_DIRECTORY: ${{ github.workspace }}/target/debug
         run: cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p agent-process -p agent-protocol -p agent-transport -p agent-local-host -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Documentation examples
         if: ${{ !inputs.release-tag }}
         run: cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p agent-process -p agent-protocol -p agent-transport -p agent-local-host -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch' && !inputs.release-tag
+        env:
+          AGENT_RUNTIME_DIRECTORY: ${{ github.workspace }}/target/debug
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
       - name: Package verified Windows development binaries
         if: ${{ !inputs.release-tag }}

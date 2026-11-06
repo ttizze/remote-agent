@@ -31,11 +31,12 @@ unit-tests *targets:
     node --test crates/agent-protocol/src/browser_input.test.cjs crates/host-daemon/src/browser/password-fill.test.cjs apps/desktop/src/browser/native/snapshot.test.cjs || failed=1
     pwsh -NoLogo -NoProfile -NonInteractive -File tools/windows-fxc/update.test.ps1 || failed=1
     npm --prefix crates/host-daemon/src/providers/claude/sdk test || failed=1
-    node scripts/build-claude-sdk.ts "${CARGO_TARGET_DIR:-target}/debug" || failed=1
+    node scripts/build-claude-sdk.ts target/debug || failed=1
     cargo build --locked -p agent-process --bin agent-provider-supervisor || failed=1
+    export AGENT_RUNTIME_DIRECTORY="${AGENT_RUNTIME_DIRECTORY:-$PWD/target/debug}"
     cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings "$@" &
     rust_pid=$!
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/agent-peer" cargo test --locked --no-fail-fast --manifest-path tools/agent-peer/Cargo.toml || failed=1
+    cargo test --locked --no-fail-fast --manifest-path tools/agent-peer/Cargo.toml || failed=1
     wait "$rust_pid" || failed=1
     exit "$failed"
 
@@ -54,15 +55,6 @@ macos-unit-tests:
 
 ios-unit-tests:
     bash scripts/test-ios-scroll.sh
-
-# Prune inactive Cargo outputs older than 3 days or over the 32 GiB idle budget, here and on the remote builder.
-clean-builds *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cargo xtask clean-builds "$@"
-    if [[ -n ${AGENT_REMOTE_BUILDER-} ]]; then
-        scripts/remote-run.sh --native "$AGENT_REMOTE_BUILDER" cargo xtask clean-builds "$@"
-    fi
 
 # Build and verify the certificate-signed Host executable (dev or release).
 build-host-macos profile="release":
@@ -99,7 +91,7 @@ ios-markdown:
 macos-e2e:
     # Match the workspace test feature graph instead of rebuilding GPUI and core without test support.
     cargo build --locked --workspace --bins --tests --features agent-core/bindings
-    cargo nextest run --locked --workspace --lib --bins --test browser_native --features agent-core/bindings --run-ignored only -E 'binary(browser_native) & test(=shared_browser_live)'
+    AGENT_RUNTIME_DIRECTORY="$PWD/target/debug" cargo nextest run --locked --workspace --lib --bins --test browser_native --features agent-core/bindings --run-ignored only -E 'binary(browser_native) & test(=shared_browser_live)'
 
 # Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
@@ -155,7 +147,7 @@ conversation-ui *options:
 [group('portable')]
 iroh-e2e:
     cargo build --locked --package agent-process --bin agent-provider-supervisor
-    cargo test --locked --package host-fixture --test iroh_host
+    AGENT_RUNTIME_DIRECTORY="$PWD/target/debug" cargo test --locked --package host-fixture --test iroh_host
 
 # Lint and validate contracts without building native clients or starting E2E.
 quality language="apple":
@@ -167,7 +159,7 @@ quality language="apple":
 [group('portable')]
 mutants-diff *args:
     mkdir -p target/mutation-diff
-    env -u CARGO_TARGET_DIR PROPTEST_RNG_SEED=20260925 cargo mutants --copy-target=false --package agent-core --file crates/agent-core/src/presentation/diff.rs --output target/mutation-diff --jobs 2 --build-timeout 900 --timeout 60 --cargo-arg=--locked --cargo-arg=--lib "$@" -- presentation::diff::tests
+    PROPTEST_RNG_SEED=20260925 cargo mutants --copy-target=false --package agent-core --file crates/agent-core/src/presentation/diff.rs --output target/mutation-diff --jobs 2 --build-timeout 900 --timeout 60 --cargo-arg=--locked --cargo-arg=--lib "$@" -- presentation::diff::tests
 
 # Verify bounded Git path decoding with the dedicated `nix develop .#kani` environment.
 # Keep unwinding assertions enabled; a timeout is a failure, not a proof.

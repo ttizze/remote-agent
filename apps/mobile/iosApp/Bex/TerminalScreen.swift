@@ -157,7 +157,7 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
         let copy = UIAction(title: copyTitle, image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
             self?.copy(nil)
         }
-        return UIMenu(children: [copy] + suggestedActions.compactMap(removingCopyCommand))
+        return UIMenu(children: [copy] + splitCopyCommand(suggestedActions).others)
     }
 
     override func paste(_ sender: Any?) {

@@ -177,6 +177,10 @@ extension LaunchUITests {
         XCTAssertGreaterThan(search.frame.midY, app.frame.height * 0.8)
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.exists)
+        // Expansion persists across launches; this scenario begins with a closed project.
+        if project.value as? String == "開いています" {
+            project.tap()
+        }
         XCTAssertEqual(project.value as? String, "閉じています")
         let compose = app.buttons["tasks.new.project.simulator-project"]
         XCTAssertTrue(compose.isHittable)
@@ -186,10 +190,11 @@ extension LaunchUITests {
         XCTAssertFalse(app.buttons["tasks.new.chat"].exists)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(search.waitUntilExists(timeout: 10))
+        XCTAssertEqual(project.value as? String, "閉じています")
         search.tap(); search.typeText("no-matching-conversation-unique\n")
         XCTAssertFalse(app.buttons["tasks.project.simulator-project"].exists)
         search.buttons.firstMatch.tap()
-        app.buttons["close"].tap()
+        closeSearch(app)
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         XCTAssertTrue(project.waitUntilExists(timeout: 10))
@@ -291,7 +296,7 @@ extension LaunchUITests {
         settings.tap()
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitUntilExists(timeout: 10))
-        XCTAssertEqual(choice.value as? String, "選択中")
+        XCTAssertTrue(choice.isSelected)
         captureScreen(app, named: "Restored model and account picker")
         dismissModelSettings(app)
         expandComposer(app)
@@ -336,6 +341,7 @@ extension LaunchUITests {
 
             XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
             XCTAssertTrue(app.descendants(matching: .any)[answerID].waitUntilExists(timeout: 15))
+            assertComposerAtBottomWithKeyboardHidden(in: app)
             XCTAssertEqual(message.value as? String, "Keep this conversation draft")
             backToTaskList(app, swipe: !cycle.isMultiple(of: 2))
 
@@ -352,10 +358,9 @@ extension LaunchUITests {
             backToTaskList(app, swipe: !cycle.isMultiple(of: 2))
             row.tap()
             XCTAssertTrue(app.descendants(matching: .any)[answerID].waitUntilExists(timeout: 15))
+            assertComposerAtBottomWithKeyboardHidden(in: app)
         }
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Task reopened after repeated back and cancelled edge swipes"
-        screenshot.lifetime = .keepAlways; add(screenshot)
+        captureScreen(app, named: "Task reopened after repeated back and cancelled edge swipes")
     }
 
     private func assertUnavailableScannerCanBeCancelled(_ app: XCUIApplication) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Share tooling and Cargo downloads; keep compilation outputs per worktree.
+# Cargo shares compilation outputs; public artifacts stay in each worktree.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Portable builder checks do not need the mobile SDKs in the default shell.
@@ -34,9 +34,9 @@ if [[ ! -e $agent_root/target/CACHEDIR.TAG && ! -L $agent_root/target/CACHEDIR.T
     (set -o noclobber; printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' > "$agent_root/target/CACHEDIR.TAG") ||
         [[ -f $agent_root/target/CACHEDIR.TAG && ! -L $agent_root/target/CACHEDIR.TAG ]]
 fi
-agent_cargo_home=${CARGO_HOME:-$HOME/.cargo}
+agent_cargo_home=${CARGO_HOME:-${agent_build_root:-$HOME}/.cargo}
 export XDG_CACHE_HOME="$agent_root/target/tool-cache"
-agent_env_key=$({ git hash-object flake.nix flake.lock tools/github-release-binary.nix tools/cccc/package.nix tools/kache/package.nix tools/node-runtime/package.nix; uname -sm; printf '%s\n' "$agent_env_shell"; } | git hash-object --stdin)
+agent_env_key=$({ git hash-object flake.nix flake.lock tools/github-release-binary.nix tools/cccc/package.nix tools/cargo/package.nix tools/node-runtime/package.nix; uname -sm; printf '%s\n' "$agent_env_shell"; } | git hash-object --stdin)
 agent_env_dir="$(git rev-parse --git-common-dir)/agent-dev-env/$agent_env_key"
 mkdir -p "$agent_env_dir"
 if [[ ! -f $agent_env_dir/env.sh ]]; then
@@ -66,12 +66,12 @@ if [[ -n $agent_original_build_top ]]; then
 else
     unset NIX_BUILD_TOP
 fi
-export CARGO_TARGET_DIR="$agent_root/target"
+unset CARGO_TARGET_DIR
 # Cargo owns locking and cache maintenance for its shared dependency storage.
 export CARGO_HOME="$agent_cargo_home"
 # Cargo builds and verification, and recipes in the portable group, run on the
 # configured Linux builder. Builds for Apple targets and all else stay here.
-agent_portable() {
+agent_command() {
     if [[ ${1-} == env ]]; then
         shift
         while [[ ${1-} == -u || ${1-} == *=* ]]; do
@@ -79,7 +79,13 @@ agent_portable() {
             shift
         done
     fi
-    case "${1-} ${2-}" in
+    printf '%s %s' "${1-}" "${2-}"
+}
+agent_command_kind=$(agent_command "$@")
+agent_portable() {
+    local command_kind=$1
+    shift
+    case "$command_kind" in
         "cargo build" | "cargo rustc" | "cargo run" | "cargo check" | "cargo clippy" | "cargo test" | "cargo nextest" | "cargo mutants")
             local previous='' argument
             for argument; do
@@ -90,14 +96,19 @@ agent_portable() {
             ;;
         "just "[!-]*)
             just --dump --dump-format json |
-                jq -e --arg recipe "$2" '.recipes[$recipe].attributes // [] | any(.group? == "portable")' > /dev/null
+                jq -e --arg recipe "${command_kind#just }" '.recipes[$recipe].attributes // [] | any(.group? == "portable")' > /dev/null
             ;;
         *) return 1 ;;
     esac
 }
 export AGENT_REMOTE_BUILDER
 AGENT_REMOTE_BUILDER=$(git config --get bex.remoteBuilder || true)
-if [[ -n $AGENT_REMOTE_BUILDER ]] && agent_portable "$@"; then
+if [[ -n $AGENT_REMOTE_BUILDER ]] && agent_portable "$agent_command_kind" "$@"; then
     exec scripts/remote-run.sh --native "$AGENT_REMOTE_BUILDER" "$@"
 fi
+case "$agent_command_kind" in
+    "cargo test" | "cargo nextest")
+        export AGENT_RUNTIME_DIRECTORY="${AGENT_RUNTIME_DIRECTORY:-$agent_root/target/debug}"
+        ;;
+esac
 exec "$@"

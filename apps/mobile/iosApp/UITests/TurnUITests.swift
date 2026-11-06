@@ -90,7 +90,7 @@ extension LaunchUITests {
         XCTAssertTrue(text.waitUntilExists(timeout: 5))
         XCTAssertTrue((text.value as? String ?? "").contains("Second paragraph"))
         text.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 25, dy: 10)).press(forDuration: 1.2)
-        let copy = app.menuItems["コピー"]
+        let copy = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Copy", "コピー"])).firstMatch
         XCTAssertTrue(copy.waitUntilExists(timeout: 5)); copy.tap()
         let message = app.textFields["task.message"]
         // Focus expands the idle composer before its edit menu opens.
@@ -155,7 +155,7 @@ extension LaunchUITests {
             sideMessage.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
             sideMessage.typeText("Keep my side draft")
             openWorkbenchTool(app, "terminal")
-            tapWhenStable(app.buttons["workbench.tabs"])
+            openWorkbenchTabs(app)
             XCTAssertTrue(workbenchTab(app, "sideChat").exists)
             dismissWorkbenchMenu(app)
             openWorkbenchTool(app, "sideChat")
@@ -186,7 +186,7 @@ extension LaunchUITests {
         let side = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "サイドチャットで質問")).firstMatch
         if !side.exists {
-            let forward = app.buttons["Forward"]
+            let forward = app.buttons.matching(NSPredicate(format: "label IN %@", ["Forward", "進む"])).firstMatch
             XCTAssertTrue(forward.waitUntilExists(timeout: 5)); forward.tap()
         }
         XCTAssertTrue(side.waitUntilExists(timeout: 5)); side.tap()
@@ -250,7 +250,7 @@ extension LaunchUITests {
         waitForStableFrame(sent)
         // User messages select in place like answers.
         sent.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 25, dy: 10)).press(forDuration: 1.2)
-        let copy = app.menuItems["コピー"]
+        let copy = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Copy", "コピー"])).firstMatch
         XCTAssertTrue(copy.waitUntilExists(timeout: 5)); copy.tap()
         let composer = app.textFields["task.message"]
         composer.tap()

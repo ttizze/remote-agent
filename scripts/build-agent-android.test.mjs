@@ -34,14 +34,9 @@ const args = process.argv.slice(2);
 const log = entry => fs.appendFileSync(path.join(root, 'events'), JSON.stringify(entry) + '\\n');
 const wait = async name => { while (!fs.existsSync(path.join(root, name))) await new Promise(resolve => setTimeout(resolve, 10)); };
 (async () => {
-  if (args[0] === 'metadata') {
-    log({ stage: 'metadata' });
-    console.log(JSON.stringify({ target_directory: path.join(root, 'custom cache') }));
-    return;
-  }
   const abi = args[args.indexOf('--target') + 1];
   fs.writeFileSync(path.join(root, abi + '.pid'), String(process.pid));
-  log({ stage: 'start', abi, jobs: Number(process.env.CARGO_BUILD_JOBS), target: process.env.CARGO_TARGET_DIR, args });
+  log({ stage: 'start', abi, jobs: Number(process.env.CARGO_BUILD_JOBS), args });
   if (mode === 'fail-' + abi) {
     await wait((abi === 'arm64-v8a' ? 'x86_64' : 'arm64-v8a') + '.descendant');
     process.exit(37);
@@ -131,7 +126,6 @@ test('ABI builds overlap within the CPU budget and publish both JNI libraries', 
   const starts = build.events().filter(event => event.stage === 'start');
   assert.deepEqual(starts.map(event => event.abi).sort(), ['arm64-v8a', 'x86_64']);
   assert.deepEqual(starts.map(event => event.jobs).sort(), [2, 3]);
-  assert.equal(new Set(starts.map(event => event.target)).size, 2);
   assert.ok(starts.every(event => event.args.includes('--locked') && event.args.includes('--release')));
   assert.ok(!build.events().some(event => event.stage === 'exit'));
   for (const { abi } of starts) build.release(abi);

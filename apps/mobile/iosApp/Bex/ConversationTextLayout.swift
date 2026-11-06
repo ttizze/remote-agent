@@ -9,8 +9,6 @@ final class ConversationTextView: UITextView {
     static let rule = NSAttributedString.Key("agent.rule")
 
     private var content: ConversationTextContent?
-    private var idealWidth: CGFloat?
-    private var displayedText: NSAttributedString?
     /// UITextView does not retain storage that it did not create.
     private let storage = NSTextStorage()
 
@@ -46,32 +44,27 @@ final class ConversationTextView: UITextView {
             return
         }
         content = ConversationTextContent(blocks: blocks, dark: dark, sizeCategory: sizeCategory)
-        idealWidth = nil
-        displayedText = nil
+        setContent(ConversationAttributedText.attributedText(blocks, dark: dark))
         invalidateIntrinsicContentSize()
-        setNeedsLayout()
     }
 
+    /// UIKit measures the view that draws the message, so the size always fits what it shows.
+    /// Reopened conversations share these sizes, keyed by what the view shows.
     func measure(width proposal: CGFloat?) -> CGSize {
         guard let content, !content.blocks.isEmpty else { return .zero }
-        let width = proposal.flatMap { $0.isFinite ? $0 : nil }
-        if width == nil, idealWidth == nil {
-            idealWidth = ceil(ConversationAttributedText.attributedText(content.blocks, dark: content.dark,
-                                                                        attachmentWidth: 300).size().width)
+        let proposedWidth = proposal.flatMap { $0.isFinite ? $0 : nil }
+        let width = proposedWidth ?? .greatestFiniteMagnitude
+        guard width > 0 else { return .zero }
+        return ConversationTextSizes.size(content, width: width) {
+            let measured = sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+            return CGSize(width: proposedWidth ?? measured.width, height: measured.height)
         }
-        guard let width = width ?? idealWidth, width > 0 else { return .zero }
-        return ConversationTextLayouts.layout(content, width: width).size
     }
 
-    override func layoutSubviews() {
-        if bounds.width > 0, let content {
-            let text = ConversationTextLayouts.layout(content, width: bounds.width).text
-            if displayedText !== text {
-                setContent(text)
-                displayedText = text
-            }
-        }
-        super.layoutSubviews()
+    /// Every copy path, including the edit menu and a hardware keyboard, copies the message's source text.
+    override func copy(_: Any?) {
+        guard selectedRange.length > 0 else { return }
+        UIPasteboard.general.string = ConversationAttributedText.selectedText(attributedText, range: selectedRange)
     }
 
     private func setContent(_ content: NSAttributedString) {
@@ -118,21 +111,10 @@ private final class ConversationTextContent: NSObject {
     }
 }
 
-/// Text laid out for one width, shared by every view showing the same content.
-/// Opening a conversation again neither rebuilds nor remeasures its messages, and
-/// sizing reuses one measuring view instead of creating a text view per proposal.
+/// Sizes UIKit measured for a message at one width, shared by every view showing the same content.
+/// Opening a conversation again does not remeasure its messages.
 @MainActor
-private enum ConversationTextLayouts {
-    final class Layout {
-        let text: NSAttributedString
-        let size: CGSize
-
-        init(text: NSAttributedString, size: CGSize) {
-            self.text = text
-            self.size = size
-        }
-    }
-
+private enum ConversationTextSizes {
     private final class Key: NSObject {
         let content: ConversationTextContent
         let width: CGFloat
@@ -153,34 +135,21 @@ private enum ConversationTextLayouts {
     }
 
     /// Bounded and released under memory pressure, so a resized window does not
-    /// keep a document copy for every proposed width.
-    private static let cache: NSCache<Key, Layout> = {
-        let cache = NSCache<Key, Layout>()
+    /// keep a size for every proposed width.
+    private static let cache: NSCache<Key, NSValue> = {
+        let cache = NSCache<Key, NSValue>()
         cache.countLimit = 1000
         return cache
     }()
 
-    /// Size proposals must not change a live view's text container or selection.
-    private static let measuring: UITextView = {
-        let view = UITextView(usingTextLayoutManager: false)
-        view.textContainerInset = .zero
-        view.textContainer.lineFragmentPadding = 0
-        view.isScrollEnabled = false
-        return view
-    }()
-
-    static func layout(_ content: ConversationTextContent, width: CGFloat) -> Layout {
+    static func size(_ content: ConversationTextContent, width: CGFloat, measure: () -> CGSize) -> CGSize {
         let key = Key(content, width: width)
         if let cached = cache.object(forKey: key) {
-            return cached
+            return cached.cgSizeValue
         }
-        let text = ConversationAttributedText.attributedText(content.blocks, dark: content.dark,
-                                                             attachmentWidth: width)
-        measuring.attributedText = text
-        let measured = measuring.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        let layout = Layout(text: text, size: CGSize(width: width, height: measured.height))
-        cache.setObject(layout, forKey: key)
-        return layout
+        let size = measure()
+        cache.setObject(NSValue(cgSize: size), forKey: key)
+        return size
     }
 }
 

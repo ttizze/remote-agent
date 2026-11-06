@@ -1,6 +1,9 @@
 //! All owned processes run under a small companion supervisor. Its stdin is
 //! a lifetime pipe owned by the Host; EOF also covers Host SIGKILL/crashes.
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 use tokio::process::Command;
 
 /// Standalone processes must not inherit a launcher's blocked shutdown or
@@ -42,12 +45,11 @@ pub fn suppress_browser(command: &mut Command) -> io::Result<()> {
     Ok(())
 }
 
-fn supervisor_path() -> io::Result<std::path::PathBuf> {
-    let executable = std::env::current_exe()?;
-    let supervisor = companion_path(
-        &executable,
-        &format!("agent-provider-supervisor{}", std::env::consts::EXE_SUFFIX),
-    )?;
+fn supervisor_path() -> io::Result<PathBuf> {
+    let supervisor = runtime_directory()?.join(format!(
+        "agent-provider-supervisor{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     if !supervisor.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -57,16 +59,57 @@ fn supervisor_path() -> io::Result<std::path::PathBuf> {
     Ok(supervisor)
 }
 
-pub fn companion_path(executable: &Path, name: &str) -> io::Result<std::path::PathBuf> {
-    let directory = executable
-        .parent()
-        .ok_or_else(|| io::Error::other("Host executable directory is unavailable"))?;
-    let directory = if directory.file_name().is_some_and(|name| name == "deps") {
-        directory.parent().unwrap_or(directory)
-    } else {
-        directory
-    };
-    Ok(directory.join(name))
+/// Installed Hosts use their executable directory. Test launchers supply the
+/// public build directory because Cargo may execute tests from shared storage.
+pub fn runtime_directory() -> io::Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    let configured = std::env::var_os("AGENT_RUNTIME_DIRECTORY");
+    runtime_directory_from(executable.parent(), configured.as_deref().map(Path::new))
+}
+
+fn runtime_directory_from(
+    executable_directory: Option<&Path>,
+    configured: Option<&Path>,
+) -> io::Result<PathBuf> {
+    if let Some(directory) = configured {
+        if !directory.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "AGENT_RUNTIME_DIRECTORY must be absolute",
+            ));
+        }
+        return Ok(directory.to_path_buf());
+    }
+    executable_directory
+        .map(Path::to_path_buf)
+        .ok_or_else(|| io::Error::other("Host executable directory is unavailable"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_resources_follow_the_install_or_the_explicit_launch_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let public = root.path().join("target/debug");
+        assert_eq!(
+            runtime_directory_from(Some(&installed), None).unwrap(),
+            installed
+        );
+        assert_eq!(
+            runtime_directory_from(Some(&installed), Some(&public)).unwrap(),
+            public
+        );
+        assert_eq!(
+            runtime_directory_from(None, Some(Path::new("relative")))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(runtime_directory_from(None, None).is_err());
+    }
 }
 
 /// On Windows the Host owns a Job Object for the supervisor and all PTY

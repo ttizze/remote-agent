@@ -71,14 +71,11 @@ private struct WorkspaceFilePreview: View {
             case let .failure(error):
                 AppNotice(text: error.localizedDescription).padding()
             }
-        } else if mimeType.hasPrefix("image/") {
-            if ["image/svg+xml", "image/gif"].contains(mimeType) {
-                FileWebPreview(url: file.url)
-            } else {
-                ConversationImagePreview(url: file.url)
-            }
+        } else if mimeType == "image/svg+xml" {
+            // QuickLook does not draw SVG.
+            FileWebPreview(url: file.url, mimeType: mimeType)
         } else if QLPreviewController.canPreview(file.url as NSURL) {
-            ConversationFilePreview(url: file.url)
+            ConversationFilePreview(url: file.url).accessibilityIdentifier("file.preview")
         } else {
             AppNotice(text: "このファイル形式はプレビューできません").padding()
         }
@@ -144,11 +141,11 @@ struct WorkspaceFileSheet: View {
     let entry: FileEntry
     let line: UInt32?
     let download: @MainActor (String) async throws -> URL
-    let share: (String) -> Void
     let aiEdit: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var error: String?
     @State private var busy = false
+    @State private var sharedFile: SharedFile?
     @State private var initialized = false
     @State private var confirmReload = false
     @State private var selection: TextSelection?
@@ -199,8 +196,8 @@ struct WorkspaceFileSheet: View {
                         } else {
                             load(restoreDraft: false)
                         }
-                    }
-                    Button("ダウンロード") { share(entry.path) }.accessibilityIdentifier("file.download")
+                    }.disabled(busy)
+                    Button("ダウンロード", action: share).disabled(busy).accessibilityIdentifier("file.download")
                     Button("AIで編集") { aiEdit(entry.path) }.accessibilityIdentifier("file.ai-edit")
                 }.padding()
             }
@@ -233,6 +230,20 @@ struct WorkspaceFileSheet: View {
                     load(restoreDraft: false)
                 }
             }
+            .sheet(item: $sharedFile) { ShareSheet(file: $0) }
+        }
+    }
+
+    /// Shares the Host's saved file, not the unsaved draft.
+    private func share() {
+        busy = true; error = nil
+        Task {
+            defer { busy = false }
+            do {
+                sharedFile = try await SharedFile(url: download(entry.path))
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
 
@@ -258,19 +269,36 @@ struct WorkspaceFileSheet: View {
     }
 }
 
-private struct FileWebPreview: UIViewRepresentable {
+/// Scripts, cookies and navigation stay off for a previewed document.
+private struct FileWebPreview: View {
     let url: URL
+    let mimeType: String
+    @State private var page: WebPage?
 
-    func makeUIView(context _: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        return WKWebView(frame: .zero, configuration: configuration)
+    var body: some View {
+        ZStack {
+            if let page {
+                WebView(page)
+            } else {
+                ProgressView()
+            }
+        }
+        .task(id: url) {
+            let url = url
+            guard let data = try? await Task.detached(priority: .userInitiated, operation: {
+                try Data(contentsOf: url)
+            }).value, !Task.isCancelled else { return }
+            let page = page ?? WebPage(configuration: Self.configuration, navigationDecider: InitialDocumentOnly())
+            self.page = page
+            page.load(data, mimeType: mimeType, characterEncoding: .utf8, baseURL: URL(string: "about:blank")!)
+        }
     }
 
-    func updateUIView(_ view: WKWebView, context _: Context) {
-        guard view.url != url else { return }
-        view.loadFileURL(url, allowingReadAccessTo: url)
+    private static var configuration: WebPage.Configuration {
+        var configuration = WebPage.Configuration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultNavigationPreferences.allowsContentJavaScript = false
+        return configuration
     }
 }
 

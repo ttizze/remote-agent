@@ -23,7 +23,7 @@
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
         kani = pkgs.callPackage ./tools/kani/package.nix { };
-        kache = pkgs.callPackage ./tools/kache/package.nix { };
+        cargo = pkgs.callPackage ./tools/cargo/package.nix { };
         maestro = pkgs.callPackage ./tools/maestro/package.nix { };
       } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
         node-runtime = pkgs.callPackage ./tools/node-runtime/package.nix { };
@@ -54,28 +54,16 @@
             ];
           };
           cccc = pkgs.callPackage ./tools/cccc/package.nix { };
-          kache = pkgs.callPackage ./tools/kache/package.nix { };
+          cargo = pkgs.callPackage ./tools/cargo/package.nix { };
+          withCargo = toolchain: pkgs.symlinkJoin {
+            name = "rust-${toolchain.version}-cargo-huacnlee";
+            inherit (toolchain) version;
+            paths = [ toolchain ];
+            postBuild = ''
+              ln -sfn ${cargo}/bin/cargo "$out/bin/cargo"
+            '';
+          };
           nodeRuntime = pkgs.callPackage ./tools/node-runtime/package.nix { };
-          kacheHook = ''
-            # CI already restores Cargo outputs.
-            if [ -z "''${CI:-}" ]; then
-              export RUSTC_WRAPPER="${kache}/bin/kache"
-              if [ -z "''${KACHE_CACHE_DIR:-}" ]; then
-                agent_kache_build_root=$(git config --path --get bex.buildRoot 2>/dev/null || true)
-                if [ -n "$agent_kache_build_root" ]; then
-                  if [ "''${agent_kache_build_root#/}" = "$agent_kache_build_root" ] || [ ! -d "$agent_kache_build_root" ]; then
-                    printf 'Build storage is unavailable: %s\n' "$agent_kache_build_root" >&2
-                    exit 1
-                  fi
-                  # Keep the shared compiler cache on the build volume for CoW restores.
-                  export KACHE_CACHE_DIR="$agent_kache_build_root/.kache"
-                else
-                  export KACHE_CACHE_DIR="$HOME/${if pkgs.stdenv.hostPlatform.isDarwin then "Library/Caches/kache" else ".cache/kache"}"
-                fi
-                unset agent_kache_build_root
-              fi
-            fi
-          '';
           androidSdk = (pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "37.0" ];
             buildToolsVersions = [ "36.0.0" ];
@@ -126,6 +114,7 @@
           '';
           mkDevShell = attrs: pkgs.mkShell (attrs // {
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            RUSTC_WRAPPER = "";
             packages = [ pkgs.zsh ] ++ (attrs.packages or [ ]);
             shellHook = (attrs.shellHook or "") + runtimeShellHook;
           });
@@ -144,17 +133,18 @@
             AGENT_NODE_RUNTIME = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "${nodeRuntime}";
             RUST_TOOLCHAIN_VERSION = hostRustToolchain.version;
             NEXTEST_VERSION = pkgs.cargo-nextest.version;
-            packages = with pkgs; [ hostRustToolchain kache cccc cargo-mutants cargo-nextest just jq git perl ] ++ nativeBuildTools
+            packages = with pkgs; [ (withCargo hostRustToolchain) cccc cargo-mutants cargo-nextest just jq git perl ] ++ nativeBuildTools
               ++ [ workflowLinter nodejs powershell ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxDesktopLibraries;
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux linuxDesktopLibraryPath;
-            shellHook = kacheHook + appleSdkHook;
+            shellHook = appleSdkHook;
           };
           ios-test = pkgs.mkShellNoCC {
             packages = with pkgs; [ just gitMinimal nodejs gh zsh ];
             shellHook = appleSdkHook + runtimeShellHook;
           };
           android-test = pkgs.mkShell {
-            packages = [ androidTestSdk pkgs.jdk21 buildRustToolchain pkgs.coreutils pkgs.zsh ];
+            packages = [ androidTestSdk pkgs.jdk21 (withCargo buildRustToolchain) pkgs.coreutils pkgs.zsh ];
+            RUSTC_WRAPPER = "";
             JAVA_HOME = pkgs.jdk21.home;
             ANDROID_HOME = "${androidTestSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";
@@ -170,8 +160,7 @@
               nodejs
               perl
               powershell
-              mobileRustToolchain
-              kache
+              (withCargo mobileRustToolchain)
               cccc
               cargo-mutants
               cargo-nextest
@@ -189,35 +178,35 @@
               pkgs.swiftformat
             ];
 
-            shellHook = kacheHook + appleSdkHook;
+            shellHook = appleSdkHook;
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (androidBuildEnvironment // {
             LD_LIBRARY_PATH = linuxDesktopLibraryPath;
           }));
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           host-build = mkDevShell {
             packages = with pkgs; [
-              buildRustToolchain kache just jq gitMinimal nodejs pkg-config cmake clang zig
+              (withCargo buildRustToolchain) just jq gitMinimal nodejs pkg-config cmake clang zig
             ];
-            shellHook = kacheHook;
           };
           android-build = pkgs.mkShell (androidBuildEnvironment // {
             packages = with pkgs; [
-              (buildRustToolchain.override {
+              (withCargo (buildRustToolchain.override {
                 targets = [ "aarch64-linux-android" "x86_64-linux-android" ];
-              })
-              kache zsh just jq gitMinimal nodejs cargo-ndk jdk21 androidSdk
+              }))
+              zsh just jq gitMinimal nodejs cargo-ndk jdk21 androidSdk
             ];
-            shellHook = kacheHook + runtimeShellHook;
+            RUSTC_WRAPPER = "";
+            shellHook = runtimeShellHook;
           });
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
           ios-build = mkDevShell {
             packages = with pkgs; [
-              (buildRustToolchain.override {
+              (withCargo (buildRustToolchain.override {
                 targets = [ "aarch64-apple-ios-sim" ];
-              })
-              kache just jq gitMinimal nodejs zig swiftlint swiftformat
+              }))
+              just jq gitMinimal nodejs zig swiftlint swiftformat
             ];
-            shellHook = kacheHook + appleSdkHook;
+            shellHook = appleSdkHook;
           };
         });
     };

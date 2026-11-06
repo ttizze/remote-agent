@@ -10,7 +10,7 @@ function cachePrefix(key: string | undefined) {
   const prefix = key?.match(/^(bex-gradle-v1-.+-)[0-9a-f]{40}$/)?.[1] ??
     key?.match(/^(ios-swift-xcode-[0-9]+\.[0-9]+-)[0-9a-f]{64}$/)?.[1] ??
     key?.match(/^(ios-release-xcode-[0-9]+\.[0-9]+-)[0-9a-f]{40}$/)?.[1] ??
-    key?.match(/^(local-rust-[A-Za-z0-9]+-[A-Za-z0-9]+-xcode-[0-9]+\.[0-9]+-[0-9a-f]{64}-(?:mac|iphone)-)[0-9a-f]{40}$/)?.[1];
+    key?.match(/^(cargo-build-[A-Za-z0-9]+-[A-Za-z0-9]+-xcode-[0-9]+\.[0-9]+-[0-9a-f]{64}-(?:mac|iphone)-)[0-9a-f]{40}$/)?.[1];
   if (!prefix) throw new Error('Invalid build snapshot key');
   return prefix;
 }

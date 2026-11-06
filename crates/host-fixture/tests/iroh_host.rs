@@ -2771,7 +2771,10 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 store.close().await.unwrap();
                 endpoint.close().await;
                 fixture.close().await.unwrap();
-                assert!(reflected.is_ok(), "completed conversation and title did not appear automatically (worktree={automatic}, scoped={scoped})");
+                assert!(reflected.is_ok(),
+                    "completed conversation and title did not appear automatically (worktree={automatic}, scoped={scoped}); turns={:?}; list={:?}",
+                    store.snapshot().sessions.conversations[&id].turns.as_ref().map(|turns| turns.iter().map(|turn| &turn.status).collect::<Vec<_>>()),
+                    store.snapshot().thread_list().map(|list| list.threads.iter().chain(list.projects.iter().flat_map(|project| &project.threads)).map(|thread| (thread.id.clone(), thread.title.clone(), thread.project_id.clone())).collect::<Vec<_>>()));
             }
         }
     }).await.expect("sidebar regression exceeded its deadline");

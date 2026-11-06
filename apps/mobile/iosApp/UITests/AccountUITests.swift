@@ -232,8 +232,8 @@ extension LaunchUITests {
         XCTAssertTrue(app.navigationBars["Codex"].exists)
         XCTAssertTrue(app.buttons["account.refresh"].exists)
         openModelChoices(app)
-        XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中",
-                       "Browsing agent settings must not change the draft model")
+        XCTAssertTrue(app.buttons["model.choice.fixture-model"].isSelected,
+                      "Browsing agent settings must not change the draft model")
         dismissModelSettings(app)
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("[success] Keep the conversation agent")
@@ -273,7 +273,7 @@ extension LaunchUITests {
         model.tap()
         let selected = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(selected.waitUntilExists(timeout: 10))
-        XCTAssertEqual(selected.value as? String, "選択中")
+        XCTAssertTrue(selected.isSelected)
         dismissModelSettings(app)
         try simulatorFixture("release-inputs")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))

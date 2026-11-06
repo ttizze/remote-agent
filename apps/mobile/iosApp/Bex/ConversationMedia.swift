@@ -1,8 +1,6 @@
 import AgentCore
 import ImageIO
-import Photos
 import QuickLook
-import SkeletonUI
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -52,11 +50,11 @@ struct ConversationImageSkeleton: View {
     var identifier = "image.loading.skeleton"
 
     var body: some View {
-        Color.clear
-            .skeleton(with: true, animation: reduceMotion ? .none : .pulse(),
-                      appearance: .solid(color: Color.primary.opacity(0.08),
-                                         background: Color(UIColor.secondarySystemBackground)),
-                      shape: .rounded(.radius(10)))
+        RoundedRectangle(cornerRadius: 10)
+            .fill(Color(UIColor.secondarySystemBackground))
+            .phaseAnimator(reduceMotion ? [1.0] : [1.0, 0.5]) { $0.opacity($1) } animation: { _ in
+                .easeInOut(duration: 0.9)
+            }
             .frame(maxWidth: 320)
             .frame(height: 320)
             .accessibilityLabel(label)
@@ -173,150 +171,6 @@ func writeConversationImage(_ data: Data) async throws -> URL {
         throw CancellationError()
     }
     return local
-}
-
-struct ConversationPreview: View {
-    let url: URL
-    let isImage: Bool
-    let close: () -> Void
-    @State private var saving = false
-    @State private var saved = false
-    @State private var saveError: String?
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if isImage {
-                    ConversationImagePreview(url: url)
-                } else {
-                    ConversationFilePreview(url: url)
-                }
-            }
-            .disabled(saving)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    HStack(spacing: 20) {
-                        if isImage {
-                            Button {
-                                saving = true
-                                Task { await save() }
-                            } label: {
-                                Image(systemName: saved ? "checkmark" : "arrow.down.to.line")
-                            }
-                            .disabled(saving || saved)
-                            .accessibilityLabel(LocalizedStringKey(saved ? "保存済み" : "保存"))
-                            .accessibilityIdentifier("conversation.preview.save")
-                        }
-                        Button(action: close) { Image(systemName: "xmark") }
-                            .disabled(saving)
-                            .accessibilityLabel("閉じる")
-                            .accessibilityIdentifier("conversation.preview.close")
-                    }
-                }
-            }
-            .alert("画像を保存できません", isPresented: Binding(get: { saveError != nil }, set: {
-                if !$0 {
-                    saveError = nil
-                }
-            })) {
-                Button("OK") { saveError = nil }
-            } message: { AppText(saveError ?? "") }
-        }
-        .interactiveDismissDisabled(isImage || saving)
-    }
-
-    @MainActor private func save() async {
-        defer { saving = false }
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else {
-            saveError = "設定でBexの写真への追加を許可してください。"
-            return
-        }
-        do {
-            try await PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: url, options: nil)
-            }
-            saved = true
-        } catch { saveError = error.localizedDescription }
-    }
-}
-
-struct ConversationImagePreview: View {
-    let url: URL
-    @State private var image: UIImage?
-    @State private var loadFailed = false
-
-    var body: some View {
-        Group {
-            if let image {
-                ZoomableConversationImage(image: image)
-            } else if loadFailed {
-                Text("画像ファイルを読み込めません。")
-            } else {
-                ConversationImageSkeleton()
-            }
-        }
-        .task(id: url) {
-            let loaded = await Task.detached(priority: .userInitiated) {
-                UIImage(contentsOfFile: url.path)
-            }.value
-            guard !Task.isCancelled else { return }
-            if let loaded {
-                image = loaded
-            } else {
-                loadFailed = true
-            }
-        }
-    }
-}
-
-private struct ZoomableConversationImage: UIViewRepresentable {
-    let image: UIImage
-
-    func makeUIView(context _: Context) -> ImageScrollView {
-        ImageScrollView(image: image)
-    }
-
-    func updateUIView(_: ImageScrollView, context _: Context) {}
-
-    final class ImageScrollView: UIScrollView, UIScrollViewDelegate {
-        private let imageView: UIImageView
-        private var viewport = CGSize.zero
-
-        init(image: UIImage) {
-            imageView = UIImageView(image: image)
-            super.init(frame: .zero)
-            imageView.contentMode = .scaleAspectFit
-            imageView.isAccessibilityElement = true
-            imageView.accessibilityLabel = "画像プレビュー"
-            imageView.accessibilityIdentifier = "conversation.preview.image"
-            addSubview(imageView)
-            delegate = self
-            maximumZoomScale = 6
-            showsHorizontalScrollIndicator = false
-            showsVerticalScrollIndicator = false
-        }
-
-        @available(*, unavailable)
-        required init?(coder _: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            guard bounds.size != viewport else { return }
-            viewport = bounds.size
-            setZoomScale(1, animated: false)
-            imageView.frame = CGRect(origin: .zero, size: viewport)
-            contentSize = viewport
-        }
-
-        func viewForZooming(in _: UIScrollView) -> UIView? {
-            imageView
-        }
-    }
 }
 
 struct ConversationFilePreview: UIViewControllerRepresentable {

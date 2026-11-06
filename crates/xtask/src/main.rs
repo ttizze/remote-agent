@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 use xtask::Result;
 
-const USAGE: &str = "Usage: cargo xtask <command>\n  clean-builds [--dry-run]\n  ios-e2e [--build-only|--prebuilt|--await-build] [--maestro] [--without-codex] TEST...\n  ios-markdown\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n  ios-e2e [--build-only|--prebuilt|--await-build] [--maestro] [--without-codex] TEST...\n  ios-markdown\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -22,10 +22,6 @@ async fn main() -> ExitCode {
 
 async fn execute(arguments: &[String]) -> Result<()> {
     match (arguments[0].as_str(), &arguments[1..]) {
-        #[cfg(unix)]
-        ("clean-builds", flags) if flags.is_empty() || flags == ["--dry-run"] => {
-            xtask::build_cleanup::run(!flags.is_empty()).await
-        }
         #[cfg(unix)]
         ("ios-markdown", []) => xtask::ios_markdown::run().await,
         #[cfg(unix)]

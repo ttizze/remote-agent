@@ -51,22 +51,25 @@ struct AssistantSelectableText: UIViewRepresentable {
                       suggestedActions: [UIMenuElement]) -> UIMenu? {
             guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return nil }
             let text = ConversationAttributedText.selectedText(textView.attributedText, range: range)
-            let add = UIAction(title: "チャットに追加", image: UIImage(systemName: "bubble")) { [weak self] _ in
+            let language = parent.locale.appLanguage
+            var actions: [UIMenuElement] = [UIAction(
+                title: localizedUiText(language: language, source: "チャットに追加"),
+                image: UIImage(systemName: "bubble")
+            ) { [weak self] _ in
                 self?.parent.actions.addToChat(text)
-            }
-            let copy = UIAction(title: "コピー", image: UIImage(systemName: "doc.on.doc")) { _ in
-                UIPasteboard.general.string = text
-            }
-            var actions: [UIMenuElement] = [add, copy]
+            }]
             if parent.actions.askInSideChat != nil {
                 actions.append(UIAction(
-                    title: "サイドチャットで質問",
+                    title: localizedUiText(language: language, source: "サイドチャットで質問"),
                     image: UIImage(systemName: "bubble.left.and.bubble.right")
                 ) { [weak self] _ in
                     self?.parent.actions.askInSideChat?(text)
                 })
             }
-            return UIMenu(children: actions + suggestedActions.compactMap(removingCopyCommand))
+            // Keep the system Copy on the first page beside the chat actions.
+            let system = splitCopyCommand(suggestedActions)
+            let copy: [UIMenuElement] = system.copy.map { [$0] } ?? []
+            return UIMenu(children: copy + actions + system.others)
         }
 
         func textView(_: UITextView, menuConfigurationFor textItem: UITextItem,
@@ -95,21 +98,9 @@ struct AssistantSelectableText: UIViewRepresentable {
     }
 }
 
-@MainActor func removingCopyCommand(_ element: UIMenuElement) -> UIMenuElement? {
-    if let command = element as? UICommand,
-       command.action == #selector(UIResponderStandardEditActions.copy(_:)) {
-        return nil
-    }
-    if let menu = element as? UIMenu {
-        let children = menu.children.compactMap(removingCopyCommand)
-        return children.isEmpty ? nil : menu.replacingChildren(children)
-    }
-    return element
-}
-
 enum ConversationAttributedText {
     static func attributedText(_ blocks: [ConversationMarkdownContent.Block],
-                               dark: Bool, attachmentWidth: CGFloat) -> NSAttributedString {
+                               dark: Bool) -> NSAttributedString {
         let text = NSMutableAttributedString(string: "")
         for (index, block) in blocks.enumerated() {
             let start = text.length
@@ -123,7 +114,7 @@ enum ConversationAttributedText {
             }
             for run in block.runs {
                 if let file = run.file, let link = run.link {
-                    text.append(fileChip(file, link: link, font: font, dark: dark, maxWidth: attachmentWidth))
+                    text.append(fileChip(file, link: link, font: font, dark: dark))
                 } else {
                     text.append(NSAttributedString(
                         string: run.text,
@@ -204,27 +195,10 @@ enum ConversationAttributedText {
 
     private static let copySource = NSAttributedString.Key("agent.markdown-copy")
 
-    private static func fileChip(_ file: MarkdownFileReference, link: String, font: UIFont, dark: Bool,
-                                 maxWidth: CGFloat) -> NSAttributedString {
-        let labelFont = UIFont.systemFont(ofSize: font.pointSize, weight: .medium)
-        let label = file.label as NSString
-        let labelWidth = label.size(withAttributes: [.font: labelFont]).width
-        let height = ceil(labelFont.lineHeight + 4)
-        let iconSize = font.pointSize
-        let width = max(iconSize + 10, min(ceil(labelWidth + iconSize + 14), maxWidth))
-        let color = mobileFileAccent(dark: dark)
-        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height)).image { _ in
-            mobileFileImage(file.path).draw(in: CGRect(x: 5, y: (height - iconSize) / 2,
-                                                       width: iconSize, height: iconSize))
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byTruncatingTail
-            label.draw(in: CGRect(x: iconSize + 9, y: (height - labelFont.lineHeight) / 2,
-                                  width: width - iconSize - 14, height: labelFont.lineHeight),
-                       withAttributes: [.font: labelFont, .foregroundColor: color, .paragraphStyle: paragraph])
-        }
-        let attachment = NSTextAttachment()
-        attachment.image = image
-        attachment.bounds = CGRect(x: 0, y: font.descender - 2, width: width, height: height)
+    private static func fileChip(_ file: MarkdownFileReference, link: String, font: UIFont,
+                                 dark: Bool) -> NSAttributedString {
+        let attachment = FileChipAttachment(label: file.label, path: file.path, font: font,
+                                            color: mobileFileAccent(dark: dark))
         let text = NSMutableAttributedString(attachment: attachment)
         text.addAttributes([copySource: "[\(file.label)](<\(link)>)",
                             .font: font], range: NSRange(location: 0, length: text.length))
@@ -255,5 +229,67 @@ enum ConversationAttributedText {
         let base = style.code ? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
             : UIFont.systemFont(ofSize: size, weight: style.header == nil ? .regular : .semibold)
         return UIFontMetrics.default.scaledFont(for: base)
+    }
+}
+
+/// A file chip as wide as its label, truncated to the line TextKit lays it out on,
+/// so the attributed text does not depend on the view's width.
+private final class FileChipAttachment: NSTextAttachment {
+    private let label: String
+    private let path: String
+    private let font: UIFont
+    private let color: UIColor
+    private var rendered: UIImage?
+
+    init(label: String, path: String, font: UIFont, color: UIColor) {
+        self.label = label
+        self.path = path
+        self.font = font
+        self.color = color
+        super.init(data: nil, ofType: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private var labelFont: UIFont {
+        .systemFont(ofSize: font.pointSize, weight: .medium)
+    }
+
+    private var height: CGFloat {
+        ceil(labelFont.lineHeight + 4)
+    }
+
+    override func attachmentBounds(for _: NSTextContainer?, proposedLineFragment lineFrag: CGRect,
+                                   glyphPosition _: CGPoint, characterIndex _: Int) -> CGRect {
+        let iconSize = font.pointSize
+        let labelWidth = (label as NSString).size(withAttributes: [.font: labelFont]).width
+        let width = max(iconSize + 10, min(ceil(labelWidth + iconSize + 14), lineFrag.width))
+        return CGRect(x: 0, y: font.descender - 2, width: width, height: height)
+    }
+
+    override func image(forBounds imageBounds: CGRect, textContainer _: NSTextContainer?,
+                        characterIndex _: Int) -> UIImage? {
+        if let rendered, rendered.size == imageBounds.size {
+            return rendered
+        }
+        let size = imageBounds.size
+        let iconSize = font.pointSize
+        let labelFont = labelFont
+        let image = UIGraphicsImageRenderer(size: size).image { _ in
+            mobileFileImage(path).draw(in: CGRect(x: 5, y: (size.height - iconSize) / 2,
+                                                  width: iconSize, height: iconSize))
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingTail
+            (label as NSString).draw(
+                in: CGRect(x: iconSize + 9, y: (size.height - labelFont.lineHeight) / 2,
+                           width: size.width - iconSize - 14, height: labelFont.lineHeight),
+                withAttributes: [.font: labelFont, .foregroundColor: color, .paragraphStyle: paragraph]
+            )
+        }
+        rendered = image
+        return image
     }
 }

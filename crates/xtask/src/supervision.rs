@@ -80,11 +80,6 @@ impl Child {
         Ok(self.process.try_wait()?)
     }
 
-    #[cfg(test)]
-    pub(crate) fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
-        self.process.stdin().take()
-    }
-
     pub async fn stop(&mut self, host: bool, grace: Duration) -> Result<()> {
         // Only the Host receives SIGINT. Its supervisors must remain alive to
         // observe lifetime-pipe closure and stop their separate provider groups.
@@ -343,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_waits_for_provider_descendant_shutdown() {
-        let fixture = Fixture::new().await;
+        let fixture = Fixture::new();
         let root = fixture.project("provider").await;
         let mut command = Command::new(Fixture::executable(&root));
         command.arg("parent").arg(&root);
@@ -365,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_shutdown_closes_supervisor_lifetime_pipe_without_interrupting_it() {
-        let fixture = Fixture::new().await;
+        let fixture = Fixture::new();
         let root = fixture.project("host").await;
         let mut command = Command::new(Fixture::executable(&root));
         command.arg("host").arg(&root);
@@ -379,7 +374,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_honors_the_controller_cleanup_deadline() {
-        let fixture = Fixture::new().await;
+        let fixture = Fixture::new();
         let root = fixture.project("controller").await;
         for (mode, grace, cleaned) in [
             ("slow", Duration::from_millis(20), false),
