@@ -1,4 +1,3 @@
-import SwiftUI
 import UIKit
 
 /// Native layout owns row measurement; the controller owns the reading position.
@@ -130,68 +129,5 @@ final class KeyboardDismissingTap: UITapGestureRecognizer, UIGestureRecognizerDe
     func gestureRecognizer(_: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer) -> Bool {
         true
-    }
-}
-
-/// A real child controller preserves native selection and controller-backed SwiftUI content in recycled cells.
-final class ConversationListCell: UICollectionViewCell {
-    private var host: UIHostingController<AnyView>?
-
-    var isMounted: Bool {
-        host?.parent != nil
-    }
-
-    func show(_ content: AnyView, parent: UIViewController) {
-        let row = AnyView(content.fixedSize(horizontal: false, vertical: true))
-        let host: UIHostingController<AnyView>
-        if let retained = self.host {
-            host = retained
-            host.rootView = row
-        } else {
-            host = UIHostingController(rootView: row)
-            self.host = host
-        }
-        if host.parent == nil {
-            host.safeAreaRegions = []
-            host.sizingOptions = .intrinsicContentSize
-            parent.addChild(host)
-            host.view.backgroundColor = .clear
-            host.view.translatesAutoresizingMaskIntoConstraints = false
-            contentView.addSubview(host.view)
-            NSLayoutConstraint.activate([
-                host.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-                host.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-                host.view.topAnchor.constraint(equalTo: contentView.topAnchor),
-                host.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-            ])
-            host.didMove(toParent: parent)
-        }
-        // UIKit observes invalidation of the cell's content view, not the child controller's view.
-        contentView.invalidateIntrinsicContentSize()
-    }
-
-    func unmount() {
-        guard let host, host.parent != nil else { return }
-        host.willMove(toParent: nil)
-        host.view.removeFromSuperview()
-        host.removeFromParent()
-        host.rootView = AnyView(EmptyView())
-    }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        unmount()
-    }
-
-    override func preferredLayoutAttributesFitting(_ layoutAttributes: UICollectionViewLayoutAttributes)
-        -> UICollectionViewLayoutAttributes {
-        guard let attributes = layoutAttributes.copy() as? UICollectionViewLayoutAttributes else {
-            return layoutAttributes
-        }
-        // Recycling must not replace a measured row's size with the empty hosting view's size.
-        guard let host, host.parent != nil else { return attributes }
-        let proposal = CGSize(width: attributes.size.width, height: .greatestFiniteMagnitude)
-        attributes.size.height = max(1, ceil(host.sizeThatFits(in: proposal).height))
-        return attributes
     }
 }
