@@ -52,6 +52,11 @@ impl Database {
                 std::fs::create_dir_all(parent).map_err(failure)?;
             }
             let mut connection = Connection::open(path).map_err(failure)?;
+            // Apply the Host lock budget before the first schema read, which
+            // can overlap the previous connection's WAL shutdown checkpoint.
+            connection
+                .busy_timeout(std::time::Duration::from_secs(10))
+                .map_err(failure)?;
             let fresh: bool = connection
                 .query_row(
                     "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table')",
@@ -64,9 +69,6 @@ impl Database {
                     .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
                     .map_err(failure)?;
             }
-            connection
-                .busy_timeout(std::time::Duration::from_secs(10))
-                .map_err(failure)?;
             connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;").map_err(failure)?;
             migrations::upgrade(&mut connection, path)?;
             Ok(connection)
@@ -131,16 +133,7 @@ impl Database {
 }
 
 pub(super) fn ensure_thread(connection: &Connection, session: &SessionRef) -> Result<(), String> {
-    let response = ThreadResponse {
-        thread: Thread {
-            id: Some(session.clone()),
-            ..Default::default()
-        },
-        model: None,
-        effort: None,
-        service_tier: None,
-    };
-    connection.execute("INSERT INTO threads (thread_id, metadata_json) VALUES (?1, ?2) ON CONFLICT(thread_id) DO NOTHING", params![key(session), encode(response)?]).map_err(failure)?;
+    connection.execute("INSERT INTO threads (thread_id, metadata_json) VALUES (?1, ?2) ON CONFLICT(thread_id) DO NOTHING", params![key(session), encode(ThreadResponse::default())?]).map_err(failure)?;
     Ok(())
 }
 
@@ -164,4 +157,44 @@ pub(super) fn deleted(
     changed(connection, session, kind, id)?;
     connection.execute("UPDATE changes SET deleted = 1 WHERE thread_id = ?1 AND entity_type = ?2 AND entity_id = ?3", params![key(session), kind, id]).map_err(failure)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_protocol::session::ProviderKind;
+
+    #[test]
+    fn startup_waits_for_a_previous_connections_exclusive_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("conversations.sqlite");
+        let session = SessionRef::new(ProviderKind::Claude, "saved".into()).unwrap();
+        let database = Database::open(&path);
+        database
+            .observe(&Thread {
+                id: Some(session.clone()),
+                name: Some("saved".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        drop(database);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                // Longer than rusqlite's five-second default, within the
+                // Host's ten-second lock budget. The first schema read must
+                // use the Host policy too, before migrations or recovery.
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                drop(connection);
+            });
+            let reopened = Database::open(&path);
+            let saved = reopened.titles("").unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].thread.id.as_ref(), Some(&session));
+            assert_eq!(saved[0].thread.name.as_deref(), Some("saved"));
+        });
+    }
 }
