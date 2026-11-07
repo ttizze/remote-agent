@@ -784,8 +784,10 @@ impl Agent for Codex {
                 .data
                 .into_iter()
                 .map(|value| {
-                    let branch = value["gitInfo"]["branch"].as_str().map(str::to_owned);
-                    native::parse_thread(value).map(|thread| SessionSummary { thread, branch })
+                    native::parse_thread(value).map(|thread| SessionSummary {
+                        branch: thread.git_branch.clone(),
+                        thread,
+                    })
                 })
                 .collect::<Result<_, _>>()?,
             next_cursor: page.next_cursor,

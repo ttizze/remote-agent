@@ -1237,6 +1237,8 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
         ])).unwrap()).unwrap();
         let fixture = start_host(&root).await;
         let local = fixture.local().await.unwrap();
+        local.peer.call(&agent_protocol::project_import::ImportProjects { paths: vec![root.to_str().unwrap().into()] }).await.unwrap();
+        let project = local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap().projects[0].id.clone();
         let invitation: Invitation = local.peer.call(&op::CreateInvitation {}).await.unwrap();
         let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation), "Fixture device").await.unwrap();
@@ -1250,6 +1252,7 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
             let store = if let Some(store) = owner.take() { store } else {
                 Store::connect(&endpoint, &fixture.ticket, saved.take().unwrap(), None, "Fixture device").await.unwrap()
             };
+            store.dispatch(Intent::SetProjectExpanded { project_id: project.clone(), expanded: true }).await.unwrap();
             assert_eq!(store.snapshot().sessions.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }), cached);
             if cached {
                 // The imported transcript answers; a native change made outside
@@ -1275,7 +1278,8 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
             }
             // List refresh shares the production transport but must not wait for history.
             store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
-            assert!(store.snapshot().lists.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("selected")));
+            let listed = store.snapshot().thread_list().unwrap();
+            assert!(listed.threads.iter().chain(listed.projects.iter().flat_map(|project| &project.threads)).any(|thread| thread.id.id == "selected"), "the imported task remains visible while history is held: cached={cached}");
             if !cached {
                 std::fs::remove_file(root.join("hold-history-reads")).unwrap();
                 std::fs::remove_file(root.join("history-read-held")).unwrap();
@@ -1345,7 +1349,10 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
                 && thread.turns.as_ref().is_some_and(|turns| {
                     turns.first().is_some_and(|turn| {
                         turn.status == agent_protocol::execution::TurnStatus::Completed
-                    })
+                    }) && turns
+                        .iter()
+                        .flat_map(|turn| turn.items.iter().flatten())
+                        .any(|item| item.id.as_str() == "duplicate-history-old")
                 })
             {
                 break;
@@ -2229,24 +2236,29 @@ async fn upstream_exit_keeps_host_management_connected() {
             .unwrap();
         assert!(store.snapshot().connection.connected);
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
-        assert!(
-            store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(
-                    Default::default()
-                )))
-                .await
-                .is_err()
-        );
-        assert!(
-            store
-                .snapshot()
-                .operation_error(op::OperationKey::SessionList)
-                .is_some()
-        );
         let management = fixture
             .local()
             .await
             .expect("Codex exit must not close the Host");
+        assert!(
+            management
+                .peer
+                .call(&agent_protocol::live_activity::ReadTaskActivity {})
+                .await
+                .is_err()
+        );
+        store
+            .dispatch(Intent::ListSessions(op::ListSessions::new(
+                Default::default(),
+            )))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .snapshot()
+                .operation_error(op::OperationKey::SessionList)
+                .is_none()
+        );
         assert!(
             management
                 .peer
@@ -3006,11 +3018,11 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
             .await
             .unwrap();
         assert!(
-            !listed
+            listed
                 .data
                 .iter()
                 .any(|thread| thread.id.as_ref() == Some(active)),
-            "the active first turn must be absent from the history list in this regression"
+            "the Host list keeps admitted work even when native history metadata is deferred"
         );
         let terminal_path = &checkouts[1].1;
         local

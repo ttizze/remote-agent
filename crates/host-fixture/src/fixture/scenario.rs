@@ -309,8 +309,13 @@ impl ScenarioTurn {
         complete(context, &thread_id, turn, index)?;
         context.finish(thread, turn, "completed", None)?;
         if scenario == "duplicate" {
-            thread.borrow_mut().turns.push(Rc::new(RefCell::new(json!({"id":turn_id,"status":"completed","items":[
-            {"id":"duplicate-history-old","type":"agentMessage","phase":"final_answer","text":"Older AI response must remain visible."}]}))));
+            let occurrence = Rc::new(RefCell::new(
+                json!({"id":turn_id,"status":"completed","items":[
+                {"id":"duplicate-history-old","type":"agentMessage","phase":"final_answer","text":"Older AI response must remain visible."}]}),
+            ));
+            thread.borrow_mut().turns.push(occurrence.clone());
+            // Every Host-owned occurrence is observed, even when its native turn ID is reused.
+            context.turn_event("turn/completed", &thread_id, &occurrence.borrow())?;
         }
         Ok(())
     }

@@ -153,7 +153,7 @@ impl HostRpcService {
                         .and_then(|cwd| projects.project_for_workspace(cwd))
                         .is_some_and(|project| selected.contains(project))
                     {
-                        thread.git_branch = summary.branch;
+                        thread.git_branch = summary.branch.or(thread.git_branch);
                         describe_thread(&mut thread, agent.capabilities(), &projects);
                         self.inner
                             .database

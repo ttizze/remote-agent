@@ -609,6 +609,7 @@ pub(crate) fn parse_thread(mut value: Value) -> Result<Thread, serde_json::Error
             })
             .transpose()?,
         preview: field(&value, "preview")?,
+        git_branch: value["gitInfo"]["branch"].as_str().map(str::to_owned),
         updated_at: field(&value, "updatedAt")?,
         history_has_more: field(&value, "historyHasMore")?,
         history_limit: field(&value, "historyLimit")?,
