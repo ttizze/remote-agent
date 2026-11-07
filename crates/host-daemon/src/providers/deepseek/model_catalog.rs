@@ -36,6 +36,8 @@ fn route_label(provider: KeyProvider, route: &str) -> &'static str {
 pub(super) fn provider_profile(provider: KeyProvider) -> Value {
     let mut profile = json!({"apiKeyEnv":provider.reference()});
     if provider == KeyProvider::NanoGpt {
+        // NanoGPT is a custom OpenAI-compatible route outside the installed catalog.
+        // Model capabilities: https://nano-gpt.com/api/v1/models?detailed=true
         profile["displayName"] = json!("NanoGPT");
         profile["api"] = json!("openai-completions");
         profile["baseURL"] = json!("https://nano-gpt.com/api/v1");

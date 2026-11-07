@@ -12,7 +12,6 @@ pub(in crate::app) struct ConversationModel {
     epoch: u64,
     connected: bool,
     busy: bool,
-    input_notice: Option<String>,
     history_notice: Option<String>,
     history: Option<agent_core::presentation::conversation::HistoryControl>,
     docked: Vec<agent_core::presentation::conversation::Request>,
@@ -157,9 +156,6 @@ impl Desktop {
             epoch: self.snapshot.connection.epoch,
             connected: self.snapshot.connection.connected,
             busy: self.busy > 0,
-            input_notice: self
-                .thread()
-                .and_then(|thread| agent_protocol::session::input_unavailable_reason(thread)),
             history_notice: self
                 .thread()
                 .and_then(|thread| agent_core::presentation::conversation::history_notice(thread)),
@@ -1848,10 +1844,7 @@ impl ConversationView {
                     |_, action, _, cx| cx.emit(ConversationAction::Notice(action)),
                 ),
             ));
-        for notice in [&self.model.input_notice, &self.model.history_notice]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(notice) = &self.model.history_notice {
             body = body.child(div().px_4().py_2().text_sm().child(
                 agent_core::localization::localized_ui_text(language, notice.clone()),
             ));

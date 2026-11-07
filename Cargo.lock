@@ -4765,6 +4765,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "which",
  "zeroize",
 ]
 

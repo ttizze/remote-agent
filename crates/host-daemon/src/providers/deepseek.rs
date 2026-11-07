@@ -37,12 +37,14 @@ use agent_protocol::dsh::{KeyProvider, KeyUpdate};
 
 mod credentials;
 mod model_catalog;
+mod usage;
 use credentials::ManagedKeys;
 use model_catalog::{catalog, credential_route, provider_profile, resolved_model_settings};
 
 const PROVIDER: ProviderKind = ProviderKind::DeepSeek;
 const ACCOUNT: &str = "deepseek:native";
 const DEFAULT_MODEL: &str = "[\"deepseek-official\",\"deepseek-flash\"]";
+const INSTALL_DSH_HINT: &str = "HostにDSHをインストールするか、--deepseekで本体のパスを指定してください。APIキーの保存だけでは本体はインストールされません。";
 type Pending = HashMap<u64, oneshot::Sender<Result<Value, String>>>;
 
 #[derive(Clone)]
@@ -57,6 +59,7 @@ struct Inner {
     stop: CancellationToken,
     workers: Mutex<tokio::task::JoinSet<()>>,
     credential_updates: Mutex<()>,
+    usage: std::sync::Mutex<Arc<crate::account_usage::UsageEntry>>,
 }
 struct Rpc {
     input: Arc<Mutex<JsonlWriter<ChildStdin>>>,
@@ -84,6 +87,30 @@ impl From<DeepSeek> for super::Backend {
 }
 fn failure(error: impl std::fmt::Display) -> Failure {
     Failure::new("deepseek_failed", error)
+}
+fn missing_program(label: &str, program: &Path, hint: &str) -> Failure {
+    Failure::new(
+        "provider_unavailable",
+        format!(
+            "{label}が見つからないか実行できません（{}）。{hint}",
+            program.display()
+        ),
+    )
+}
+fn script_command(script: &Path, runtime: &Path) -> Result<tokio::process::Command, Failure> {
+    if !script.is_file() {
+        return Err(missing_program(
+            "DeepSeek Harness（DSH）",
+            script,
+            INSTALL_DSH_HINT,
+        ));
+    }
+    let runtime = which::which(runtime).map_err(|_| missing_program("DSH用のNode.js", runtime,
+        "HostにNode.jsをインストールするか、AGENT_DEEPSEEK_NODEで実行ファイルを指定してください。"))?;
+    let mut command = agent_process::command(&runtime)
+        .map_err(|error| Failure::new("provider_unavailable", error))?;
+    command.arg(script);
+    Ok(command)
 }
 fn unsupported() -> Failure {
     Failure::new(
@@ -133,49 +160,53 @@ impl DeepSeek {
             stop: CancellationToken::new(),
             workers: Mutex::new(tokio::task::JoinSet::new()),
             credential_updates: Mutex::new(()),
+            usage: Default::default(),
         })))
     }
     fn command(&self) -> Result<tokio::process::Command, Failure> {
         let program = &self.0.program;
-        if program.extension().is_some_and(|e| e == "js" || e == "mjs") {
-            let runtime = std::env::var_os("AGENT_DEEPSEEK_NODE").unwrap_or_else(|| "node".into());
-            let mut command = agent_process::command(Path::new(&runtime)).map_err(failure)?;
-            command.arg(program);
-            return Ok(command);
-        }
+        let script = program
+            .extension()
+            .is_some_and(|e| e == "js" || e == "mjs")
+            .then(|| program.clone());
         #[cfg(windows)]
-        {
+        let script = script.or_else(|| {
+            if program != Path::new("dsh") {
+                return None;
+            }
             let managed = directories::BaseDirs::new().map(|base| {
                 base.data_local_dir()
                     .join("BEX/deepseek-harness/node_modules/@deepseek-ai/dsh/lib/bin.js")
             });
             let path = std::env::var_os("PATH").unwrap_or_default();
-            let script = managed
+            managed
                 .filter(|p| p.is_file())
                 .into_iter()
                 .chain(
                     std::env::split_paths(&path)
                         .map(|p| p.join("node_modules/@deepseek-ai/dsh/lib/bin.js")),
                 )
-                .find(|p| p.is_file());
-            if program == Path::new("dsh")
-                && let Some(script) = script
-            {
-                let runtime = directories::BaseDirs::new()
+                .find(|p| p.is_file())
+        });
+        if let Some(script) = script {
+            let runtime = std::env::var_os("AGENT_DEEPSEEK_NODE");
+            #[cfg(windows)]
+            let runtime = runtime.or_else(|| {
+                directories::BaseDirs::new()
                     .map(|base| {
                         base.data_local_dir()
                             .join("BEX/deepseek-harness/runtime/node.exe")
                     })
-                    .filter(|p| p.is_file());
-                let runtime = std::env::var_os("AGENT_DEEPSEEK_NODE")
-                    .or_else(|| runtime.map(|p| p.into_os_string()))
-                    .unwrap_or_else(|| "node".into());
-                let mut command = agent_process::command(Path::new(&runtime)).map_err(failure)?;
-                command.arg(script);
-                return Ok(command);
-            }
+                    .filter(|p| p.is_file())
+                    .map(|p| p.into_os_string())
+            });
+            let runtime = runtime.unwrap_or_else(|| "node".into());
+            return script_command(&script, Path::new(&runtime));
         }
-        agent_process::command(program).map_err(failure)
+        let program = which::which(program)
+            .map_err(|_| missing_program("DeepSeek Harness（DSH）", program, INSTALL_DSH_HINT))?;
+        agent_process::command(&program)
+            .map_err(|error| Failure::new("provider_unavailable", error))
     }
     async fn receive(
         owner: &std::sync::Weak<Inner>,
@@ -215,7 +246,6 @@ impl DeepSeek {
         if let Some(rpc) = slot.as_ref().filter(|rpc| !rpc.stop.is_cancelled()) {
             return Ok(rpc.clone());
         }
-        let mut command = self.command()?;
         let patch = self.0.directory.join("acp.patch.json");
         let keys = ManagedKeys::load(&self.0.directory).await?;
         let mut providers = serde_json::Map::new();
@@ -236,6 +266,7 @@ impl DeepSeek {
             overlays.push(json!({"id":"credentials","config":{"path":credentials}}));
         }
         agent_local_host::save_private_json(&patch, &overlays).map_err(failure)?;
+        let mut command = self.command()?;
         command
             .args(["--profile", "acp", "--patch"])
             .arg(patch)
@@ -251,7 +282,7 @@ impl DeepSeek {
             Failure::new(
                 "provider_unavailable",
                 format!(
-                    "DeepSeek Harness を起動できません。npm install -g @deepseek-ai/dsh@next: {e}"
+                    "DeepSeek Harness を起動できません。HostのDSHとNode.jsの起動設定を確認してください: {e}"
                 ),
             )
         })?;
@@ -309,7 +340,8 @@ impl DeepSeek {
         // Discovery can be cancelled before ACP initialization completes. The
         // reader owns the lifetime pipe, so cancellation must stop it as well.
         let initializing = rpc.stop.clone().drop_guard();
-        let initialized = rpc.call("initialize", json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"bex","version":env!("CARGO_PKG_VERSION")}}), Some(Duration::from_secs(90))).await?;
+        let initialized = rpc.call("initialize", json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"bex","version":env!("CARGO_PKG_VERSION")}}), Some(Duration::from_secs(90))).await
+            .map_err(|error| Failure::new("provider_unavailable", format!("DeepSeek Harnessの起動時にACP接続を確立できませんでした。HostのDSHとNode.jsの起動設定を確認してください: {error}")))?;
         if initialized["protocolVersion"] != 1 {
             return Err(failure("Harness requires ACP v1"));
         }
@@ -791,6 +823,11 @@ impl Identity for DeepSeek {
     ) -> Result<agent_protocol::dsh::Credentials, Failure> {
         let _update = self.0.credential_updates.lock().await;
         self.update_key(update).await?;
+        *self
+            .0
+            .usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::default();
         self.dsh_credentials().await
     }
     async fn account(&self, command: AccountCommand) -> Result<AccountReply, Failure> {
@@ -807,26 +844,39 @@ impl Identity for DeepSeek {
                 let _update = self.0.credential_updates.lock().await;
                 self.reset_rpc().await?;
                 ManagedKeys::default().save(&self.0.directory).await?;
+                *self
+                    .0
+                    .usage
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::default();
                 Ok(AccountReply::Complete)
             }
             _ => Err(failure("Unknown DeepSeek account")),
         }
     }
     async fn usage(&self, _: &str) -> Result<op::AccountUsage, Failure> {
-        // ACP has no quota API. An empty result means unavailable usage, not a
-        // failed credential setup, and keeps account settings usable.
-        Ok(op::AccountUsage {
-            windows: vec![],
-            fetched_at: now() as i64,
-            error: None,
-        })
+        let keys = ManagedKeys::load(&self.0.directory).await?;
+        let Some(key) = keys.get(KeyProvider::OpenCode) else {
+            return Ok(op::AccountUsage {
+                windows: vec![],
+                fetched_at: now() as i64,
+                error: None,
+            });
+        };
+        let cache = self
+            .0
+            .usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Ok(cache.read(usage::read(key)).await)
     }
 }
 
 #[async_trait::async_trait]
 impl Agent for DeepSeek {
     fn data_recipient(&self) -> &'static str {
-        "DeepSeek Harness（選択したAPI事業者：DeepSeek / OpenRouter / NanoGPT / OpenAI / Google / Anthropic / Groq / Mistral AI / xAI、およびモデル提供元）"
+        "DeepSeek Harness（選択したAPI事業者：DeepSeek / OpenRouter / NanoGPT / OpenCode / OpenAI / Google / Anthropic / Groq / Mistral AI / xAI、およびモデル提供元）"
     }
     fn running_input(&self) -> RunningInput {
         RunningInput::Queue
@@ -1357,8 +1407,6 @@ async fn prompt(input: &[op::Input]) -> Result<Vec<Value>, Failure> {
     }
     Ok(prompt)
 }
-// NanoGPT is an OpenAI-compatible custom route, not an installed pi-ai catalog.
-// Model IDs/capabilities: https://nano-gpt.com/api/v1/models?detailed=true
 /// ACP option kinds say what each permission option does.
 fn permission_choice(option: &Value) -> Option<Choice> {
     let effect = match option["kind"].as_str()? {
@@ -1646,6 +1694,85 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn opencode_allowance_cache_is_invalidated_when_credentials_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = DeepSeek::load(dir.path().join("missing-dsh"), dir.path().into())
+            .await
+            .unwrap();
+        save_test_key(&adapter, KeyProvider::OpenCode, Some("first-test-key")).await;
+        let first = adapter.0.usage.lock().unwrap().clone();
+        let original = first
+            .read(async {
+                Ok(vec![
+                    op::UsageWindow::from_used("OpenCode Go · 週間枠".into(), 20., None).unwrap(),
+                ])
+            })
+            .await;
+        assert_eq!(adapter.usage(ACCOUNT).await.unwrap(), original);
+        save_test_key(
+            &adapter,
+            KeyProvider::OpenCode,
+            Some("replacement-test-key"),
+        )
+        .await;
+        let replacement = adapter.0.usage.lock().unwrap().clone();
+        assert!(!Arc::ptr_eq(&first, &replacement));
+        let refreshed = replacement
+            .read(async {
+                Ok(vec![
+                    op::UsageWindow::from_used("OpenCode Go · 週間枠".into(), 55., None).unwrap(),
+                ])
+            })
+            .await;
+        assert_eq!(adapter.usage(ACCOUNT).await.unwrap(), refreshed);
+        save_test_key(&adapter, KeyProvider::OpenCode, None).await;
+        assert!(adapter.usage(ACCOUNT).await.unwrap().windows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_harness_reports_installation_instead_of_a_disconnection_and_keeps_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        for program in ["not-installed-dsh", "not-installed-dsh.js"] {
+            let adapter = DeepSeek::load(dir.path().join(program), dir.path().into())
+                .await
+                .unwrap();
+            save_test_key(&adapter, KeyProvider::OpenCode, Some("test-key")).await;
+            let error = adapter
+                .models(&op::ListModels {
+                    provider: PROVIDER,
+                    limit: 100,
+                    cursor: None,
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "provider_unavailable");
+            assert!(error.message.contains("DSH"));
+            assert!(error.message.contains("--deepseek"));
+            assert!(!error.message.contains("disconnected"));
+            assert!(!error.message.contains("test-key"));
+            assert_eq!(
+                ManagedKeys::load(dir.path())
+                    .await
+                    .unwrap()
+                    .get(KeyProvider::OpenCode),
+                Some("test-key")
+            );
+        }
+    }
+
+    #[test]
+    fn missing_node_reports_the_runtime_without_claiming_the_harness_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("harness.js");
+        std::fs::write(&script, "").unwrap();
+        let error = script_command(&script, &dir.path().join("missing-node")).unwrap_err();
+        assert_eq!(error.code, "provider_unavailable");
+        assert!(error.message.contains("Node.js"));
+        assert!(error.message.contains("AGENT_DEEPSEEK_NODE"));
+        assert!(!error.message.contains("DSHをインストール"));
     }
 
     #[tokio::test]

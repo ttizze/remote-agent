@@ -19648,6 +19648,54 @@
           }
         }
       }
+    },
+    "AIを切り替えて送信するには、現在の応答・確認・送信の完了を待つか、新しいチャットを開いてください。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AIを切り替えて送信するには、現在の応答・確認・送信の完了を待つか、新しいチャットを開いてください。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To send with another AI, wait for the current response, approval or submission to finish, or open a new chat."
+          }
+        }
+      }
+    },
+    "OpenCode Go · 5時間枠": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenCode Go · 5時間枠"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenCode Go · 5-hour allowance"
+          }
+        }
+      }
+    },
+    "OpenCode Go · 月間枠": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenCode Go · 月間枠"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenCode Go · Monthly allowance"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

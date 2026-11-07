@@ -354,7 +354,7 @@ impl ComposerContent {
                         || !model.provider_available
                         || model.busy
                         || empty
-                        || model.input_unavailable,
+                        || model.input_unavailable.is_some(),
                 )
             });
             let microphone = Button::new("dictation-toggle")
@@ -602,6 +602,11 @@ impl ComposerContent {
                 column.child(Self::question_panel(question, cx))
             })
             .child(Self::composer_context(model, cx))
+            .when_some(model.input_unavailable.as_ref(), |column, reason| {
+                column.child(div().text_sm().text_color(rgb(appearance::MUTED)).child(
+                    agent_core::localization::localized_ui_text(language, reason.clone()),
+                ))
+            })
             .child(composer);
         h_flex()
             .justify_center()
@@ -648,7 +653,7 @@ struct ComposerModel {
     connected: bool,
     busy: bool,
     provider_available: bool,
-    input_unavailable: bool,
+    input_unavailable: Option<String>,
     phase: Option<Phase>,
     levels: std::collections::VecDeque<f32>,
     remote: Option<RemoteHost>,
@@ -681,10 +686,10 @@ impl Desktop {
             connected: self.snapshot.connection.connected,
             busy: self.busy > 0,
             provider_available: permission.provider.is_some(),
-            input_unavailable: self
-                .thread()
-                .and_then(|thread| agent_protocol::session::input_unavailable_reason(thread))
-                .is_some(),
+            input_unavailable: self.selected().and_then(|id| {
+                self.snapshot
+                    .input_unavailable_reason(id.clone(), permission.provider)
+            }),
             phase: self.dictation.as_ref().map(|state| state.phase),
             levels: self
                 .dictation

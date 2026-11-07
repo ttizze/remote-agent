@@ -79,6 +79,9 @@ struct ConversationComposer: View {
             if let error = model.transferError {
                 AppNotice(text: error)
             }
+            if let reason = controls.unavailable {
+                AppNotice(text: reason)
+            }
             if let request = model.dockedRequest {
                 RequestPanel(
                     request: request,
@@ -235,7 +238,7 @@ struct ConversationComposer: View {
         .buttonBorderShape(.circle)
         .accessibilityLabel(LocalizedStringKey(dictation.isRecording ? "文字起こしして送信" : "送信"))
         .disabled(!model.isConnected || (!model.isNewThread && !hasConversation) || model
-            .composerControls.provider == nil || model
+            .composerControls.provider == nil || model.composerControls.unavailable != nil || model
             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
             .transcribing ||
             (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines)

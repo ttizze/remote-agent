@@ -89,8 +89,8 @@ impl ComposerPresentation {
                     })
                 }),
             running_turn,
-            unavailable: thread
-                .and_then(|thread| agent_protocol::session::input_unavailable_reason(thread)),
+            unavailable: session
+                .and_then(|id| snapshot.input_unavailable_reason(id.clone(), provider)),
             question: session.and_then(|id| snapshot.question_prompt(id.clone())),
             request: requests
                 .iter()
@@ -128,6 +128,43 @@ impl ComposerPresentation {
             return previous.clone();
         }
         Arc::new(next)
+    }
+}
+
+impl Snapshot {
+    pub(crate) fn submission_unavailable_reason(
+        &self,
+        session: &crate::session::SessionRef,
+        selected: Option<ProviderKind>,
+    ) -> Option<String> {
+        let thread = self.thread_metadata(session)?;
+        crate::session::direct_input_unavailable_reason(thread.can_accept_direct_input).or_else(|| {
+            let active = thread.active_provider.unwrap_or(session.provider);
+            let busy = agent_protocol::models::task_active(None, thread.status)
+                || thread.active_turn_id().is_some()
+                || !thread.requests.is_empty()
+                || thread.preparation.is_some();
+            if selected.is_some_and(|provider| provider != active) && busy {
+                Some("AIを切り替えて送信するには、現在の応答・確認・送信の完了を待つか、新しいチャットを開いてください。".into())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl Snapshot {
+    pub fn input_unavailable_reason(
+        &self,
+        session: crate::session::SessionRef,
+        selected: Option<ProviderKind>,
+    ) -> Option<String> {
+        self.submission_unavailable_reason(&session, selected)
+            .or_else(|| {
+                self.thread_metadata(&session)
+                    .and_then(crate::session::input_unavailable_reason)
+            })
     }
 }
 
