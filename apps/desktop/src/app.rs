@@ -934,7 +934,9 @@ impl Desktop {
                         .project_import
                         .result
                         .as_ref()
-                        .is_some_and(|result| result.errors.is_empty())
+                        .is_some_and(|result| {
+                            result.errors.is_empty() && result.warnings.is_empty()
+                        })
                 {
                     self.complete_onboarding();
                 }

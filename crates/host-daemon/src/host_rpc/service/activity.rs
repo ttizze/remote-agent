@@ -83,7 +83,7 @@ impl HostRpcService {
                 successful |= fresh;
                 complete &= fresh;
                 for summary in pages.into_iter().flatten() {
-                    if let Some(thread) = self.inner.conversations.summary(summary.thread)? {
+                    if let Some(thread) = self.inner.database.summary(summary.thread)? {
                         native.push(thread);
                     }
                 }
@@ -210,7 +210,7 @@ rl.on('line', line => {
         })
         .unwrap();
         conversation.id = root.clone();
-        service.inner.conversations.save(conversation).unwrap();
+        service.inner.database.save(conversation).unwrap();
         service.start();
 
         let bootstrap = service.read_task_activity(false).await.unwrap();

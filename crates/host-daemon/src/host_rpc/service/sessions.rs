@@ -14,13 +14,13 @@ impl HostRpcService {
             .map_err(|error| Failure::new("invalid_params", error))?;
         let stored = self
             .inner
-            .transcripts
+            .database
             .turn(&params.session, &params.turn_id)
             .map_err(transcripts::storage_failure)?
             .and_then(|turn| turn.items);
         let items = if let Some(items) = stored {
             items
-        } else if let Some(row) = self.inner.conversations.get(&params.session)? {
+        } else if let Some(row) = self.inner.database.get(&params.session)? {
             let (source, turn) = row.source(&params.turn_id)?;
             if !row.sources().any(|session| *session == source) {
                 return Err(Failure::new(
@@ -56,7 +56,7 @@ impl HostRpcService {
         &self,
         params: &agent_protocol::session::ReadHistory,
     ) -> Result<agent_protocol::session::HistoryPage, Failure> {
-        let row = self.inner.conversations.get(&params.session)?;
+        let row = self.inner.database.get(&params.session)?;
         // Transcript cursors are positions. A window read from native history
         // before its import keeps paging native history.
         let stored = match transcripts::position(row.is_some(), &params.cursor) {
@@ -102,7 +102,7 @@ impl HostRpcService {
         &self,
         params: &op::ListAgents,
     ) -> Result<Vec<agent_protocol::models::AgentObservation>, Failure> {
-        let row = self.inner.conversations.get(&params.thread_id)?;
+        let row = self.inner.database.get(&params.thread_id)?;
         if row.as_ref().is_some_and(|row| row.bindings.is_empty()) {
             return Ok(Vec::new());
         }
@@ -125,7 +125,7 @@ impl HostRpcService {
         while let Some(summary) = threads.try_next().await? {
             let Some(thread) = self
                 .inner
-                .conversations
+                .database
                 .summary(crate::projects::titles::summary(summary.thread))?
             else {
                 continue;
@@ -147,7 +147,7 @@ impl HostRpcService {
         target: &agent_protocol::session::SessionRef,
         params: &op::ForkSession,
     ) -> Result<ThreadResponse, Failure> {
-        if let Some(row) = self.inner.conversations.get(target)? {
+        if let Some(row) = self.inner.database.get(target)? {
             return self.fork_conversation(&row, &params.last_turn_id).await;
         }
         self.require_provider_enabled(target.provider)?;
@@ -170,7 +170,7 @@ impl HostRpcService {
         if handled {
             return Ok(agent_protocol::models::Empty {});
         }
-        let row = self.inner.conversations.get(target)?;
+        let row = self.inner.database.get(target)?;
         if let Some(row) = row.as_ref().filter(|row| {
             row.startup.as_ref().is_some_and(|startup| {
                 startup
@@ -208,9 +208,9 @@ impl HostRpcService {
         target: &agent_protocol::session::SessionRef,
         params: &op::RenameSession,
     ) -> Result<agent_protocol::models::Empty, Failure> {
-        if let Some(mut row) = self.inner.conversations.get(target)? {
+        if let Some(mut row) = self.inner.database.get(target)? {
             row.name = Some(params.name.clone());
-            self.inner.conversations.save(row)?;
+            self.inner.database.save(row)?;
             self.inner
                 .router
                 .broadcast(agent_protocol::protocol::Notification::SessionRenamed {
@@ -226,7 +226,7 @@ impl HostRpcService {
         )?;
         let renamed = agent.rename(&target.id, &params.name).await?;
         self.inner
-            .transcripts
+            .database
             .rename(target, Some(&params.name))
             .map_err(transcripts::storage_failure)?;
         Ok(renamed)
@@ -238,14 +238,14 @@ impl HostRpcService {
         input: &op::Submission,
     ) -> Result<op::SubmissionReceipt, Failure> {
         self.capacity_input(target);
-        let mut row = self.inner.conversations.get(target)?;
+        let mut row = self.inner.database.get(target)?;
         if let Some(current) = row.as_ref().filter(|row| {
             row.startup.as_ref().is_some_and(|startup| {
                 startup.preparation.status == agent_protocol::session::PreparationStatus::Unknown
             })
         }) {
             self.preparation_history(current).await?;
-            row = self.inner.conversations.get(target)?;
+            row = self.inner.database.get(target)?;
             if let Some(receipt) = self
                 .inner
                 .router
@@ -428,7 +428,7 @@ impl HostRpcService {
                 .as_secs_f64(),
         );
         response.thread = self.inner.router.overlay_execution(root, response.thread);
-        if let Some(row) = self.inner.conversations.get(root)? {
+        if let Some(row) = self.inner.database.get(root)? {
             row.describe(&mut response.thread);
             response.thread.capabilities = Some(agent_protocol::session::Capabilities {
                 rename: true,
@@ -443,6 +443,10 @@ impl HostRpcService {
         thread: Thread,
         projects: &[agent_protocol::models::Project],
     ) {
+        if let Err(message) = self.inner.database.observe(&thread) {
+            tracing::error!(target: "agent", operation = "host.conversation.write", message);
+            return;
+        }
         // Admit new Host conversations without replacing newer provider events.
         self.inner.router.task_activity(vec![thread.clone()], 0);
         let project = thread
@@ -492,7 +496,7 @@ impl HostRpcService {
                 anyhow::bail!("invalid session reference or zero history limit");
             }
             let target = params.session.clone();
-            let row = self.inner.conversations.get(&target)?;
+            let row = self.inner.database.get(&target)?;
             let native = row.as_ref().map_or(&target, |row| &row.active);
             let limit = params.limit;
             let read = self
@@ -590,7 +594,7 @@ impl HostRpcService {
             Some(item) => Some(item),
             None => self
                 .inner
-                .transcripts
+                .database
                 .item(target, &params.turn_id, &params.item_id, true)
                 .map_err(transcripts::storage_failure)?
                 .filter(|item| !item.is_deferred()),
@@ -600,7 +604,7 @@ impl HostRpcService {
                 item: Arc::unwrap_or_clone(item),
                 transfer: None,
             }
-        } else if let Some(row) = self.inner.conversations.get(target)? {
+        } else if let Some(row) = self.inner.database.get(target)? {
             let (source, turn) = row.source(&params.turn_id)?;
             let (item_source, item) = row.source(&params.item_id)?;
             if source != item_source || !row.sources().any(|session| *session == source) {
@@ -1048,7 +1052,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while service
                 .inner
-                .transcripts
+                .database
                 .window(&target, None, 1)
                 .unwrap()
                 .is_none()

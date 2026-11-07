@@ -1,49 +1,5 @@
-//! Conversation lists: native titles merged with registered projects and Host conversations.
+//! Conversation lists read only Host-owned rows; discovery is an import operation.
 use super::*;
-use crate::providers::SessionSummary;
-
-fn append_named_titles(
-    mut summaries: Vec<SessionSummary>,
-    threads: Vec<Thread>,
-) -> Vec<SessionSummary> {
-    let original_len = summaries.len();
-    let large_batch = threads.len() >= 64;
-    let mut ids = None;
-    for thread in threads {
-        // Small pages and batches need no index. Include earlier appends if
-        // the retained page grows large enough to benefit during this batch.
-        if large_batch && ids.is_none() && summaries.len() >= 128 {
-            ids = Some(
-                summaries
-                    .iter()
-                    .map(|summary| summary.thread.id.clone())
-                    .collect::<std::collections::HashSet<_>>(),
-            );
-        }
-        let unseen = match &mut ids {
-            Some(ids) => ids.insert(thread.id.clone()),
-            None => !summaries
-                .iter()
-                .any(|summary| summary.thread.id == thread.id),
-        };
-        if unseen {
-            summaries.push(SessionSummary {
-                branch: thread.git_branch.clone(),
-                thread,
-            });
-        }
-    }
-    if summaries.len() != original_len {
-        summaries.sort_by(|left, right| {
-            right
-                .thread
-                .updated_at
-                .unwrap_or_default()
-                .total_cmp(&left.thread.updated_at.unwrap_or_default())
-        });
-    }
-    summaries
-}
 
 impl HostRpcService {
     pub(super) async fn list_sessions(
@@ -92,60 +48,40 @@ impl HostRpcService {
             .await
             .map_err(|error| Failure::new("project_state_unavailable", error))
     }
-    fn title_capabilities(
-        &self,
-        session: Option<&agent_protocol::session::SessionRef>,
-        native: agent_protocol::session::Capabilities,
-    ) -> Result<agent_protocol::session::Capabilities, Failure> {
-        let row = session
-            .map(|session| self.inner.conversations.get(session))
-            .transpose()?
-            .flatten();
-        Ok(row.map_or(native, |row| {
-            self.conversation_capabilities(
-                row.active.provider,
-                row.sources().map(|source| source.provider),
-            )
-        }))
-    }
-
     pub(super) fn saved_conversation_titles(&self, search: &str) -> Result<Vec<Thread>, Failure> {
-        let search = search.trim().to_lowercase();
-        let mut threads = Vec::new();
-        for (mut thread, sources) in self.inner.conversations.summaries()? {
-            let Some(provider) = thread.active_provider else {
+        let saved = self
+            .inner
+            .database
+            .titles(search)
+            .map_err(transcripts::storage_failure)?;
+        let mut threads = Vec::with_capacity(saved.len());
+        for title in saved {
+            let mut thread = title.thread;
+            let Some(id) = thread.id.clone() else {
                 continue;
             };
-            let error = self
-                .inner
-                .providers
-                .get(provider)
-                .and_then(|agent| agent.availability())
-                .err();
-            if error.is_none() && thread.preparation.is_none() {
-                continue;
-            }
-            let text = format!(
-                "{} {}",
-                thread.name.as_deref().unwrap_or_default(),
-                thread.preview.as_deref().unwrap_or_default()
-            )
-            .to_lowercase();
-            if !text.contains(&search) {
-                continue;
-            }
-            if let Some(error) = error
-                && thread.preparation.is_none()
+            let provider = thread.active_provider.unwrap_or(id.provider);
+            let capabilities = if title.managed {
+                self.conversation_capabilities(provider, title.sources.into_iter())
+            } else {
+                self.inner
+                    .providers
+                    .get(provider)
+                    .map(|agent| agent.capabilities())
+                    .unwrap_or_default()
+            };
+            thread.capabilities = Some(capabilities);
+            if thread.preparation.is_none()
+                && self
+                    .inner
+                    .providers
+                    .get(provider)
+                    .and_then(|agent| agent.availability())
+                    .is_err()
             {
                 thread.status = agent_protocol::models::SessionStatus::Unavailable;
-                thread.history_read_state = Some(agent_protocol::session::HistoryReadState::new(
-                    agent_protocol::session::HistoryReadKind::Unavailable,
-                    vec![format!("{}: {}", provider.key(), error.message)],
-                ));
             }
-            thread.capabilities =
-                Some(self.conversation_capabilities(provider, sources.into_iter()));
-            threads.push(thread);
+            threads.push(self.inner.router.overlay_execution(&id, thread));
         }
         threads.sort_by(|a, b| {
             b.updated_at
@@ -156,34 +92,6 @@ impl HostRpcService {
         Ok(threads)
     }
 
-    /// A Host-owned name can match even when its native provider title does not.
-    async fn named_conversation_titles(
-        &self,
-        search: &str,
-        deadline: tokio::time::Instant,
-    ) -> Result<Vec<(ProviderKind, ThreadResponse)>, Failure> {
-        if search.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let targets = self.inner.conversations.search_targets(search)?;
-        let found = futures_util::future::join_all(targets.into_iter().map(|target| async move {
-            let response = tokio::time::timeout_at(deadline, async {
-                self.inner
-                    .providers
-                    .get(target.provider)?
-                    .open(&target.id, 1, false)
-                    .await
-            })
-            .await;
-            (target.provider, response)
-        }))
-        .await;
-        Ok(found
-            .into_iter()
-            .filter_map(|(provider, result)| result.ok()?.ok().map(|response| (provider, response)))
-            .collect())
-    }
-
     pub(super) async fn host_title_list(
         &self,
         search: &str,
@@ -191,184 +99,15 @@ impl HostRpcService {
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
         let revision = self.inner.router.list_revision();
         let task_revision = self.inner.router.task_activity_revision();
-        let agents = self.inner.providers.all();
-        let first_page_size = title_first_page_size(query);
-        let started = std::time::Instant::now();
-        let scope = if search.trim().is_empty() {
-            SessionListScope::Roots
-        } else {
-            SessionListScope::All
-        };
-        let ((snapshot, projects_elapsed), (mut first_pages, first_pages_elapsed)) = tokio::join!(
-            async { (self.project_snapshot().await, started.elapsed()) },
-            async {
-                let started = tokio::time::Instant::now();
-                let deadline = started + SESSION_LIST_TIMEOUT;
-                let pages = futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
-                    let read_started = std::time::Instant::now();
-                    let page = read_session_page(
-                        Agent::list(agent.as_ref(), search, None, scope, first_page_size),
-                        deadline,
-                    ).await;
-                    tracing::info!(target: "agent", operation = "host.provider.list",
-                        message = %format_args!("provider={} elapsed_ms={} code={}", provider.key(), read_started.elapsed().as_millis(), page.as_ref().err().map_or("ok", |error| error.code)));
-                    page
-                }))
-                .await;
-                (pages, started.elapsed())
-            },
-        );
-        let snapshot = snapshot?;
-        // Project discovery must not consume the native page-read budget.
-        // Reuse the first pages and give subsequent reads only the time left.
-        let deadline =
-            tokio::time::Instant::now() + SESSION_LIST_TIMEOUT.saturating_sub(first_pages_elapsed);
-        let mut named_by_provider = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for (provider, response) in self.named_conversation_titles(search, deadline).await? {
-            named_by_provider
-                .entry(provider)
-                .or_default()
-                .push(response.thread);
-        }
-        for (provider, threads) in named_by_provider {
-            if let Some(index) = agents
-                .iter()
-                .position(|(candidate, _)| *candidate == provider)
-                && let Ok(page) = &mut first_pages[index]
-            {
-                page.data = append_named_titles(std::mem::take(&mut page.data), threads);
-            }
-        }
-        let initial_elapsed = started.elapsed();
-        let mut listings = futures_util::future::join_all(agents.iter().zip(first_pages).map(
-            |((provider, agent), page)| async move {
-                let mut threads = session_pages(
-                    agent.as_ref(),
-                    search,
-                    scope,
-                    first_page_size,
-                    TITLE_PAGE_SIZE,
-                    Some(deadline),
-                    Some(page),
-                )
-                .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok::<_, Failure>)))
-                .try_flatten()
-                .try_filter_map(|summary| {
-                    let branch = summary.branch;
-                    futures_util::future::ready(
-                        self.inner
-                            .conversations
-                            .summary(summary.thread)
-                            .map(|thread| thread.map(|thread| SessionSummary { thread, branch })),
-                    )
-                })
-                .boxed();
-                let head = threads.try_next().await;
-                (*provider, agent.capabilities(), threads, head)
-            },
-        ))
-        .await;
-        let saved_titles = self.saved_conversation_titles(search)?;
-        let saved = !saved_titles.is_empty();
-        let mut saved_by_provider = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for thread in saved_titles {
-            saved_by_provider
-                .entry(thread.active_provider.expect("saved title provider"))
-                .or_default()
-                .push(Ok(SessionSummary {
-                    branch: thread.git_branch.clone(),
-                    thread,
-                }));
-        }
-        for (provider, saved) in saved_by_provider {
-            let mut threads = futures_util::stream::iter(saved).boxed();
-            let head = threads.try_next().await;
-            listings.push((
-                provider,
-                agent_protocol::session::Capabilities::default(),
-                threads,
-                head,
-            ));
-        }
+        let snapshot = self.project_snapshot().await?;
         let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, query);
-        let mut provider_errors = self
-            .provider_errors()
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        let mut listed = std::collections::HashSet::new();
-        let successful = listings.iter().any(|(_, _, _, head)| head.is_ok());
-        while let Some(newest) = listings
-            .iter()
-            .filter_map(|(_, _, _, head)| head.as_ref().ok()?.as_ref())
-            .map(|summary| summary.thread.updated_at.unwrap_or_default())
-            .max_by(f64::total_cmp)
-        {
-            // Never scan additional pages merely to exhaust a timestamp tie in
-            // the requested root window. Order ties within that window by ID.
-            let maximum = titles.remaining_chats().unwrap_or(usize::MAX).max(1);
-            let mut group = Vec::new();
-            for (_, capabilities, threads, head) in &mut listings {
-                while group.len() < maximum
-                    && head.as_ref().is_ok_and(|thread| {
-                        thread.as_ref().is_some_and(|summary| {
-                            summary
-                                .thread
-                                .updated_at
-                                .unwrap_or_default()
-                                .total_cmp(&newest)
-                                == std::cmp::Ordering::Equal
-                        })
-                    })
-                {
-                    group.push((head.as_mut().unwrap().take().unwrap(), *capabilities));
-                    if group.len() < maximum {
-                        *head = threads.try_next().await;
-                    }
-                }
-            }
-            group.sort_by(|(a, _), (b, _)| a.thread.id.cmp(&b.thread.id));
-            for (summary, capabilities) in group {
-                let Some(mut thread) = summary
-                    .thread
-                    .id
-                    .as_ref()
-                    .is_none_or(|id| !listed.contains(id))
-                    .then_some(summary.thread)
-                else {
-                    continue;
-                };
-                thread.git_branch = summary.branch;
-                let capabilities = self.title_capabilities(thread.id.as_ref(), capabilities)?;
-                describe_thread(&mut thread, capabilities, &snapshot);
-                listed.extend(thread.id.clone());
-                titles.push(thread);
-                if titles.done() {
-                    break;
-                }
-            }
+        for mut thread in self.saved_conversation_titles(search)? {
+            let capabilities = thread.capabilities.unwrap_or_default();
+            describe_thread(&mut thread, capabilities, &snapshot);
+            titles.push(thread);
             if titles.done() {
                 break;
             }
-            // A group can fill its allowance with assigned rows that are not
-            // retained. Continue that provider only if the visible page still
-            // needs rows; do not start another read after its lookahead.
-            for (_, _, threads, head) in &mut listings {
-                if matches!(head, Ok(None)) {
-                    *head = threads.try_next().await;
-                }
-            }
-        }
-        for (provider, _, _, head) in listings {
-            if let Err(error) = head {
-                provider_errors.insert(provider.key().to_owned(), serde_json::to_value(error)?);
-            }
-        }
-        if !successful && !saved && !provider_errors.is_empty() {
-            return Err(Failure::new(
-                "sessions_unavailable",
-                serde_json::to_value(provider_errors)?,
-            ));
         }
         let mut page = titles.finish();
         self.inner
@@ -381,11 +120,6 @@ impl HostRpcService {
         for project in &mut page.projects {
             project.list_revision = revision;
         }
-        if !provider_errors.is_empty() {
-            page.provider_errors = Some(provider_errors);
-        }
-        tracing::info!(target: "agent", operation = "host.thread.list.stages",
-            message = %format_args!("projects_ms={} titles_ms={} titles={}", projects_elapsed.as_millis(), (first_pages_elapsed + started.elapsed().saturating_sub(initial_elapsed)).as_millis(), page.data.len()));
         Ok(page)
     }
     pub(super) async fn list_decorations(
@@ -446,257 +180,112 @@ impl HostRpcService {
     }
 }
 
-const TITLE_PAGE_SIZE: u32 = 100;
-
-// One title walk supplies each requested quota plus lookahead.
-fn title_first_page_size(query: crate::projects::titles::TitleQuery<'_>) -> u32 {
-    match query {
-        crate::projects::titles::TitleQuery::Root {
-            limit,
-            project_limits,
-            part,
-            ..
-        } => {
-            let chats = if part == Some(agent_protocol::models::ListPart::Projects) {
-                0
-            } else {
-                limit.max(1).saturating_add(1)
-            };
-            let projects = project_limits.map_or(30, |limits| {
-                limits.values().fold(0u32, |sum, limit| {
-                    sum.saturating_add(limit.max(&1).saturating_add(1))
-                })
-            });
-            (chats.saturating_add(projects)).clamp(1, TITLE_PAGE_SIZE)
-        }
-        crate::projects::titles::TitleQuery::Project { .. } => TITLE_PAGE_SIZE,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    fn named_thread(
-        id: Option<&str>,
-        provider: agent_protocol::session::ProviderKind,
-        name: &str,
-        updated_at: Option<f64>,
-    ) -> super::Thread {
-        super::Thread {
-            id: id.map(|id| agent_protocol::session::SessionRef {
-                provider,
-                id: id.into(),
+    #[tokio::test]
+    async fn saved_list_and_transcript_survive_provider_failure_without_native_listing() {
+        use super::*;
+        use crate::host_rpc::service::conversations::tests::{NativeAgent, call};
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("worktrees.json");
+        let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("codex"));
+        let service = HostRpcService::new([agent.backend()], ProjectStore::new(&path));
+        let connection = service.open_session();
+        let created: agent_protocol::session::OpenedSession = call(
+            &service,
+            connection.id(),
+            Call::CreateSession(op::CreateSession {
+                initial_input: None,
+                provider: ProviderKind::Codex,
+                cwd: Some(root.path().to_str().unwrap().into()),
+                model: None,
             }),
-            name: Some(name.into()),
-            preview: Some(format!("preview-{name}")),
-            git_branch: Some(format!("git-{name}")),
-            updated_at,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn named_titles_keep_existing_rows_first_new_payloads_and_stable_timestamp_ties() {
-        use super::*;
-        use agent_protocol::session::ProviderKind::{Claude, Codex};
-        for existing_count in [3, 128] {
-            for incoming_count in [6, 63, 64, 65] {
-                let mut existing = vec![
-                    SessionSummary {
-                        thread: named_thread(Some("a"), Codex, "existing", Some(5.)),
-                        branch: Some("original branch".into()),
-                    },
-                    SessionSummary {
-                        thread: named_thread(Some("a"), Codex, "existing duplicate", Some(1.)),
-                        branch: None,
-                    },
-                    SessionSummary {
-                        thread: named_thread(None, Codex, "existing anonymous", None),
-                        branch: Some("anonymous branch".into()),
-                    },
-                ];
-                for index in 3..existing_count {
-                    existing.push(SessionSummary {
-                        thread: named_thread(
-                            Some("a"),
-                            Codex,
-                            &format!("existing duplicate {index}"),
-                            Some(1.),
-                        ),
-                        branch: None,
-                    });
-                }
-                let mut incoming = vec![
-                    named_thread(Some("a"), Codex, "ignored existing update", Some(999.)),
-                    named_thread(Some("b"), Codex, "first new b", Some(5.)),
-                    named_thread(Some("b"), Codex, "ignored new b update", Some(999.)),
-                    named_thread(Some("b"), Claude, "other provider b", Some(5.)),
-                    named_thread(None, Codex, "ignored anonymous update", Some(999.)),
-                    named_thread(Some("c"), Codex, "new c", None),
-                ];
-                incoming.resize(incoming_count, incoming[0].clone());
-                let original = |row: &SessionSummary| (row.thread.clone(), row.branch.clone());
-                let appended = |thread: &Thread| (thread.clone(), thread.git_branch.clone());
-                let mut expected = vec![
-                    original(&existing[0]),
-                    appended(&incoming[1]),
-                    appended(&incoming[3]),
-                    original(&existing[1]),
-                ];
-                expected.extend(existing[3..].iter().map(original));
-                expected.push(original(&existing[2]));
-                expected.push(appended(&incoming[5]));
-                let result = append_named_titles(existing, incoming)
-                    .into_iter()
-                    .map(|row| (row.thread, row.branch))
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    result, expected,
-                    "existing={existing_count}, incoming={incoming_count}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn duplicate_only_named_titles_leave_the_original_page_order_untouched() {
-        use super::*;
-        use agent_protocol::session::ProviderKind::Codex;
-        for count in [0, 1, 64] {
-            let existing = vec![
-                SessionSummary {
-                    thread: named_thread(None, Codex, "anonymous", None),
-                    branch: Some("original".into()),
-                },
-                SessionSummary {
-                    thread: named_thread(Some("a"), Codex, "first", Some(5.)),
-                    branch: None,
-                },
-                SessionSummary {
-                    thread: named_thread(Some("a"), Codex, "duplicate", Some(1.)),
-                    branch: None,
-                },
-            ];
-            let expected = existing
+        )
+        .await
+        .unwrap();
+        let id = created.session;
+        service
+            .import_transcript(id.clone(), false)
+            .unwrap()
+            .await
+            .unwrap();
+        let _: op::SubmissionReceipt = call(
+            &service,
+            connection.id(),
+            Call::Submit(op::Submission {
+                thread_id: id.clone(),
+                client_user_message_id: "input".into(),
+                input: vec![op::Input::Text {
+                    text: "Saved task".into(),
+                }],
+                model: None,
+                effort: None,
+                service_tier: None,
+            }),
+        )
+        .await
+        .unwrap();
+        agent.fail_list.store(1, Ordering::SeqCst);
+        let list = service
+            .list_sessions(&op::ListSessions::new(Default::default()))
+            .await
+            .unwrap();
+        assert!(
+            list.data
                 .iter()
-                .map(|row| (row.thread.clone(), row.branch.clone()))
-                .collect::<Vec<_>>();
-            let incoming = (0..count)
-                .map(|index| {
-                    named_thread(
-                        if index % 2 == 0 { Some("a") } else { None },
-                        Codex,
-                        "ignored",
-                        Some(999.),
-                    )
-                })
-                .collect();
-            let result = append_named_titles(existing, incoming)
-                .into_iter()
-                .map(|row| (row.thread, row.branch))
-                .collect::<Vec<_>>();
-            assert_eq!(result, expected);
-        }
-    }
-
-    #[test]
-    fn named_title_index_includes_items_appended_before_it_was_created() {
-        use super::*;
-        use agent_protocol::session::ProviderKind::Codex;
-        let mut incoming = (0..200)
-            .map(|index| {
-                let id = format!("chat-{index}");
-                named_thread(
-                    if index == 150 { None } else { Some(&id) },
-                    Codex,
-                    &format!("original {index}"),
-                    Some(0.),
-                )
-            })
-            .collect::<Vec<_>>();
-        let expected = incoming.clone();
-        incoming.push(named_thread(
-            Some("chat-0"),
-            Codex,
-            "ignored late duplicate",
-            Some(999.),
-        ));
-        incoming.push(named_thread(
-            None,
-            Codex,
-            "ignored anonymous duplicate",
-            Some(999.),
-        ));
-        let result = append_named_titles(Vec::new(), incoming);
-        assert_eq!(result.len(), expected.len());
-        for (row, thread) in result.into_iter().zip(expected) {
-            assert_eq!(row.thread, thread);
-            assert_eq!(row.branch, thread.git_branch);
-        }
-    }
-
-    #[test]
-    fn named_titles_keep_total_timestamp_order_and_original_float_bits() {
-        use super::*;
-        use agent_protocol::session::ProviderKind::Codex;
-        let positive_nan = 0x7ff8_0000_0000_0003;
-        let negative_nan = 0xfff8_0000_0000_0002;
-        let existing = [
-            ("z-none", None),
-            ("negative zero", Some(-0.)),
-            ("positive nan", Some(f64::from_bits(positive_nan))),
-            ("negative nan", Some(f64::from_bits(negative_nan))),
-            ("a-zero", Some(0.)),
-            ("one", Some(1.)),
-        ]
-        .into_iter()
-        .map(|(name, time)| SessionSummary {
-            thread: named_thread(Some(name), Codex, name, time),
-            branch: None,
-        })
-        .collect();
-        let result = append_named_titles(
-            existing,
-            vec![named_thread(
-                Some("infinity"),
-                Codex,
-                "infinity",
-                Some(f64::INFINITY),
-            )],
+                .any(|thread| thread.id.as_ref() == Some(&id))
         );
         assert_eq!(
-            result
-                .iter()
-                .map(|row| row.thread.name.as_deref().unwrap())
-                .collect::<Vec<_>>(),
-            [
-                "positive nan",
-                "infinity",
-                "one",
-                "z-none",
-                "a-zero",
-                "negative zero",
-                "negative nan"
-            ]
+            agent.fail_list.load(Ordering::SeqCst),
+            1,
+            "list reads must not reach the provider"
         );
-        assert_eq!(
-            result
-                .iter()
-                .map(|row| row.thread.updated_at.map(f64::to_bits))
-                .collect::<Vec<_>>(),
-            [
-                Some(positive_nan),
-                Some(f64::INFINITY.to_bits()),
-                Some(1f64.to_bits()),
-                None,
-                Some(0f64.to_bits()),
-                Some((-0f64).to_bits()),
-                Some(negative_nan)
-            ]
+        drop(connection);
+        drop(service);
+        let service = HostRpcService::new(
+            [Backend::unavailable(ProviderKind::Codex, "offline")],
+            ProjectStore::new(path),
         );
+        let connection = service.open_session();
+        let list = service
+            .list_sessions(&op::ListSessions::new(Default::default()))
+            .await
+            .unwrap();
+        assert!(
+            list.data
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(&id))
+        );
+        assert!(
+            serde_json::to_value(list)
+                .unwrap()
+                .get("providerErrors")
+                .is_none()
+        );
+        let opened: agent_protocol::session::OpenedSession = call(
+            &service,
+            connection.id(),
+            Call::OpenSession(agent_protocol::session::OpenSession {
+                session: id,
+                limit: 10,
+                include_activity: true,
+                known_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let turns = opened.response.thread.turns.unwrap();
+        assert_eq!(turns.len(), 1);
+        assert!(
+            agent_protocol::handoff::Message::from_turn(&turns[0])
+                .any(|message| message.text == "Saved task")
+        );
+        assert_eq!(agent.inputs.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn prefetched_project_titles_continue_past_the_first_native_page() {
+    async fn imported_project_titles_page_past_the_first_native_page() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(root.path()).unwrap();
@@ -720,6 +309,10 @@ mod tests {
         let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
         projects.register(&cwd).await.unwrap();
         let service = HostRpcService::new([agent.into()], projects);
+        service
+            .import_projects(&[cwd.to_str().unwrap().into()])
+            .await
+            .unwrap();
         let snapshot = service.project_snapshot().await.unwrap();
         let page = service
             .host_title_list(
@@ -732,7 +325,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(page.data.len(), 101, "{:?}", page.provider_errors);
+        assert_eq!(page.data.len(), 101);
         assert!(page.has_more);
         let ids: std::collections::HashSet<_> = page
             .data
@@ -810,6 +403,16 @@ mod tests {
         .await
         .unwrap();
         let service = HostRpcService::new([claude.into()], projects);
+        // Seed observations independently; membership/list reads must not consult native metadata.
+        for (_, agent) in service.inner.providers.all() {
+            for summary in Agent::list(agent.as_ref(), "", None, SessionListScope::All, 100)
+                .await
+                .unwrap()
+                .data
+            {
+                service.inner.database.observe(&summary.thread).unwrap();
+            }
+        }
         let session = service.open_session();
         for repaired in [false, true] {
             if repaired {
@@ -942,6 +545,10 @@ mod tests {
             ],
             projects,
         );
+        service
+            .import_projects(&[workspace.to_str().unwrap().into()])
+            .await
+            .unwrap();
         let session = service.open_session();
         for has_icon in [true, false] {
             if !has_icon {

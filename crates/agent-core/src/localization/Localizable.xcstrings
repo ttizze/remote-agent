@@ -10081,22 +10081,6 @@
         }
       }
     },
-    "一部を取得できません（{0}）": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "一部を取得できません（{0}）"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Some data is unavailable ({0})"
-          }
-        }
-      }
-    },
     "上の欄に URL を入力するか、AI にブラウザ操作を依頼してください。": {
       "localizations": {
         "ja": {
@@ -10429,22 +10413,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Search conversations"
-          }
-        }
-      }
-    },
-    "会話一覧は部分結果です（{0}）。取得できない提供元の保存済み表示は最新とは限りません。": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会話一覧は部分結果です（{0}）。取得できない提供元の保存済み表示は最新とは限りません。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The conversation list is incomplete ({0}). Saved results from unavailable providers may be out of date."
           }
         }
       }

@@ -2,18 +2,13 @@
 //! Provider bindings and historical source identities belong to the Host. Text
 //! lives in Host transcripts. Admitted input is retained until delivery;
 //! provider switches retain only the exact delivered handoff.
-use crate::providers::{AgentChange, Failure};
+use crate::providers::Failure;
 use agent_protocol::{
     handoff::Context, ids::ClientInputId, models::*, operations::SubmissionReceipt, session::*,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeSet,
-    io::Write,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Binding {
@@ -68,6 +63,20 @@ pub(super) struct Startup {
     pub started_at: f64,
 }
 
+impl Startup {
+    pub(in crate::host_rpc) fn describe(&self, thread: &mut Thread) {
+        thread.preparation = Some(self.preparation.clone());
+        thread.status = match self.preparation.status {
+            PreparationStatus::Preparing | PreparationStatus::Sending => SessionStatus::Preparing,
+            PreparationStatus::Unknown => SessionStatus::Unknown,
+            PreparationStatus::Failed { .. } | PreparationStatus::Interrupted => {
+                SessionStatus::Idle
+            }
+        };
+        thread.updated_at = Some(self.started_at);
+    }
+}
+
 /// Resource results are committed against the latest row, so an interrupt or
 /// rename received during filesystem/provider IO cannot be overwritten.
 pub(super) enum StartupChange {
@@ -81,7 +90,7 @@ pub(super) enum StartupChange {
     Finished,
 }
 
-fn change_startup(
+pub(super) fn change_startup(
     row: &Conversation,
     change: StartupChange,
 ) -> Result<Option<Conversation>, Failure> {
@@ -213,7 +222,10 @@ impl Conversation {
                 .clone()
                 .ok_or_else(|| Failure::new("invalid_thread", "working directory is missing"))?,
             name: thread.name.clone(),
-            preview: thread.preview.clone(),
+            preview: thread
+                .preview
+                .as_deref()
+                .map(agent_protocol::models::compact_title),
             bindings: vec![Binding {
                 session: id.clone(),
                 covered: None,
@@ -269,17 +281,7 @@ impl Conversation {
             thread.preview = Some(preview.clone());
         }
         if let Some(startup) = &self.startup {
-            thread.preparation = Some(startup.preparation.clone());
-            thread.status = match startup.preparation.status {
-                PreparationStatus::Preparing | PreparationStatus::Sending => {
-                    SessionStatus::Preparing
-                }
-                PreparationStatus::Unknown => SessionStatus::Unknown,
-                PreparationStatus::Failed { .. } | PreparationStatus::Interrupted => {
-                    SessionStatus::Idle
-                }
-            };
-            thread.updated_at = Some(startup.started_at);
+            startup.describe(thread);
         }
     }
 
@@ -373,297 +375,7 @@ pub(super) fn source(id: &str) -> Result<(SessionRef, String), Failure> {
     })
 }
 
-pub(super) struct Conversations {
-    path: PathBuf,
-    // Loading errors remain errors; a damaged registry must never create a
-    // second logical conversation or redirect an input to an old native session.
-    state: Mutex<Result<Vec<Conversation>, String>>,
-}
-
-impl Conversations {
-    pub fn new(path: PathBuf) -> Self {
-        let state = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Vec<Conversation>>(&bytes)
-                .map_err(|error| error.to_string())
-                .and_then(|mut rows| {
-                    validate(&rows)?;
-                    for row in &mut rows {
-                        if let Some(startup) = &mut row.startup {
-                            startup.preparation.status = match startup.preparation.status {
-                                PreparationStatus::Preparing => PreparationStatus::Failed {
-                                    error: agent_protocol::execution::ExecutionError {
-                                        message: "ホストの再起動で準備が中断されました。再試行してください。".into(),
-                                        ..Default::default()
-                                    },
-                                },
-                                PreparationStatus::Sending => PreparationStatus::Unknown,
-                                ref status => status.clone(),
-                            };
-                        }
-                        for handoff in &mut row.handoffs {
-                            if handoff.submission == SubmissionDelivery::Sending {
-                                handoff.submission = SubmissionDelivery::Unknown;
-                            }
-                        }
-                    }
-                    Ok(rows)
-                }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.to_string()),
-        };
-        Self {
-            path,
-            state: Mutex::new(state),
-        }
-    }
-
-    pub fn get(&self, id: &SessionRef) -> Result<Option<Conversation>, Failure> {
-        let state = self.state.lock().unwrap();
-        let rows = state
-            .as_ref()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        if let Some(row) = rows.iter().find(|row| &row.id == id) {
-            return Ok(Some(row.clone()));
-        }
-        if let Some(row) = owner(rows, id) {
-            return Err(Failure::new(
-                "native_session_bound",
-                format!(
-                    "Use the public conversation {} instead of its provider session.",
-                    row.id
-                ),
-            ));
-        }
-        Ok(None)
-    }
-
-    pub fn summary(&self, mut thread: Thread) -> Result<Option<Thread>, Failure> {
-        let state = self.state.lock().unwrap();
-        let rows = state
-            .as_ref()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        if let Some(id) = &thread.id
-            && let Some(row) = owner(rows, id)
-        {
-            if *id != row.active {
-                return Ok(None);
-            }
-            row.describe(&mut thread);
-        }
-        if let Some(parent) = &thread.parent_id
-            && let Some(row) = owner(rows, parent)
-        {
-            thread.parent_id = Some(row.id.clone());
-        }
-        Ok(Some(thread))
-    }
-
-    /// Saved title metadata, independent of native provider discovery.
-    pub fn summaries(&self) -> Result<Vec<(Thread, BTreeSet<ProviderKind>)>, Failure> {
-        let state = self.state.lock().unwrap();
-        let rows = state
-            .as_ref()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        Ok(rows
-            .iter()
-            .map(|row| {
-                let mut thread = Thread::default();
-                row.describe(&mut thread);
-                (
-                    thread,
-                    row.sources().map(|session| session.provider).collect(),
-                )
-            })
-            .collect())
-    }
-
-    pub fn active_bindings(&self) -> Result<Vec<(SessionRef, ProviderKind)>, Failure> {
-        let state = self.state.lock().unwrap();
-        let rows = state
-            .as_ref()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        Ok(rows
-            .iter()
-            .filter(|row| !row.bindings.is_empty())
-            .map(|row| (row.id.clone(), row.active.provider))
-            .collect())
-    }
-
-    pub fn search_targets(&self, search: &str) -> Result<Vec<SessionRef>, Failure> {
-        let state = self.state.lock().unwrap();
-        let rows = state
-            .as_ref()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        let search = search.trim().to_lowercase();
-        Ok(rows
-            .iter()
-            .filter(|row| !row.bindings.is_empty())
-            .filter(|row| {
-                row.name
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&search)
-                    || row
-                        .preview
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&search)
-            })
-            .map(|row| row.active.clone())
-            .collect())
-    }
-
-    pub fn save(&self, conversation: Conversation) -> Result<(), Failure> {
-        let mut state = self.state.lock().unwrap();
-        let mut next = state
-            .as_ref()
-            .cloned()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        if let Some(row) = next.iter_mut().find(|row| row.id == conversation.id) {
-            *row = conversation;
-        } else {
-            next.push(conversation);
-        }
-        self.save_rows(&mut state, next)
-    }
-
-    pub fn admit(&self, conversation: Conversation) -> Result<(Conversation, bool), Failure> {
-        let mut state = self.state.lock().unwrap();
-        let mut rows = state
-            .as_ref()
-            .cloned()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        if let Some(row) = rows.iter().find(|row| row.id == conversation.id) {
-            return Ok((row.clone(), false));
-        }
-        rows.push(conversation.clone());
-        self.save_rows(&mut state, rows)?;
-        Ok((conversation, true))
-    }
-
-    pub fn update_startup(
-        &self,
-        id: &SessionRef,
-        change: StartupChange,
-    ) -> Result<(Conversation, bool), Failure> {
-        let mut state = self.state.lock().unwrap();
-        let mut rows = state
-            .as_ref()
-            .cloned()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        let index = rows
-            .iter()
-            .position(|row| &row.id == id)
-            .ok_or_else(|| Failure::new("invalid_thread", "task is unavailable"))?;
-        let Some(row) = change_startup(&rows[index], change)? else {
-            return Ok((rows[index].clone(), false));
-        };
-        rows[index] = row.clone();
-        self.save_rows(&mut state, rows)?;
-        Ok((row, true))
-    }
-
-    fn save_rows(
-        &self,
-        state: &mut Result<Vec<Conversation>, String>,
-        next: Vec<Conversation>,
-    ) -> Result<(), Failure> {
-        validate(&next).map_err(|error| Failure::new("invalid_conversation", error))?;
-        let bytes = serde_json::to_vec(&next)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        }
-        atomicwrites::AtomicFile::new(&self.path, atomicwrites::OverwriteBehavior::AllowOverwrite)
-            .write(|file| {
-                file.write_all(&bytes)?;
-                file.sync_all()
-            })
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        *state = Ok(next);
-        Ok(())
-    }
-
-    pub fn route(
-        &self,
-        event: AgentChange,
-        supports_fork: bool,
-    ) -> Result<Option<AgentChange>, Failure> {
-        let state = self.state.lock().unwrap();
-        let rows = state
-            .as_ref()
-            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
-        let event = match event {
-            AgentChange::Session {
-                session,
-                mut change,
-            } => {
-                let Some(row) = owner(rows, &session) else {
-                    return Ok(Some(AgentChange::Session { session, change }));
-                };
-                // Closed ranges are read from native history. Late callbacks
-                // from a released runtime cannot change the active execution.
-                if session != row.active {
-                    return Ok(None);
-                }
-                namespace_change(row, &session, &mut change, supports_fork);
-                AgentChange::Session {
-                    session: row.id.clone(),
-                    change,
-                }
-            }
-            AgentChange::Request {
-                session,
-                origin,
-                mut request,
-            } => {
-                let root = if let Some(row) = owner(rows, &session) {
-                    if session != row.active {
-                        return Err(Failure::new(
-                            "inactive_provider_session",
-                            "The provider session has been released.",
-                        ));
-                    }
-                    namespace_request(row, &session, &mut request);
-                    row.id.clone()
-                } else {
-                    session
-                };
-                AgentChange::Request {
-                    session: root,
-                    origin,
-                    request,
-                }
-            }
-            AgentChange::Renamed { session, name } => {
-                if let Some(row) = owner(rows, &session) {
-                    if row.active != session || row.name.is_some() {
-                        return Ok(None);
-                    }
-                    return Ok(Some(AgentChange::Renamed {
-                        session: row.id.clone(),
-                        name,
-                    }));
-                }
-                AgentChange::Renamed { session, name }
-            }
-            other => other,
-        };
-        Ok(Some(event))
-    }
-}
-
-fn owner<'a>(rows: &'a [Conversation], native: &SessionRef) -> Option<&'a Conversation> {
-    rows.iter().find(|row| {
-        row.bindings
-            .iter()
-            .any(|binding| &binding.session == native)
-    })
-}
-
-fn validate(rows: &[Conversation]) -> Result<(), String> {
+pub(super) fn validate(rows: &[Conversation]) -> Result<(), String> {
     let mut identities = std::collections::HashSet::new();
     let public: std::collections::HashSet<_> = rows.iter().map(|row| &row.id).collect();
     if public.len() != rows.len() {
@@ -712,7 +424,7 @@ fn validate(rows: &[Conversation]) -> Result<(), String> {
     Ok(())
 }
 
-fn namespace_change(
+pub(super) fn namespace_change(
     row: &Conversation,
     session: &SessionRef,
     change: &mut SessionChange,
@@ -756,7 +468,7 @@ fn namespace_change(
     }
 }
 
-fn namespace_request(
+pub(super) fn namespace_request(
     row: &Conversation,
     session: &SessionRef,
     request: &mut agent_protocol::requests::Request,
@@ -773,6 +485,8 @@ fn namespace_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_rpc::storage::Database;
+    use crate::providers::AgentChange;
 
     fn conversation() -> Conversation {
         Conversation::new(&Thread {
@@ -794,8 +508,8 @@ mod tests {
             PreparationStage::Provider,
         ] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("conversations.json");
-            let store = Conversations::new(path.clone());
+            let path = directory.path().join("conversations.sqlite");
+            let store = Database::open(&path);
             for status in [PreparationStatus::Preparing, PreparationStatus::Sending] {
                 let mut row = conversation();
                 let submission = agent_protocol::operations::Submission {
@@ -817,10 +531,7 @@ mod tests {
                     started_at: 1.,
                 });
                 store.save(row.clone()).unwrap();
-                let restored = Conversations::new(path.clone())
-                    .get(&row.id)
-                    .unwrap()
-                    .unwrap();
+                let restored = Database::open(&path).get(&row.id).unwrap().unwrap();
                 let startup = restored.startup.unwrap();
                 assert_eq!(startup.preparation.submission, submission);
                 assert_eq!(startup.preparation.stage, stage);
@@ -842,31 +553,27 @@ mod tests {
     #[test]
     fn persistence_recovers_preparation_and_does_not_commit_failed_writes() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("conversations.json");
-        let store = Conversations::new(path.clone());
+        let path = directory.path().join("conversations.sqlite");
+        let store = Database::open(&path);
         let mut row = conversation();
         row.cover(3);
         store.save(row.clone()).unwrap();
-        let recovered = Conversations::new(path.clone())
-            .get(&row.id)
-            .unwrap()
-            .unwrap();
+        let recovered = Database::open(&path).get(&row.id).unwrap().unwrap();
         assert_eq!(recovered.segments.len(), 1);
         assert_eq!(recovered.bindings[0].covered, Some(3));
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
+        store.with(|connection| connection.execute_batch("CREATE TRIGGER reject_title BEFORE UPDATE ON threads WHEN NEW.host_title = 'uncommitted' BEGIN SELECT RAISE(ABORT, 'test failure'); END;").map_err(crate::host_rpc::storage::failure)).unwrap();
         row.name = Some("uncommitted".into());
         assert!(store.save(row.clone()).is_err());
         assert_eq!(store.get(&row.id).unwrap().unwrap().name, None);
-        std::fs::remove_dir(&path).unwrap();
+        drop(store);
         std::fs::write(&path, "broken").unwrap();
-        assert!(Conversations::new(path).get(&row.id).is_err());
+        assert!(Database::open(&path).get(&row.id).is_err());
     }
 
     #[test]
     fn released_provider_callbacks_cannot_change_the_active_conversation() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Conversations::new(directory.path().join("conversations.json"));
+        let store = Database::open(&directory.path().join("conversations.sqlite"));
         let mut row = conversation();
         let target = SessionRef {
             provider: ProviderKind::Claude,

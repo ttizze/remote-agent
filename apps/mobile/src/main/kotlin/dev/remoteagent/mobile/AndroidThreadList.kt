@@ -163,7 +163,6 @@ private fun ThreadListContent(
     val language = LocalUiLanguage.current
     Box(modifier.clipToBounds()) {
         LazyColumn(Modifier.fillMaxSize(), state = reorder.list, contentPadding = PaddingValues(vertical = 16.dp)) {
-            list?.notice?.let { notice -> item { Text(notice, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
             if (selectedTab == 0) {
                 recentChats(list, loadingThreads, perform, language)
             } else {

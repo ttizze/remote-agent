@@ -476,7 +476,6 @@ async fn conversation_copies_are_saved_restored_and_cleared_on_pairing() {
             has_more: false,
             has_more_projects: false,
             project_pages: Default::default(),
-            provider_errors: None,
         }));
         Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(thread));
         draft(&mut snapshot, "host draft");

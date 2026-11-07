@@ -88,7 +88,7 @@ impl HostRpcService {
         };
         let projects = self.project_snapshot().await?;
         let response = self.preparation_snapshot(&row, &projects);
-        let (row, created) = self.inner.conversations.admit(row)?;
+        let (row, created) = self.inner.database.admit(row)?;
         if !created {
             return Ok((
                 self.conversation_history(&row, conversations::HistoryUse::Read)
@@ -153,6 +153,12 @@ impl HostRpcService {
                 .collect()
         });
         if let Some(turn_id) = receipt {
+            // Recovery confirmed the initial input from native storage. Commit
+            // that evidence before clearing its durable preparation state.
+            self.inner
+                .database
+                .import(&row.id, response.clone())
+                .map_err(transcripts::storage_failure)?;
             self.change_preparation(&row.id, StartupChange::Finished)
                 .await?;
             response.thread.preparation = None;
@@ -239,7 +245,7 @@ impl HostRpcService {
         change: StartupChange,
     ) -> Result<(Conversation, bool), Failure> {
         let projects = self.project_snapshot().await?;
-        let (row, changed) = self.inner.conversations.update_startup(id, change)?;
+        let (row, changed) = self.inner.database.update_startup(id, change)?;
         if changed {
             if row.startup.is_some() {
                 let response = self.preparation_snapshot(&row, &projects);
@@ -363,7 +369,7 @@ impl HostRpcService {
     }
 
     fn preparing_task(&self, id: &SessionRef) -> Result<Option<Conversation>, Failure> {
-        Ok(self.inner.conversations.get(id)?.filter(|row| {
+        Ok(self.inner.database.get(id)?.filter(|row| {
             row.startup
                 .as_ref()
                 .is_some_and(|startup| startup.preparation.status == PreparationStatus::Preparing)

@@ -47,12 +47,6 @@ pub fn combine_connection_lists(
             list.loading_chats |= other.loading_chats;
             list.has_more |= other.has_more;
             list.has_more_projects |= other.has_more_projects;
-            list.notice = match (list.notice, other.notice) {
-                (Some(first), Some(second)) if first != second => {
-                    Some(format!("{first}\n{second}"))
-                }
-                (first, second) => first.or(second),
-            };
             list.projects.extend(other.projects);
             list.hidden_projects.extend(other.hidden_projects);
             list.threads.extend(other.threads);
@@ -85,7 +79,6 @@ mod tests {
         ThreadList {
             loading_projects: false,
             loading_chats: false,
-            notice: None,
             projects: vec![ProjectSummary {
                 host_id: String::new(),
                 id: "same-project".into(),
@@ -181,30 +174,16 @@ mod tests {
     }
 
     #[test]
-    fn partial_results_keep_errors_and_independent_paging_and_loading() {
-        let mut first = list();
-        first.notice = Some("Provider unavailable".into());
+    fn hosts_keep_independent_paging_and_loading() {
+        let first = list();
         let mut second = list();
-        second.notice = Some("Page failed".into());
         second.loading_chats = true;
         second.has_more_projects = true;
         let combined =
             combine_connection_lists([("one".into(), first), ("two".into(), second)]).unwrap();
-        assert_eq!(
-            combined.notice.as_deref(),
-            Some("Provider unavailable\nPage failed")
-        );
         assert!(combined.loading_chats);
         assert!(combined.has_more_projects);
         assert!(!combined.loading_projects);
         assert!(!combined.has_more);
-
-        let mut first = list();
-        first.notice = Some("Same failure".into());
-        let mut second = list();
-        second.notice = first.notice.clone();
-        let combined =
-            combine_connection_lists([("one".into(), first), ("two".into(), second)]).unwrap();
-        assert_eq!(combined.notice.as_deref(), Some("Same failure"));
     }
 }

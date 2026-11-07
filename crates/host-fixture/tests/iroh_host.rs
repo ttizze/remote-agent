@@ -1549,7 +1549,6 @@ async fn generated_images_are_visible_on_open_reopen_and_older_pages_without_exp
         let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() },
             Arc::new(Memory::default()), "isolated Host", false, None).await.unwrap();
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
         let session = SessionRef::new(ProviderKind::Codex, "images".into()).unwrap();
         for _ in 0..2 {
             let (opened, _updates) = open_session(&local.peer, &json!(session), 5).await;
@@ -1606,7 +1605,6 @@ async fn summary_history_rejects_repeated_cursors_and_oversized_pages() {
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
         for (id, limit, _, message) in cases {
             let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
                 &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,
@@ -1648,7 +1646,6 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         }])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
         let (opened, mut updates) = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
             &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,
                 session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "command-history".to_string()).unwrap(), limit: 5,
@@ -1721,7 +1718,6 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
             {"id":"fixture-long-history","fixtureHistory":"long","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
         ])).unwrap()).unwrap();
-        mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"useStateDbOnly":true})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         let history_id = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "fixture-long-history".into()).unwrap();
         let mut page: models::ThreadResponse = serde_json::from_value(open_session(&mobile.peer, &json!(history_id), 5).await.0["response"].clone()).unwrap();
         let initial = page.thread.turns.as_ref().unwrap();
@@ -1778,6 +1774,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         for project in 1..=7 {
             let id = format!("project-{project}");
             let cwd = directory.path().join(&id);
+            std::fs::create_dir_all(&cwd).unwrap();
             projects.push(json!({"id":id,"name":format!("Project {project:02}"),"roots":[{"path":cwd}]}));
             for index in 1..=18 {
                 threads.push(json!({"id":format!("p{project}-{index}"),"projectId":null,"cwd":cwd,"name":format!("Project {project:02} conversation {index:02}"),"updatedAt":project*100+index,"preview":"unused history".repeat(1000)}));
@@ -1805,6 +1802,16 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             .install(Path::new(env!("CARGO_BIN_EXE_agent-codex-fixture")), directory.path()).unwrap();
         let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated Host", false, None).await.unwrap();
         let mobile = fixture.local().await.unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+        mobile.peer.call(&agent_protocol::project_import::ImportProjects { paths: projects.iter().map(|project| project["roots"][0]["path"].as_str().unwrap().to_owned()).collect() }).await.unwrap();
+        // Explicitly opening standalone native chats imports them into Host storage.
+        for id in (1..=18).map(|index| format!("chat-{index}")).chain(["projectless".into()]) {
+            let session = SessionRef::new(ProviderKind::Codex, id).unwrap();
+            imported(&fixture, &session).await;
+        }
+        let native_reads = || std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap().lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let before_list = native_reads().len();
 
         let start = std::time::Instant::now();
         let query = models::ListQuery {
@@ -1931,6 +1938,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             "p1-18"
         );
         assert!(!project_search.has_more);
+        assert_eq!(native_reads().len(), before_list, "saved list paging and search never query native sources");
         let body = open_session(&mobile.peer, &json!({"provider":"codex","id":"p5-1"}), 5).await.0["response"].clone();
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");
@@ -1953,8 +1961,6 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert!(nested.has_more);
         assert!(nested.data.iter().all(|thread| thread.parent_id.is_none()));
         assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
-        let native_reads = || std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap().lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert!(!native_reads().iter().any(|method| method == "project/list"), "title listing must not discover external projects");
         let before = native_reads().len();
         let agents = mobile.peer.call(&rpc::ListAgents {
@@ -3339,6 +3345,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             json!({"id":id.id,"cwd":cwd,"name":"worktree history","gitInfo":{"branch":"task"}})
         }).collect();
         std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
+        for id in &ids { imported(&fixture, id).await; }
         let store = Store::new((local.peer, local.events), Snapshot::default());
         for (step, expected) in [
             ("fresh", None),
@@ -3462,6 +3469,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             match step {
                 "deleted-merged" => { git(&repo, &["merge", "--no-ff", "-m", "merge remaining work", "task"]); }
                 "missing-metadata" => {
+                    // A list refresh keeps the saved branch when native metadata disappears.
                     native_rows[1]["gitInfo"] = Value::Null;
                     std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
                 }
@@ -3474,7 +3482,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             let list = snapshot.thread_list().unwrap();
             for (index, id) in ids.iter().enumerate() {
                 let row = list.threads.iter().find(|row| &row.id == id).unwrap();
-                assert_eq!(row.worktree_status, if index < 2 && !(index == 1 && step == "missing-metadata") { expected } else { None }, "{step}: {index}");
+                assert_eq!(row.worktree_status, if index < 2 { expected } else { None }, "{step}: {index}");
             }
             assert_eq!(snapshot.pane.error, None);
         }
@@ -4093,7 +4101,6 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
         for ((_, id, _, succeeds, _), native) in cases.iter().zip(&threads) {
             let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
                 &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,

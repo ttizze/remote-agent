@@ -23,7 +23,6 @@ fn list(data: Vec<Thread>, limit: u32) -> ThreadList {
         has_more: false,
         has_more_projects: false,
         project_pages: Default::default(),
-        provider_errors: None,
     }
 }
 

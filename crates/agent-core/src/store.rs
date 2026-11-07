@@ -2662,7 +2662,6 @@ mod tests {
                             has_more_projects: false,
                             limit: 5,
                             project_pages: Default::default(),
-                            provider_errors: None,
                         }),
                     )]
                     .into(),
@@ -2709,8 +2708,6 @@ mod tests {
                     has_more_projects: false,
                     limit: 5,
                     project_pages: Default::default(),
-
-                    provider_errors: None,
                 }))
             }),
             ("epoch", |snapshot| snapshot.connection.epoch += 1),
@@ -2756,7 +2753,6 @@ mod model_reconnection_tests {
             has_more: false,
             has_more_projects: false,
             project_pages: Default::default(),
-            provider_errors: None,
         });
         let previous = Snapshot {
             lists: crate::state::Lists {

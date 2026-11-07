@@ -539,12 +539,7 @@ async fn recovery_uses_the_native_binding_after_a_provider_switch() {
         session: fixture.session.clone(),
         covered: None,
     });
-    fixture
-        .service
-        .inner
-        .conversations
-        .save(row.clone())
-        .unwrap();
+    fixture.service.inner.database.save(row.clone()).unwrap();
     fixture.session = first;
     let _lease = fixture
         .service

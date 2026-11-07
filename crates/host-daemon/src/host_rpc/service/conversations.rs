@@ -34,11 +34,11 @@ impl HostRpcService {
         &self,
         params: &agent_protocol::handoff::ReadHistory,
     ) -> Result<agent_protocol::handoff::Page, Failure> {
-        let history = if let Some(row) = self.inner.conversations.get(&params.session)? {
+        let history = if let Some(row) = self.inner.database.get(&params.session)? {
             self.conversation_history(&row, HistoryUse::Excerpt).await?
         } else if let Some(response) = self
             .inner
-            .transcripts
+            .database
             .history(&params.session)
             .map_err(transcripts::storage_failure)?
         {
@@ -86,7 +86,7 @@ impl HostRpcService {
         }
         let history = if let Some(history) = self
             .inner
-            .transcripts
+            .database
             .history(&row.id)
             .map_err(transcripts::storage_failure)?
         {
@@ -174,10 +174,10 @@ impl HostRpcService {
         });
         fork.cover(boundary);
         self.inner
-            .transcripts
+            .database
             .import(&fork.id, inherited)
             .map_err(transcripts::storage_failure)?;
-        self.inner.conversations.save(fork.clone())?;
+        self.inner.database.save(fork.clone())?;
         Self::conversation_page(
             self.conversation_history(&fork, HistoryUse::Read).await?,
             None,
@@ -315,7 +315,7 @@ impl HostRpcService {
             || row.bindings.iter().any(|binding| binding.covered.is_some()))
             && let Some(response) = self
                 .inner
-                .transcripts
+                .database
                 .history(&row.id)
                 .map_err(transcripts::storage_failure)?
         {
@@ -476,7 +476,7 @@ impl HostRpcService {
     async fn handoff_history(&self, root: &SessionRef) -> Result<ThreadResponse, Failure> {
         let response = if let Some(response) = self
             .inner
-            .transcripts
+            .database
             .history(root)
             .map_err(transcripts::storage_failure)?
         {
@@ -486,7 +486,7 @@ impl HostRpcService {
                 importing.await?;
             }
             self.inner
-                .transcripts
+                .database
                 .history(root)
                 .map_err(transcripts::storage_failure)?
                 .ok_or_else(|| {
@@ -562,7 +562,7 @@ impl HostRpcService {
         root: &SessionRef,
         input: &op::Submission,
     ) -> Result<op::SubmissionReceipt, Failure> {
-        let previous = self.inner.conversations.get(root)?;
+        let previous = self.inner.database.get(root)?;
         let active = previous
             .as_ref()
             .map_or_else(|| root.clone(), |row| row.active.clone());
@@ -616,7 +616,7 @@ impl HostRpcService {
             };
             if let Some(turn) = self
                 .inner
-                .transcripts
+                .database
                 .turn(root, id)
                 .map_err(transcripts::storage_failure)?
             {
@@ -684,7 +684,7 @@ impl HostRpcService {
             Some(row) => row,
             None => {
                 let row = Conversation::new(&source.thread)?;
-                self.inner.conversations.save(row.clone())?;
+                self.inner.database.save(row.clone())?;
                 row
             }
         };
@@ -723,7 +723,7 @@ impl HostRpcService {
         }
         // Persist the native binding before attempting delivery; events and
         // reconnection must resolve it to the same public conversation.
-        self.inner.conversations.save(row.clone())?;
+        self.inner.database.save(row.clone())?;
         let last_seen = row
             .bindings
             .iter()
@@ -761,17 +761,17 @@ impl HostRpcService {
             receipt: None,
             submission: agent_protocol::session::SubmissionDelivery::Rejected,
         });
-        self.inner.conversations.save(row.clone())?;
+        self.inner.database.save(row.clone())?;
         let injected = agent
             .inject_history(&target.id, &row.handoffs[index].context)
             .await
             .map_err(Failure::before_submission)?;
         if injected {
             row.handoffs[index].delivery = Delivery::Injected;
-            self.inner.conversations.save(row.clone())?;
+            self.inner.database.save(row.clone())?;
         }
         row.activate(target.clone(), count);
-        self.inner.conversations.save(row.clone())?;
+        self.inner.database.save(row.clone())?;
         let mut native_input = input.clone();
         native_input.thread_id = target.clone();
         if !injected {
@@ -783,7 +783,7 @@ impl HostRpcService {
             );
         }
         row.handoffs[index].submission = agent_protocol::session::SubmissionDelivery::Sending;
-        self.inner.conversations.save(row.clone())?;
+        self.inner.database.save(row.clone())?;
         let result = self.submit_native(root, &target, &native_input).await;
         match result {
             Ok(mut receipt) => {
@@ -796,7 +796,7 @@ impl HostRpcService {
                     agent_protocol::session::SubmissionDelivery::Accepted {
                         turn_id: receipt.turn_id.clone(),
                     };
-                self.inner.conversations.save(row)?;
+                self.inner.database.save(row)?;
                 Ok(receipt)
             }
             Err(error) => {
@@ -814,11 +814,11 @@ impl HostRpcService {
                     }
                     row.handoffs[index].submission =
                         agent_protocol::session::SubmissionDelivery::Rejected;
-                    self.inner.conversations.save(row)?;
+                    self.inner.database.save(row)?;
                 } else {
                     row.handoffs[index].submission =
                         agent_protocol::session::SubmissionDelivery::Unknown;
-                    self.inner.conversations.save(row)?;
+                    self.inner.database.save(row)?;
                 }
                 Err(error)
             }

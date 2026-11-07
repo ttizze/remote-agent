@@ -71,6 +71,16 @@ impl HostRpcService {
         let saved = self
             .saved_conversation_titles("")?
             .into_iter()
+            .filter(|thread| {
+                thread.preparation.is_some()
+                    || thread.id.as_ref().is_some_and(|id| {
+                        self.inner
+                            .providers
+                            .get(thread.active_provider.unwrap_or(id.provider))
+                            .and_then(|agent| agent.availability())
+                            .is_err()
+                    })
+            })
             .filter_map(|thread| Some((thread.id.clone()?, thread)))
             .collect::<std::collections::BTreeMap<_, _>>();
         let (threads, warning) = self.worktree_threads(&saved).await?;
@@ -126,7 +136,7 @@ impl HostRpcService {
                 let row = if from_provider {
                     None
                 } else {
-                    self.inner.conversations.get(id)?
+                    self.inner.database.get(id)?
                 };
                 let native = match row {
                     Some(row) => (!row.bindings.is_empty()).then_some(row.active),
@@ -143,7 +153,7 @@ impl HostRpcService {
                 None
             };
             let display = if from_provider {
-                self.inner.conversations.summary(thread)?
+                self.inner.database.summary(thread)?
             } else {
                 Some(thread)
             };
@@ -233,7 +243,7 @@ impl HostRpcService {
             {
                 continue;
             }
-            let row = self.inner.conversations.get(&target)?;
+            let row = self.inner.database.get(&target)?;
             if let Some(row) = &row
                 && row.startup.is_some()
             {
@@ -481,7 +491,7 @@ pub(super) mod tests {
             )
             .unwrap();
             let public = conversation.id.clone();
-            host.inner.conversations.save(conversation).unwrap();
+            host.inner.database.save(conversation).unwrap();
             // Also exercise the public execution snapshot alongside its native
             // listing, as happens while clients retain an admitted task.
             let _execution = host.inner.router.retain_execution(public.clone()).unwrap();
@@ -503,7 +513,7 @@ pub(super) mod tests {
             } else {
                 host.remove_worktree(entries[0].path.clone()).await.unwrap();
                 assert!(!checkout.exists());
-                assert!(host.inner.conversations.get(&public).unwrap().is_some());
+                assert!(host.inner.database.get(&public).unwrap().is_some());
             }
         }
     }
@@ -571,7 +581,7 @@ pub(super) mod tests {
                 row.activate(native.clone(), 0);
                 let public = row.id.clone();
                 let turn = row.identity(&native, "turn").into();
-                host.inner.conversations.save(row).unwrap();
+                host.inner.database.save(row).unwrap();
                 let _execution = host.inner.router.retain_execution(public.clone()).unwrap();
                 host.inner
                     .router

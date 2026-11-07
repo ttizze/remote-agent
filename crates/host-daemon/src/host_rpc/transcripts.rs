@@ -1,573 +1,15 @@
-//! Host-owned transcripts. Native provider history is read once to import a
-//! conversation; afterwards the Host records each turn as it finishes and
-//! never returns to native storage for reads. Rows keep every item inline;
-//! readers summarize or defer bodies for transfer.
-use agent_protocol::{
-    execution::TurnStatus,
-    ids::{ItemId, TurnId},
-    models::{Item, SessionStatus, ThreadResponse, Turn},
-    protocol,
-    session::SessionRef,
-};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use std::{collections::HashMap, path::Path, sync::Mutex};
-
-/// A window stops growing past this many encoded bytes, keeping at least one turn.
-const WINDOW_BYTES: usize = 1 << 20;
-
-pub(crate) struct Transcripts {
-    // A store that failed to open stays failed; reads must not fall back to
-    // an empty transcript that would look like a conversation without turns.
-    state: Mutex<Result<Connection, String>>,
-}
-
-pub(crate) struct Window {
-    pub response: ThreadResponse,
-    /// Position of the first returned turn. Earlier turns precede it.
-    pub start: usize,
-}
-
-fn failure(error: impl std::fmt::Display) -> String {
-    error.to_string()
-}
-
-fn turns_by_id<'a>(turns: impl Iterator<Item = &'a Turn>) -> HashMap<&'a TurnId, Vec<&'a Turn>> {
-    let mut by_id: HashMap<_, Vec<_>> = HashMap::new();
-    for turn in turns {
-        by_id.entry(&turn.id).or_default().push(turn);
-    }
-    by_id
-}
-
-fn decode_turn(body: &[u8]) -> Result<Turn, String> {
-    protocol::decode(body).map_err(failure)
-}
-
-impl Transcripts {
-    pub(crate) fn open(path: &Path) -> Self {
-        let state = (|| {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(failure)?;
-            }
-            let connection = Connection::open(path).map_err(failure)?;
-            // A restarting Host can briefly overlap its predecessor.
-            connection
-                .busy_timeout(std::time::Duration::from_secs(10))
-                .map_err(failure)?;
-            connection
-                .execute_batch(
-                    "PRAGMA journal_mode = WAL;
-                     PRAGMA synchronous = NORMAL;
-                     CREATE TABLE IF NOT EXISTS conversations (
-                         provider TEXT NOT NULL,
-                         id TEXT NOT NULL,
-                         cwd TEXT,
-                         metadata BLOB,
-                         PRIMARY KEY (provider, id)
-                     ) WITHOUT ROWID;
-                     CREATE TABLE IF NOT EXISTS turns (
-                         provider TEXT NOT NULL,
-                         id TEXT NOT NULL,
-                         position INTEGER NOT NULL,
-                         turn_id TEXT NOT NULL,
-                         running INTEGER NOT NULL,
-                         body BLOB NOT NULL,
-                         PRIMARY KEY (provider, id, position)
-                     ) WITHOUT ROWID;
-                     CREATE INDEX IF NOT EXISTS turn_ids ON turns (provider, id, turn_id, position);
-                     -- Host-wide order of each conversation's latest change.
-                     CREATE TABLE IF NOT EXISTS versions (
-                         provider TEXT NOT NULL,
-                         id TEXT NOT NULL,
-                         version INTEGER NOT NULL,
-                         PRIMARY KEY (provider, id)
-                     ) WITHOUT ROWID;
-                     CREATE INDEX IF NOT EXISTS version_order ON versions (version);",
-                )
-                .map_err(failure)?;
-            Ok(connection)
-        })();
-        Self {
-            state: Mutex::new(state),
-        }
-    }
-
-    fn with<T>(
-        &self,
-        work: impl FnOnce(&mut Connection) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        work(state.as_mut().map_err(|error| error.clone())?)
-    }
-
-    fn write<T>(&self, work: impl FnOnce(&Transaction) -> Result<T, String>) -> Result<T, String> {
-        self.with(|connection| {
-            let transaction = connection.transaction().map_err(failure)?;
-            let value = work(&transaction)?;
-            transaction.commit().map_err(failure)?;
-            Ok(value)
-        })
-    }
-
-    /// Native history fills in what the Host did not run. A turn the Host
-    /// recorded keeps its recorded items, which an import does not copy in
-    /// full; recorded turns missing from native history follow it in order.
-    pub(crate) fn import(
-        &self,
-        conversation: &SessionRef,
-        mut response: ThreadResponse,
-    ) -> Result<(), String> {
-        let native = response.thread.turns.take().unwrap_or_default();
-        // Live execution supplies status; a stored observation would go stale.
-        response.thread.status = SessionStatus::Unknown;
-        response.thread.history_cursor = None;
-        response.thread.history_has_more = None;
-        response.thread.history_read_state = None;
-        let metadata = protocol::encode(&response).map_err(failure)?;
-        let key = params![conversation.provider.key(), conversation.id];
-        self.write(|transaction| {
-            let mut recorded = Vec::new();
-            {
-                let mut rows = transaction
-                    .prepare("SELECT body FROM turns WHERE provider = ?1 AND id = ?2 ORDER BY position")
-                    .map_err(failure)?;
-                let mut rows = rows.query(key).map_err(failure)?;
-                while let Some(row) = rows.next().map_err(failure)? {
-                    recorded.push(decode_turn(&row.get::<_, Vec<u8>>(0).map_err(failure)?)?);
-                }
-            }
-            // A turn recorded before its conversation was saved lacks the
-            // provider attribution native reads add.
-            let recorded_by_id = turns_by_id(recorded.iter());
-            let native_by_id = turns_by_id(native.iter().map(AsRef::as_ref));
-            let turns: Vec<std::borrow::Cow<Turn>> = native
-                .iter()
-                .map(|native| {
-                    let stored = recorded_by_id.get(&native.id).into_iter().flatten().copied()
-                        .find(|turn| native.matches_occurrence(turn));
-                    match stored {
-                        Some(turn) => std::borrow::Cow::Owned(Turn {
-                            provider: turn.provider.or(native.provider),
-                            supports_fork: turn.supports_fork.or(native.supports_fork),
-                            ..turn.clone()
-                        }),
-                        None => std::borrow::Cow::Borrowed(native.as_ref()),
-                    }
-                })
-                .chain(
-                    recorded
-                        .iter()
-                        .filter(|turn| {
-                            !native_by_id.get(&turn.id).into_iter().flatten()
-                                .any(|native| native.matches_occurrence(turn))
-                        })
-                        .map(std::borrow::Cow::Borrowed),
-                )
-                .collect();
-            transaction
-                .execute("DELETE FROM turns WHERE provider = ?1 AND id = ?2", key)
-                .map_err(failure)?;
-            for (position, turn) in turns.iter().enumerate() {
-                write_turn(transaction, conversation, position as i64, turn)?;
-            }
-            transaction
-                .execute(
-                    "INSERT INTO conversations (provider, id, cwd, metadata) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT (provider, id) DO UPDATE SET cwd = excluded.cwd, metadata = excluded.metadata",
-                    params![conversation.provider.key(), conversation.id, response.thread.cwd, metadata],
-                )
-                .map_err(failure)?;
-            advance(transaction, conversation.provider.key(), &conversation.id)
-        })
-    }
-
-    /// Replace the stored occurrence of a live turn, or append it. Conversations
-    /// that are not imported yet keep these turns for their import.
-    /// A turn observed without items keeps the items already stored for it.
-    /// The removed item identifies the occurrence even after its last item is gone.
-    pub(crate) fn record(
-        &self,
-        conversation: &SessionRef,
-        turn: &Turn,
-        removed_item: Option<&ItemId>,
-    ) -> Result<(), String> {
-        let key = params![conversation.provider.key(), conversation.id];
-        self.write(|transaction| {
-            let stored = find_turn(transaction, conversation, &turn.id, false, |stored| {
-                removed_item
-                    .map_or_else(
-                        || stored.shares_items(turn),
-                        |id| stored.items.iter().flatten().any(|item| &item.id == id),
-                    )
-                    .then_some(stored)
-            })?;
-            let stored = match stored {
-                None if removed_item.is_none() => {
-                    find_turn(transaction, conversation, &turn.id, false, |stored| {
-                        stored.matches_occurrence(turn).then_some(stored)
-                    })?
-                }
-                stored => stored,
-            };
-            let mut turn = std::borrow::Cow::Borrowed(turn);
-            let position = match stored {
-                Some((position, stored)) => {
-                    if turn.items.is_none() {
-                        turn.to_mut().items = stored.items;
-                    }
-                    position
-                }
-                None => turn_count(transaction, conversation.provider.key(), &conversation.id)?,
-            };
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO conversations (provider, id) VALUES (?1, ?2)",
-                    key,
-                )
-                .map_err(failure)?;
-            write_turn(transaction, conversation, position, &turn)?;
-            advance(transaction, conversation.provider.key(), &conversation.id)
-        })
-    }
-
-    /// Change the stored occurrence containing the item, or the latest occurrence
-    /// for changes that do not name an item.
-    pub(crate) fn update_turn(
-        &self,
-        conversation: &SessionRef,
-        turn_id: &TurnId,
-        item_id: Option<&ItemId>,
-        change: impl FnOnce(Turn) -> Option<Turn>,
-    ) -> Result<(), String> {
-        self.write(|transaction| {
-            let Some((position, turn)) =
-                find_turn(transaction, conversation, turn_id, false, |turn| {
-                    item_id
-                        .is_none_or(|id| turn.items.iter().flatten().any(|item| &item.id == id))
-                        .then_some(turn)
-                })?
-            else {
-                return Ok(());
-            };
-            let Some(turn) = change(turn) else {
-                return Ok(());
-            };
-            write_turn(transaction, conversation, position, &turn)?;
-            advance(transaction, conversation.provider.key(), &conversation.id)
-        })
-    }
-
-    /// No turn runs across a Host restart.
-    pub(crate) fn interrupt_running(&self) -> Result<(), String> {
-        self.write(|transaction| {
-            let mut stopped = Vec::new();
-            {
-                let mut rows = transaction
-                    .prepare("SELECT provider, id, position, body FROM turns WHERE running = 1")
-                    .map_err(failure)?;
-                let mut rows = rows.query([]).map_err(failure)?;
-                while let Some(row) = rows.next().map_err(failure)? {
-                    let mut turn = decode_turn(&row.get::<_, Vec<u8>>(3).map_err(failure)?)?;
-                    turn.status = TurnStatus::Interrupted;
-                    stopped.push((
-                        row.get::<_, String>(0).map_err(failure)?,
-                        row.get::<_, String>(1).map_err(failure)?,
-                        row.get::<_, i64>(2).map_err(failure)?,
-                        protocol::encode(&turn).map_err(failure)?,
-                    ));
-                }
-            }
-            for (provider, id, position, body) in stopped {
-                transaction
-                    .execute(
-                        "UPDATE turns SET running = 0, body = ?4
-                         WHERE provider = ?1 AND id = ?2 AND position = ?3",
-                        params![provider, id, position, body],
-                    )
-                    .map_err(failure)?;
-                advance(transaction, &provider, &id)?;
-            }
-            Ok(())
-        })
-    }
-
-    /// Handoffs and forks read the entire committed transcript, without the UI
-    /// window's byte limit. Recorded turns alone do not prove a complete import.
-    pub(crate) fn history(
-        &self,
-        conversation: &SessionRef,
-    ) -> Result<Option<ThreadResponse>, String> {
-        self.with(|connection| {
-            let key = params![conversation.provider.key(), conversation.id];
-            let Some(metadata) = connection
-                .query_row(
-                    "SELECT metadata FROM conversations WHERE provider = ?1 AND id = ?2",
-                    key,
-                    |row| row.get::<_, Option<Vec<u8>>>(0),
-                )
-                .optional()
-                .map_err(failure)?
-                .flatten()
-            else {
-                return Ok(None);
-            };
-            let mut response: ThreadResponse = protocol::decode(&metadata).map_err(failure)?;
-            let mut statement = connection
-                .prepare("SELECT body FROM turns WHERE provider = ?1 AND id = ?2 ORDER BY position")
-                .map_err(failure)?;
-            let mut rows = statement.query(key).map_err(failure)?;
-            let mut turns = Vec::new();
-            while let Some(row) = rows.next().map_err(failure)? {
-                turns.push(std::sync::Arc::new(decode_turn(
-                    &row.get::<_, Vec<u8>>(0).map_err(failure)?,
-                )?));
-            }
-            response.thread.turns = Some(turns);
-            Ok(Some(response))
-        })
-    }
-
-    /// The newest turns before `end`, or None until the conversation is imported.
-    pub(crate) fn window(
-        &self,
-        conversation: &SessionRef,
-        end: Option<usize>,
-        limit: usize,
-    ) -> Result<Option<Window>, String> {
-        let key = params![conversation.provider.key(), conversation.id];
-        self.with(|connection| {
-            let Some(metadata) = connection
-                .query_row(
-                    "SELECT metadata FROM conversations WHERE provider = ?1 AND id = ?2",
-                    key,
-                    |row| row.get::<_, Option<Vec<u8>>>(0),
-                )
-                .optional()
-                .map_err(failure)?
-                .flatten()
-            else {
-                return Ok(None);
-            };
-            let count =
-                turn_count(connection, conversation.provider.key(), &conversation.id)? as usize;
-            let end = end.unwrap_or(count);
-            if end > count {
-                return Err("conversation history cursor is no longer valid".into());
-            }
-            let mut rows = connection
-                .prepare(
-                    "SELECT body FROM turns WHERE provider = ?1 AND id = ?2 AND position < ?3
-                     ORDER BY position DESC LIMIT ?4",
-                )
-                .map_err(failure)?;
-            let mut rows = rows
-                .query(params![
-                    conversation.provider.key(),
-                    conversation.id,
-                    end as i64,
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ])
-                .map_err(failure)?;
-            let (mut turns, mut bytes) = (Vec::new(), 0);
-            while let Some(row) = rows.next().map_err(failure)? {
-                let body = row.get::<_, Vec<u8>>(0).map_err(failure)?;
-                if !turns.is_empty() && bytes + body.len() > WINDOW_BYTES {
-                    break;
-                }
-                bytes += body.len();
-                turns.push(std::sync::Arc::new(decode_turn(&body)?));
-            }
-            turns.reverse();
-            let mut response: ThreadResponse = protocol::decode(&metadata).map_err(failure)?;
-            let start = end - turns.len();
-            response.thread.turns = Some(turns);
-            response.thread.transcript_version = connection
-                .query_row(
-                    "SELECT version FROM versions WHERE provider = ?1 AND id = ?2",
-                    key,
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(failure)?
-                .map(|version| version as u64);
-            Ok(Some(Window { response, start }))
-        })
-    }
-
-    /// Imported conversations and their working directories.
-    pub(crate) fn imported(&self) -> Result<Vec<(SessionRef, Option<String>)>, String> {
-        self.with(|connection| {
-            let mut rows = connection
-                .prepare("SELECT provider, id, cwd FROM conversations WHERE metadata IS NOT NULL")
-                .map_err(failure)?;
-            let mut rows = rows.query([]).map_err(failure)?;
-            let mut imported = Vec::new();
-            while let Some(row) = rows.next().map_err(failure)? {
-                let provider =
-                    serde_json::from_value(serde_json::Value::String(row.get(0).map_err(failure)?))
-                        .map_err(failure)?;
-                imported.push((
-                    SessionRef::new(provider, row.get(1).map_err(failure)?).map_err(failure)?,
-                    row.get(2).map_err(failure)?,
-                ));
-            }
-            Ok(imported)
-        })
-    }
-
-    /// The latest stored occurrence of a turn of an imported conversation.
-    pub(crate) fn turn(
-        &self,
-        conversation: &SessionRef,
-        turn_id: &TurnId,
-    ) -> Result<Option<Turn>, String> {
-        self.with(|connection| {
-            find_turn(connection, conversation, turn_id, true, Some)
-                .map(|found| found.map(|(_, turn)| turn))
-        })
-    }
-
-    pub(crate) fn item(
-        &self,
-        conversation: &SessionRef,
-        turn_id: &TurnId,
-        item_id: &ItemId,
-        imported_only: bool,
-    ) -> Result<Option<std::sync::Arc<Item>>, String> {
-        self.with(|connection| {
-            find_turn(connection, conversation, turn_id, imported_only, |turn| {
-                turn.items?.into_iter().find(|item| &item.id == item_id)
-            })
-            .map(|found| found.map(|(_, item)| item))
-        })
-    }
-
-    /// Names change on the Host; the imported snapshot must follow them.
-    pub(crate) fn rename(
-        &self,
-        conversation: &SessionRef,
-        name: Option<&str>,
-    ) -> Result<(), String> {
-        let key = params![conversation.provider.key(), conversation.id];
-        self.write(|transaction| {
-            let Some(metadata) = transaction
-                .query_row(
-                    "SELECT metadata FROM conversations WHERE provider = ?1 AND id = ?2",
-                    key,
-                    |row| row.get::<_, Option<Vec<u8>>>(0),
-                )
-                .optional()
-                .map_err(failure)?
-                .flatten()
-            else {
-                return Ok(());
-            };
-            let mut response: ThreadResponse = protocol::decode(&metadata).map_err(failure)?;
-            response.thread.name = name.map(Into::into);
-            transaction
-                .execute(
-                    "UPDATE conversations SET metadata = ?3 WHERE provider = ?1 AND id = ?2",
-                    params![
-                        conversation.provider.key(),
-                        conversation.id,
-                        protocol::encode(&response).map_err(failure)?
-                    ],
-                )
-                .map_err(failure)?;
-            advance(transaction, conversation.provider.key(), &conversation.id)
-        })
-    }
-}
-
-fn find_turn<T>(
-    connection: &Connection,
-    conversation: &SessionRef,
-    turn_id: &TurnId,
-    imported_only: bool,
-    select: impl Fn(Turn) -> Option<T>,
-) -> Result<Option<(i64, T)>, String> {
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT position, body FROM turns JOIN conversations USING (provider, id)
-         WHERE provider = ?1 AND id = ?2 AND turn_id = ?3 AND (?4 = 0 OR metadata IS NOT NULL)
-         ORDER BY position DESC",
-        )
-        .map_err(failure)?;
-    let mut rows = statement
-        .query(params![
-            conversation.provider.key(),
-            conversation.id,
-            turn_id.as_str(),
-            imported_only
-        ])
-        .map_err(failure)?;
-    while let Some(row) = rows.next().map_err(failure)? {
-        let turn = decode_turn(&row.get::<_, Vec<u8>>(1).map_err(failure)?)?;
-        if let Some(selected) = select(turn) {
-            return Ok(Some((row.get(0).map_err(failure)?, selected)));
-        }
-    }
-    Ok(None)
-}
-
-/// Imports enumerate positions, and live writes only replace or append. The
-/// final indexed position therefore gives the count without scanning the history.
-fn turn_count(connection: &Connection, provider: &str, id: &str) -> Result<i64, String> {
-    connection
-        .prepare_cached(
-            "SELECT COALESCE(MAX(position) + 1, 0) FROM turns WHERE provider = ?1 AND id = ?2",
-        )
-        .map_err(failure)?
-        .query_row(params![provider, id], |row| row.get(0))
-        .map_err(failure)
-}
-
-/// Give the conversation the next Host-wide version, using the version index.
-fn advance(transaction: &Transaction, provider: &str, id: &str) -> Result<(), String> {
-    transaction
-        .prepare_cached(
-            "INSERT INTO versions (provider, id, version)
-             VALUES (?1, ?2, (SELECT COALESCE(MAX(version), 0) + 1 FROM versions))
-             ON CONFLICT (provider, id) DO UPDATE SET version = excluded.version",
-        )
-        .map_err(failure)?
-        .execute(params![provider, id])
-        .map_err(failure)?;
-    Ok(())
-}
-
-fn write_turn(
-    transaction: &Transaction,
-    conversation: &SessionRef,
-    position: i64,
-    turn: &Turn,
-) -> Result<(), String> {
-    transaction
-        .prepare_cached(
-            "INSERT INTO turns (provider, id, position, turn_id, running, body)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (provider, id, position) DO UPDATE SET
-                 turn_id = excluded.turn_id, running = excluded.running, body = excluded.body",
-        )
-        .map_err(failure)?
-        .execute(params![
-            conversation.provider.key(),
-            conversation.id,
-            position,
-            turn.id.as_str(),
-            turn.status == TurnStatus::Running,
-            protocol::encode(turn).map_err(failure)?
-        ])
-        .map_err(failure)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::host_rpc::storage::*;
+    use agent_protocol::{
+        execution::TurnStatus,
+        models::{Item, SessionStatus, ThreadResponse, Turn},
+        session::SessionRef,
+    };
+    const WINDOW_BYTES: usize = 1 << 20;
     use agent_protocol::{
         items::{AssistantPhase, ItemBody},
-        models::{Item, Thread},
+        models::Thread,
         session::ProviderKind,
     };
     use std::sync::Arc;
@@ -614,9 +56,9 @@ mod tests {
         }
     }
 
-    fn store() -> (tempfile::TempDir, Transcripts) {
+    fn store() -> (tempfile::TempDir, Database) {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(&root.path().join("state/transcripts.sqlite"));
+        let store = Database::open(&root.path().join("state/transcripts.sqlite"));
         (root, store)
     }
 
@@ -633,6 +75,171 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect()
+    }
+
+    #[test]
+    fn bound_native_aliases_are_neither_list_roots_nor_reimport_targets() {
+        let (_root, database) = store();
+        database
+            .import(
+                &conversation(),
+                history(vec![turn("native", &["message"], TurnStatus::Completed)]),
+            )
+            .unwrap();
+        let mut row = crate::host_rpc::conversations::Conversation::new(&Thread {
+            id: Some(conversation()),
+            cwd: Some("/workspace".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let public = SessionRef::new(ProviderKind::Codex, "public".into()).unwrap();
+        row.id = public.clone();
+        database.save(row).unwrap();
+        assert_eq!(
+            database
+                .titles("")
+                .unwrap()
+                .into_iter()
+                .map(|title| title.thread.id.unwrap())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            std::slice::from_ref(&public)
+        );
+        assert!(database.imported().unwrap().is_empty());
+        database
+            .import(
+                &public,
+                history(vec![turn("app", &["app-message"], TurnStatus::Completed)]),
+            )
+            .unwrap();
+        assert_eq!(
+            database
+                .imported()
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            [public]
+        );
+    }
+
+    #[test]
+    fn repeated_empty_native_occurrences_keep_distinct_runs_and_stable_identity() {
+        let (_root, database) = store();
+        let empty = turn("same", &[], TurnStatus::Completed);
+        database
+            .import(&conversation(), history(vec![empty.clone(), empty.clone()]))
+            .unwrap();
+        let ids = || {
+            database
+                .read(|connection| {
+                    let mut query = connection
+                        .prepare("SELECT run_id FROM runs ORDER BY ordinal")
+                        .map_err(failure)?;
+                    query
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .map_err(failure)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(failure)
+                })
+                .unwrap()
+        };
+        let original = ids();
+        assert_ne!(original[0], original[1]);
+        database
+            .import(
+                &conversation(),
+                history(vec![
+                    turn("older", &["older-item"], TurnStatus::Completed),
+                    empty.clone(),
+                    empty,
+                ]),
+            )
+            .unwrap();
+        let imported = ids();
+        assert_eq!(&imported[1..], original.as_slice());
+        assert_eq!(
+            database
+                .history(&conversation())
+                .unwrap()
+                .unwrap()
+                .thread
+                .turns
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn streaming_updates_replace_one_body_and_keep_deletion_revisions() {
+        let (root, database) = store();
+        database.import(&conversation(), history(vec![])).unwrap();
+        let mut previous = 0;
+        for length in 1..=100 {
+            let mut turn = turn("stream", &["message"], TurnStatus::Running);
+            turn.items = Some(vec![Arc::new(Item::new(
+                "message".into(),
+                Default::default(),
+                ItemBody::AssistantText {
+                    text: "x".repeat(length),
+                    phase: AssistantPhase::Final,
+                },
+            ))]);
+            database.record(&conversation(), &turn, None).unwrap();
+            let (revision, changes, items): (i64, i64, i64) = database.read(|connection| {
+                connection.query_row("SELECT max(sequence), count(*), (SELECT count(*) FROM turn_items) FROM changes", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(failure)
+            }).unwrap();
+            assert!(revision > previous);
+            previous = revision;
+            assert_eq!((changes, items), (3, 1));
+        }
+        drop(database);
+        let database = Database::open(&root.path().join("state/transcripts.sqlite"));
+        database.interrupt_running().unwrap();
+        let restored = database
+            .history(&conversation())
+            .unwrap()
+            .unwrap()
+            .thread
+            .turns
+            .unwrap();
+        assert_eq!(restored[0].status, TurnStatus::Interrupted);
+        assert!(
+            matches!(restored[0].items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == &"x".repeat(100))
+        );
+        database
+            .record(
+                &conversation(),
+                &turn("stream", &[], TurnStatus::Interrupted),
+                Some(&"message".into()),
+            )
+            .unwrap();
+        let deleted: bool = database
+            .read(|connection| {
+                connection
+                    .query_row(
+                        "SELECT deleted FROM changes WHERE entity_type = 'item'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(failure)
+            })
+            .unwrap();
+        assert!(deleted);
+        assert!(
+            database
+                .history(&conversation())
+                .unwrap()
+                .unwrap()
+                .thread
+                .turns
+                .unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -804,8 +411,8 @@ mod tests {
             .with(|connection| {
                 connection
                     .execute_batch(
-                        "CREATE TRIGGER reject_turn BEFORE INSERT ON turns
-                         WHEN NEW.turn_id = 'rejected' OR NEW.running = 1
+                        "CREATE TRIGGER reject_turn BEFORE INSERT ON runs
+                         WHEN NEW.native_turn_id = 'rejected' OR NEW.status = 'running'
                          BEGIN SELECT RAISE(ABORT, 'rejected by test'); END;",
                     )
                     .map_err(failure)
@@ -848,7 +455,7 @@ mod tests {
             )
             .unwrap();
         drop(store);
-        let store = Transcripts::open(&root.path().join("state/transcripts.sqlite"));
+        let store = Database::open(&root.path().join("state/transcripts.sqlite"));
         let latest = store.window(&target, None, 1).unwrap().unwrap();
         assert_eq!(latest.start, 1);
         assert_eq!(texts(&latest), ["second/b"]);
@@ -866,16 +473,22 @@ mod tests {
             .with(|connection| {
                 let counted: i64 = connection
                     .query_row(
-                        "SELECT COUNT(*) FROM turns WHERE provider = ?1 AND id = ?2",
-                        params![target.provider.key(), target.id],
+                        "SELECT COUNT(*) FROM runs WHERE thread_id = ?1",
+                        [key(&target)],
                         |row| row.get(0),
                     )
                     .map_err(failure)?;
                 assert_eq!(
-                    turn_count(connection, target.provider.key(), &target.id)?,
+                    connection
+                        .query_row(
+                            "SELECT coalesce(max(ordinal) + 1, 0) FROM runs WHERE thread_id = ?1",
+                            [key(&target)],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .map_err(failure)?,
                     counted
                 );
-                Ok(())
+                Ok::<(), String>(())
             })
             .unwrap();
     }
@@ -1142,7 +755,7 @@ mod tests {
     #[test]
     fn complete_history_requires_an_import_and_is_not_limited_to_a_display_window() {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(&root.path().join("transcripts.sqlite"));
+        let store = Database::open(&root.path().join("transcripts.sqlite"));
         let target = conversation();
         let mut first = turn("first", &["large"], TurnStatus::Completed);
         Arc::make_mut(&mut first.items.as_mut().unwrap()[0]).body =
@@ -1173,7 +786,7 @@ mod tests {
     #[test]
     fn an_unopened_store_fails_instead_of_reporting_empty_transcripts() {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(root.path());
+        let store = Database::open(root.path());
         assert!(store.window(&conversation(), None, 10).is_err());
         assert!(
             store

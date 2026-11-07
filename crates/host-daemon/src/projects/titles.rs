@@ -17,7 +17,7 @@ pub(crate) enum TitleQuery<'a> {
     },
 }
 
-/// One native title walk supplies chats and explicitly requested project pages.
+/// One ordered set of saved titles supplies chats and requested project pages.
 /// Unrequested project contents never enter the reply or Git-status work.
 pub(crate) struct TitleList<'a> {
     projects: &'a [Project],
@@ -70,13 +70,6 @@ impl<'a> TitleList<'a> {
             .iter()
             .filter(|thread| thread.project_id.as_deref() == project)
             .count()
-    }
-    pub(crate) fn remaining_chats(&self) -> Option<usize> {
-        matches!(self.query, TitleQuery::Root { .. }).then(|| {
-            self.limit()
-                .saturating_add(1)
-                .saturating_sub(self.count(None))
-        })
     }
     fn projects_complete(&self) -> bool {
         self.recent_projects.len()
@@ -257,7 +250,6 @@ impl<'a> TitleList<'a> {
             has_more,
             has_more_projects,
             project_pages,
-            provider_errors: None,
         }
     }
 }
@@ -376,7 +368,6 @@ mod tests {
         titles.push(thread("lookahead", Some("recent")));
         titles.push(thread("chat-2", None));
         assert!(titles.complete());
-        assert_eq!(titles.remaining_chats(), Some(0));
         titles.push(thread("old-task", Some("old")));
         let page = titles.finish();
         assert_eq!(
@@ -670,7 +661,6 @@ mod tests {
             let mut titles=TitleList::new(&[],TitleQuery::Root { limit, project_limit:5, project_limits: None,
                 part: None, searching:false });
             for index in 0..count { titles.push(thread(&index.to_string(),None)); }
-            proptest::prop_assert_eq!(titles.remaining_chats(), Some((limit as usize + 1).saturating_sub(count)));
             let page=titles.finish();
             proptest::prop_assert_eq!(page.data.len(), count.min(limit as usize));
             proptest::prop_assert_eq!(page.has_more, count>limit as usize);

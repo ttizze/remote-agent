@@ -396,12 +396,7 @@ async fn retry_restores_a_removed_workspace_before_creating_the_first_provider_s
     let client = host.open_session();
     let (opened, mut updates) = admit(&host, client.id(), &request(&checkout)).await;
     until(&mut updates, |change| matches!(change, SessionChange::Preparation { preparation: Some(preparation) } if matches!(preparation.status, PreparationStatus::Failed { .. }))).await;
-    let row = host
-        .inner
-        .conversations
-        .get(&opened.session)
-        .unwrap()
-        .unwrap();
+    let row = host.inner.database.get(&opened.session).unwrap().unwrap();
     assert!(row.bindings.is_empty());
     assert_eq!(
         row.startup.unwrap().preparation.stage,
@@ -525,12 +520,7 @@ async fn stopping_during_provider_creation_keeps_the_binding_without_sending() {
         .submission_lock(&opened.session)
         .lock_owned()
         .await;
-    let row = host
-        .inner
-        .conversations
-        .get(&opened.session)
-        .unwrap()
-        .unwrap();
+    let row = host.inner.database.get(&opened.session).unwrap().unwrap();
     assert_eq!(
         row.startup.unwrap().preparation.status,
         PreparationStatus::Interrupted
@@ -578,7 +568,7 @@ async fn uncertain_initial_delivery_survives_restart_without_resubmission() {
         if echoed {
             let native = host
                 .inner
-                .conversations
+                .database
                 .get(&opened.session)
                 .unwrap()
                 .unwrap()

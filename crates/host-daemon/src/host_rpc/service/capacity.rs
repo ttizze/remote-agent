@@ -328,7 +328,7 @@ impl HostRpcService {
         {
             return Err(Failure::new("host_updating", "Host is updating"));
         }
-        let row = self.inner.conversations.get(session)?;
+        let row = self.inner.database.get(session)?;
         let native = row.as_ref().map_or(session, |row| &row.active);
         let source = row
             .as_ref()

@@ -310,8 +310,6 @@ pub struct ThreadList {
     pub has_more_projects: bool,
     /// Project pages included in this response, with their own lookahead result.
     pub project_pages: BTreeMap<String, ListPage>,
-    #[serde(default)]
-    pub provider_errors: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

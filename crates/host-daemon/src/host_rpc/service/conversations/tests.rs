@@ -813,7 +813,7 @@ async fn unimported_handoff(directory: &Path) -> HandoffFixture {
     });
     row.active = target.clone();
     let current = row.identity(&target, &current).into();
-    host.inner.conversations.save(row).unwrap();
+    host.inner.database.save(row).unwrap();
     HandoffFixture {
         codex,
         claude,
@@ -972,7 +972,7 @@ async fn unavailable_current_provider_does_not_block_earlier_segments_or_local_r
     );
     assert_eq!(
         host.inner
-            .conversations
+            .database
             .get(&root)
             .unwrap()
             .unwrap()
@@ -1046,7 +1046,6 @@ async fn unavailable_current_provider_does_not_block_earlier_segments_or_local_r
         assert!(thread.capabilities.unwrap().rename);
         assert!(thread.capabilities.unwrap().fork);
         assert!(!thread.capabilities.unwrap().model_change);
-        assert!(listed.provider_errors.is_some());
     }
     let send_error = send(
         &host,
@@ -1087,7 +1086,7 @@ async fn unavailable_current_provider_does_not_block_earlier_segments_or_local_r
 }
 
 #[tokio::test]
-async fn unavailable_conversations_keep_project_membership_and_page_warnings() {
+async fn unavailable_execution_keeps_saved_membership_and_separate_history_warnings() {
     let directory = tempfile::tempdir().unwrap();
     let HandoffFixture { codex, root, .. } = unimported_handoff(directory.path()).await;
     let projects = ProjectStore::new(directory.path().join("worktrees.json"));
@@ -1785,7 +1784,7 @@ async fn incomplete_native_history_without_a_complete_host_import_blocks_handoff
     )
     .await
     .unwrap();
-    assert!(host.inner.transcripts.history(&root).unwrap().is_none());
+    assert!(host.inner.database.history(&root).unwrap().is_none());
     *a.open_failure.lock().unwrap() = Some(Failure::new(
         "incomplete_history",
         "transcript parent is unavailable",
@@ -1996,6 +1995,76 @@ async fn round_trip_reuses_native_sessions_transfers_only_missing_history_and_re
 }
 
 #[tokio::test]
+async fn lost_receipt_storage_never_invites_a_second_provider_execution() {
+    let directory = tempfile::tempdir().unwrap();
+    let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let b = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let root = a
+        .create(directory.path().to_str().unwrap(), None, None)
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let host = service(directory.path(), &a, &b);
+    let client = host.open_session();
+    host.inner.database.with(|connection| connection.execute_batch("CREATE TRIGGER reject_receipt BEFORE UPDATE ON command_receipts BEGIN SELECT RAISE(ABORT, 'test failure'); END;").map_err(crate::host_rpc::storage::failure)).unwrap();
+    let error = send(
+        &host,
+        client.id(),
+        &root,
+        ProviderKind::Codex,
+        "input",
+        "execute once",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.delivery, agent_protocol::error::Delivery::Unknown);
+    assert_eq!(error.code, "submission_storage_failed");
+    host.inner
+        .database
+        .with(|connection| {
+            connection
+                .execute_batch("DROP TRIGGER reject_receipt")
+                .map_err(crate::host_rpc::storage::failure)
+        })
+        .unwrap();
+    assert_eq!(
+        send(
+            &host,
+            client.id(),
+            &root,
+            ProviderKind::Codex,
+            "input",
+            "execute once"
+        )
+        .await
+        .unwrap_err()
+        .delivery,
+        agent_protocol::error::Delivery::Unknown
+    );
+    drop(client);
+    drop(host);
+    let host = service(directory.path(), &a, &b);
+    let client = host.open_session();
+    assert_eq!(
+        send(
+            &host,
+            client.id(),
+            &root,
+            ProviderKind::Codex,
+            "input",
+            "execute once"
+        )
+        .await
+        .unwrap_err()
+        .delivery,
+        agent_protocol::error::Delivery::Unknown
+    );
+    assert_eq!(a.inputs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn replayed_handoff_receipts_do_not_block_later_provider_switches() {
     use agent_protocol::session::SubmissionDelivery;
 
@@ -2048,7 +2117,7 @@ async fn replayed_handoff_receipts_do_not_block_later_provider_switches() {
     let opened = history(&host, client.id(), &root).await;
     assert!(opened.thread.active_turn_id().is_none());
     assert!(opened.thread.submissions.contains_key("a1"));
-    let row = host.inner.conversations.get(&root).unwrap().unwrap();
+    let row = host.inner.database.get(&root).unwrap().unwrap();
     host.inner
         .router
         .begin_submission(&root, "pending")
@@ -2830,7 +2899,7 @@ async fn handoff_and_excerpts_recover_deferred_native_messages() {
 async fn imported_turns(host: &HostRpcService, root: &SessionRef, expected: &[&str]) {
     let stored = || {
         host.inner
-            .transcripts
+            .database
             .window(root, None, 1000)
             .unwrap()
             .map(|window| {
@@ -2987,7 +3056,7 @@ async fn unreadable_native_bodies_stay_deferred_without_blocking_their_import() 
     imported_turns(&host, &root, &["turn-0"]).await;
     let stored = host
         .inner
-        .transcripts
+        .database
         .turn(&root, &"turn-0".into())
         .unwrap()
         .unwrap()
@@ -3054,7 +3123,7 @@ async fn recorded_items_with_reused_turn_ids_do_not_need_the_native_provider() {
         })
     });
     host.inner
-        .transcripts
+        .database
         .import(
             &target,
             ThreadResponse {
@@ -3157,7 +3226,7 @@ async fn imports_copy_message_text_while_host_turns_keep_activity() {
     imported_turns(&host, &root, &["past", "live"]).await;
     let items = |id: &str| {
         host.inner
-            .transcripts
+            .database
             .turn(&root, &id.into())
             .unwrap()
             .unwrap()

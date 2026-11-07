@@ -60,12 +60,12 @@ impl SessionRouter {
         drop(state);
         owned.request_origins.insert(request.id.clone(), origin);
         let mut failed = Vec::new();
-        self.change_locked(
+        record_failure(self.change_locked(
             &mut owned,
             &target,
             &SessionChange::Request { request },
             &mut failed,
-        );
+        ));
         drop(owned);
         self.close_failed(failed);
         Ok(())
@@ -152,7 +152,7 @@ impl SessionRouter {
         }
         drop(state);
         let mut failed = Vec::new();
-        self.change_locked(
+        record_failure(self.change_locked(
             &mut owned,
             &target,
             &SessionChange::RequestDelivery {
@@ -160,7 +160,7 @@ impl SessionRouter {
                 state: agent_protocol::session::RequestDelivery::Sending,
             },
             &mut failed,
-        );
+        ));
         drop(owned);
         self.close_failed(failed);
         Ok((origin, body))
@@ -181,7 +181,7 @@ impl SessionRouter {
         if owned.timeline.requests.get(id).is_some_and(|request| {
             request.delivery == agent_protocol::session::RequestDelivery::Sending
         }) {
-            self.change_locked(
+            record_failure(self.change_locked(
                 &mut owned,
                 &target,
                 &SessionChange::RequestDelivery {
@@ -189,7 +189,7 @@ impl SessionRouter {
                     state: delivery,
                 },
                 &mut failed,
-            );
+            ));
         }
         drop(owned);
         self.close_failed(failed);

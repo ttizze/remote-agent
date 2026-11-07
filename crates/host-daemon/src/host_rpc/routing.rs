@@ -112,7 +112,7 @@ struct State {
     subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
     requests: HashMap<agent_protocol::ids::RequestId, SessionRef>,
     native_requests: HashMap<(uuid::Uuid, String), agent_protocol::ids::RequestId>,
-    transcripts: Option<Arc<super::transcripts::Transcripts>>,
+    database: Option<Arc<super::storage::Database>>,
 }
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
@@ -136,7 +136,9 @@ impl SessionRouter {
     ) -> Result<(), String> {
         match change {
             AgentChange::TaskParent { .. } => {}
-            AgentChange::Session { session, change } => self.session_change(&session, change),
+            AgentChange::Session { session, change } => {
+                return self.try_session_change(&session, change);
+            }
             AgentChange::Request {
                 session,
                 origin,
@@ -148,8 +150,8 @@ impl SessionRouter {
             } => self.resolve_native_request(instance, &native_id),
             AgentChange::SourceClosed(instance) => self.close_request_source(instance),
             AgentChange::Renamed { session, name } => {
-                if let Some(transcripts) = lock_state(&self.state).transcripts.clone() {
-                    record_failure(transcripts.rename(&session, name.as_deref()));
+                if let Some(transcripts) = lock_state(&self.state).database.clone() {
+                    transcripts.rename(&session, name.as_deref())?;
                 }
                 self.broadcast(Notification::SessionRenamed {
                     session,
@@ -173,11 +175,8 @@ impl SessionRouter {
     }
     /// Finished turns are recorded while their conversation is still locked,
     /// so the store observes them in execution order.
-    pub(super) fn with_transcripts(
-        self,
-        transcripts: Arc<super::transcripts::Transcripts>,
-    ) -> Self {
-        lock_state(&self.state).transcripts = Some(transcripts);
+    pub(super) fn with_database(self, transcripts: Arc<super::storage::Database>) -> Self {
+        lock_state(&self.state).database = Some(transcripts);
         self
     }
     /// Running turns end with the Host; record what they produced.
@@ -189,7 +188,7 @@ impl SessionRouter {
                 .iter()
                 .map(|(target, actor)| (target.clone(), actor.clone()))
                 .collect();
-            (state.transcripts.clone(), actors)
+            (state.database.clone(), actors)
         };
         let Some(transcripts) = transcripts else {
             return;
@@ -288,7 +287,7 @@ impl SessionRouter {
             ));
         }
         let mut failed = Vec::new();
-        self.change_locked(
+        record_failure(self.change_locked(
             &mut owned,
             target,
             &SessionChange::Submission {
@@ -296,7 +295,7 @@ impl SessionRouter {
                 delivery: agent_protocol::session::SubmissionDelivery::Sending,
             },
             &mut failed,
-        );
+        ));
         drop(owned);
         self.close_failed(failed);
         Ok(())
@@ -313,7 +312,7 @@ impl SessionRouter {
         let mut owned = lock_state(&actor);
         let mut failed = Vec::new();
         if owned.timeline.submissions.contains_key(id) {
-            self.change_locked(
+            record_failure(self.change_locked(
                 &mut owned,
                 target,
                 &SessionChange::Submission {
@@ -321,7 +320,7 @@ impl SessionRouter {
                     delivery,
                 },
                 &mut failed,
-            );
+            ));
         }
         drop(owned);
         self.close_failed(failed);
@@ -510,11 +509,16 @@ impl SessionRouter {
         })
     }
     pub(crate) fn session_change(&self, target: &SessionRef, change: SessionChange) {
+        record_failure(self.try_session_change(target, change));
+    }
+
+    fn try_session_change(&self, target: &SessionRef, change: SessionChange) -> Result<(), String> {
         let actor = self.actor(target);
         let mut failed = Vec::new();
-        self.change_locked(&mut lock_state(&actor), target, &change, &mut failed);
+        let result = self.change_locked(&mut lock_state(&actor), target, &change, &mut failed);
         self.close_failed(failed);
         self.prune(target, &actor);
+        result
     }
     pub(crate) fn fail_provider(
         &self,
@@ -585,7 +589,7 @@ impl SessionRouter {
             });
             let mut failed = Vec::new();
             for change in changes {
-                self.change_locked(&mut owned, &target, &change, &mut failed);
+                record_failure(self.change_locked(&mut owned, &target, &change, &mut failed));
             }
             drop(owned);
             self.close_failed(failed);
@@ -598,7 +602,7 @@ impl SessionRouter {
         target: &SessionRef,
         change: &SessionChange,
         failed: &mut Vec<SessionId>,
-    ) {
+    ) -> Result<(), String> {
         let expired: Vec<_> = actor.timeline.requests.values().filter(|request| match change {
             SessionChange::Turn { turn, completed: true } => matches!(&request.target, agent_protocol::requests::RequestTarget::Turn { turn_id, .. } if turn_id == &turn.id),
             SessionChange::Item { turn_id, item } => {
@@ -607,28 +611,11 @@ impl SessionRouter {
             }
             _ => false,
         }).map(|request| request.id.clone()).collect();
-        for request_id in expired {
-            self.change_locked(
-                actor,
-                target,
-                &SessionChange::ResolveRequest { request_id },
-                failed,
-            );
-        }
-        if let SessionChange::ResolveRequest { request_id } = change
-            && let Some(origin) = actor.request_origins.remove(request_id)
-        {
-            let mut state = lock_state(&self.state);
-            state.requests.remove(request_id);
-            state
-                .native_requests
-                .remove(&native_key(origin.instance, &origin.native_id));
-        }
         let previous_turns = actor.timeline.turns.as_deref().unwrap_or_default();
         let removed_from_history = matches!(change, SessionChange::RemoveItem { turn_id, item_id }
             if agent_protocol::session::item_position(previous_turns, turn_id, item_id).is_none());
         let updated = change.turn_index(previous_turns);
-        let transcripts = lock_state(&self.state).transcripts.clone();
+        let transcripts = lock_state(&self.state).database.clone();
         let archived_item = if let (Some(transcripts), SessionChange::Item { turn_id, item }) =
             (&transcripts, change)
         {
@@ -643,6 +630,7 @@ impl SessionRouter {
         } else {
             false
         };
+        let previous = actor.timeline.clone();
         let timeline = std::mem::take(&mut actor.timeline);
         let (next, result) = if archived_item {
             (
@@ -653,18 +641,14 @@ impl SessionRouter {
             change.apply_timeline(timeline)
         };
         actor.timeline = next;
-        // Finished turns, and later updates to them, are recorded as they change.
+        // Persist running and completed turns before publishing their changes.
         let turns = actor.timeline.turns.as_deref().unwrap_or_default();
         let finished = updated
             .or_else(|| change.turn_index(turns))
             .and_then(|index| {
                 turns
                     .get(index)
-                    .filter(|current| {
-                        result.is_ok()
-                            && !removed_from_history
-                            && current.status != agent_protocol::execution::TurnStatus::Running
-                    })
+                    .filter(|_| result.is_ok() && !removed_from_history)
                     .cloned()
             });
         // An update may target a finished turn that live execution no longer
@@ -679,8 +663,53 @@ impl SessionRouter {
             && !late
         {
             tracing::warn!(target: "agent", operation = "host.session.invalid_update", message = %reason);
+            actor.timeline = previous;
             actor.release();
-            return;
+            return Err(reason.to_string());
+        }
+        let persisted = (|| {
+            if let (Some(transcripts), Some(turn)) = (&transcripts, finished) {
+                let removed_item = match change {
+                    SessionChange::RemoveItem { item_id, .. } => Some(item_id),
+                    _ => None,
+                };
+                transcripts.record(target, &turn, removed_item)?;
+            }
+            if let (Some(transcripts), true, Some(turn_id)) = (&transcripts, late, change.turn_id())
+            {
+                transcripts.update_turn(target, turn_id, change.item_id(), |turn| {
+                    let (timeline, result) =
+                        change.apply_timeline(agent_protocol::session::Timeline {
+                            turns: Some(vec![Arc::new(turn)]),
+                            ..Default::default()
+                        });
+                    result.ok()?;
+                    timeline.turns?.pop().map(Arc::unwrap_or_clone)
+                })?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = persisted {
+            actor.timeline = previous;
+            actor.release();
+            return Err(error);
+        }
+        for request_id in expired {
+            record_failure(self.change_locked(
+                actor,
+                target,
+                &SessionChange::ResolveRequest { request_id },
+                failed,
+            ));
+        }
+        if let SessionChange::ResolveRequest { request_id } = change
+            && let Some(origin) = actor.request_origins.remove(request_id)
+        {
+            let mut state = lock_state(&self.state);
+            state.requests.remove(request_id);
+            state
+                .native_requests
+                .remove(&native_key(origin.instance, &origin.native_id));
         }
         let frame = protocol::encode(change).expect("change encodes");
         for (connection, output) in actor.subscriptions.values() {
@@ -708,26 +737,7 @@ impl SessionRouter {
             change,
         ));
         drop(state);
-        if let (Some(transcripts), Some(turn)) = (&transcripts, finished) {
-            let removed_item = match change {
-                SessionChange::RemoveItem { item_id, .. } => Some(item_id),
-                _ => None,
-            };
-            record_failure(transcripts.record(target, &turn, removed_item));
-        }
-        if let (Some(transcripts), true, Some(turn_id)) = (&transcripts, late, change.turn_id()) {
-            record_failure(
-                transcripts.update_turn(target, turn_id, change.item_id(), |turn| {
-                    let (timeline, result) =
-                        change.apply_timeline(agent_protocol::session::Timeline {
-                            turns: Some(vec![Arc::new(turn)]),
-                            ..Default::default()
-                        });
-                    result.ok()?;
-                    timeline.turns?.pop().map(Arc::unwrap_or_clone)
-                }),
-            );
-        }
         actor.release();
+        Ok(())
     }
 }

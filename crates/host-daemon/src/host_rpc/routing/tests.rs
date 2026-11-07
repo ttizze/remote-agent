@@ -2,6 +2,141 @@ use super::*;
 use agent_protocol::models::{Item, Thread, Turn};
 use agent_transport::peer::RpcMessage;
 
+#[tokio::test]
+async fn failed_storage_is_not_published_or_retained_and_the_same_update_can_retry() {
+    use crate::host_rpc::storage::{Database, failure};
+    let root = tempfile::tempdir().unwrap();
+    let database = Arc::new(Database::open(&root.path().join("state.sqlite")));
+    let router = SessionRouter::new().with_database(database.clone());
+    let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+    database
+        .import(
+            &target,
+            ThreadResponse {
+                thread: Thread {
+                    id: Some(target.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let client = router.open_session();
+    let mut stream = router
+        .finish_session_read(
+            open(&router, "native"),
+            client.id(),
+            ThreadResponse {
+                thread: Thread {
+                    id: Some(target.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap()
+        .updates
+        .unwrap();
+    database.with(|connection| connection.execute_batch("CREATE TRIGGER reject_run BEFORE INSERT ON runs BEGIN SELECT RAISE(ABORT, 'test failure'); END;").map_err(failure)).unwrap();
+    let update = || AgentChange::Session {
+        session: target.clone(),
+        change: SessionChange::Turn {
+            turn: Turn {
+                id: "turn".into(),
+                status: agent_protocol::execution::TurnStatus::Running,
+                items: Some(vec![]),
+                ..Default::default()
+            },
+            completed: false,
+        },
+    };
+    assert!(router.apply(update(), &[]).is_err());
+    assert!(stream.receiver.try_recv().is_err());
+    assert!(
+        lock_state(&router.actor(&target))
+            .timeline
+            .turns
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+    );
+    assert!(
+        database
+            .history(&target)
+            .unwrap()
+            .unwrap()
+            .thread
+            .turns
+            .unwrap()
+            .is_empty()
+    );
+    database
+        .with(|connection| {
+            connection
+                .execute_batch("DROP TRIGGER reject_run")
+                .map_err(failure)
+        })
+        .unwrap();
+    router.apply(update(), &[]).unwrap();
+    assert!(matches!(
+        protocol::decode::<SessionChange>(&stream.recv().await.unwrap()).unwrap(),
+        SessionChange::Turn { .. }
+    ));
+    assert_eq!(
+        database
+            .history(&target)
+            .unwrap()
+            .unwrap()
+            .thread
+            .turns
+            .unwrap()
+            .len(),
+        1
+    );
+    let request = serde_json::from_value(serde_json::json!({"id":"question", "target":{"turn":{"turnId":"turn","itemId":null}}, "delivery":"awaiting", "body":{"question":{"questions":[]}}})).unwrap();
+    router.session_change(&target, SessionChange::Request { request });
+    stream.recv().await.unwrap();
+    database.with(|connection| connection.execute_batch("CREATE TRIGGER reject_run BEFORE INSERT ON runs BEGIN SELECT RAISE(ABORT, 'test failure'); END;").map_err(failure)).unwrap();
+    let finish = || AgentChange::Session {
+        session: target.clone(),
+        change: SessionChange::Turn {
+            turn: Turn {
+                id: "turn".into(),
+                status: agent_protocol::execution::TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        },
+    };
+    assert!(router.apply(finish(), &[]).is_err());
+    assert!(stream.receiver.try_recv().is_err());
+    assert!(
+        lock_state(&router.actor(&target))
+            .timeline
+            .requests
+            .contains_key("question")
+    );
+    database
+        .with(|connection| {
+            connection
+                .execute_batch("DROP TRIGGER reject_run")
+                .map_err(failure)
+        })
+        .unwrap();
+    router.apply(finish(), &[]).unwrap();
+    assert!(matches!(
+        protocol::decode::<SessionChange>(&stream.recv().await.unwrap()).unwrap(),
+        SessionChange::ResolveRequest { .. }
+    ));
+    assert!(matches!(
+        protocol::decode::<SessionChange>(&stream.recv().await.unwrap()).unwrap(),
+        SessionChange::Turn {
+            completed: true,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn subagent_work_and_requests_do_not_contribute_to_system_activity() {
     use agent_protocol::{models::SessionStatus, session::RequestDelivery};
@@ -1053,7 +1188,7 @@ fn late_item_changes_update_the_correct_recorded_occurrence() {
     };
     for retained in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let transcripts = Arc::new(crate::host_rpc::transcripts::Transcripts::open(
+        let transcripts = Arc::new(crate::host_rpc::storage::Database::open(
             &directory.path().join("transcripts.sqlite"),
         ));
         let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
@@ -1086,7 +1221,7 @@ fn late_item_changes_update_the_correct_recorded_occurrence() {
                 },
             )
             .unwrap();
-        let router = SessionRouter::new().with_transcripts(transcripts.clone());
+        let router = SessionRouter::new().with_database(transcripts.clone());
         let lease = retained.then(|| router.retain_execution(target.clone()).unwrap());
         if retained {
             router.session_change(

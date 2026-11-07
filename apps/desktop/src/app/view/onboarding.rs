@@ -490,6 +490,14 @@ impl Desktop {
                     vec![result.imported.len().to_string()],
                 ));
             }
+            for (provider, warning) in &result.warnings {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xffc773))
+                        .child(format!("{provider}: {warning}")),
+                );
+            }
             for (path, error) in &result.errors {
                 body = body.child(
                     div()

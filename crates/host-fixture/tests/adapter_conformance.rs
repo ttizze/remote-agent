@@ -830,7 +830,7 @@ async fn claude_conforms_to_host_conversations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_cursors() {
+async fn imported_lists_survive_repeated_native_cursors() {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let threads: Vec<_> = (0..101)
@@ -855,14 +855,35 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
         .await
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
+    local
+        .peer
+        .call(&agent_protocol::project_import::ImportProjects {
+            paths: vec![root.to_str().unwrap().into()],
+        })
+        .await
+        .unwrap();
+    let overview = local
+        .peer
+        .call(&op::ListSessions::new(Default::default()))
+        .await
+        .unwrap();
+    let project = overview.projects[0].id.clone();
     let query = op::ListSessions::new(agent_protocol::models::ListQuery {
         limit: 200,
+        project_limits: Some([(project, 200)].into()),
         ..Default::default()
     });
     let listing = local.peer.call(&query).await.unwrap();
     assert_eq!(listing.data.len(), 102);
-    assert!(listing.provider_errors.is_none());
     std::fs::write(root.join("repeat-list-cursor"), []).unwrap();
+    let imported = local
+        .peer
+        .call(&agent_protocol::project_import::ImportProjects {
+            paths: vec![root.to_str().unwrap().into()],
+        })
+        .await
+        .unwrap();
+    assert!(imported.warnings.contains_key("codex"));
     let listing = local.peer.call(&query).await.unwrap();
     assert!(
         listing
@@ -872,12 +893,8 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
     );
     assert_eq!(
         listing.data.len(),
-        101,
-        "keep the earlier healthy Codex page"
-    );
-    assert_eq!(
-        listing.provider_errors.unwrap()["codex"]["code"],
-        "invalid_session_list"
+        102,
+        "an incomplete reimport retains saved rows"
     );
     local.close().await;
     host.close().await.unwrap();
@@ -1031,7 +1048,7 @@ async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_adm
         let root = dunce::canonicalize(directory.path()).unwrap();
         let mut threads: Vec<_> = (0..200).map(|index| serde_json::json!({
             "id":format!("root-{index:03}"), "name":format!("Conversation {index:03}"),
-            "updatedAt":index,
+            "updatedAt":index, "cwd":root,
         })).collect();
         threads.extend([
             serde_json::json!({"id":"child", "parentThreadId":"root-199", "name":"Child", "updatedAt":-1}),
@@ -1047,26 +1064,22 @@ async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_adm
                 .lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .filter(|entry| entry["method"] == "thread/list" && entry["ancestorThreadId"].is_string()).count()
         };
-        let query = op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 150, ..Default::default()
-        });
+        first.peer.call(&agent_protocol::project_import::ImportProjects { paths: vec![root.to_str().unwrap().into()] }).await.unwrap();
+        let overview = first.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
+        let project = overview.projects[0].id.clone();
+        let query = op::ListProjectSessions { project_id: project.clone(), limit: 150, search_term: String::new() };
         let (first_page, second_page) = tokio::join!(first.peer.call(&query), second.peer.call(&query));
         for page in [first_page.unwrap(), second_page.unwrap()] {
-            assert!(page.provider_errors.is_none());
             assert!(page.has_more);
             assert_eq!(page.data.len(), 150);
             assert!(page.data.iter().all(|thread| thread.parent_id.is_none()));
         }
-        let complete = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 250, ..Default::default()
-        })).await.unwrap();
-        assert!(complete.provider_errors.is_none());
+        let complete = first.peer.call(&op::ListProjectSessions { project_id: project.clone(), limit: 250, search_term: String::new() }).await.unwrap();
         assert!(!complete.has_more);
         assert_eq!(complete.data.len(), 200);
         let searched = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
             search_term: "Conversation 199".into(), ..Default::default()
         })).await.unwrap();
-        assert!(searched.provider_errors.is_none());
         assert_eq!(searched.data.len(), 1);
         assert_eq!(descendant_reads(), 0, "expanded, complete and searched root lists must not read descendants");
         let gate = root.join("hold-list-reads");
@@ -1103,7 +1116,7 @@ async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_adm
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_order() {
+async fn saved_title_lists_page_sections_without_native_reads() {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let threads: Vec<_> = (0..2000)
@@ -1142,10 +1155,26 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .filter(|entry| entry["ancestorThreadId"].is_null())
             .count()
     };
+    local
+        .peer
+        .call(&agent_protocol::project_import::ImportProjects {
+            paths: vec![root.to_str().unwrap().into()],
+        })
+        .await
+        .unwrap();
+    let overview = local
+        .peer
+        .call(&op::ListSessions::new(Default::default()))
+        .await
+        .unwrap();
+    let project = overview.projects[0].id.clone();
+    let imported_reads = page_reads();
+    assert_eq!(imported_reads, 20);
     let listing = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
             limit: 5,
+            project_limits: Some([(project.clone(), 4)].into()),
             ..Default::default()
         }))
         .await
@@ -1154,9 +1183,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(listing.data.len(), 5);
     assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
     assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
-    assert!(listing.has_more);
-    assert!(listing.provider_errors.is_none());
-    assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
+    assert!(listing.project_pages[&project].has_more);
+    assert_eq!(page_reads(), imported_reads, "list reads only saved titles");
     local
         .peer
         .call(&agent_protocol::live_activity::ReadTaskActivity {})
@@ -1164,7 +1192,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .unwrap();
     assert_eq!(
         page_reads(),
-        1,
+        imported_reads,
         "activity bootstrap must not scan historical titles"
     );
     let descendant_roots = list_reads()
@@ -1199,20 +1227,21 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     );
     let expanded = local
         .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+        .call(&op::ListProjectSessions {
+            project_id: project.clone(),
             limit: 150,
-            ..Default::default()
-        }))
+            search_term: String::new(),
+        })
         .await
         .unwrap();
     assert_eq!(expanded.data.len(), 150);
-    assert_eq!(expanded.data[0].id.as_ref(), Some(&session));
-    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
+    assert_eq!(expanded.data[0].id.as_ref().unwrap().id, "page-1999");
+    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1850");
     assert!(expanded.has_more);
     assert_eq!(
         page_reads(),
-        3,
-        "expansion needs only two additional page reads"
+        imported_reads,
+        "expansion reads only saved titles"
     );
 
     let found = local
@@ -1226,16 +1255,25 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(found.data.len(), 1);
     assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
     assert!(!found.has_more);
-    assert_eq!(page_reads(), 4);
+    assert_eq!(page_reads(), imported_reads);
 
     let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
-        "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":100,
+        "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":10000,
     })).collect();
     std::fs::write(&fixture, serde_json::to_vec(&tied).unwrap()).unwrap();
+    local
+        .peer
+        .call(&agent_protocol::project_import::ImportProjects {
+            paths: vec![root.to_str().unwrap().into()],
+        })
+        .await
+        .unwrap();
+    let tied_reads = page_reads();
     let listing = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
             limit: 5,
+            project_limits: Some([(project.clone(), 4)].into()),
             ..Default::default()
         }))
         .await
@@ -1247,14 +1285,19 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .data
             .iter()
             .skip(1)
-            .all(|t| t.updated_at == Some(100.0))
+            .all(|t| t.updated_at == Some(10000.0))
     );
-    assert!(listing.has_more);
+    assert!(listing.project_pages[&project].has_more);
     assert_eq!(
-        page_reads(),
-        5,
-        "recent lists never exhaust timestamp ties across old pages"
+        listing
+            .data
+            .iter()
+            .skip(1)
+            .map(|t| t.id.as_ref().unwrap().id.as_str())
+            .collect::<Vec<_>>(),
+        ["equal-000", "equal-001", "equal-002", "equal-003"]
     );
+    assert_eq!(page_reads(), tied_reads);
 
     let projects: Vec<_> = (0..3)
         .map(|index| {
@@ -1270,10 +1313,23 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     )
     .unwrap();
     let scoped: Vec<_> = (0..2000).map(|index| serde_json::json!({
-        "id":format!("scoped-{index:04}"), "name":"Scoped conversation", "updatedAt":index,
+        "id":format!("scoped-{index:04}"), "name":"Scoped conversation", "updatedAt":20000 + index,
         "cwd":if index % 4 == 3 { root.clone() } else { root.join(format!("project-{}", index % 4)) },
     })).collect();
     std::fs::write(&fixture, serde_json::to_vec(&scoped).unwrap()).unwrap();
+    let paths: Vec<_> = (0..3)
+        .map(|index| {
+            let path = root.join(format!("project-{index}"));
+            std::fs::create_dir_all(&path).unwrap();
+            path.to_str().unwrap().to_owned()
+        })
+        .collect();
+    local
+        .peer
+        .call(&agent_protocol::project_import::ImportProjects { paths })
+        .await
+        .unwrap();
+    let scoped_reads = page_reads();
     let listing = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
@@ -1304,8 +1360,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(listing.has_more);
     assert_eq!(
         page_reads(),
-        6,
-        "initial project and chat pages share one native title walk"
+        scoped_reads,
+        "project and chat pages read saved titles"
     );
     let expanded = local
         .peer
@@ -1335,8 +1391,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(expanded.has_more);
     assert_eq!(
         page_reads(),
-        13,
-        "project expansion reads only its own title page, never other sections"
+        scoped_reads,
+        "project expansion reads saved titles"
     );
     let empty_projects: Vec<_> = (0..6)
         .map(|index| {
@@ -1368,8 +1424,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     }
     assert_eq!(
         page_reads(),
-        before_empty + 42,
-        "empty prefetched project pages are certified by exhausting titles without reading bodies"
+        before_empty,
+        "empty project lists do not read native history"
     );
     local.close().await;
     host.close().await.unwrap();

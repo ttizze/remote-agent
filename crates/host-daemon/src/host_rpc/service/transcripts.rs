@@ -60,7 +60,7 @@ impl HostRpcService {
         }
         let Some(window) = self
             .inner
-            .transcripts
+            .database
             .window(target, end, limit)
             .map_err(storage_failure)?
         else {
@@ -146,7 +146,7 @@ impl HostRpcService {
         let started = std::time::Instant::now();
         let result = match self.import_history(&target).await {
             Ok(response) => {
-                let transcripts = self.inner.transcripts.clone();
+                let transcripts = self.inner.database.clone();
                 let key = target.clone();
                 tokio::task::spawn_blocking(move || transcripts.import(&key, response))
                     .await
@@ -177,7 +177,7 @@ impl HostRpcService {
 
     /// History in public identity, keeping the conversation's content.
     async fn import_history(&self, target: &SessionRef) -> Result<ThreadResponse, Failure> {
-        let mut response = if let Some(row) = self.inner.conversations.get(target)? {
+        let mut response = if let Some(row) = self.inner.database.get(target)? {
             if row.startup.is_some() {
                 return Err(Failure::new(
                     "preparation_active",

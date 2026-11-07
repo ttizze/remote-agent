@@ -96,8 +96,81 @@ impl HostRpcService {
                 }
             }
         }
+        result.warnings = self.import_conversation_titles(&result.imported).await?;
         self.reimport_transcripts(&result.imported).await?;
         Ok(result)
+    }
+
+    /// External discovery belongs to explicit import, never to a list read.
+    async fn import_conversation_titles(
+        &self,
+        roots: &[String],
+    ) -> Result<BTreeMap<String, String>, Failure> {
+        let mut warnings = BTreeMap::new();
+        if roots.is_empty() {
+            return Ok(warnings);
+        }
+        warnings.extend(
+            self.inner
+                .providers
+                .startup_errors()
+                .map(|(provider, error)| (provider.key().into(), error.to_string())),
+        );
+        let projects = self.project_snapshot().await?;
+        let selected: HashSet<_> = roots
+            .iter()
+            .filter_map(|root| projects.project_for_workspace(root))
+            .collect();
+        for (provider, agent) in self.inner.providers.all() {
+            let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
+            let pages = session_pages(
+                agent.as_ref(),
+                "",
+                SessionListScope::All,
+                100,
+                100,
+                Some(deadline),
+                None,
+            );
+            futures_util::pin_mut!(pages);
+            let mut scanned = 0;
+            while let Some(page) = pages.next().await {
+                let page = match page {
+                    Ok(page) => page,
+                    Err(error) => {
+                        warnings.insert(provider.key().into(), error.to_string());
+                        break;
+                    }
+                };
+                for summary in page {
+                    scanned += 1;
+                    let Some(mut thread) = self.inner.database.summary(summary.thread)? else {
+                        continue;
+                    };
+                    if thread
+                        .cwd
+                        .as_deref()
+                        .and_then(|cwd| projects.project_for_workspace(cwd))
+                        .is_some_and(|project| selected.contains(project))
+                    {
+                        thread.git_branch = summary.branch;
+                        describe_thread(&mut thread, agent.capabilities(), &projects);
+                        self.inner
+                            .database
+                            .observe(&thread)
+                            .map_err(transcripts::storage_failure)?;
+                    }
+                }
+                if scanned >= MAX_SESSIONS_PER_PROVIDER {
+                    warnings.insert(
+                        provider.key().into(),
+                        "一覧が多いため、最初の5000件まで取り込みました。".into(),
+                    );
+                    break;
+                }
+            }
+        }
+        Ok(warnings)
     }
 
     /// Importing a project again copies native history continued outside the
@@ -110,7 +183,7 @@ impl HostRpcService {
             .collect();
         let conversations = self
             .inner
-            .transcripts
+            .database
             .imported()
             .map_err(transcripts::storage_failure)?;
         for (conversation, cwd) in conversations {
@@ -339,6 +412,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.imported.as_slice(), std::slice::from_ref(&path));
         assert!(result.errors.contains_key(&missing));
+        assert!(result.warnings.contains_key("codex"));
         service
             .import_projects(&[path.clone(), path.clone()])
             .await
@@ -348,7 +422,7 @@ mod tests {
         assert_eq!(registered.projects[0].roots[0].path, path);
         let scan = service.scan_projects().await.unwrap();
         assert!(scan.projects[0].registered);
-        // Import only registers folders. Native titles and IDs remain readable without a CLI.
+        // Explicit import preserves provider identities, including without a CLI.
         let agent = &service.inner.providers.all()[0].1;
         let page = Agent::list(agent.as_ref(), "", None, SessionListScope::Roots, 100)
             .await

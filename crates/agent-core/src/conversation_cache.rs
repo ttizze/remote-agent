@@ -380,7 +380,6 @@ mod tests {
             has_more: true,
             has_more_projects: false,
             project_pages: Default::default(),
-            provider_errors: None,
         })
     }
 

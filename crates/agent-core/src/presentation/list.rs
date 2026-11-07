@@ -117,7 +117,6 @@ pub struct ThreadSummary {
 pub struct ThreadList {
     pub loading_projects: bool,
     pub loading_chats: bool,
-    pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<ProjectSummary>,
     pub hidden_projects: Vec<ProjectSummary>,
@@ -129,7 +128,6 @@ pub struct ThreadList {
 /// operation generations are deliberately absent from its equality contract.
 pub(crate) struct ListSource<'a> {
     lists: &'a crate::state::Lists,
-    accounts: &'a Option<std::sync::Arc<agent_protocol::operations::Accounts>>,
     conversations: &'a std::sync::Arc<
         BTreeMap<crate::session::SessionRef, std::sync::Arc<crate::models::Thread>>,
     >,
@@ -140,7 +138,6 @@ pub(crate) struct ListSource<'a> {
 impl<'a> ListSource<'a> {
     pub(crate) fn new(
         lists: &'a crate::state::Lists,
-        accounts: &'a Option<std::sync::Arc<agent_protocol::operations::Accounts>>,
         conversations: &'a std::sync::Arc<
             BTreeMap<crate::session::SessionRef, std::sync::Arc<crate::models::Thread>>,
         >,
@@ -150,7 +147,6 @@ impl<'a> ListSource<'a> {
     ) -> Self {
         Self {
             lists,
-            accounts,
             conversations,
             operations,
             storage_scope,
@@ -206,7 +202,6 @@ impl<'a> ListSource<'a> {
                 .archived_scopes
                 .same(&other.lists.archived_scopes)
             && self.lists.recent_chats == other.lists.recent_chats
-            && self.accounts.same(other.accounts)
             && self.storage_scope == other.storage_scope
             && self.connected == other.connected
             && (self.lists.task_activity.same(&other.lists.task_activity)
@@ -283,7 +278,6 @@ impl Snapshot {
     pub(crate) fn list_source(&self) -> ListSource<'_> {
         ListSource::new(
             &self.lists,
-            &self.catalog.account.accounts,
             &self.sessions.conversations,
             &self.operations,
             &self.connection.storage_scope,
@@ -319,25 +313,6 @@ impl Snapshot {
 }
 
 impl ListSource<'_> {
-    fn list_error_providers(&self, list: &crate::models::ThreadList) -> Vec<String> {
-        list.provider_errors
-            .iter()
-            .flat_map(|errors| errors.keys())
-            .filter(|provider| {
-                // An unused login provider is not a partial-list failure.
-                // Keep errors visible until account discovery has completed.
-                !matches!(provider.as_str(), "codex" | "claude")
-                    || self.accounts.as_ref().is_none_or(|accounts| {
-                        accounts
-                            .accounts
-                            .iter()
-                            .any(|account| account.provider.key() == provider.as_str())
-                    })
-            })
-            .cloned()
-            .collect()
-    }
-
     fn waiting_sessions(&self) -> &[crate::session::SessionRef] {
         self.lists
             .task_activity
@@ -357,8 +332,6 @@ impl ListSource<'_> {
             .iter()
             .map(|project| project.id.as_str())
             .collect();
-        let errors = self.list_error_providers(list);
-        let notice = (!errors.is_empty()).then(|| format!("会話一覧は部分結果です（{}）。取得できない提供元の保存済み表示は最新とは限りません。", errors.join("、")));
         let preferences = self.lists.project_preferences.get(self.storage_scope);
         let mut projects = Vec::new();
         let mut hidden_projects = Vec::new();
@@ -455,7 +428,6 @@ impl ListSource<'_> {
         };
         (
             ThreadList {
-                notice,
                 threads: summaries,
                 loading_projects: self.operation_running(
                     crate::state::operations::OperationKey::SessionPage {
@@ -551,16 +523,6 @@ impl ListSource<'_> {
                                 )
                             };
                             summary.has_more = page.has_more;
-                            let errors = self.list_error_providers(page);
-                            if !errors.is_empty() {
-                                summary.error = Some(super::error::ErrorText {
-                                    message: format!(
-                                        "一部を取得できません（{}）",
-                                        errors.join("、")
-                                    ),
-                                    details: None,
-                                });
-                            }
                         }
                         let placed_ids = prefs
                             .filter(|prefs| {
@@ -1110,131 +1072,6 @@ mod tests {
         }
     }
 
-    #[rstest::rstest]
-    #[case(&[], &[])]
-    #[case(&["codex"], &["codex"])]
-    #[case(&["claude"], &["claude"])]
-    #[case(&["codex", "claude"], &["claude", "codex"])]
-    fn list_notices_follow_logged_in_providers(
-        #[case] logged_in: &[&str],
-        #[case] expected: &[&str],
-        #[values(false, true)] root_errors: bool,
-    ) {
-        let mut snapshot = snapshot_list(json!([]));
-        let errors = json!({"codex":{"message":"offline"},"claude":{"message":"offline"}});
-        Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).provider_errors =
-            Some(serde_json::from_value(errors).unwrap());
-        Arc::make_mut(&mut snapshot.lists.project_threads)
-            .insert("project".into(), snapshot.lists.threads.clone().unwrap());
-        if !root_errors {
-            Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).provider_errors = None;
-        }
-        Arc::make_mut(&mut snapshot.lists.expanded_projects).insert("project".into(), 5);
-        // Exercise login and logout with the same already-loaded list.
-        for providers in [logged_in, &[], logged_in] {
-            let previous = Arc::new(snapshot.clone());
-            let previous_list = previous.thread_list();
-            crate::state::operations::ListAccounts {}.apply(
-                &mut snapshot,
-                serde_json::from_value(json!({
-                    "accounts": providers.iter().map(|provider| json!({
-                        "provider":provider,"id":"account"
-                    })).collect::<Vec<_>>(),
-                    "selected":{}
-                }))
-                .unwrap(),
-            );
-            let list = snapshot.thread_list().unwrap();
-            let recent = snapshot.recent_thread_list().unwrap();
-            // Mobile clients cache this projection using the publication flag.
-            if previous_list.as_ref() != Some(&list) {
-                assert!(!snapshot.list_source().equivalent(&previous.list_source()));
-            }
-            if providers.is_empty() {
-                assert!(list.notice.is_none());
-                assert!(recent.notice.is_none());
-                assert!(list.projects[0].error.is_none());
-            } else {
-                assert_eq!(recent.notice, list.notice);
-                let project_error = list.projects[0].error.as_ref().unwrap();
-                if root_errors {
-                    assert!(list.notice.as_ref().unwrap().contains("部分結果"));
-                } else {
-                    assert!(list.notice.is_none());
-                }
-                for provider in ["codex", "claude"] {
-                    let visible = expected.contains(&provider);
-                    assert_eq!(
-                        list.notice
-                            .as_ref()
-                            .is_some_and(|notice| notice.contains(provider)),
-                        root_errors && visible
-                    );
-                    assert_eq!(project_error.message.contains(provider), visible);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn non_login_provider_errors_remain_visible_without_accounts() {
-        let mut snapshot = snapshot_list(json!([]));
-        crate::state::operations::ListAccounts {}.apply(
-            &mut snapshot,
-            serde_json::from_value(json!({"accounts":[],"selected":{}})).unwrap(),
-        );
-        let page = Arc::make_mut(snapshot.lists.threads.as_mut().unwrap());
-        page.provider_errors = Some(Default::default());
-        assert!(snapshot.thread_list().unwrap().notice.is_none());
-        Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).provider_errors =
-            Some(serde_json::from_value(json!({"deepseek":{"message":"offline"}})).unwrap());
-        assert!(
-            snapshot
-                .thread_list()
-                .unwrap()
-                .notice
-                .unwrap()
-                .contains("deepseek")
-        );
-    }
-
-    #[test]
-    fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
-        let mut snapshot = Snapshot::default();
-        let page = |data, errors| {
-            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,"providerErrors":errors})).unwrap()
-        };
-        ListSessions::new(Default::default()).apply(
-            &mut snapshot,
-            page(
-                serde_json::json!([{"id":{"provider":"codex","id":"native"},"name":"Cached"}]),
-                serde_json::json!({}),
-            ),
-        );
-        ListSessions::new(Default::default()).apply(
-            &mut snapshot,
-            page(
-                serde_json::json!([{"id":{"provider":"claude","id":"uuid"},"name":"Available"}]),
-                serde_json::json!({"codex":{"message":"offline"}}),
-            ),
-        );
-        let list = snapshot.thread_list().unwrap();
-        assert_eq!(list.threads.len(), 2);
-        assert!(list.notice.unwrap().contains("部分結果"));
-        assert!(
-            list.threads
-                .iter()
-                .find(|thread| thread.id
-                    == agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        id: "native".into()
-                    })
-                .unwrap()
-                .title
-                .contains("未確認")
-        );
-        assert!(snapshot.pane.error.is_none());
-    }
     #[rstest::rstest]
     fn list_preserves_worktree_status_alongside_activity_after_serialization_and_refresh(
         #[values(false, true)] active: bool,

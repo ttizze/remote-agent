@@ -17,6 +17,7 @@ codex-app-server = { path = "../codex-app-server" }
 host-daemon = { path = "../host-daemon" }
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
+rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { workspace = true, features = ["io-std", "process", "signal"] }
 tokio-util.workspace = true
 zeroize.workspace = true

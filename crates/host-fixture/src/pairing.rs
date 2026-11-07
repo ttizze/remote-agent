@@ -253,23 +253,28 @@ fn route(
 // Native fixture item IDs locate a backing session, while UI assertions must
 // use its persisted public address. Unmanaged fixture sessions own their ID.
 fn session_identity(root: &Path, native: &str) -> Result<serde_json::Value> {
-    let rows: Vec<serde_json::Value> = match fs::read(root.join("bex-conversations.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let native = json!({"provider":"codex", "id":native});
-    Ok(rows
-        .iter()
-        .find(|row| {
-            row["bindings"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|binding| binding["session"] == native)
-        })
-        .map(|row| row["id"].clone())
-        .unwrap_or(native))
+    use rusqlite::OptionalExtension;
+    let native = agent_protocol::session::SessionRef::new(
+        agent_protocol::session::ProviderKind::Codex,
+        native.into(),
+    )?;
+    let path = root.join("bex-transcripts.sqlite");
+    if !path.exists() {
+        return Ok(serde_json::to_value(native)?);
+    }
+    let database =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let owner: Option<String> = database
+        .query_row(
+            "SELECT thread_id FROM provider_threads WHERE provider_thread_id = ?1",
+            [serde_json::to_string(&native)?],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match owner {
+        Some(owner) => serde_json::from_str(&owner)?,
+        None => serde_json::to_value(native)?,
+    })
 }
 
 fn merge_worktree(root: &Path, path: &str) -> Result<()> {

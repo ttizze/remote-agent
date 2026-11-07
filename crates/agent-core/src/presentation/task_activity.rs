@@ -49,7 +49,6 @@ mod tests {
             has_more: false,
             has_more_projects: false,
             project_pages: Default::default(),
-            provider_errors: None,
         };
         state.lists.project_threads = Arc::new([("closed".into(), Arc::new(page))].into());
         let _ = state.accept_task_activity(TaskActivityState {

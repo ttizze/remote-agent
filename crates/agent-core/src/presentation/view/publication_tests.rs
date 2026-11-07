@@ -44,7 +44,6 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
                     has_more: false,
                     has_more_projects: false,
                     project_pages: Default::default(),
-                    provider_errors: None,
                 })),
                 ..Default::default()
             },
