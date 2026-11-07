@@ -53,6 +53,11 @@ async fn exercise(command: &[&str], expected: Value) {
                 }
                 Some("host/model/list") => json!({"data":[],"nextCursor":null}),
                 Some("host/account/list") => json!({"accounts":[], "selected":{}}),
+                Some("host/taskActivity/read") if mode == "activity" => {
+                    assert!(!handled);
+                    handled = true;
+                    expected.clone()
+                }
                 Some("host/taskActivity/read") => {
                     json!({"revision":0,"statuses":[],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
                 }
@@ -75,6 +80,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 }
                 Some("host/session/open") => {
                     reads += 1;
+                    handled |= mode == "history";
                     assert_eq!(
                         request["params"],
                         json!({"session":{"provider":"codex","id":"fixture-thread"},"limit":10,"includeActivity":false})
@@ -114,7 +120,10 @@ async fn exercise(command: &[&str], expected: Value) {
         }
         session.close();
         assert!(handled);
-        assert_eq!(reads, usize::from(mode == "send" || mode == "approve"));
+        assert_eq!(
+            reads,
+            usize::from(matches!(mode, "send" | "approve" | "history"))
+        );
         if mode == "list" {
             assert_eq!(lists, 1);
         }
@@ -142,17 +151,27 @@ async fn exercise(command: &[&str], expected: Value) {
     })
     .await
     .expect("bounded CLI session");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        if mode == "list" {
-            serde_json::to_value(
-                serde_json::from_value::<agent_protocol::models::ThreadList>(expected).unwrap(),
-            )
-            .unwrap()
-        } else {
-            expected
-        }
-    );
+    let output = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+    if mode == "history" {
+        assert_eq!(
+            output["id"],
+            json!({"provider":"codex","id":"fixture-thread"})
+        );
+        assert_eq!(output["cwd"], expected);
+        assert!(output["turns"].is_array());
+    } else {
+        assert_eq!(
+            output,
+            if mode == "list" {
+                serde_json::to_value(
+                    serde_json::from_value::<agent_protocol::models::ThreadList>(expected).unwrap(),
+                )
+                .unwrap()
+            } else {
+                expected
+            }
+        );
+    }
     endpoint.close().await;
 }
 #[tokio::test]
@@ -160,6 +179,18 @@ async fn cli_lists_over_iroh() {
     exercise(
         &["list", "--limit", "11", "--search", "CLI search"],
         json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
+    )
+    .await;
+}
+#[tokio::test]
+async fn cli_reads_activity_without_submitting_input() {
+    exercise(&["activity"], json!({"revision":7,"statuses":[[{"provider":"codex","id":"fixture-thread"},"running"]],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary { running:1,..Default::default() }.display()})).await;
+}
+#[tokio::test]
+async fn cli_reads_history_without_submitting_input() {
+    exercise(
+        &["history", r#"{"provider":"codex","id":"fixture-thread"}"#],
+        json!("/fixture"),
     )
     .await;
 }

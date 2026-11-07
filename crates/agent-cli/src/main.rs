@@ -28,6 +28,12 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Read the Host's current task states without starting an agent.
+    Activity,
+    /// Read the saved conversation without submitting input.
+    History {
+        thread_id: agent_protocol::session::SessionRef,
+    },
     List {
         #[arg(long, default_value_t = ListQuery::default().limit)]
         limit: u32,
@@ -78,14 +84,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 ..Default::default()
             })
         }
-        Command::Send { thread_id, .. } => {
+        Command::History { thread_id } | Command::Send { thread_id, .. } => {
             Arc::make_mut(&mut snapshot.pane).navigation = Arc::new(Navigation {
                 thread_id: Some(thread_id.clone()),
                 draft_key: thread_id.clone().into(),
                 ..Default::default()
             })
         }
-        Command::Approve { .. } => {}
+        Command::Activity | Command::Approve { .. } => {}
     }
     let store = {
         let secret = tokio::fs::read(args.identity_file)
@@ -111,19 +117,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
             .context("cannot connect to Host")?
     };
     let mut updates = store.subscribe();
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // Keep the state that satisfied the read even if the Host then disconnects.
+    let initial = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             {
                 let snapshot = updates.borrow_and_update();
                 let ready = match &args.command {
+                    Command::Activity => snapshot.lists.task_activity.is_some(),
                     Command::List { .. } => snapshot.lists.threads.is_some(),
-                    Command::Send { thread_id, .. } => {
+                    Command::History { thread_id } | Command::Send { thread_id, .. } => {
                         snapshot.sessions.conversations.contains_key(thread_id)
                     }
                     Command::Approve { .. } => true,
                 };
                 if ready {
-                    return Ok::<_, anyhow::Error>(());
+                    return Ok::<_, anyhow::Error>(snapshot.clone());
                 }
                 if let Some(error) = &snapshot.pane.error {
                     return Err(anyhow::Error::msg(error.clone()));
@@ -136,11 +144,17 @@ async fn run(args: Args) -> anyhow::Result<()> {
     .context("timed out waiting for initial Host state")?
     .context("cannot load initial Host state")?;
     match args.command {
-        Command::List { .. } => {
+        Command::Activity => {
+            println!("{}", serde_json::to_string(&initial.lists.task_activity)?);
+        }
+        Command::History { thread_id } => {
             println!(
                 "{}",
-                serde_json::to_string(&store.snapshot().lists.threads)?
+                serde_json::to_string(&initial.sessions.conversations[&thread_id])?
             );
+        }
+        Command::List { .. } => {
+            println!("{}", serde_json::to_string(&initial.lists.threads)?);
         }
         Command::Send {
             thread_id,
