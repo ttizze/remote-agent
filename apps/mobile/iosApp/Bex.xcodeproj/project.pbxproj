@@ -523,7 +523,7 @@
 				ARCHS = arm64;
 				AGENT_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 113;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(AGENT_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(AGENT_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -557,7 +557,7 @@
 				CODE_SIGN_STYLE = "$(AGENT_IOS_CODE_SIGN_STYLE)";
 				CODE_SIGN_IDENTITY = "$(AGENT_IOS_CODE_SIGN_IDENTITY)";
 				PROVISIONING_PROFILE_SPECIFIER = "$(AGENT_IOS_PROFILE_SPECIFIER)";
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 113;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(AGENT_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(AGENT_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -619,7 +619,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 113;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TaskActivity/Info.plist;
@@ -646,7 +646,7 @@
 				CODE_SIGN_STYLE = "$(AGENT_IOS_CODE_SIGN_STYLE)";
 				CODE_SIGN_IDENTITY = "$(AGENT_IOS_CODE_SIGN_IDENTITY)";
 				PROVISIONING_PROFILE_SPECIFIER = "$(AGENT_IOS_PROFILE_SPECIFIER)";
-				CURRENT_PROJECT_VERSION = 76;
+				CURRENT_PROJECT_VERSION = 113;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TaskActivity/Info.plist;
