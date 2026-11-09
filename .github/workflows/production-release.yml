@@ -9,26 +9,27 @@ concurrency:
 jobs:
   export:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/bex/iphone-170-HFX1Ff'
-    runs-on: macos-26
+    runs-on: [self-hosted, bex-dev117-hfx1ff]
     timeout-minutes: 60
     permissions:
       contents: write
     env:
-      AGENT_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      AGENT_XCODE_DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       AGENT_TESTFLIGHT_GROUP: BEX Dev External
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - name: Initialize pinned tooling before loading credentials
-        run: scripts/dev-env.sh true
+        run: |
+          scripts/dev-env.sh true
+          test "$(scripts/dev-env.sh xcodebuild -version | head -n 1)" = 'Xcode 26.6'
       - name: Download and verify the existing archive
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p target/apple-release
-          gh release download dev-117-export-HFX1Ff --repo "$GITHUB_REPOSITORY" \
+          scripts/dev-env.sh nix develop .#ios-test --no-update-lock-file --command gh release download dev-117-export-HFX1Ff --repo "$GITHUB_REPOSITORY" \
             --pattern BEX-Dev-117.xcarchive.zip --dir target/apple-release
           echo '9bc4068810c06ec8ec7b09e1570e81f5e46e9ec4ea42912221575c260b19666e  target/apple-release/BEX-Dev-117.xcarchive.zip' | shasum -a 256 -c -
           ditto -x -k target/apple-release/BEX-Dev-117.xcarchive.zip target/apple-release
@@ -82,6 +83,7 @@ jobs:
         run: |
           scripts/dev-env.sh bash <<'SH'
           set -euo pipefail
+          export TMPDIR="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)"
           for destination in export upload; do
             if [[ $destination == upload ]]; then touch target/apple-release/upload-start; fi
             xcodebuild -exportArchive -archivePath target/apple-release/Bex.xcarchive \
