@@ -1,69 +1,108 @@
-name: Production release
+name: Export existing BEX Dev 117
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17,47 * * * *'
 permissions:
   contents: read
 concurrency:
-  group: production-release
+  group: apple-release
   cancel-in-progress: false
 jobs:
-  source:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    outputs:
-      sha: ${{ steps.source.outputs.sha }}
-      tag: ${{ steps.source.outputs.source-tag }}
+  export:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/bex/iphone-170-HFX1Ff'
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      AGENT_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      AGENT_TESTFLIGHT_GROUP: BEX Dev External
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - id: source
-        name: Select the latest published Nightly source
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/dev-env.sh node scripts/release-candidate.ts resolve
-  build:
-    needs: source
-    permissions:
-      actions: write
-      contents: write
-    uses: ./.github/workflows/build-release.yml
-    with:
-      source-sha: ${{ needs.source.outputs.sha }}
-      source-tag: ${{ needs.source.outputs.tag }}
-      channel: stable
-    secrets: inherit
-  approvals:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - name: Initialize pinned tooling before loading credentials
         run: scripts/dev-env.sh true
-      - name: Load the App Store Connect API credential
-        env:
-          ASC_PRIVATE_KEY: ${{ secrets.BEX_ASC_PRIVATE_KEY }}
-        run: |
-          umask 077
-          key="$RUNNER_TEMP/bex-asc.p8"
-          printf '%s' "$ASC_PRIVATE_KEY" > "$key"
-          echo "AGENT_ASC_PRIVATE_KEY_FILE=$key" >> "$GITHUB_ENV"
-      - name: Finish approved stable releases
+      - name: Download and verify the existing archive
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p target/apple-release
+          gh release download dev-117-export-HFX1Ff --repo "$GITHUB_REPOSITORY" \
+            --pattern BEX-Dev-117.xcarchive.zip --dir target/apple-release
+          echo '9bc4068810c06ec8ec7b09e1570e81f5e46e9ec4ea42912221575c260b19666e  target/apple-release/BEX-Dev-117.xcarchive.zip' | shasum -a 256 -c -
+          ditto -x -k target/apple-release/BEX-Dev-117.xcarchive.zip target/apple-release
+          app='target/apple-release/Bex.xcarchive/Products/Applications/BEX Dev.app'
+          codesign --verify --deep --strict "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")" = 117
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = dev.remoteagent.mobile.ios.dev
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")" = 1.0
+          test "$(/usr/libexec/PlistBuddy -c 'Print :BEXBuildRevision' "$app/Info.plist")" = b022fca7a30ffae070c2cdd38dd6c6e43df4805c
+      - name: Prepare dedicated non-interactive signing keychain
+        env:
+          AGENT_SIGNING_KEYCHAIN_BASE64: ${{ secrets.BEX_SIGNING_KEYCHAIN_BASE64 }}
+          AGENT_SIGNING_KEYCHAIN_PASSWORD: ${{ secrets.BEX_SIGNING_KEYCHAIN_PASSWORD }}
+          AGENT_ASC_PRIVATE_KEY: ${{ secrets.BEX_ASC_PRIVATE_KEY }}
           AGENT_ASC_KEY_ID: ${{ secrets.BEX_ASC_KEY_ID }}
           AGENT_ASC_ISSUER_ID: ${{ secrets.BEX_ASC_ISSUER_ID }}
-        run: scripts/dev-env.sh node scripts/release-candidate.ts sync
-      - name: Remove the API credential
+        run: scripts/dev-env.sh node scripts/apple-signing.ts prepare
+      - name: Install App Store profiles for the existing Dev identifiers
+        env:
+          AGENT_ASC_KEY_ID: ${{ secrets.BEX_ASC_KEY_ID }}
+          AGENT_ASC_ISSUER_ID: ${{ secrets.BEX_ASC_ISSUER_ID }}
+        run: |
+          scripts/dev-env.sh node --input-type=module <<'JS'
+          import {execFileSync} from 'node:child_process';
+          import {X509Certificate} from 'node:crypto';
+          import {mkdirSync,writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          import {distributionProfiles} from './scripts/apple-provisioning.ts';
+          import {requestFromEnvironment,appForBundleId} from './scripts/apple-release.ts';
+          const pem=execFileSync('/usr/bin/security',['find-certificate','-a','-p',process.env.AGENT_CODE_SIGN_KEYCHAIN],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+          const certs=[...pem.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)].map(m=>new X509Certificate(m[0])).filter(c=>/^CN=Apple Distribution:/m.test(c.subject)&&/^OU=K65K9J8686$/m.test(c.subject));
+          if(certs.length!==1)throw new Error('One BEX distribution certificate is required.');
+          const request=requestFromEnvironment();
+          const app=await appForBundleId(request,'dev.remoteagent.mobile.ios.dev');
+          if(app.id!=='6820657007')throw new Error('Unexpected BEX Dev app.');
+          const result=await distributionProfiles(request,certs[0].serialNumber,'dev.remoteagent.mobile.ios.dev','IOS_APP_STORE');
+          const directory=join(process.env.HOME,'Library/Developer/Xcode/UserData/Provisioning Profiles');
+          mkdirSync(directory,{recursive:true,mode:0o700});
+          const profiles={};
+          for(const [id,p] of Object.entries(result.profiles)){writeFileSync(join(directory,p.uuid+'.mobileprovision'),Buffer.from(p.profileContent,'base64'),{mode:0o600});profiles[id]=p.name;}
+          for(const destination of ['export','upload'])writeFileSync('target/apple-release/options-'+destination+'.json',JSON.stringify({method:'app-store-connect',destination,teamID:'K65K9J8686',signingStyle:'manual',signingCertificate:'Apple Distribution',provisioningProfiles:profiles,manageAppVersionAndBuildNumber:false,uploadSymbols:true}));
+          writeFileSync('target/apple-release/plan.json',JSON.stringify({channel:'stable',bundleId:'dev.remoteagent.mobile.ios.dev',appId:app.id,version:'117',versionName:'1.0',tag:'dev-117',sha:'b022fca7a30ffae070c2cdd38dd6c6e43df4805c',locale:app.attributes.primaryLocale,notes:'OpenCode利用時に、設定済みの認証経路で使えるDSHモデルだけを表示するよう修正しました。'}));
+          JS
+          for destination in export upload; do
+            plutil -convert xml1 -o "target/apple-release/options-$destination.plist" "target/apple-release/options-$destination.json"
+          done
+      - name: Export the existing archive and upload without rebuilding
+        env:
+          AGENT_ASC_KEY_ID: ${{ secrets.BEX_ASC_KEY_ID }}
+          AGENT_ASC_ISSUER_ID: ${{ secrets.BEX_ASC_ISSUER_ID }}
+        run: |
+          scripts/dev-env.sh bash <<'SH'
+          set -euo pipefail
+          for destination in export upload; do
+            if [[ $destination == upload ]]; then touch target/apple-release/upload-start; fi
+            xcodebuild -exportArchive -archivePath target/apple-release/Bex.xcarchive \
+              -exportPath "target/apple-release/$destination" \
+              -exportOptionsPlist "target/apple-release/options-$destination.plist" \
+              -allowProvisioningUpdates -authenticationKeyPath "$AGENT_ASC_PRIVATE_KEY_FILE" \
+              -authenticationKeyID "$AGENT_ASC_KEY_ID" -authenticationKeyIssuerID "$AGENT_ASC_ISSUER_ID" \
+              "OTHER_CODE_SIGN_FLAGS=--keychain $AGENT_CODE_SIGN_KEYCHAIN" </dev/null
+          done
+          node scripts/apple-release.ts record-delivery "$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" target/apple-release/upload-start
+          node scripts/apple-release.ts verify
+          SH
+      - name: Save the verified delivery receipt
         if: always()
-        run: rm -f "$RUNNER_TEMP/bex-asc.p8"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: BEX-Dev-117-TestFlight-receipt
+          path: |
+            target/apple-release/plan.json
+            target/apple-release/apple-build.json
+          if-no-files-found: ignore
+      - name: Remove signing credentials
+        if: always()
+        run: scripts/dev-env.sh node scripts/apple-signing.ts cleanup

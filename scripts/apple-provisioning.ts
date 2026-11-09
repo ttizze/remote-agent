@@ -11,7 +11,7 @@ type Profile = AscResource<ProfileAttributes> & { relationships: { bundleId: { d
 // Reuse profiles for the installed certificate; certificate renewal gets new names.
 export async function distributionProfiles(request: AscRequest, serial: string, bundleId: string, profileType: string, now = Date.now()) {
   if (!/^[A-F0-9]+$/.test(serial)) throw new Error('Invalid distribution certificate serial.');
-  if (!['dev.remoteagent.mobile.ios', 'dev.remoteagent.mobile.ios.preview'].includes(bundleId)
+  if (!['dev.remoteagent.mobile.ios', 'dev.remoteagent.mobile.ios.preview', 'dev.remoteagent.mobile.ios.dev'].includes(bundleId)
     || profileType !== (bundleId.endsWith('.preview') ? 'IOS_APP_ADHOC' : 'IOS_APP_STORE')) throw new Error('Invalid BEX distribution profile configuration.');
   const certificates = await listAll<AscResource<{ serialNumber: string; certificateType: string; expirationDate: string }>>(request, '/v1/certificates?limit=200');
   const certificate = certificates.find(item => item.attributes.serialNumber.toUpperCase() === serial
