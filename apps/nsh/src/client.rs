@@ -786,6 +786,63 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_host_before_its_store_starts_does_not_report_startup_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, client, incoming) = Client::new(directory.path().into(), None).unwrap();
+        runtime.block_on(async {
+            assert!(
+                matches!(incoming.recv().await.unwrap(), Update::Hosts(hosts) if hosts.is_empty())
+            );
+        });
+        client.jobs.close();
+        runtime.block_on(client.jobs.wait());
+        client.jobs.reopen();
+
+        // Park every worker so restore can register a Host while its startup
+        // remains queued. Dropping a release sender also unblocks it on panic.
+        let workers = runtime.metrics().num_workers();
+        let (entered, parked) = std::sync::mpsc::channel();
+        let mut releases = Vec::new();
+        for _ in 0..workers {
+            let (release, wait) = std::sync::mpsc::channel();
+            releases.push(release);
+            let entered = entered.clone();
+            drop(runtime.spawn(async move {
+                let _ = entered.send(());
+                let _ = wait.recv();
+            }));
+        }
+        for _ in 0..workers {
+            parked.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let remote = saved_host(directory.path());
+        runtime.block_on(async {
+            client.restore().await.unwrap();
+            assert!(client.snapshot(&remote.id).is_some());
+            client.remove_host(remote.id.clone()).await.unwrap();
+        });
+        for release in releases {
+            let _ = release.send(());
+        }
+        client.jobs.close();
+        runtime.block_on(async {
+            client.jobs.wait().await;
+            let mut hosts = None;
+            while let Ok(update) = incoming.try_recv() {
+                match update {
+                    Update::Hosts(next) => hosts = Some(next),
+                    Update::Error(reason) => panic!("retired startup reported an error: {reason}"),
+                    Update::Presentation { .. } => panic!("retired startup published its UI"),
+                    _ => {}
+                }
+            }
+            assert!(hosts.unwrap().is_empty());
+            assert!(client.snapshot(&remote.id).is_none());
+            client.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
     fn a_removed_host_leaves_the_saved_list_and_its_files_while_this_pc_stays() {
         let directory = tempfile::tempdir().unwrap();
         let remote = saved_host(directory.path());
