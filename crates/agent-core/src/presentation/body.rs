@@ -46,6 +46,7 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
         WireBody::Reasoning { .. } => Some(language.text("詳細を表示").into()),
         WireBody::ImageGeneration { .. } => (item.status == ItemStatus::Failed)
             .then(|| language.text("画像を生成できませんでした").into()),
+        WireBody::ImageView { .. } => None,
         _ => Some(
             match item.status {
                 ItemStatus::Unknown => language.text("詳細を表示"),
@@ -69,6 +70,10 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
                     .filter(|data| !data.is_empty())
                     .map(|data| crate::presentation::media::encoded_image_source(data))
             })
+            .into_iter()
+            .collect(),
+        WireBody::ImageView { path } => (!path.is_empty())
+            .then(|| path.clone())
             .into_iter()
             .collect(),
         WireBody::UserMessage { content, .. } => content

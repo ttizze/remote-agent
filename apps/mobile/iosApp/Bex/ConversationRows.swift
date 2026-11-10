@@ -105,7 +105,7 @@ struct ThreadMessageRow: View, Equatable {
         }
         let thumbnails = ForEach(sources.indices, id: \.self) { index in
             ConversationImage(source: SessionImage(reference: sources[index]),
-                              label: isUser ? "添付画像" : "生成画像",
+                              label: isUser ? "添付画像" : "画像",
                               identifier: "message.image.\(item.data.id).\(index)", media: media)
                 .frame(width: isUser ? 80 : nil, height: isUser ? 80 : nil)
                 .clipped()

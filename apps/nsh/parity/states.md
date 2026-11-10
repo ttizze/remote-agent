@@ -76,7 +76,8 @@ reason). Reasons recur:
 | `turn-fold` (Worked for …) folded and expanded | `TurnFoldTimelineRow` | covered: `turn-finished`, `turn-expanded` |
 | `work-toggle` group (Ran N commands) folded and expanded | `WorkGroupToggleTimelineRow`, `WorkGroupHeader` | covered: `turn-expanded`, `turn-live` |
 | `work` rows: command | `SimpleWorkEntryRow`, `WorkLog.tsx`, `ToolActivityIcon` | covered: `turn-expanded`, `turn-failed` |
-| `work` rows: file change, MCP, dynamic tool, agent tool, web search, image view, plan, review mode, compaction | `SimpleWorkEntryRow`, `WorkLog.tsx`, `ToolActivityIcon` | not yet: `turn-items` is mapped, but T3 fails the fixture's `[items]` turn ("Provider turn failed."): the fixture sends item kinds T3's Codex adapter rejects (`sleep`, `subAgentActivity`) |
+| `work` rows: file change, MCP, dynamic tool, agent tool, web search, plan, review mode, compaction | `SimpleWorkEntryRow`, `WorkLog.tsx`, `ToolActivityIcon` | not yet: `turn-items` is mapped, but T3 fails the fixture's `[items]` turn ("Provider turn failed."): the fixture sends item kinds T3's Codex adapter rejects (`sleep`, `subAgentActivity`) |
+| viewed screenshots | T3's Codex adapter omits `imageView`; BEX displays it as a conversation image | intentional difference; core tests cover live and reopened turns |
 | `work` row expanded output (shell command block, fetched output, file diff) | `ShellCommandBlock.tsx`, `FetchedToolOutput`, `FileDiff` | not yet: not mapped |
 | `event` rows: provider error, run interrupted, retrying | `V2EventTimelineRow`, `TimelineSystemDivider.tsx` | covered: `turn-failed`, `turn-interrupted`, `turn-retry` |
 | `event` rows: handoff, fork, compaction, todo list | `V2EventTimelineRow` | not yet: fixture |

@@ -140,6 +140,60 @@ async fn saturated_dictation_preparations_leave_complete_recording_transcription
 }
 
 #[tokio::test]
+async fn opening_a_deferred_screenshot_loads_its_image_without_expanding_work() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let id = SessionRef::new(ProviderKind::Codex, "screenshots".into()).unwrap();
+    let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())));
+    let request = read_after_status(&mut reader, &writer).await;
+    assert_eq!(request["method"], "host/session/open");
+    writer.reply(&request, json!({"result":{
+        "session":id,"subscriptionId":uuid::Uuid::new_v4(),
+        "response":{"thread":{"id":id,"turns":[{"id":"turn","status":"completed","items":[{
+            "id":"screenshot","status":"completed","body":{"deferred":{"summary":{"imageView":{"path":"file:///tmp/blog.png"}}}}
+        }]}]}}
+    }})).await.unwrap();
+    let request = read_after_status(&mut reader, &writer).await;
+    assert_eq!(request["method"], "host/session/item/read");
+    assert_eq!(request["params"]["itemId"], "screenshot");
+    writer.reply(&request, json!({"result":{"item":{
+        "id":"screenshot","status":"completed","body":{"inline":{"body":{"imageView":{"path":"file:///tmp/blog.png"}}}}
+    }}})).await.unwrap();
+    opening.await.unwrap();
+    let mut updates = store.subscribe();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let loaded = {
+                let snapshot = updates.borrow_and_update();
+                !snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]
+                    .items
+                    .as_ref()
+                    .unwrap()[0]
+                    .is_deferred()
+            };
+            if loaded {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = store.snapshot();
+    let projected = agent_core::presentation::conversation::project_conversation(
+        agent_core::localization::UiLanguage::Japanese,
+        &snapshot.panes.primary().navigation.draft_key,
+        &snapshot.sessions.pending_submissions,
+        snapshot.sessions.conversations[&id].clone(),
+        &None,
+    );
+    assert!(projected.turns[0].rows.iter().any(|row| matches!(&row.content,
+        agent_core::presentation::conversation::ConversationRowContent::Response { item, .. }
+            if item.data.image_sources == ["file:///tmp/blog.png"]
+    )));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navigation() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(

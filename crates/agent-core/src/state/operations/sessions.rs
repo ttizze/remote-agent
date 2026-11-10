@@ -98,6 +98,7 @@ pub(crate) fn item_details(
                             crate::models::ItemBody::UserMessage { .. }
                                 | crate::models::ItemBody::AssistantText { .. }
                                 | crate::models::ItemBody::ImageGeneration { .. }
+                                | crate::models::ItemBody::ImageView { .. }
                         )
                 })
                 .map(|item| {

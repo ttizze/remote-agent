@@ -207,12 +207,13 @@ impl HostRpcService {
     }
 }
 
-/// What an import copies from native history: messages and generated images.
+/// What an import copies from native history: messages and images.
 pub(super) fn content(body: &agent_protocol::items::ItemBody) -> bool {
     matches!(
         body,
         agent_protocol::items::ItemBody::UserMessage { .. }
             | agent_protocol::items::ItemBody::AssistantText { .. }
             | agent_protocol::items::ItemBody::ImageGeneration { .. }
+            | agent_protocol::items::ItemBody::ImageView { .. }
     )
 }

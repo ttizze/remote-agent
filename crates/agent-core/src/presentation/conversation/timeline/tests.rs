@@ -85,7 +85,11 @@ fn names(rows: &[TurnRow]) -> Vec<String> {
                     format!("user {}", item.data.body.clone().unwrap_or_default())
                 }
                 ConversationRowContent::Response { item, .. } => {
-                    format!("message {}", item.data.body.clone().unwrap_or_default())
+                    if item.data.image_sources.is_empty() {
+                        format!("message {}", item.data.body.clone().unwrap_or_default())
+                    } else {
+                        format!("images {}", item.data.image_sources.join(", "))
+                    }
                 }
                 ConversationRowContent::Error { error } => format!("error {}", error.message),
                 _ => "row".into(),
@@ -361,7 +365,7 @@ fn groups_name_their_tools_as_t3_code_does() {
 }
 
 #[test]
-fn plans_subagents_and_compaction_stand_apart_and_neutral_work_hides() {
+fn plans_subagents_compaction_and_viewed_images_stand_apart_and_neutral_work_hides() {
     let body = |id: &str, body: Value| item(id, "completed", body);
     let mcp = json!({"toolCall":{"kind":"mcp","tool":"lookup","server":"fixture","namespace":null,
         "arguments":{},"result":null,"error":null,"content":[],"success":true,"durationMs":null}});
@@ -400,6 +404,7 @@ fn plans_subagents_and_compaction_stand_apart_and_neutral_work_hides() {
             "subagent Subagent: Reviewed.",
             "work Web search",
             "divider Context compacted",
+            "images /tmp/a.png",
             "interrupted"
         ]
     );

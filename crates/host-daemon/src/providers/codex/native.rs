@@ -632,7 +632,7 @@ pub(crate) fn parse_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
     Ok(turn)
 }
 
-/// Codex's summary view omits generated images. Read full bounded pages, then
+/// Codex's summary view omits images. Read full bounded pages, then
 /// keep the conversation content here while leaving work details on demand.
 pub(super) fn summary_items(items: Vec<Arc<Item>>) -> Vec<Arc<Item>> {
     // A notification starts a turn as its user message does.
@@ -657,7 +657,10 @@ pub(super) fn summary_items(items: Vec<Arc<Item>>) -> Vec<Arc<Item>> {
         .filter(|(index, item)| {
             Some(*index) == user
                 || Some(*index) == answer
-                || matches!(item.body(), ItemBody::ImageGeneration { .. })
+                || matches!(
+                    item.body(),
+                    ItemBody::ImageGeneration { .. } | ItemBody::ImageView { .. }
+                )
         })
         .map(|(_, item)| item)
         .collect()
@@ -1079,6 +1082,7 @@ mod tests {
                 {"id":"old-answer","type":"agentMessage","text":"Earlier answer"},
                 {"id":"inline","type":"imageGeneration","status":"completed","result":"base64"},
                 {"id":"failed","type":"imageGeneration","status":"failed"},
+                {"id":"screenshot","type":"imageView","path":"file:///tmp/blog.png"},
                 {"id":"answer","type":"agentMessage","phase":phase,"text":"Here are the images"},
                 {"id":"tail-commentary","type":"agentMessage","phase":"commentary","text":"Activity"}
             ]})).unwrap();
@@ -1088,7 +1092,15 @@ mod tests {
                     .iter()
                     .map(|item| item.id.as_str())
                     .collect::<Vec<_>>(),
-                ["user", "pending", "saved", "inline", "failed", "answer"]
+                [
+                    "user",
+                    "pending",
+                    "saved",
+                    "inline",
+                    "failed",
+                    "screenshot",
+                    "answer"
+                ]
             );
             assert_eq!(summary[1].status, ItemStatus::Running);
             assert!(
@@ -1098,6 +1110,9 @@ mod tests {
                 matches!(summary[3].body(), ItemBody::ImageGeneration {saved_path:None, data:Some(data), ..} if data == "base64")
             );
             assert_eq!(summary[4].status, ItemStatus::Failed);
+            assert!(
+                matches!(summary[5].body(), ItemBody::ImageView { path } if path == "file:///tmp/blog.png")
+            );
         }
         assert!(summary_items(vec![]).is_empty());
         let image = Arc::new(parse_item(json!({"id":"image","type":"imageGeneration"})).unwrap());

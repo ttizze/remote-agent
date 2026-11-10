@@ -1398,17 +1398,18 @@ fn render_turn(
         push(ProviderHandoff { text });
     }
     let segments: Vec<_> = project_items(language, &source, order.len(), metadata).collect();
-    // As T3 Code's, the turn's last message is its terminal one, which a
-    // settled turn's actions belong to.
+    // The last assistant message owns a settled turn's actions. Image rows
+    // do not take copy or fork actions away from its text.
     let responses = |segment: &super::Segment| -> Vec<usize> {
         (segment.start..segment.end)
             .filter(|&index| segment.role(index, metadata(index)) == Role::Response)
             .collect()
     };
-    let terminal = segments
-        .iter()
-        .rev()
-        .find_map(|segment| responses(segment).last().copied());
+    let terminal = segments.iter().rev().find_map(|segment| {
+        responses(segment)
+            .into_iter()
+            .rfind(|&index| metadata(index).kind == super::GroupKind::Assistant)
+    });
     for segment in &segments {
         // A later segment of a turn starts with a message sent while it worked.
         steering.set(segment.start > 0);
@@ -1505,7 +1506,7 @@ fn render_turn(
         occurrence: turn_occurrence,
         pending,
         requests,
-        rows: images::without_repeated_generated_images(rows),
+        rows: images::without_repeated_images(rows),
     })
 }
 

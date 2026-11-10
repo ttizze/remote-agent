@@ -285,8 +285,7 @@ enum Place {
     Work,
     /// Apart from the work, which it ends: a plan, a subagent, a divider.
     Alone(Vec<TurnRow>),
-    /// Not at all: work without an outcome to show (an image looked at, a
-    /// sleep, review mode entered or left).
+    /// Not at all: a sleep, review mode entered or left.
     Hidden,
 }
 
@@ -320,7 +319,7 @@ fn place(language: UiLanguage, item: &RenderedItem) -> Place {
                 })
                 .into(),
         }]),
-        ItemBody::ImageView { .. } | ItemBody::Sleep {} | ItemBody::Review { .. } => Place::Hidden,
+        ItemBody::Sleep {} | ItemBody::Review { .. } => Place::Hidden,
         _ => Place::Work,
     }
 }

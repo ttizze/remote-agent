@@ -86,7 +86,10 @@ impl<'a> From<&'a Item> for ItemMetadata<'a> {
                 ItemBody::AssistantText { .. } => GroupKind::Assistant,
                 ItemBody::CommandExecution { .. } => GroupKind::Command,
                 ItemBody::FileChange { .. } => GroupKind::FileChange,
-                ItemBody::ImageGeneration { .. } => GroupKind::Image,
+                ItemBody::ImageView { path } if path.is_empty() || item.is_deferred() => {
+                    GroupKind::Hidden
+                }
+                ItemBody::ImageGeneration { .. } | ItemBody::ImageView { .. } => GroupKind::Image,
                 ItemBody::Reasoning { content, summary }
                     if body::reasoning_parts(content, summary).is_some() =>
                 {
@@ -493,6 +496,7 @@ pub fn item_presentation(
             true,
         ),
         ItemBody::ImageGeneration { .. } => ("imageGeneration", None, false),
+        ItemBody::ImageView { .. } => ("imageView", None, false),
         ItemBody::Notification { reports } => (
             "notification",
             Some(background_work::notification_text(
@@ -577,17 +581,6 @@ fn tool_title(language: UiLanguage, body: &ItemBody) -> String {
                     language,
                     "Webを検索: {0}".into(),
                     vec![compact_title(query)],
-                )
-            }
-        }
-        ItemBody::ImageView { path } => {
-            if path.is_empty() {
-                language.text("画像を確認しました").into()
-            } else {
-                localized_ui_format(
-                    language,
-                    "画像を確認: {0}".into(),
-                    vec![compact_title(path)],
                 )
             }
         }

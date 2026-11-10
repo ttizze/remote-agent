@@ -10269,22 +10269,6 @@
         }
       }
     },
-    "生成画像": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "生成画像"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Generated image"
-          }
-        }
-      }
-    },
     "生成画像 {0}": {
       "localizations": {
         "ja": {
@@ -10377,38 +10361,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Generating image"
-          }
-        }
-      }
-    },
-    "画像を確認: {0}": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を確認: {0}"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "View image: {0}"
-          }
-        }
-      }
-    },
-    "画像を確認しました": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を確認しました"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Viewed image"
           }
         }
       }

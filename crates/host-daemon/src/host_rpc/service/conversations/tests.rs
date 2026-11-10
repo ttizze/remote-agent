@@ -3577,7 +3577,7 @@ async fn recorded_items_with_reused_turn_ids_do_not_need_the_native_provider() {
 }
 
 #[tokio::test]
-async fn imports_copy_message_text_while_host_turns_keep_activity() {
+async fn imports_copy_messages_and_viewed_images_while_host_turns_keep_activity() {
     let directory = tempfile::tempdir().unwrap();
     let directory = dunce::canonicalize(directory.path()).unwrap();
     let codex = NativeAgent::new(ProviderKind::Codex, directory.join("codex"));
@@ -3603,6 +3603,9 @@ async fn imports_copy_message_text_while_host_turns_keep_activity() {
                 ItemBody::Reasoning {
                     content: vec![format!("{id} activity")],
                     summary: vec![],
+                },
+                ItemBody::ImageView {
+                    path: format!("file:///tmp/{id}.png"),
                 },
                 ItemBody::AssistantText {
                     text: format!("{id} answer"),
@@ -3656,8 +3659,8 @@ async fn imports_copy_message_text_while_host_turns_keep_activity() {
             .map(|item| item.id.to_string())
             .collect::<Vec<_>>()
     };
-    assert_eq!(items("past"), ["past-0", "past-2"]);
-    assert_eq!(items("live"), ["live-0", "live-1", "live-2"]);
+    assert_eq!(items("past"), ["past-0", "past-2", "past-3"]);
+    assert_eq!(items("live"), ["live-0", "live-1", "live-2", "live-3"]);
 }
 
 #[tokio::test]
