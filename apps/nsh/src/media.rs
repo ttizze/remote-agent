@@ -607,6 +607,100 @@ pub(crate) enum ImageSize {
     /// As T3 Code's answer images: a point per pixel, at most 30rem tall and
     /// as wide as there is room, its corners rounded.
     Natural,
+    /// As T3 Code's lone sent image: 12rem tall and as wide as its picture,
+    /// from 6rem, cropped where there is less room.
+    Sent,
+    /// Filling its cell of a sent message's collage, cropped.
+    Cell,
+}
+
+/// T3 Code's ring around sent media and its collage's hairlines: white at 12%.
+const MEDIA_EDGE: u32 = 0xffffff1f;
+
+/// The images a sent message carries, above its bubble as T3 Code's: one
+/// keeps its own shape, several share one rounded shape split by hairlines.
+pub(crate) fn sent_images(
+    connection: Connection,
+    preview: Preview,
+    sources: impl Fn() -> Vec<String> + 'static,
+    above_bubble: impl Fn() -> bool + 'static,
+    max_width: impl Fn() -> f32 + 'static,
+) -> impl Element {
+    let sources = computed(sources);
+    let count = move || sources.with(Vec::len);
+    let collage = move || count() > 1;
+    view()
+        .max_w(move || px(max_width()))
+        .rounded(px(16.0))
+        // The corner by the bubble tightens, as the bubble's does.
+        .style_when(above_bubble, |s| s.mb(px(4.0)).rounded_br(px(6.0)))
+        .overflow_hidden()
+        // An inset shadow sits below native image children. The outline
+        // draws above them, inside the frame, without changing its size.
+        .outline(px(1.0))
+        .outline_offset(px(-1.0))
+        .outline_color(nsh_core::element::rgba(MEDIA_EDGE))
+        .style_when(collage, move |s| {
+            // T3 Code's collage: two side by side 12rem tall, three with the
+            // first beside the other two, more in pairs 6rem tall with an odd
+            // last one across.
+            s.w(px(320.0))
+                .grid()
+                .gap(px(1.0))
+                .bg(nsh_core::element::rgba(MEDIA_EDGE))
+                .grid_template_columns(move || {
+                    SharedString::from(if count() == 3 { "3fr 2fr" } else { "1fr 1fr" })
+                })
+                .grid_template_rows(move || {
+                    SharedString::from(match count() {
+                        2 => "192px".to_owned(),
+                        3 => "95.5px 95.5px".to_owned(),
+                        count => vec!["96px"; count.div_ceil(2)].join(" "),
+                    })
+                })
+        })
+        .child(each(
+            move || {
+                sources
+                    .get()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, source)| (index, source, collage()))
+                    .collect::<Vec<_>>()
+            },
+            // A single image becoming a collage must recreate its image frame.
+            |item: &(usize, String, bool)| item.clone(),
+            move |item, _| {
+                let index = item.get_untracked().0;
+                let source = move || item.get().1;
+                view()
+                    .overflow_hidden()
+                    .style_when(collage, move |s| {
+                        s.bg(crate::ui::colors::BACKGROUND)
+                            .row_span(move || -> u16 {
+                                if count() == 3 && index == 0 { 2 } else { 1 }
+                            })
+                            .col_span(move || -> u16 {
+                                let count = count();
+                                if count > 3 && count % 2 == 1 && index + 1 == count {
+                                    2
+                                } else {
+                                    1
+                                }
+                            })
+                    })
+                    .child(image_view(
+                        connection,
+                        preview,
+                        source,
+                        if item.get_untracked().2 {
+                            ImageSize::Cell
+                        } else {
+                            ImageSize::Sent
+                        },
+                    ))
+            },
+        ))
 }
 
 /// A conversation's or the composer's image, which opens in the viewer and,
@@ -657,6 +751,7 @@ fn loaded_image(
     // Its pixels once it loaded, and the points it shows in.
     let pixels = signal(None::<(f32, f32)>);
     let natural = size == ImageSize::Natural;
+    let cell = size == ImageSize::Cell;
     let shown = move || match size {
         ImageSize::Box(width, height) => (width, height),
         // `max-height: 30rem`; until it loads, T3 Code's 16:9 slot.
@@ -664,6 +759,15 @@ fn loaded_image(
             let scale = (480.0 / height).min(1.0);
             (width * scale, height * scale)
         }),
+        // `h-48 w-auto min-w-24`; until it loads, its `w-64` placeholder.
+        ImageSize::Sent => pixels.get().map_or((256.0, 192.0), |(width, height)| {
+            ((width * 192.0 / height.max(1.0)).max(96.0), 192.0)
+        }),
+        ImageSize::Cell => (0.0, 0.0),
+    };
+    let fit = match size {
+        ImageSize::Box(..) | ImageSize::Natural => ResizeMode::Contain,
+        ImageSize::Sent | ImageSize::Cell => ResizeMode::Cover,
     };
     let loaded = resource(
         move || Some(key.get()),
@@ -677,9 +781,14 @@ fn loaded_image(
     let press = Rc::new(press);
     // TextView's image wrapper has intrinsic width; a percentage alone collapses it.
     // A failed image keeps only its message's height, not the image's.
-    view()
-        .w(move || px(shown().0))
-        .style_when(move || !failed(), move |s| s.min_h(move || px(shown().1)))
+    let frame = if cell {
+        view().w_full().h_full()
+    } else {
+        view()
+            .w(move || px(shown().0))
+            .style_when(move || !failed(), move |s| s.min_h(move || px(shown().1)))
+    };
+    frame
         .max_w(relative(1.0))
         .gap_2()
         .child(when(
@@ -693,8 +802,9 @@ fn loaded_image(
                     })
                 })
                 .w_full()
-                .h(move || px(shown().1))
-                .object_fit(ResizeMode::Contain)
+                .style_when(move || !cell, move |s| s.h(move || px(shown().1)))
+                .style_when(move || cell, |s| s.h_full())
+                .object_fit(fit)
                 .style_when(move || natural, |s| s.rounded(px(10.0)).overflow_hidden())
                 .on_load(move |loaded: &Size<DevicePixels>| {
                     pixels.set(Some((loaded.width.0 as f32, loaded.height.0 as f32)))

@@ -853,6 +853,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             move || row.with(|r| r.as_ref().is_some_and(|r| r.kind == Kind::User));
                         let kind =
                             move || row.with(|r| r.as_ref().map_or(Kind::Response, |r| r.kind));
+                        let images = computed(move || row.with(|row| row.as_ref().map(|row| row.images.clone()).unwrap_or_default()));
+                        let sent_media = move || user() && images.with(|images| !images.is_empty());
                         let collapsible = computed(move || {
                             row.with(|r| {
                                 r.as_ref().is_some_and(|r| {
@@ -910,6 +912,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                     matches!(row.shape, Shape::Message | Shape::Commentary)
                                         && row.status.is_none()
                                         && row.notification.is_none()
+                                        && (row.kind != Kind::User
+                                            || agent_core::presentation::conversation::shows_user_message_bubble(&row.body, !row.images.is_empty()))
                                 })
                             })
                         };
@@ -1102,6 +1106,16 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                         move || error.with(Option::is_some),
                                         move || error_row(error, time),
                                     ))
+                                    .child(when(
+                                        sent_media,
+                                        move || crate::media::sent_images(
+                                            connection,
+                                            surroundings.preview,
+                                            move || images.get(),
+                                            message,
+                                            move || column_width.try_get().unwrap_or_default() * 0.8,
+                                        ),
+                                    ))
                                     .child(when(message, move || {
                                         // As T3 Code's: the user's message in its
                                         // bubble, other text in the lane, inset.
@@ -1111,6 +1125,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 s.max_w(relative(0.8))
                                                     .p(px(12.0))
                                                     .rounded(px(18.0))
+                                                    .style_when(
+                                                        sent_media,
+                                                        |s| s.rounded_tr(px(6.0)),
+                                                    )
                                                     .bg(look::BUBBLE)
                                             })
                                             .style_when(
@@ -1171,11 +1189,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                     }))
                                     .child(each(
                                         move || {
-                                            row.with(|row| {
-                                                row.as_ref()
-                                                    .map(|row| row.images.clone())
-                                                    .unwrap_or_default()
-                                            })
+                                            if user() { Vec::new() } else { images.get() }
                                         },
                                         |source: &String| source.clone(),
                                         move |source, _| {
@@ -1183,11 +1197,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 connection,
                                                 surroundings.preview,
                                                 move || source.get(),
-                                                if untracked(user) {
-                                                    crate::media::ImageSize::Box(320.0, 240.0)
-                                                } else {
-                                                    crate::media::ImageSize::Natural
-                                                },
+                                                crate::media::ImageSize::Natural,
                                             )
                                         },
                                     ))

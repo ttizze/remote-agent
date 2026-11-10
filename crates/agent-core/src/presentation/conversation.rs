@@ -187,6 +187,11 @@ pub fn should_collapse_user_message(text: &str) -> bool {
         && (visible.encode_utf16().count() > 600 || visible.split('\n').count() > 8)
 }
 
+/// Sent images stand on their own when the message has no words or file labels.
+pub fn shows_user_message_bubble(text: &str, has_images: bool) -> bool {
+    !has_images || !text.trim().is_empty()
+}
+
 mod search;
 pub use search::{TextMatch, find_matches};
 
@@ -1821,6 +1826,18 @@ pub struct Request {
 #[cfg(test)]
 mod message_text_tests {
     use super::should_collapse_user_message as collapses;
+
+    #[test]
+    fn images_without_words_have_no_bubble_and_captions_and_file_labels_keep_theirs() {
+        for text in ["", " \n\t", "\u{3000}"] {
+            assert!(!super::shows_user_message_bubble(text, true));
+            assert!(super::shows_user_message_bubble(text, false));
+        }
+        for text in ["a", " 日本語\n", "添付: hello.txt (/hello.txt)"] {
+            assert!(super::shows_user_message_bubble(text, true));
+            assert!(super::shows_user_message_bubble(text, false));
+        }
+    }
 
     #[test]
     fn a_message_folds_past_eight_lines_or_600_characters() {
