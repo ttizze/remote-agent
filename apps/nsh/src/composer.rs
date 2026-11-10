@@ -438,7 +438,18 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             })
             .auto_correct(false)
             .auto_capitalize(AutoCapitalize::None)
-            .h(move || if collapsed() { px(36.0) } else { px(64.0) })
+            // Let the multiline input measure wrapped text; only constrain
+            // its range so long drafts scroll after growing with their text.
+            .min_h(move || {
+                px(if is_desktop() {
+                    40.0
+                } else if collapsed() {
+                    36.0
+                } else {
+                    64.0
+                })
+            })
+            .max_h(px(240.0))
     };
     let dictation_button = move || {
         #[cfg(dictation)]
@@ -680,13 +691,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             .bg(colors::SURFACE)
             .border_1()
             .border_color(colors::border())
-            .child(
-                view()
-                    .px_2()
-                    .pt(px(10.0))
-                    .pb_1()
-                    .child(field().w_full().h(px(40.0))),
-            )
+            .child(view().px_2().pt(px(10.0)).pb_1().child(field().w_full()))
             .child(
                 controls_row
                     .child(view().flex_1())

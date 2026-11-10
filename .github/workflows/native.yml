@@ -488,11 +488,11 @@ jobs:
         env:
           AGENT_CODE_SIGN_IDENTITY: '-'
         run: nix develop .#native --command just build-desktop-macos dev
-      - name: Verify native Find and thread details
+      - name: Verify native Find, thread details and composer growth
         run: |
           nix develop .#native --command cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
-          nix develop .#native --command cargo xtask nsh-acceptance find-in-thread thread-details
-      - name: Retain Find and thread details acceptance evidence
+          nix develop .#native --command cargo xtask nsh-acceptance find-in-thread thread-details composer
+      - name: Retain Find, thread details and composer acceptance evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -507,6 +507,10 @@ jobs:
             target/nsh-acceptance/run-*/thread-details/*.json
             target/nsh-acceptance/run-*/thread-details/*.txt
             target/nsh-acceptance/run-*/thread-details/*.png
+            target/nsh-acceptance/run-*/composer/*.log
+            target/nsh-acceptance/run-*/composer/*.json
+            target/nsh-acceptance/run-*/composer/*.txt
+            target/nsh-acceptance/run-*/composer/*.png
           retention-days: 7
       - name: Build and package the native NSH iPhone app
         run: nix develop .#ios-build --command just nsh-ios-simulator

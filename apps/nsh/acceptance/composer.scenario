@@ -17,3 +17,6 @@ expect_height "*分かります。" above 80
 key return
 expect "シミュレータで完了しました。" 30000
 expect "fixture-review" after 右パネルを切り替え
+# Sending clears the draft and restores the field's least height.
+type "AI に依頼する" "次の短い下書き"
+expect_height "次の短い下書き" below 65
