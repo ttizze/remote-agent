@@ -667,6 +667,7 @@ mod tests {
     async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
         use super::*;
         use crate::host_rpc::conversations::{Binding, Conversation};
+        use crate::host_rpc::service::conversations::tests::call;
         use agent_protocol::session::SessionRef;
         let root = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(root.path()).unwrap();
@@ -693,6 +694,7 @@ mod tests {
             ].map(|row| row.to_string() + "\n").concat();
             std::fs::write(transcripts.join(format!("{id}.jsonl")), rows).unwrap();
         }
+        let mut side_chat = None;
         for restarting in [false, true] {
             let agent = crate::providers::Claude::load(
                 root.path().join("missing-cli"),
@@ -723,6 +725,27 @@ mod tests {
                         startup: None,
                     })
                     .unwrap();
+                let client = service.open_session();
+                let created: agent_protocol::session::OpenedSession = call(
+                    &service,
+                    client.id(),
+                    Call::CreateSession(op::CreateSession {
+                        provider: ProviderKind::Claude,
+                        cwd: Some(cwd.to_string_lossy().into_owned()),
+                        model: None,
+                        initial_input: None,
+                    }),
+                )
+                .await
+                .unwrap();
+                let id = created.session;
+                // A completed SDK turn must stay visible even without a loaded worker.
+                let rows = [
+                    serde_json::json!({"type":"user","uuid":"question","sessionId":id.id,"cwd":cwd,"entrypoint":"sdk-ts","message":{"content":"NSH side chat"}}),
+                    serde_json::json!({"type":"assistant","uuid":"answer","parentUuid":"question","sessionId":id.id,"entrypoint":"sdk-ts","message":{"id":"reply","content":[{"type":"text","text":"Done"}]}}),
+                ].map(|row| row.to_string() + "\n").concat();
+                std::fs::write(transcripts.join(format!("{}.jsonl", id.id)), rows).unwrap();
+                side_chat = Some(id);
             }
             let snapshot = service.project_snapshot().await.unwrap();
             for search in ["", "NSH", "NSH message text sizing"] {
@@ -745,7 +768,9 @@ mod tests {
                 let expected = if search == "NSH message text sizing" {
                     std::collections::HashSet::new()
                 } else {
-                    [public.clone(), session(5)].into_iter().collect()
+                    [public.clone(), session(5), side_chat.clone().unwrap()]
+                        .into_iter()
+                        .collect()
                 };
                 assert_eq!(ids, expected, "search={search}, restarting={restarting}");
             }

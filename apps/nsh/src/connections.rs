@@ -74,9 +74,9 @@ pub(crate) fn screen(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                                 .items_center()
                                 .gap_2()
                                 .child(ui::text_button(tr("接続"), move || {
-                                    connection.application.with(|application| {
-                                        application.select_host(id.clone())
-                                    });
+                                    connection
+                                        .application
+                                        .with(|application| application.select_host(id.clone()));
                                 }));
                         ui::setting(
                             host.label(),

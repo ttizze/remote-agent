@@ -1281,6 +1281,43 @@ async fn rewind_without_subscribers_serializes_input_until_the_new_binding_is_re
 }
 
 #[tokio::test]
+async fn a_failed_native_thread_registration_unloads_and_can_be_retried() {
+    let directory = tempfile::tempdir().unwrap();
+    let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let b = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let host = service(directory.path(), &a, &b);
+    let client = host.open_session();
+    let registry = directory.path().join("bex-conversations.json");
+    std::fs::create_dir(&registry).unwrap();
+    let request = Call::CreateSession(op::CreateSession {
+        provider: ProviderKind::Claude,
+        cwd: Some(directory.path().to_string_lossy().into_owned()),
+        model: None,
+        initial_input: None,
+    });
+    let error = call::<agent_protocol::session::OpenedSession>(&host, client.id(), request.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "conversation_storage_failed");
+    assert_eq!(b.released.lock().unwrap().as_slice(), ["claude-0"]);
+    assert!(
+        host.inner
+            .conversations
+            .active_sessions("")
+            .unwrap()
+            .is_empty()
+    );
+
+    std::fs::remove_dir(&registry).unwrap();
+    let created: agent_protocol::session::OpenedSession =
+        call(&host, client.id(), request).await.unwrap();
+    assert_eq!(
+        host.inner.conversations.active_sessions("").unwrap(),
+        [created.session]
+    );
+}
+
+#[tokio::test]
 async fn native_fork_rejects_an_unsupported_provider_before_execution() {
     let directory = tempfile::tempdir().unwrap();
     let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));

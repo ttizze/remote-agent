@@ -1,6 +1,6 @@
 //! Read-only access to Claude's native transcript tree. Never repairs or writes
 //! transcripts, and never launches the CLI to list or display a conversation.
-use super::{SessionListScope, native};
+use super::native;
 use agent_protocol::{
     execution::*,
     ids::ItemId,
@@ -40,7 +40,7 @@ pub(super) fn list_page(
     running: Vec<Thread>,
     search: &str,
     cursor: Option<&str>,
-    scope: SessionListScope<'_>,
+    owned: Option<&HashSet<String>>,
     limit: u32,
 ) -> Result<super::SessionPage> {
     let mut candidates: Vec<_> = files(home)?
@@ -64,16 +64,6 @@ pub(super) fn list_page(
         .iter()
         .filter_map(|t| t.id.as_ref().map(|id| id.id.clone()))
         .collect();
-    let owned: Option<HashSet<_>> = match scope {
-        SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
-            owned
-                .iter()
-                .filter(|id| id.provider == ProviderKind::Claude)
-                .map(|id| id.id.as_str())
-                .collect(),
-        ),
-        _ => None,
-    };
     for thread in running {
         let id = thread.id.as_ref().unwrap().id.clone();
         if !candidates
@@ -107,9 +97,7 @@ pub(super) fn list_page(
             match summary(&path) {
                 Ok(Summary {
                     automated: true, ..
-                }) if owned
-                    .as_ref()
-                    .is_some_and(|owned| !owned.contains(id.as_str()))
+                }) if owned.is_some_and(|owned| !owned.contains(id.as_str()))
                     && !active.contains(&id) =>
                 {
                     continue;
@@ -1115,15 +1103,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let first = list_page(
-            root.path(),
-            vec![],
-            "",
-            None,
-            SessionListScope::Roots(&[]),
-            3,
-        )
-        .unwrap();
+        let first = list_page(root.path(), vec![], "", None, Some(&HashSet::new()), 3).unwrap();
         assert_eq!(
             first
                 .data
@@ -1138,7 +1118,7 @@ mod tests {
             vec![],
             "",
             first.next_cursor.as_deref(),
-            SessionListScope::Roots(&[]),
+            Some(&HashSet::new()),
             3,
         )
         .unwrap();
@@ -1155,7 +1135,7 @@ mod tests {
             vec![],
             "",
             second.next_cursor.as_deref(),
-            SessionListScope::Roots(&[]),
+            Some(&HashSet::new()),
             3,
         )
         .unwrap();
@@ -1166,7 +1146,7 @@ mod tests {
             vec![],
             "title 1",
             None,
-            SessionListScope::Roots(&[]),
+            Some(&HashSet::new()),
             3,
         )
         .unwrap();
@@ -1178,22 +1158,12 @@ mod tests {
                 vec![],
                 "",
                 Some("bad"),
-                SessionListScope::Roots(&[]),
+                Some(&HashSet::new()),
                 3
             )
             .is_err()
         );
-        assert!(
-            list_page(
-                root.path(),
-                vec![],
-                "",
-                Some("9"),
-                SessionListScope::Roots(&[]),
-                3
-            )
-            .is_err()
-        );
+        assert!(list_page(root.path(), vec![], "", Some("9"), Some(&HashSet::new()), 3).is_err());
     }
     #[test]
     fn task_listings_omit_unowned_sdk_runs_started_by_other_agents() {
@@ -1230,13 +1200,13 @@ mod tests {
             }),
             ..Default::default()
         };
-        let owned = [2, 3].map(|id| SessionRef {
-            provider: ProviderKind::Claude,
-            id: Uuid::from_u128(id).to_string(),
-        });
-        let listed = |scope| {
+        let owned: HashSet<_> = [2, 3]
+            .map(|id| Uuid::from_u128(id).to_string())
+            .into_iter()
+            .collect();
+        let listed = |owned| {
             let mut names: Vec<_> =
-                list_page(root.path(), vec![running.clone()], "", None, scope, 10)
+                list_page(root.path(), vec![running.clone()], "", None, owned, 10)
                     .unwrap()
                     .data
                     .into_iter()
@@ -1246,7 +1216,7 @@ mod tests {
             names
         };
         assert_eq!(
-            listed(SessionListScope::Roots(&owned)),
+            listed(Some(&owned)),
             [
                 "agent-running-in-host",
                 "host",
@@ -1255,18 +1225,14 @@ mod tests {
                 "terminal-resumed-by-agent"
             ]
         );
-        assert_eq!(
-            listed(SessionListScope::WithSubagents(&owned)),
-            listed(SessionListScope::Roots(&owned))
-        );
-        assert_eq!(listed(SessionListScope::All).len(), transcripts.len());
+        assert_eq!(listed(None).len(), transcripts.len());
         assert!(
             list_page(
                 root.path(),
                 vec![],
                 "NSH message text sizing",
                 None,
-                SessionListScope::WithSubagents(&owned),
+                Some(&owned),
                 1
             )
             .unwrap()

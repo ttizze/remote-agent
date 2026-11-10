@@ -744,7 +744,7 @@ impl HostRpcService {
             Err(error) => Err(Failure::new("worktree_creation_failed", error)),
         }
     }
-    /// New threads browse under a provisional scope until their native ID exists.
+    /// Persist Host ownership before publishing a newly created conversation.
     pub(super) async fn start_thread<F>(
         &self,
         agent: &dyn Agent,
@@ -754,6 +754,14 @@ impl HostRpcService {
         F: std::future::Future<Output = Result<ThreadResponse, Failure>>,
     {
         let response = self.native_thread(agent, start).await?;
+        if let Err(error) = crate::host_rpc::conversations::Conversation::new(&response.thread)
+            .and_then(|row| self.inner.conversations.save(row))
+        {
+            if let Some(id) = &response.thread.id {
+                let _ = agent.unload(&id.id).await;
+            }
+            return Err(error);
+        }
         self.notify_thread(response.thread.clone()).await?;
         Ok(response)
     }

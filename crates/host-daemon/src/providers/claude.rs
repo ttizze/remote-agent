@@ -13,7 +13,7 @@ mod usage;
 
 use anyhow::Context;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -330,7 +330,7 @@ impl Claude {
         &self,
         search: &str,
         cursor: Option<String>,
-        scope: SessionListScope<'_>,
+        owned: Option<HashSet<String>>,
         limit: u32,
     ) -> anyhow::Result<SessionPage> {
         let home = self.native_home.clone();
@@ -345,21 +345,13 @@ impl Claude {
             })
             .collect();
         let search = search.to_owned();
-        let owned = match scope {
-            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => {
-                Some(owned.to_vec())
-            }
-            _ => None,
-        };
         tokio::task::spawn_blocking(move || {
             history::list_page(
                 &home,
                 running,
                 &search,
                 cursor.as_deref(),
-                owned
-                    .as_deref()
-                    .map_or(SessionListScope::All, SessionListScope::Roots),
+                owned.as_ref(),
                 limit,
             )
         })
@@ -2120,36 +2112,46 @@ impl Agent for Claude {
         scope: SessionListScope<'_>,
         limit: u32,
     ) -> Result<SessionPage, Failure> {
-        if matches!(scope, SessionListScope::Descendants(_)) {
-            return Ok(SessionPage {
-                data: vec![],
-                next_cursor: None,
-            });
-        }
-        if matches!(scope, SessionListScope::Loaded) {
-            let limit = limit.max(1) as usize;
-            let mut threads = self.loaded_threads().await;
-            threads.sort_by(|a, b| a.id.cmp(&b.id));
-            let mut data: Vec<_> = threads
-                .into_iter()
-                .filter(|thread| {
-                    cursor
-                        .as_ref()
-                        .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
-                })
-                .take(limit + 1)
-                .map(|thread| SessionSummary {
-                    thread,
-                    branch: None,
-                })
-                .collect();
-            let next_cursor = (data.len() > limit).then(|| {
-                data.truncate(limit);
-                data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
-            });
-            return Ok(SessionPage { data, next_cursor });
-        }
-        Claude::list(self, search, cursor, scope, limit)
+        let owned = match scope {
+            SessionListScope::Descendants(_) => {
+                return Ok(SessionPage {
+                    data: vec![],
+                    next_cursor: None,
+                });
+            }
+            SessionListScope::Loaded => {
+                let limit = limit.max(1) as usize;
+                let mut threads = self.loaded_threads().await;
+                threads.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut data: Vec<_> = threads
+                    .into_iter()
+                    .filter(|thread| {
+                        cursor
+                            .as_ref()
+                            .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
+                    })
+                    .take(limit + 1)
+                    .map(|thread| SessionSummary {
+                        thread,
+                        branch: None,
+                    })
+                    .collect();
+                let next_cursor = (data.len() > limit).then(|| {
+                    data.truncate(limit);
+                    data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
+                });
+                return Ok(SessionPage { data, next_cursor });
+            }
+            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
+                owned
+                    .iter()
+                    .filter(|id| id.provider == ProviderKind::Claude)
+                    .map(|id| id.id.clone())
+                    .collect(),
+            ),
+            SessionListScope::All => None,
+        };
+        Claude::list(self, search, cursor, owned, limit)
             .await
             .map_err(|e| Failure::new("session_list_failed", e))
     }
@@ -2764,10 +2766,16 @@ mod execution_tests {
         )
         .await
         .unwrap();
-        let owned = [SessionRef {
-            provider: ProviderKind::Claude,
-            id: Uuid::from_u128(1).to_string(),
-        }];
+        let owned = [
+            SessionRef {
+                provider: ProviderKind::Claude,
+                id: Uuid::from_u128(1).to_string(),
+            },
+            SessionRef {
+                provider: ProviderKind::Codex,
+                id: Uuid::from_u128(2).to_string(),
+            },
+        ];
         for (scope, expected) in [
             (SessionListScope::Roots(&[]), vec!["cli"]),
             (SessionListScope::Roots(&owned), vec!["cli", "sdk-ts"]),
