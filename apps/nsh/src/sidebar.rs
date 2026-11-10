@@ -367,7 +367,7 @@ fn connection_menu(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                     if id.is_empty() {
                         application.select_all_hosts();
                     } else {
-                        application.select_host(id.to_owned(), false);
+                        application.select_host(id.to_owned());
                     }
                 })
             })

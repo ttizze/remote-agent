@@ -104,7 +104,7 @@ impl Application {
             _ if editor.pending => return false,
             WorktreeAction::Host { id } => {
                 if state.hosts.iter().any(|host| host.id == id) {
-                    self.select_host(id, false);
+                    self.select_host(id);
                     self.open_worktrees();
                 }
             }

@@ -226,7 +226,7 @@ fn choice(connection: Connection, host: Host) -> View {
                     move || {
                         connection
                             .application
-                            .with(|app| app.select_host(id.clone(), false))
+                            .with(|app| app.select_host(id.clone()))
                     },
                 ))
                 .child(view().flex_1())

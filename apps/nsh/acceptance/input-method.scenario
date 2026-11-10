@@ -15,8 +15,6 @@ expect "何に取り組みますか？"
 key return
 expect_absent "何に取り組みますか？" 10000
 expect "シミュレータで完了しました。" 30000
-# The conversation has started: where it runs is no longer offered.
-expect_absent "フォルダ:"
 # The composer is empty again.
 expect_absent 会話 after "AI に依頼する"
 # Live conversion keeps the whole message marked: the send button sends it,

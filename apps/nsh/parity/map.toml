@@ -28,7 +28,7 @@ description = "A new chat in the project before anything is sent: the hero and t
 nsh = ["press \"New chat in this project\"", "expect \"Ask AI\""]
 t3 = []
 column = "composer"
-elements = ["window", "header", "header-project", "header-new-chat", "composer", "composer-placeholder", "composer-send", "composer-attach", "composer-model", "composer-mode", "composer-dictation", "composer-context-strip", "draft-hero", "draft-hero-project", "draft-without-project"]
+elements = ["window", "header", "header-project", "header-new-chat", "composer", "composer-placeholder", "composer-send", "composer-attach", "composer-model", "composer-mode", "composer-dictation", "draft-hero", "draft-hero-project", "draft-without-project"]
 
 [[state]]
 name = "composer-draft"
@@ -295,14 +295,6 @@ group = "composer"
 t3 = "button[aria-label='Runtime mode']"
 nsh = { text = "Change approval mode" }
 anchor = "composer"
-
-[[element]]
-id = "composer-context-strip"
-what = "Project and destination strip"
-kind = "text"
-group = "composer"
-t3 = "[data-slot=composer-context-strip]"
-nsh = { text = "Destination", up = 2 }
 
 [[element]]
 id = "model-menu"

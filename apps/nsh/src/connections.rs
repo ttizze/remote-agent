@@ -6,31 +6,29 @@ use serde_json::json;
 pub(crate) fn selector(
     hosts: Memo<Vec<Host>>,
     selected: Memo<String>,
-    list_scope: bool,
 ) -> nsh_core::element::NativeView {
     let connection = use_context::<Connection>().unwrap();
     native::menu(
         "desktopcomputer",
         tr("接続先"),
         move || {
-            let all = list_scope && connection.state.with(|state| state.all_hosts);
-            let mut entries = Vec::new();
-            if list_scope {
-                entries.push(json!({"id":"", "title":tr("すべての接続先"), "symbol":"square.stack", "selected":all}));
-                entries.push(json!({"separator":true}));
-            }
+            let all = connection.state.with(|state| state.all_hosts);
+            let mut entries = vec![
+                json!({"id":"", "title":tr("すべての接続先"), "symbol":"square.stack", "selected":all}),
+                json!({"separator":true}),
+            ];
             entries.extend(hosts.with(|hosts| hosts.iter().map(|host| json!({"id":host.id,"title":host.label(),"selected":!all && host.id == selected.get()})).collect::<Vec<_>>()));
             json!(entries)
         },
         move |name| {
             connection.application.with(|application| {
-                if list_scope && name.is_empty() { application.select_all_hosts(); }
-                else { application.select_host(name.to_owned(), !list_scope); }
+                if name.is_empty() { application.select_all_hosts(); }
+                else { application.select_host(name.to_owned()); }
             });
         },
     )
     .prop("title", move || {
-        if list_scope && connection.state.with(|state| state.all_hosts) { return json!(tr("すべての接続先")); }
+        if connection.state.with(|state| state.all_hosts) { return json!(tr("すべての接続先")); }
         json!(hosts.with(|hosts| {
             hosts
                 .iter()
@@ -45,7 +43,7 @@ pub(crate) fn selector(
                 .unwrap_or_else(|| tr("接続先").into())
         }))
     })
-    .prop("identifier", json!(if list_scope { "connections.list" } else { "connections.destination" }))
+    .prop("identifier", json!("connections.list"))
     .min_h(px(if is_desktop() { 28.0 } else { 44.0 }))
 }
 
@@ -77,7 +75,7 @@ pub(crate) fn screen(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                                 .gap_2()
                                 .child(ui::text_button(tr("接続"), move || {
                                     connection.application.with(|application| {
-                                        application.select_host(id.clone(), false)
+                                        application.select_host(id.clone())
                                     });
                                 }));
                         ui::setting(

@@ -679,7 +679,7 @@ fn app_content(
                         move || {
                             view()
                                 .flex_1()
-                                .child(connections::selector(hosts, host, true))
+                                .child(connections::selector(hosts, host))
                                 .child(when(
                                     move || searching.get(),
                                     move || {
