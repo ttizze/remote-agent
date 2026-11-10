@@ -3,10 +3,11 @@
 # contract on Mac; release builds are packaged by scripts/build-macos.sh.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-platform=${1:?usage: build-native.sh macos|ios-simulator [debug|release]}
+platform=${1:?usage: build-native.sh macos|ios|ios-simulator [debug|release]}
 configuration=${2:-debug}
 case "$platform" in
     macos) sdk=macosx; triple=arm64-apple-macosx26.0; bundle_platform=MacOSX ;;
+    ios) sdk=iphoneos; triple=arm64-apple-ios26.0; bundle_platform=iPhoneOS ;;
     ios-simulator) sdk=iphonesimulator; triple=arm64-apple-ios26.0-simulator; bundle_platform=iPhoneSimulator ;;
     *) printf 'Unsupported platform: %s\n' "$platform" >&2; exit 1 ;;
 esac

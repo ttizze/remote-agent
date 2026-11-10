@@ -38,6 +38,8 @@ pub(super) fn page(connection: Connection) -> View {
     let emit = move |action: WorktreeAction| {
         if let Some(token) = editor.with_untracked(|editor| editor.as_ref().map(|e| e.id.clone())) {
             application.with(|app| app.worktree_action(&token, action));
+        } else if matches!(action, WorktreeAction::Load {}) {
+            application.with(|app| app.open_worktrees());
         }
     };
     let busy = move || {
@@ -120,7 +122,7 @@ pub(super) fn page(connection: Connection) -> View {
             move || editor.with(|e| e.as_ref().is_some_and(|e| e.error.is_some())),
             move || failure(editor, busy, connected, emit, save),
         ))
-        .child(managed(connection, busy, connected, emit))
+        .child(managed(connection, editor, busy, connected, emit))
 }
 
 fn heading(title: &'static str) -> Text {
@@ -430,8 +432,53 @@ fn failure(
 }
 
 /// The worktrees Bex created, with their conversations and removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedState {
+    Loading,
+    Disconnected,
+    Unavailable,
+    Failed,
+    Empty,
+    Ready,
+}
+
+fn managed_state(
+    rows: Option<&[Worktree]>,
+    editor: bool,
+    pending: bool,
+    error: bool,
+    connected: bool,
+) -> ManagedState {
+    if !editor {
+        return if connected {
+            ManagedState::Unavailable
+        } else {
+            ManagedState::Disconnected
+        };
+    }
+    if let Some(rows) = rows {
+        return if rows.is_empty() {
+            ManagedState::Empty
+        } else {
+            ManagedState::Ready
+        };
+    }
+    if error {
+        ManagedState::Failed
+    } else if !connected {
+        ManagedState::Disconnected
+    } else if pending {
+        ManagedState::Loading
+    } else {
+        // A cancelled or otherwise lost request must not leave the page in a
+        // permanent loading state.  The refresh action is still available.
+        ManagedState::Failed
+    }
+}
+
 fn managed(
     connection: Connection,
+    editor: Memo<Option<WorktreeEditor>>,
     busy: impl Fn() -> bool + Copy + 'static,
     connected: Memo<bool>,
     emit: impl Fn(WorktreeAction) + Copy + 'static,
@@ -440,6 +487,14 @@ fn managed(
         connection
             .publication
             .with(|p| p.snapshot.files.workspace.worktrees.as_deref().cloned())
+    });
+    let list_state = computed(move || {
+        let editor_present = editor.with(Option::is_some);
+        let pending = editor.with(|editor| editor.as_ref().is_some_and(|editor| editor.pending));
+        let error =
+            editor.with(|editor| editor.as_ref().is_some_and(|editor| editor.error.is_some()));
+        let connected = connected.get();
+        rows.with(|rows| managed_state(rows.as_deref(), editor_present, pending, error, connected))
     });
     let idle = move || !busy() && connected.get();
     view()
@@ -457,11 +512,31 @@ fn managed(
                 ),
         )
         .child(when(
-            move || rows.with(Option::is_none),
+            move || list_state.get() == ManagedState::Loading,
             || note(tr("一覧を読み込み中…")),
         ))
         .child(when(
-            move || rows.with(|rows| rows.as_ref().is_some_and(Vec::is_empty)),
+            move || list_state.get() == ManagedState::Disconnected,
+            || note(tr("作業環境との接続を確認してください。")),
+        ))
+        .child(when(
+            move || list_state.get() == ManagedState::Unavailable,
+            || note(tr("ワークツリーを利用できません。再読み込みしてください。")),
+        ))
+        .child(when(
+            move || {
+                list_state.get() == ManagedState::Failed
+                    && editor
+                        .with(|editor| editor.as_ref().is_none_or(|editor| editor.error.is_none()))
+            },
+            || {
+                note(tr(
+                    "ワークツリー一覧を読み込めませんでした。再読み込みしてください。",
+                ))
+            },
+        ))
+        .child(when(
+            move || list_state.get() == ManagedState::Empty,
             || {
                 ui::card(vec![
                     view()
@@ -588,4 +663,37 @@ fn worktree(
                 },
             )),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_state_does_not_turn_unavailable_or_failed_requests_into_loading() {
+        assert_eq!(
+            managed_state(None, false, false, false, true),
+            ManagedState::Unavailable
+        );
+        assert_eq!(
+            managed_state(None, true, true, false, true),
+            ManagedState::Loading
+        );
+        assert_eq!(
+            managed_state(None, true, false, false, false),
+            ManagedState::Disconnected
+        );
+        assert_eq!(
+            managed_state(None, true, false, false, true),
+            ManagedState::Failed
+        );
+        assert_eq!(
+            managed_state(None, true, false, true, true),
+            ManagedState::Failed
+        );
+        assert_eq!(
+            managed_state(Some(&[]), true, true, true, true),
+            ManagedState::Empty
+        );
+    }
 }

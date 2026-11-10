@@ -11,9 +11,9 @@ type "AI に依頼する" "元の下書き"
 select "*Needle Alpha*" Bravo
 menu "*Needle Alpha*"
 press サイドチャットで質問
-expect "> Bravo" after ツールを閉じる 10000
-type "AI に依頼する" "[immediate] サイドで質問します" after ツールを閉じる
-press 送信 after ツールを閉じる
-expect "シミュレータで完了しました。" after ツールを閉じる 30000
+expect "> Bravo" after ツールを追加 10000
+type "AI に依頼する" "[immediate] サイドで質問します" after ツールを追加
+press 送信 after ツールを追加
+expect "シミュレータで完了しました。" after ツールを追加 30000
 expect "元の下書き"
 screenshot side-chat

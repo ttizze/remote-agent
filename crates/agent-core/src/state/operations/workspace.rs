@@ -176,6 +176,27 @@ impl SaveFile {
     }
 }
 
+pub use agent_protocol::operations::WriteWorkspaceFile;
+
+/// A file written into a workspace, as T3 Code saves a plan there: its
+/// dialog shows the write running and why it failed, so no notice does.
+impl Operation for WriteWorkspaceFile {
+    rpc_operation!();
+    const REPORT_ERROR: bool = false;
+    fn navigation_bound(&self) -> bool {
+        false
+    }
+    fn prepare(&mut self, _snapshot: &mut Snapshot, _pane_id: &str) -> Result<(), String> {
+        if self.cwd.trim().is_empty() {
+            return Err("ワークスペースのパスがありません".into());
+        }
+        if self.relative_path.trim().is_empty() {
+            return Err("ワークスペース内のパスを入力してください".into());
+        }
+        Ok(())
+    }
+}
+
 pub use agent_protocol::operations::ReviewWorkspace;
 
 /// Navigation and notifications already belong to an epoch. Their review read

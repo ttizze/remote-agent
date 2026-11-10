@@ -253,7 +253,7 @@ fn act(connection: Connection, picker: Signal<Option<Picker>>, action: &str, val
 }
 
 #[cfg(desktop)]
-pub(crate) fn provider_mark(id: &str) -> Option<(&'static str, nsh_core::element::Rgba)> {
+pub(crate) fn provider_mark(id: &str) -> Option<(&'static str, crate::ui::Tone)> {
     use crate::ui::colors::FOREGROUND;
     use nsh_core::element::rgb;
     Some(match id {
@@ -263,11 +263,11 @@ pub(crate) fn provider_mark(id: &str) -> Option<(&'static str, nsh_core::element
         ),
         "claude" => (
             include_str!("../../mobile/iosApp/Bex/Assets.xcassets/claude.imageset/claude.svg"),
-            rgb(0xd97757),
+            crate::ui::Tone::same(rgb(0xd97757)),
         ),
         "deepseek" => (
             include_str!("../../mobile/iosApp/Bex/Assets.xcassets/deepseek.imageset/deepseek.svg"),
-            rgb(0x4d6bfe),
+            crate::ui::Tone::same(rgb(0x4d6bfe)),
         ),
         _ => return None,
     })
@@ -369,16 +369,22 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
             },
             |usage: &Value| usage["label"].as_str().unwrap_or_default().to_owned(),
             |usage, _| {
-                let usage = usage.get_untracked();
-                let percent = usage["remainingPercent"].as_f64().unwrap_or_default() as f32;
+                let percent = move || {
+                    usage
+                        .with(|usage| usage["remainingPercent"].as_f64().unwrap_or_default() as f32)
+                };
                 view()
                     .flex_row()
                     .items_center()
                     .gap_2()
                     .child(
-                        text(usage["label"].as_str().unwrap_or_default().to_owned())
-                            .text_size(px(12.0))
-                            .text_color(colors::MUTED),
+                        text(move || {
+                            usage.with(|usage| {
+                                usage["label"].as_str().unwrap_or_default().to_owned()
+                            })
+                        })
+                        .text_size(px(12.0))
+                        .text_color(colors::MUTED),
                     )
                     .child(
                         view()
@@ -390,15 +396,17 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                                 view()
                                     .h(px(4.0))
                                     .rounded_full()
-                                    .w(relative(percent / 100.0))
-                                    .bg(if percent <= 20.0 {
-                                        nsh_core::element::rgb(0xfb923c)
-                                    } else {
-                                        colors::FOREGROUND
+                                    .w(move || relative(percent() / 100.0))
+                                    .bg(move || {
+                                        if percent() <= 20.0 {
+                                            crate::ui::Tone::same(nsh_core::element::rgb(0xfb923c))
+                                        } else {
+                                            colors::FOREGROUND
+                                        }
                                     }),
                             ),
                     )
-                    .child(text(format!("{percent}%")).text_size(px(12.0)))
+                    .child(text(move || format!("{}%", percent())).text_size(px(12.0)))
             },
         ));
     let models = scroll().max_h(px(264.0)).child(

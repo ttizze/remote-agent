@@ -63,7 +63,17 @@ pub mod macos;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-mod hosted;
+pub(crate) mod hosted;
+
+/// UI operations returned to the embedding native screen, which owns their presentation.
+#[derive(Clone, Copy)]
+pub(crate) struct ExternalActions(pub Stored<Box<dyn Fn(Value)>>);
+
+impl ExternalActions {
+    pub fn emit(self, event: Value) {
+        self.0.with(|send| send(event));
+    }
+}
 #[cfg(target_os = "ios")]
 mod preview_ios;
 #[cfg(target_os = "macos")]

@@ -57,22 +57,34 @@ pub(crate) struct Client {
     handed: Arc<HandedKeys>,
     updates: async_channel::Sender<Update>,
     panes: std::sync::Mutex<std::collections::BTreeMap<u64, Arc<panes::Pane>>>,
+    owns_sessions: bool,
 }
+
+pub(crate) struct BorrowedSession {
+    pub host: String,
+    pub session: Arc<ClientSession>,
+    pub pane: Option<Arc<agent_core::client::native::AgentPane>>,
+}
+
+type Started = (
+    tokio::runtime::Runtime,
+    Arc<Client>,
+    async_channel::Receiver<Update>,
+);
 
 pub(crate) const LOCAL: &str = "local";
 
 impl Client {
-    pub fn new(
+    #[cfg(test)]
+    pub fn new(root: PathBuf, local: Option<HostScope>) -> Result<Started, AgentError> {
+        Self::start(root, local, None)
+    }
+
+    pub(super) fn start(
         root: PathBuf,
         local: Option<HostScope>,
-    ) -> Result<
-        (
-            tokio::runtime::Runtime,
-            Arc<Self>,
-            async_channel::Receiver<Update>,
-        ),
-        AgentError,
-    > {
+        borrowed: Option<BorrowedSession>,
+    ) -> Result<Started, AgentError> {
         let runtime = tokio::runtime::Runtime::new().map_err(error)?;
         let (updates, incoming) = async_channel::unbounded();
         let device = DevicePreferences::new(Arc::new(crate::storage::DeviceStorage {
@@ -102,13 +114,29 @@ impl Client {
             handed: Default::default(),
             updates,
             panes: Default::default(),
+            owns_sessions: borrowed.is_none(),
         });
         let owner = client.clone();
-        client.spawn(async move {
-            if let Err(reason) = owner.restore().await {
-                owner.report(reason);
+        if let Some(borrowed) = borrowed {
+            client
+                .sessions
+                .borrow(borrowed.host.clone(), borrowed.session.clone());
+            if let Some(pane) = &borrowed.pane {
+                client.attach_pane(borrowed.host.clone(), pane.clone());
             }
-        });
+            client.spawn(async move {
+                if let Err(reason) = borrowed.session.clone().ready().await {
+                    return owner.report(reason);
+                }
+                owner.observe_surface(borrowed.host, borrowed.session, borrowed.pane);
+            });
+        } else {
+            client.spawn(async move {
+                if let Err(reason) = owner.restore().await {
+                    owner.report(reason);
+                }
+            });
+        }
         Ok((runtime, client, incoming))
     }
 
@@ -287,12 +315,27 @@ impl Client {
     }
 
     fn observe(self: &Arc<Self>, host: String, session: Arc<ClientSession>) {
+        self.observe_surface(host, session, None);
+    }
+
+    fn observe_surface(
+        self: &Arc<Self>,
+        host: String,
+        session: Arc<ClientSession>,
+        pane: Option<Arc<agent_core::client::native::AgentPane>>,
+    ) {
         let owner = self.clone();
         self.spawn(async move {
             let Some(store) = session.store() else {
                 return;
             };
-            let mut value = store.presentation();
+            let mut value = match &pane {
+                Some(pane) => match pane.presentation() {
+                    Ok(value) => value,
+                    Err(reason) => return owner.report(reason),
+                },
+                None => store.presentation(),
+            };
             loop {
                 if owner
                     .updates
@@ -305,7 +348,16 @@ impl Client {
                 {
                     break;
                 }
-                match store.next_presentation(value).await {
+                let next = async {
+                    match &pane {
+                        Some(pane) => pane.next_presentation(value).await,
+                        None => store.next_presentation(value).await,
+                    }
+                };
+                match tokio::select! {
+                    _ = owner.closing.cancelled() => break,
+                    result = next => result,
+                } {
                     Ok(next) => value = next,
                     Err(_) => break,
                 }
@@ -327,6 +379,12 @@ impl Client {
         pane: Option<u64>,
         intent: Intent,
     ) -> Result<Arc<agent_core::client::native::Receipt>, AgentError> {
+        #[cfg(desktop)]
+        if let Intent::ReadThread(read) = &intent
+            && read.open
+        {
+            tracing::info!(target: "agent", operation = "task.open", session = ?read.thread_id, "Task selected");
+        }
         if let Some(id) = pane {
             return self.pane(host, id)?.dispatch(intent);
         }
@@ -642,13 +700,23 @@ impl Client {
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
         self.closing.cancel();
-        self.close_panes();
+        // A borrowed session and its pane stay open for their native owner.
+        if self.owns_sessions {
+            self.close_panes();
+        }
         let hosts = self.hosts.lock().await;
-        self.sessions.retire();
+        if self.owns_sessions {
+            self.sessions.retire();
+        }
         drop(hosts);
         self.jobs.close();
         self.jobs.wait().await;
-        self.sessions.shutdown().await
+        if self.owns_sessions {
+            self.sessions.shutdown().await
+        } else {
+            self.sessions.release();
+            Ok(())
+        }
     }
 }
 

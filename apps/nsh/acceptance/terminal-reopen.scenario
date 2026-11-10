@@ -10,18 +10,18 @@ type "AI に依頼する" "Keep my draft"
 press 右パネルを切り替え
 press ツールを追加
 press ターミナル
-expect "/project" after ツールを閉じる 10000
+expect "/project" after ツールを追加 10000
 type ターミナル "AGENT_NATIVE=17" after 終了
 key return
 press ツールを追加
 press 差分
-expect "new file mode" after ツールを閉じる 10000
+expect "new file mode" after ツールを追加 10000
 press ツールを閉じる
 expect_absent "new file mode"
 expect "Keep my draft"
 press 右パネルを切り替え
 press ターミナル
-expect "/project" after ツールを閉じる 10000
+expect "/project" after ツールを追加 10000
 type ターミナル "exit $AGENT_NATIVE" after 終了
 key return
 expect "終了 · 17" 10000

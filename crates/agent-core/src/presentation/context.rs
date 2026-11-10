@@ -135,6 +135,7 @@ impl ConversationContext {
                     OperationKey::Fork {
                         session: target, ..
                     }
+                    | OperationKey::Rewind { session: target }
                     | OperationKey::TurnItems {
                         session: target, ..
                     } => Some(target) == session,
@@ -226,6 +227,13 @@ impl ConversationContext {
         self.operations
             .get(&OperationKey::Fork { session, turn })
             .map(|control| control.phase.clone())
+    }
+    pub fn rewinding(&self) -> bool {
+        self.navigation.thread_id.clone().is_some_and(|session| {
+            self.operations
+                .get(&OperationKey::Rewind { session })
+                .is_some_and(|control| control.phase == OperationPhase::Running)
+        })
     }
     pub fn fork_error(&self, turn: agent_protocol::ids::TurnId) -> Option<super::error::ErrorText> {
         let session = self.navigation.thread_id.clone()?;

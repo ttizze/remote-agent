@@ -197,6 +197,11 @@ impl Presentation {
     pub fn composer(&self) -> Arc<super::composer::ComposerPresentation> {
         self.composer.clone()
     }
+    /// The compact workspace-change summary shown above a conversation's
+    /// composer by native clients.
+    pub fn composer_review(&self, is_side_chat: bool) -> Option<super::composer::ComposerReview> {
+        self.pane().composer_review(is_side_chat)
+    }
     pub fn conversation_context(&self) -> Arc<super::context::ConversationContext> {
         self.context.clone()
     }

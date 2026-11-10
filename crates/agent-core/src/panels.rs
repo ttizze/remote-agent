@@ -22,14 +22,6 @@ pub enum PanelKind {
     SideChat,
     Agents,
 }
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum PanelLayout {
-    #[default]
-    Right,
-    Bottom,
-    Expanded,
-}
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelSurface {
@@ -41,7 +33,7 @@ pub struct PanelSurface {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PanelState {
     pub open: bool,
-    pub layout: PanelLayout,
+    pub maximized: bool,
     pub surfaces: Vec<PanelSurface>,
     pub active: Option<u64>,
 }
@@ -217,12 +209,12 @@ impl Panels {
         next.threads.entry(key).or_default().open = open;
         Arc::new(next)
     }
-    pub fn set_layout(self: Arc<Self>, key: PanelScope, layout: PanelLayout) -> Arc<Self> {
-        if self.get(key.clone()).layout == layout {
+    pub fn set_maximized(self: Arc<Self>, key: PanelScope, maximized: bool) -> Arc<Self> {
+        if self.get(key.clone()).maximized == maximized {
             return self;
         }
         let mut next = self.as_ref().clone();
-        next.threads.entry(key).or_default().layout = layout;
+        next.threads.entry(key).or_default().maximized = maximized;
         Arc::new(next)
     }
     pub fn rekey(self: Arc<Self>, before: PanelScope, after: PanelScope) -> Arc<Self> {
@@ -406,7 +398,7 @@ mod tests {
                     1 => panels = panels.clone().set_open(a.clone(), value % 2 == 0),
                     2 => panels = panels.clone().close(a.clone(), u64::from(value)),
                     3 => { activate(&mut panels, a.clone(), u64::from(value)); }
-                    _ => panels = panels.clone().set_layout(a.clone(), PanelLayout::Expanded),
+                    _ => panels = panels.clone().set_maximized(a.clone(), value % 2 == 0),
                 }
                 proptest::prop_assert_eq!(panels.get(b.clone()), expected.clone());
                 let panel = panels.get(a.clone());
@@ -416,17 +408,29 @@ mod tests {
         }
     }
     #[test]
-    fn conversations_keep_their_surfaces_selection_visibility_and_layout() {
+    fn restoring_a_maximized_panel_returns_to_the_state_before_it() {
+        let key = scope("chat");
+        let panels = Panels::new().set_open(key.clone(), true);
+        let maximized = panels.clone().set_maximized(key.clone(), true);
+        assert!(maximized.get(key.clone()).maximized);
+        assert_eq!(
+            maximized.set_maximized(key.clone(), false).get(key.clone()),
+            panels.get(key)
+        );
+    }
+
+    #[test]
+    fn conversations_keep_their_surfaces_selection_visibility_and_size() {
         let mut panels = Panels::new();
         let a = scope("draft-a");
         let b = scope("draft-b");
         let browser = open(&mut panels, a.clone(), PanelKind::Browser, None);
         let terminal = open(&mut panels, a.clone(), PanelKind::Terminal, None);
-        panels = panels.clone().set_layout(a.clone(), PanelLayout::Bottom);
+        panels = panels.clone().set_maximized(a.clone(), true);
         panels = panels.clone().set_open(a.clone(), false);
         let other = open(&mut panels, b.clone(), PanelKind::SideChat, None);
         assert_eq!(panels.get(a.clone()).active, Some(terminal));
-        assert_eq!(panels.get(a.clone()).layout, PanelLayout::Bottom);
+        assert!(panels.get(a.clone()).maximized);
         assert!(!panels.get(a.clone()).open);
         assert_eq!(panels.get(b.clone()).active, Some(other));
         assert!(!activate(&mut panels, b.clone(), browser));

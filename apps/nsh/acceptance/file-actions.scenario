@@ -20,8 +20,8 @@ press 送信
 expect "添付: hello.txt" 15000
 expect_absent 添付を削除
 press 右パネルを切り替え
-press ファイル after ツールを閉じる
-press hello.txt after ツールを閉じる
+press ファイル after ツールを追加
+press hello.txt after ツールを追加
 expect "日本語のファイル" after 保存 10000
 # Quick Look takes its controller from the active app's key window: a preview
 # asked for while the user is in another app shows once they come back.

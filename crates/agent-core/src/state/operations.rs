@@ -81,6 +81,7 @@ pub enum Intent {
     ReadAccountLogin(ReadAccountLogin),
     CancelAccountLogin(CancelAccountLogin),
     ForkSession(ForkSession),
+    RewindSession(RewindSession),
     StartTerminal(StartTerminal),
     StartAccountTerminal(StartAccountTerminal),
     DetachTerminal(DetachTerminal),
@@ -102,6 +103,7 @@ pub enum Intent {
     },
     ReadFile(ReadFile),
     SaveFile(SaveFile),
+    WriteWorkspaceFile(WriteWorkspaceFile),
     ReviewWorkspace(ReviewWorkspace),
     ReadWorktreeSettings(ReadWorktreeSettings),
     UpdateWorktreeSettings(UpdateWorktreeSettings),
@@ -311,6 +313,9 @@ pub enum OperationKey {
     Fork {
         session: crate::session::SessionRef,
         turn: agent_protocol::ids::TurnId,
+    },
+    Rewind {
+        session: crate::session::SessionRef,
     },
     Item {
         item: ReadItem,

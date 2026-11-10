@@ -1,11 +1,12 @@
 #if DEBUG && os(macOS)
     import AppKit
 
-    /// Fixture-only timing. The normal app neither records message text nor
-    /// performs probe I/O. Times use Foundation's reference date on both sides.
+    /// Native paint timing. Normal debugging records geometry and timestamps;
+    /// message text is restricted to explicitly enabled fixture tracing.
     @MainActor enum RenderProbe {
         static let enabled = ProcessInfo.processInfo.environment["BEX_ACCEPTANCE_OUTPUT"] != nil
         private static let logging = enabled && ProcessInfo.processInfo.environment["BEX_RENDER_TRACE"] == "1"
+        static let timings = ProcessInfo.processInfo.environment["BEX_RENDER_TIMINGS"] == "1"
 
         struct Paints {
             private var entries: [(text: String, at: TimeInterval)] = []
@@ -38,17 +39,25 @@
         }
 
         static func record(_ stage: String, _ view: NSTextView, painted: String = "") {
-            guard logging else { return }
-            let record: [String: Any] = [
+            guard logging || timings else { return }
+            var record: [String: Any] = [
                 "stage": stage, "at": Date.timeIntervalSinceReferenceDate,
                 "view": String(describing: Unmanaged.passUnretained(view).toOpaque()),
-                "text": String(view.string.prefix(100)), "length": view.string.utf16.count,
+                "length": view.string.utf16.count,
                 "width": view.bounds.width, "height": view.bounds.height,
                 "visible": !view.visibleRect.isEmpty,
                 "constraint": (view as? MessageTextView)?.document.maxWidth ?? 0,
-                "painted": String(painted.prefix(200)),
                 "clipY": view.visibleRect.origin.y, "clipHeight": view.visibleRect.height,
             ]
+            if let document = (view as? MessageTextView)?.document {
+                record["blocks"] = document.blocks.count
+                record["code"] = document.blocks.first?.code ?? false
+                record["cell"] = document.cell ?? ""
+            }
+            if logging {
+                record["text"] = String(view.string.prefix(100))
+                record["painted"] = String(painted.prefix(200))
+            }
             guard let data = try? JSONSerialization.data(withJSONObject: record),
                   let line = String(data: data, encoding: .utf8) else { return }
             FileHandle.standardError.write(Data("render-probe \(line)\n".utf8))

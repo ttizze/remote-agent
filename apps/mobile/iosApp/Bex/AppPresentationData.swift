@@ -18,16 +18,3 @@ struct HostProfile: Codable, Identifiable, Equatable {
         try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
     }
 }
-
-final class ConversationItem: Sendable {
-    let source: RenderedItem
-    let data: ItemPresentation
-    let markdown: [ConversationMarkdownContent.Part]
-
-    init(_ source: RenderedItem) {
-        self.source = source
-        data = source.presentation()
-        markdown = !data.collapsible ? data.body
-            .map(ConversationMarkdownContent.parse) ?? [] : []
-    }
-}

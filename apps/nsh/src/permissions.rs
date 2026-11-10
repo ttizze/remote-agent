@@ -9,13 +9,13 @@ use agent_core::{
 };
 use agent_protocol::{permissions::PermissionMode, session::ProviderKind};
 use nsh_core::{
-    element::{Rgba, rgb},
+    element::rgb,
     overlay::{Align, Placement},
     prelude::*,
 };
 
 /// Full access reads as a warning wherever it is the mode.
-const FULL_ACCESS: Rgba = rgb(0xf58b42);
+const FULL_ACCESS: crate::ui::Tone = crate::ui::Tone::same(rgb(0xf58b42));
 /// The trigger's padding at each side, its icon, and the gap before its label.
 const PADDING: f32 = 8.0;
 const ICON: f32 = 16.0;

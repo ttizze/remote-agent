@@ -197,6 +197,18 @@ impl ClientSessions {
     }
 }
 
+impl ClientSessions {
+    /// Shows a session another owner keeps: its activity and lifetime stay theirs.
+    pub fn borrow(&self, host: String, session: Arc<ClientSession>) {
+        self.hosts.lock().unwrap().sessions.insert(host, session);
+    }
+
+    /// Forgets borrowed sessions without closing them, before this manager ends.
+    pub fn release(&self) {
+        self.hosts.lock().unwrap().sessions.clear();
+    }
+}
+
 impl Drop for ClientSessions {
     fn drop(&mut self) {
         self.retire();

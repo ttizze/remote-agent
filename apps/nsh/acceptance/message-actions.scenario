@@ -21,6 +21,3 @@ press チャットに追加
 expect "> Alpha" after "AI に依頼する"
 expect_absent "Needle" after "AI に依頼する"
 screenshot quoted
-press 入力欄で編集
-expect "回答を選択します" after "AI に依頼する"
-expect_absent "> Alpha"

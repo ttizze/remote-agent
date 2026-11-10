@@ -12,36 +12,35 @@ use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-/// T3 Code's timeline as its dark theme draws it.
+/// T3 Code's timeline colors, in its light and dark themes.
 pub(crate) mod look {
-    use nsh_core::element::{Rgba, rgb};
+    use crate::ui::Tone;
+    use nsh_core::element::rgb;
 
     /// `--muted-foreground` and `--secondary-label`: work rows, headers, times.
-    pub(crate) const MUTED: Rgba = rgb(0x888888);
+    pub(crate) const MUTED: Tone = Tone::new(rgb(0x71717a), rgb(0x888888));
     /// `--icon-muted`: a tool's icon.
-    pub(crate) const ICON: Rgba = rgb(0x6a6a6a);
+    pub(crate) const ICON: Tone = Tone::new(rgb(0xa1a1aa), rgb(0x6a6a6a));
     /// `--foreground`: the shimmer's band, a hovered header.
-    pub(crate) const FOREGROUND: Rgba = rgb(0xe6e6e6);
+    pub(crate) const FOREGROUND: Tone = Tone::new(rgb(0x18181b), rgb(0xe6e6e6));
     /// `bg-message`: the user's bubble.
-    pub(crate) const BUBBLE: Rgba = rgb(0x141414);
+    pub(crate) const BUBBLE: Tone = Tone::new(rgb(0xebebed), rgb(0x141414));
     /// `border-border/60`: the rule under a turn's header.
-    pub(crate) const RULE: Rgba = rgb(0x161616);
+    pub(crate) const RULE: Tone = Tone::new(rgb(0xeeeef0), rgb(0x161616));
     /// `text-foreground/80`: an error's message.
-    pub(crate) const MESSAGE: Rgba = rgb(0xc4c4c4);
+    pub(crate) const MESSAGE: Tone = Tone::new(rgb(0x454548), rgb(0xc4c4c4));
     /// `bg-input/32`: a code block.
-    pub(crate) const CODE: Rgba = rgb(0x111111);
+    pub(crate) const CODE: Tone = Tone::new(rgb(0xefeff1), rgb(0x111111));
     /// `--destructive`.
-    pub(crate) const DESTRUCTIVE: Rgba = rgb(0xfb414a);
+    pub(crate) const DESTRUCTIVE: Tone = Tone::new(rgb(0xfb2c36), rgb(0xfb414a));
     /// `border-border/80` around a card (a proposed plan) and an avatar.
-    pub(crate) const CARD_BORDER: Rgba = rgb(0x1b1b1b);
+    pub(crate) const CARD_BORDER: Tone = Tone::new(rgb(0xe9e9ec), rgb(0x1b1b1b));
     /// `--secondary` and an outlined control's fill: a badge, a menu button.
-    pub(crate) const CONTROL: Rgba = rgb(0x161616);
-    /// `--input`: an outlined control's edge.
-    pub(crate) const CONTROL_BORDER: Rgba = rgb(0x292929);
+    pub(crate) const CONTROL: Tone = Tone::new(rgb(0xfafafa), rgb(0x161616));
     /// A subagent's avatar.
-    pub(crate) const AVATAR: Rgba = rgb(0x121212);
+    pub(crate) const AVATAR: Tone = Tone::new(rgb(0xf4f4f5), rgb(0x121212));
     /// `--success`: a subagent that finished.
-    pub(crate) const SUCCESS: Rgba = rgb(0x01b276);
+    pub(crate) const SUCCESS: Tone = Tone::new(rgb(0x00bc7d), rgb(0x01b276));
     /// `text-sm leading-relaxed`, in rows that are not Markdown.
     pub(crate) const TEXT: f32 = 14.0;
     pub(crate) const LINE: f32 = 22.75;
@@ -132,10 +131,13 @@ struct Row {
     steer: bool,
     /// The message waited in the queue, then started its turn.
     queued: bool,
-    /// A plan's Markdown, a subagent's latest word.
+    /// The turn "Edit from here" returns to just before.
+    edit_turn: Option<agent_protocol::ids::TurnId>,
+    /// A plan's complete Markdown.
     note: SharedString,
     /// A notification row's icon.
     notification: Option<crate::ui::Icon>,
+    agent: Option<agent_core::presentation::agents::SubagentPresentation>,
     error: Option<TurnErrorPresentation>,
     /// The message's id while the Host may not have received it: it goes back
     /// to the composer or is discarded, as the desktop client's controls do.
@@ -154,6 +156,7 @@ impl Row {
             actions: false,
             activity: None,
             fork: None,
+            edit_turn: None,
             retry: None,
             images: Vec::new(),
             detail: None,
@@ -163,6 +166,7 @@ impl Row {
             steer: false,
             queued: false,
             notification: None,
+            agent: None,
             note: SharedString::default(),
             error: None,
             unresolved: None,
@@ -189,6 +193,7 @@ fn project(
             timestamp_ms: item.data.timestamp_ms,
             steer: false,
             queued: false,
+            edit_turn_id: None,
         })
     }));
     rows.extend(
@@ -346,14 +351,14 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             row.note = text.into();
             row
         }
-        TurnRow::Subagent { id, name, message } => {
+        TurnRow::Subagent { id, agent } => {
             let mut row = Row::new(
                 format!("subagent:{id}"),
                 Kind::Activity,
                 Shape::Subagent,
-                name,
+                agent.name.clone(),
             );
-            row.note = message.into();
+            row.agent = Some(agent);
             row
         }
         TurnRow::Divider { id, label } => Row::new(
@@ -416,17 +421,27 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
     };
     let mut shown = Row::new(row.id, kind, shape, body);
     (shown.steer, shown.queued) = (row.steer, row.queued);
+    shown.edit_turn = row.edit_turn_id;
     shown.time = row
         .timestamp_ms
         .and_then(|ms| i64::try_from(ms).ok())
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| {
-            use chrono::Timelike;
+            use agent_core::presentation::conversation::{CalendarDay, day_aware_time};
+            use chrono::{Datelike, Timelike};
             let time = time.with_timezone(&chrono::Local);
-            agent_core::presentation::conversation::time_of_day(
+            let today = chrono::Local::now().date_naive();
+            day_aware_time(
                 crate::l10n::language(),
                 time.hour(),
                 time.minute(),
+                CalendarDay {
+                    year: time.year(),
+                    month: time.month(),
+                    day: time.day(),
+                },
+                (today - time.date_naive()).num_days(),
+                today.year(),
             )
         });
     match row.content {
@@ -497,9 +512,9 @@ pub(crate) struct Timeline {
     /// composer): as T3 Code's reservation, the tallest it was in this
     /// conversation, so that it shrinking never pulls a reader to the end.
     inset: Signal<f32>,
-    /// How tall what lies over the end is now, which a conversation opened
-    /// next starts its reservation from.
-    covered: Stored<f32>,
+    /// The composer's current height positions the latest-message button and
+    /// starts the next conversation's scroll reservation.
+    covered: Signal<f32>,
 }
 
 impl Timeline {
@@ -532,14 +547,16 @@ impl Timeline {
             viewable: signal(None),
             width: signal(0.0),
             inset: signal(0.0),
-            covered: stored(0.0),
+            covered: signal(0.0),
         }
     }
 
     /// As T3 Code's composer overlay: what lies over the timeline's end,
     /// `height` tall, which the timeline's end and its way back clear.
     pub(crate) fn cover(self, height: f32) {
-        self.covered.replace(height);
+        if self.covered.get_untracked() != height {
+            self.covered.set(height);
+        }
         if self.inset.get_untracked() < height {
             self.inset.set(height);
         }
@@ -575,10 +592,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
     } = timeline;
     let surroundings = crate::rich_text::Surroundings::current();
     let connection = surroundings.connection;
+    let saver = crate::plans::Saver::new();
     let expanded_items = signal(HashSet::<String>::new());
     // Where the list was last scrolled to, for Core's follow rule.
     let scrolled = stored(None::<agent_core::presentation::conversation::ScrollPosition>);
-    let scroll_pending = stored(false);
     // Further from the end than following reaches, as T3 Code offers the way
     // back.
     let away_from_end = signal(false);
@@ -589,10 +606,23 @@ fn list(timeline: Timeline) -> impl IntoElement {
     spawn(async move {
         loop {
             timer(std::time::Duration::from_secs(1)).await;
-            if connection
+            let running = connection
                 .composer
                 .with_untracked(|p| p.controls.running_turn.is_some())
-            {
+                || connection.publication.with_untracked(|p| {
+                    rows.with_untracked(|rows| {
+                        rows.iter()
+                            .filter_map(|row| row.agent.as_ref())
+                            .any(|agent| {
+                                let child = agent.target.as_ref().and_then(|target| {
+                                    p.snapshot.sessions.conversations.get(target)
+                                });
+                                agent.status(child.map(|child| &**child))
+                                    == agent_protocol::models::TurnStatus::Running
+                            })
+                    })
+                });
+            if running {
                 clock.set(std::time::SystemTime::now());
             }
         }
@@ -622,26 +652,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
         groups.set(HashSet::new());
         expanded_items.set(HashSet::new());
         // A reservation held for another conversation's draft is not this one's.
-        inset.set(covered.get());
-    });
-    // A conversation opening or changing rows goes to its end while it
-    // follows. A reader who scrolls back to the end is there already.
-    effect(move || {
-        target.get();
-        if column_width.get() > 0.0
-            && rows.with(|rows| !rows.is_empty())
-            && following.get_untracked()
-            && !scroll_pending.get()
-        {
-            scroll_pending.replace(true);
-            // Row keys must reach the list before its end can be targeted.
-            after_answer(move || {
-                scroll_pending.replace(false);
-                if following.get_untracked() {
-                    list.scroll_to_end(false);
-                }
-            });
-        }
+        inset.set(covered.get_untracked());
     });
     // T3 Code's thread error banner over the timeline's top.
     let banner = computed(move || connection.context.with(|p| p.thread_error().is_some()));
@@ -658,6 +669,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
         .flex_1()
         .min_h_0()
         .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
+        .child(saver.view(connection))
         .child(opening(connection))
         .child(when(
             move || history.get().is_some(),
@@ -710,17 +722,22 @@ fn list(timeline: Timeline) -> impl IntoElement {
                     .unwrap_or_default()
             })
         }))
-        .child(when(
-            move || column_width.get() > 0.0 && rows.with(|rows| !rows.is_empty()),
+        // Cell measurements and native text views belong to this conversation.
+        // Reusing the list across tasks carries their heights and scroll offset
+        // into an unrelated history before its native measurements arrive.
+        .child(each(
             move || {
+                (column_width.get() > 0.0 && rows.with(|rows| !rows.is_empty()))
+                    .then(|| target.get())
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            },
+            |target| target.clone(),
+            move |_, _| {
                 virtual_list(
                     move || rows.with(|rows| rows.len()),
                     move |at| {
-                        let binding = stored((
-                            target.get_untracked(),
-                            None::<(usize, String)>,
-                            None::<usize>,
-                        ));
+                        let binding = stored((None::<(usize, String)>, None::<usize>));
                         // Asks again once the runtime answered a retention.
                         let recheck = signal(0_u32);
                         let row = computed(move || {
@@ -730,11 +747,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             recheck.get();
                             let rows = rows.try_get()?;
                             let snapshot = std::sync::Arc::as_ptr(&rows.0) as usize;
-                            // The conversation may have closed under a recheck.
-                            let scope = target.try_get()?;
                             let position = at.index();
-                            let (previous_scope, previous, retained_in) = binding.get();
-                            let previous = previous.filter(|_| previous_scope == scope);
+                            let (previous, retained_in) = binding.get();
                             let retained = previous
                                 .as_ref()
                                 .and_then(|(_, id)| rows.iter().position(|row| &row.id == id));
@@ -756,7 +770,6 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             }
                             let row = index.and_then(|index| rows.get(index)).cloned();
                             binding.replace((
-                                scope,
                                 row.as_ref().map(|row| (position, row.id.clone())),
                                 retaining.then_some(snapshot),
                             ));
@@ -971,11 +984,11 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                     ))
                                     .child(when(
                                         move || shape() == Some(Shape::Plan),
-                                        move || plan_card(surroundings, row, column_width),
+                                        move || plan_card(surroundings, row, column_width, saver),
                                     ))
                                     .child(when(
                                         move || shape() == Some(Shape::Subagent),
-                                        move || subagent_row(row),
+                                        move || subagent_row(connection, row, clock),
                                     ))
                                     .child(when(
                                         move || shape() == Some(Shape::Divider),
@@ -1096,10 +1109,9 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             ))
                     },
                 )
-                // Start with the latest row in the first layout. Creating an empty
-                // list and jumping after its first commit first mounts older cells
-                // at placeholder heights and measures content the reader never sees.
-                .initial_scroll_index(rows.with_untracked(|rows| rows.len().saturating_sub(1)))
+                // Open at the end in the first layout. Jumping after the first
+                // commit shows older rows at placeholder heights on the way.
+                .initial_scroll_at_end()
                 .keys(move || {
                     rows.with(|rows| rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
                 })
@@ -1141,34 +1153,26 @@ fn list(timeline: Timeline) -> impl IntoElement {
         .child(when(
             move || !following.get() && away_from_end.get(),
             move || {
-                // T3 Code's "Scroll to end" pill.
+                // Match the iPhone's 44-point glass circle, centered six
+                // points above the composer.
                 let label = tr("最新のメッセージへ");
                 nsh_base::button()
                     .accessibility_label(Some(SharedString::from(label)))
                     .absolute()
                     .self_center()
-                    .bottom(move || px(10.0 + inset.get()))
-                    .h(px(24.0))
-                    .px_2()
-                    .flex_row()
+                    .bottom(move || px(6.0 + covered.get()))
+                    .w(px(44.0))
+                    .h(px(44.0))
                     .items_center()
-                    .gap_1()
+                    .justify_center()
                     .rounded_full()
-                    .bg(crate::ui::colors::RAISED)
-                    .border_1()
-                    .border_color(crate::ui::colors::BORDER)
+                    .glass_effect(nsh_core::GlassEffect::Regular)
                     .text_color(look::FOREGROUND)
-                    .hover(|s| s.bg(crate::ui::colors::SELECTED))
                     .on_press(move || {
                         following.set(true);
                         list.scroll_to_end(true);
                     })
-                    .child(crate::ui::icon(crate::ui::Icon::CHEVRON_DOWN, 14.0))
-                    .child(
-                        text(label)
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM),
-                    )
+                    .child(crate::ui::icon(crate::ui::Icon::ARROW_DOWN, 20.0))
             },
         ))
 }
@@ -1479,11 +1483,16 @@ fn group_row(
 
 /// A row's time, shown while the pointer is over the row (T3 Code's
 /// `TimelineRowTimestamp`).
-fn hover_time(time: impl Fn() -> String + 'static) -> View {
-    view()
-        .opacity(0.0)
+/// A row's controls: shown while the pointer is over the row, as T3 Code's,
+/// or always (`shown`); a touch screen, with no pointer to rest, always shows
+/// them (`pointer-coarse:opacity-100`).
+fn revealed(view: View, shown: bool) -> View {
+    view.opacity(if shown || !is_desktop() { 1.0 } else { 0.0 })
         .group_hover(|s| s.opacity(1.0))
-        .child(text(time).text_size(px(12.0)).text_color(look::MUTED))
+}
+
+fn hover_time(time: impl Fn() -> String + 'static) -> View {
+    revealed(view(), false).child(text(time).text_size(px(12.0)).text_color(look::MUTED))
 }
 
 /// T3 Code's divider for an interrupted run: its mark and label in the
@@ -1494,10 +1503,17 @@ fn plan_card(
     surroundings: crate::rich_text::Surroundings,
     row: Memo<Option<Row>>,
     column_width: Memo<f32>,
+    saver: crate::plans::Saver,
 ) -> View {
-    use crate::ui::{Icon, colors};
+    use crate::ui::colors;
     let read = move |read: fn(&Row) -> SharedString| {
-        move || row.with(|row| row.as_ref().map(read).unwrap_or_default())
+        move || {
+            row.try_get()
+                .flatten()
+                .as_ref()
+                .map(read)
+                .unwrap_or_default()
+        }
     };
     let note = read(|row| row.note.clone());
     view().w_full().px(px(4.0)).py(px(2.0)).child(
@@ -1544,25 +1560,11 @@ fn plan_card(
                                     .text_color(look::FOREGROUND),
                             ),
                     )
-                    .child(
-                        crate::ui::icon_button_sized(
-                            Icon::ELLIPSIS,
-                            tr("計画の操作"),
-                            24.0,
-                            16.0,
-                            move || {
-                                let plan = untracked(note).to_string();
-                                crate::ui::popup(
-                                    &serde_json::json!([{"id": "copy", "title": tr("クリップボードにコピー")}]),
-                                    move |_| set_clipboard(plan.clone()),
-                                )
-                            },
-                        )
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(look::CONTROL_BORDER)
-                        .bg(look::CONTROL),
-                    ),
+                    .child(crate::plans::actions(
+                        saver,
+                        surroundings.connection,
+                        move || row.try_get().flatten().map(|row| row.note.to_string()),
+                    )),
             )
             .child(view().mt(px(16.0)).child(crate::rich_text::message(
                 surroundings,
@@ -1575,12 +1577,68 @@ fn plan_card(
 
 /// A subagent the turn started, as T3 Code's subagent row: its avatar, its
 /// name over its latest word.
-fn subagent_row(row: Memo<Option<Row>>) -> View {
+fn subagent_row(
+    connection: Connection,
+    row: Memo<Option<Row>>,
+    clock: Signal<std::time::SystemTime>,
+) -> impl IntoElement {
     use crate::ui::{Icon, colors};
-    let read = move |read: fn(&Row) -> SharedString| {
-        move || row.with(|row| row.as_ref().map(read).unwrap_or_default())
+    let agent = move || row.try_get().flatten().and_then(|row| row.agent);
+    let target = move || agent().and_then(|agent| agent.target);
+    // Opening the child's history in the cache subscribes to its updates without
+    // navigating away from the parent or touching its draft.
+    let requested = stored(None);
+    effect(move || {
+        let target = target();
+        if requested.replace(target.clone()) != target
+            && let Some(target) = target
+        {
+            connection.dispatch(Intent::ReadThread(op::ReadThread::new(target)));
+        }
+    });
+    // Read the cell's retained row directly. Chained memos created inside this
+    // conditional branch can be queued while folding disposes their sources.
+    let child = move || {
+        let target = target()?;
+        connection
+            .publication
+            .try_get()?
+            .snapshot
+            .sessions
+            .conversations
+            .get(&target)
+            .cloned()
+            .map(Shared)
     };
-    view()
+    let name = move || {
+        agent()
+            .map(|agent| agent.name(child().as_deref()))
+            .unwrap_or_default()
+    };
+    let elapsed = move || {
+        agent_core::presentation::agents::subagent_elapsed(
+            crate::l10n::language(),
+            child().as_deref(),
+            clock
+                .try_get()
+                .unwrap_or_else(std::time::SystemTime::now)
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+        )
+        .unwrap_or_default()
+    };
+    let status = move || agent().map(|agent| agent.status(child().as_deref()));
+    nsh_base::button()
+        .accessibility_label(nsh_core::element::Prop::from(
+            (move || Some(SharedString::from(name()))).into_reactive(),
+        ))
+        .disabled(move || target().is_none())
+        .on_press(move || {
+            if let Some(target) = target() {
+                connection.dispatch(Intent::ReadThread(op::ReadThread::open(target)));
+            }
+        })
         .w_full()
         .flex_row()
         .items_center()
@@ -1610,7 +1668,12 @@ fn subagent_row(row: Memo<Option<Row>>) -> View {
                         .rounded_full()
                         .border_2()
                         .border_color(colors::BACKGROUND)
-                        .bg(look::SUCCESS),
+                        .bg(move || match status() {
+                            Some(agent_protocol::models::TurnStatus::Completed) => look::SUCCESS,
+                            Some(agent_protocol::models::TurnStatus::Running) => colors::ACCENT,
+                            Some(agent_protocol::models::TurnStatus::Failed) => look::DESTRUCTIVE,
+                            _ => look::MUTED,
+                        }),
                 ),
         )
         .child(
@@ -1618,18 +1681,25 @@ fn subagent_row(row: Memo<Option<Row>>) -> View {
                 .flex_1()
                 .min_w_0()
                 .child(
-                    text(read(|row| row.body.clone()))
+                    text(name)
+                        .number_of_lines(1)
                         .text_size(px(12.0))
                         .line_height(px(16.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(look::FOREGROUND),
                 )
                 .child(
-                    text(read(|row| row.note.clone()))
+                    text(move || agent().map(|agent| agent.message).unwrap_or_default())
                         .text_size(px(11.0))
                         .line_height(px(18.0))
                         .text_color(look::MUTED),
                 ),
+        )
+        .child(
+            text(elapsed)
+                .text_size(px(11.0))
+                .text_color(look::MUTED)
+                .flex_shrink_0(),
         )
 }
 
@@ -1799,7 +1869,7 @@ fn error_row(
     };
     let tone = move || {
         if error.with(|error| error.as_ref().is_some_and(|e| e.is_usage_limit)) {
-            rgb(0xe5b567)
+            crate::ui::Tone::same(rgb(0xe5b567))
         } else {
             look::DESTRUCTIVE
         }
@@ -1827,24 +1897,22 @@ fn error_row(
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(tone),
                 ))
-                .child(view().opacity(0.0).group_hover(|s| s.opacity(1.0)).child(
-                    ui::icon_button_sized(
-                        Icon::COPY,
-                        tr("エラーの詳細をコピー"),
-                        24.0,
-                        12.0,
-                        move || {
-                            if let Some(error) = error.get_untracked() {
-                                set_clipboard(format!(
-                                    "{}\n{}\n{}",
-                                    error.title,
-                                    error.message,
-                                    error.details.unwrap_or_default()
-                                ));
-                            }
-                        },
-                    ),
-                ))
+                .child(revealed(view(), false).child(ui::icon_button_sized(
+                    Icon::COPY,
+                    tr("エラーの詳細をコピー"),
+                    24.0,
+                    12.0,
+                    move || {
+                        if let Some(error) = error.get_untracked() {
+                            set_clipboard(format!(
+                                "{}\n{}\n{}",
+                                error.title,
+                                error.message,
+                                error.details.unwrap_or_default()
+                            ));
+                        }
+                    },
+                )))
                 .child(
                     text(time)
                         .ml_2()
@@ -1933,12 +2001,7 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
             .and_then(|turn| connection.context.with(|context| context.fork_error(turn)))
             .map(|error| error.to_string())
     };
-    let actions = view()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .opacity(if trailing { 1.0 } else { 0.0 })
-        .group_hover(|s| s.opacity(1.0))
+    let actions = revealed(view().flex_row().items_center().gap_2(), trailing)
         .child(when(
             move || fork().is_some(),
             move || {
@@ -1983,42 +2046,73 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
 }
 
 /// The user's own message's actions, as T3 Code's under its bubble while the
-/// pointer is over it: its time, editing it in the composer, copy.
+/// pointer is over it: its time, editing from it, copy.
 fn user_actions(connection: Connection, row: Memo<Option<Row>>) -> View {
-    use crate::ui::Icon;
-    let body = move || row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()));
-    view()
-        .mt_1()
-        .pr_1()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .opacity(0.0)
-        .group_hover(|s| s.opacity(1.0))
-        .child(time(row))
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .child(action(Icon::UNDO, "入力欄で編集", move || {
-                    let Some(text) = body() else { return };
-                    let draft_key = connection
-                        .composer
-                        .with_untracked(|c| c.controls.navigation.draft_key.clone());
-                    connection.dispatch(Intent::EditComposer {
-                        thread_id: draft_key,
-                        cursor: text.len() as u32,
-                        text,
-                    });
-                    connection.composer_ref.focus();
-                }))
-                .child(action(Icon::COPY, "発言をコピー", move || {
-                    if let Some(text) = body() {
-                        set_clipboard(text);
-                    }
-                })),
-        )
+    use crate::ui::{Enabled, Icon};
+    let edit_turn = move || row.with(|row| row.as_ref().and_then(|row| row.edit_turn.clone()));
+    revealed(
+        view().mt_1().pr_1().flex_row().items_center().gap_2(),
+        false,
+    )
+    .child(time(row))
+    .child(
+        view()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(when(
+                move || edit_turn().is_some(),
+                move || {
+                    action(Icon::PENCIL, "ここから編集", move || {
+                        if let Some(turn) = untracked(edit_turn) {
+                            edit_from_here(connection, turn);
+                        }
+                    })
+                    .enabled(move || {
+                        connection
+                            .composer
+                            .with(|c| c.controls.running_turn.is_none())
+                            && !connection.context.with(|context| context.rewinding())
+                    })
+                },
+            ))
+            .child(action(Icon::COPY, "発言をコピー", move || {
+                if let Some(text) =
+                    row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
+                {
+                    set_clipboard(text);
+                }
+            })),
+    )
+}
+
+/// T3 Code's confirmation before a conversation is rewound. Bex keeps no
+/// per-turn file snapshot, so only the conversation goes back.
+fn edit_from_here(connection: Connection, turn: agent_protocol::ids::TurnId) {
+    let Some(thread_id) = connection
+        .context
+        .with_untracked(|context| context.navigation().thread_id)
+    else {
+        return;
+    };
+    spawn(async move {
+        let confirmed = nsh_base::alert_dialog()
+            .title(tr("ここから編集しますか？"))
+            .description(tr(
+                "この発言の前まで会話を巻き戻します。発言と添付は入力欄に戻ります。ファイルの変更はそのまま残ります。",
+            ))
+            .cancel("cancel", tr("キャンセル"))
+            .destructive("rewind", tr("巻き戻す"))
+            .show()
+            .await
+            .is_ok_and(|answer| answer.action.as_deref() == Some("rewind"));
+        if confirmed {
+            connection.dispatch(Intent::RewindSession(op::RewindSession::new(
+                thread_id, turn,
+            )));
+            connection.composer_ref.focus();
+        }
+    });
 }
 
 /// A message the Host may not have received: back to the composer, or away.

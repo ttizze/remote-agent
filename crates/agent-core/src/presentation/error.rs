@@ -114,6 +114,12 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
             },
             "キューのメッセージを変更できませんでした",
         ),
+        Rewind { session } => (
+            Conversation {
+                draft_key: session.into(),
+            },
+            "会話を巻き戻せませんでした",
+        ),
         Agents { session } => (
             Conversation {
                 draft_key: session.into(),

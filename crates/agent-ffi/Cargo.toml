@@ -11,3 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 agent-core = { path = "../agent-core", features = ["bindings"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+agent-nsh = { path = "../../apps/nsh" }

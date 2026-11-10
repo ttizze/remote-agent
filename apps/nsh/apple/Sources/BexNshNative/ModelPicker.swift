@@ -1,4 +1,7 @@
-import SwiftUI
+import Foundation
+#if os(iOS)
+    import SwiftUI
+#endif
 
 struct ModelPickerData: Decodable {
     struct Choice: Decodable, Identifiable {
@@ -52,6 +55,7 @@ struct ModelPickerData: Decodable {
     let account: Account?
 }
 
+#if os(iOS)
 struct ModelPickerPresenter: View {
     let data: ModelPickerData?
     let send: ([String: String]) -> Void
@@ -173,12 +177,8 @@ private struct ModelPickerForm: View {
             }
             .formStyle(.grouped).accessibilityIdentifier("model.picker")
             .navigationTitle("モデル設定")
-            #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 .searchable(text: search, placement: .navigationBarDrawer(displayMode: .always), prompt: "モデルを検索")
-            #else
-                .searchable(text: search, prompt: "モデルを検索")
-            #endif
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("完了") { emit("close") }.keyboardShortcut(.cancelAction)
@@ -186,11 +186,7 @@ private struct ModelPickerForm: View {
                     }
                 }
         }
-        #if os(macOS)
-        .frame(width: 600, height: 660)
-        #else
         .presentationDetents([.large]).presentationDragIndicator(.visible)
-        #endif
     }
 
     private var search: Binding<String> {
@@ -209,3 +205,5 @@ private struct ModelPickerForm: View {
         send(["token": data.id, "action": action, "value": value])
     }
 }
+
+#endif

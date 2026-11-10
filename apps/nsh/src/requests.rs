@@ -2,6 +2,7 @@
 //! (`ComposerBanner`): an approval's label, reason and decisions, an input
 //! request's answer, and the question the composer answers, with its choices.
 use crate::l10n::{language, localized, tr};
+use crate::ui::Tone;
 use crate::ui::{self, Enabled, Icon, colors};
 use crate::{Connection, native};
 use agent_core::{
@@ -17,11 +18,11 @@ use agent_protocol::{
     requests::{Answer, ElicitationAnswer, ElicitationInput, RequestBody},
 };
 use nsh_core::{
-    element::{Rgba, input, rgb, rgba},
+    element::{input, rgb, rgba},
     prelude::*,
 };
 
-const ERROR: Rgba = rgb(0xff8e86);
+const ERROR: Tone = Tone::new(rgb(0xe7000b), rgb(0xff8e86));
 /// How far the banner runs under the composer, which is drawn over it (T3's
 /// `--chat-composer-attachment-overlap`, 1rem and a pixel).
 const OVERLAP: f32 = 17.0;
@@ -29,11 +30,11 @@ const OVERLAP: f32 = 17.0;
 /// `--chat-composer-drawer-inset`, measured from inside the composer's outline).
 const INSET: f32 = 21.0;
 /// The banner's fill: T3's raised surface at its glass opacity over the page.
-const SURFACE: Rgba = rgb(0x101010);
+const SURFACE: Tone = Tone::new(rgb(0xffffff), rgb(0x101010));
 /// A waiting approval's fill: the surface under 8% of T3's warning.
-const WARNING_SURFACE: Rgba = rgb(0x231b0f);
-const WARNING_OUTLINE: Rgba = rgba(0xfe9a0047);
-const NEUTRAL_OUTLINE: Rgba = rgba(0xffffff0d);
+const WARNING_SURFACE: Tone = Tone::new(rgb(0xfff5eb), rgb(0x231b0f));
+const WARNING_OUTLINE: Tone = Tone::new(rgba(0xfe9a0047), rgba(0xfe9a0047));
+const NEUTRAL_OUTLINE: Tone = Tone::new(rgba(0x0000000d), rgba(0xffffff0d));
 /// T3's `--composer-banner-icon-column` beside a row's content.
 const ICON_COLUMN: f32 = 24.0;
 
@@ -69,7 +70,7 @@ pub(crate) fn panels(following: Signal<bool>) -> impl IntoElement {
 
 /// T3's attached banner surface: inset from the composer's sides, rounded
 /// above, with its foot under the composer.
-fn attached(fill: Rgba, outline: Rgba) -> View {
+fn attached(fill: Tone, outline: Tone) -> View {
     view()
         .mx(px(INSET))
         .mb(px(-OVERLAP))
@@ -315,9 +316,9 @@ fn outlined(
         .rounded(px(8.0))
         .border_1()
         .border_color(colors::T3_INPUT)
-        .bg(rgba(0xffffff07))
+        .bg(Tone::new(rgba(0x00000007), rgba(0xffffff07)))
         .text_color(colors::T3_FOREGROUND)
-        .hover(|s| s.bg(rgba(0xffffff14)))
+        .hover(|s| s.bg(Tone::new(rgba(0x00000014), rgba(0xffffff14))))
         .child(content)
 }
 
@@ -661,8 +662,10 @@ fn choices(
                     colors::T3_FOREGROUND.opacity(0.85)
                 }
             })
-            .style_when(chosen, |s| s.bg(rgba(0xffffff04)))
-            .hover(|s| s.bg(rgba(0xffffff02)))
+            .style_when(chosen, |s| {
+                s.bg(Tone::new(rgba(0x00000004), rgba(0xffffff04)))
+            })
+            .hover(|s| s.bg(Tone::new(rgba(0x00000002), rgba(0xffffff02))))
             .disabled_style(|s| s.opacity(0.5))
             .enabled(enabled)
             .child(

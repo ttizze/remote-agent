@@ -1,4 +1,4 @@
-//! Own Swift hosting views and their callback context across the C ABI.
+//! Own native Swift views and their callback context across the C ABI.
 use crate::l10n::tr;
 use nsh_core::JsonValue;
 use objc2::rc::Retained;
@@ -66,7 +66,6 @@ struct Hosted {
 }
 impl Hosted {
     fn new(context: ComponentContext, prefix: &str) -> Self {
-        context.set_size(0., 0.);
         let create = || {
             let bridge = Bridge::load(prefix)?;
             let mut context = Box::new(context);
@@ -81,7 +80,7 @@ impl Hosted {
             };
             // Swift owns the view for the entire retained resource lifetime.
             let view = unsafe { Retained::retain((resource.bridge.view)(handle.as_ptr())) }
-                .expect("a Swift hosting owner always has a native view");
+                .expect("a Swift owner always has a native view");
             Ok::<_, String>((resource, view))
         };
         match create() {

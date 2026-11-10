@@ -31,5 +31,5 @@ type "AI に依頼する" "[generated-images] [immediate] 生成画像を表示�
 press 送信
 expect "生成画像を表示しました。" 30000
 press "ファイルを開く*"
-expect "編集を確認します。" after ツールを閉じる 20000
+expect "編集を確認します。" after ツールを追加 20000
 screenshot file-link

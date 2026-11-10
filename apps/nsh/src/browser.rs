@@ -1,11 +1,7 @@
 //! The browser's controls send displayed-page-scoped operations to the Host's browser;
 //! the page itself stays the platform's web view or the Host's rendered image.
 use crate::l10n::{localized, tr};
-use crate::{
-    Connection, native,
-    shared::Shared,
-    workbench::{Reveal, Workbench},
-};
+use crate::{Connection, native, shared::Shared, workbench::Workbench};
 use agent_core::{state::DraftKey, store::BrowserUpdate};
 use agent_protocol::{browser::*, session::SessionRef};
 use base64::Engine;
@@ -66,7 +62,7 @@ fn viewer(thread: SessionRef) -> impl IntoElement {
             dismiss_keyboard();
         }
     };
-    let page_types = cfg!(not(any(target_os = "macos", target_os = "ios"))) && is_desktop();
+    let page_types = cfg!(not(target_os = "ios")) && is_desktop();
     let image = signal(String::new());
     let credentials = signal(None::<BrowserCredentials>);
     let answering = signal(false);
@@ -217,11 +213,7 @@ fn viewer(thread: SessionRef) -> impl IntoElement {
         if !accepts_input.get() {
             return;
         }
-        if let Some(url) = workspace.take_reveal(|reveal| match reveal {
-            Reveal::Page(url) => Some(url.clone()),
-            #[cfg(desktop)]
-            Reveal::DiffFile(_) => None,
-        }) {
+        if let Some(url) = workspace.take_reveal() {
             send(BrowserAction::Navigate { url });
         }
     });
@@ -244,7 +236,7 @@ fn viewer(thread: SessionRef) -> impl IntoElement {
             .or_else(|| notice.get())
             .map(localized)
     });
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
     let native_action = move |event: &NativeEvent| {
         if event.data.get("DismissCredentials").is_some() {
             credentials.set(None);
@@ -298,7 +290,7 @@ fn viewer(thread: SessionRef) -> impl IntoElement {
         .child(when(
             move || !native_page.get(),
             move || {
-                #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+                #[cfg(not(target_os = "ios"))]
                 return drawn::page(
                     image,
                     frame,
@@ -308,7 +300,7 @@ fn viewer(thread: SessionRef) -> impl IntoElement {
                     viewport,
                     send,
                 );
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                #[cfg(target_os = "ios")]
                 native("bex.browser.remote")
                     .prop("data", move || {
                         browser_data(
@@ -504,7 +496,7 @@ fn header(
                         .label(tr("ブラウザの URL"))
                         .text_size(px(13.0))
                         .text_color(colors::FOREGROUND)
-                        .placeholder_color(colors::MUTED)
+                        .placeholder_color(move || nsh_core::element::color(colors::MUTED))
                         .flex_1()
                         .min_w_0(),
                 )
@@ -713,11 +705,11 @@ fn menu(frame: &BrowserFrame) -> serde_json::Value {
     json!(items)
 }
 
-/// The Host's rendered page where SwiftUI does not show it.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+/// The PC browser surface uses NSH controls; the Mac embeds its AppKit canvas.
+#[cfg(not(target_os = "ios"))]
 mod drawn;
 
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "ios", test))]
 fn browser_data(
     image: &str,
     enabled: bool,

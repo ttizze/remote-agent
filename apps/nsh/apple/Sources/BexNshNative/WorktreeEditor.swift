@@ -1,5 +1,8 @@
 import NativeSettingsViews
-import SwiftUI
+import Foundation
+#if os(iOS)
+    import SwiftUI
+#endif
 
 struct WorktreeEditorData: Decodable {
     struct Editor: Decodable {
@@ -61,6 +64,7 @@ private func sendWorktree(_ action: WorktreeAction, token: String, send: ([Strin
     send(["token": token, "event": event])
 }
 
+#if os(iOS)
 struct WorktreeEditorPresenter: View {
     let data: WorktreeEditorData?
     let send: ([String: String]) -> Void
@@ -106,11 +110,7 @@ private struct WorktreeEditorForm: View {
     }
 
     private var fieldsEnabled: Bool {
-        #if os(macOS)
-            loaded && data.connected
-        #else
             loaded && data.connected && !busy
-        #endif
     }
 
     var body: some View {
@@ -136,30 +136,21 @@ private struct WorktreeEditorForm: View {
                     Section {
                         Text(verbatim: error).foregroundStyle(.red).accessibilityIdentifier("worktree.error")
                         Button("再読み込み") { emit(.load) }.disabled(busy || !data.connected)
-                        #if os(macOS)
-                            if loaded {
-                                Button("保存を再試行", action: save).disabled(busy || !data.connected)
-                            }
-                        #endif
                     }
                 }
                 managedWorktrees
             }
             .formStyle(.grouped)
             .navigationTitle("ワークツリー")
-            #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
-            #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("完了") { emit(.close) }.disabled(busy).keyboardShortcut(.cancelAction)
                     }
-                    #if os(iOS)
                         ToolbarItem(placement: .confirmationAction) {
                             Button("保存", action: save).disabled(!loaded || busy || !data.connected)
                                 .accessibilityIdentifier("worktree.save")
                         }
-                    #endif
                 }
         }
         .interactiveDismissDisabled(busy)
@@ -172,13 +163,7 @@ private struct WorktreeEditorForm: View {
             guard let receipt, let sent = submission, receipt.id == sent.id else { return }
             submission = nil
             guard receipt.succeeded else { return }
-            #if os(macOS)
-                if inputs != sent.inputs {
-                    save()
-                }
-            #else
                 emit(.close)
-            #endif
         }
         .confirmationDialog("作業ディレクトリを削除しますか？", isPresented: Binding(get: { removal != nil }, set: {
             if !$0 {
@@ -192,9 +177,6 @@ private struct WorktreeEditorForm: View {
         } message: {
             Text("この作業ディレクトリを削除します。ブランチと会話履歴は残ります。次のメッセージ送信時に、元プロジェクトの main から同じ場所に作り直します。")
         }
-        #if os(macOS)
-        .frame(width: 680, height: 740)
-        #endif
     }
 
     private var managedWorktrees: some View {
@@ -237,11 +219,6 @@ private struct WorktreeEditorForm: View {
 
     private func edit(_ value: WorktreeSettingsInputs) {
         inputs = value
-        #if os(macOS)
-            if submission == nil, !data.editor.pending {
-                save()
-            }
-        #endif
     }
 
     private func save() {
@@ -251,3 +228,5 @@ private struct WorktreeEditorForm: View {
         emit(.save(id: id, settings: inputs))
     }
 }
+
+#endif

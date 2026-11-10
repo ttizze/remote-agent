@@ -255,50 +255,36 @@ impl ComposerPresentation {
     }
 }
 
-/// The changed files a conversation's composer offers to review, as T3 Code's
-/// card above it: the totals, the listed files, and how many the folded card hides.
+/// The workspace changes a conversation's composer offers to review.
+///
+/// This is the shared summary used by native composer adapters. The full file
+/// list and diff stay in `WorkspaceReview`; the composer only needs the counts
+/// that the iOS badge and the desktop card display.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerReview {
-    pub files: usize,
+    pub files: u64,
     pub additions: u64,
     pub deletions: u64,
-    pub rows: Vec<agent_protocol::models::ChangedFile>,
-    /// The files past the folded card's rows, when there are any: the toggle's count.
-    pub folded: Option<usize>,
-}
-
-/// The files the card lists until it is expanded.
-const REVIEW_ROWS: usize = 3;
-
-/// Whether a card this wide names its review action beside the icon, as T3
-/// Code's changed-files card does from 24rem (`@[24rem]/changed-files`);
-/// narrower, the action is its icon and the totals keep the room.
-pub fn review_action_labelled(card_width: f32) -> bool {
-    card_width >= 384.
 }
 
 impl crate::state::PaneState {
-    /// The card for the open conversation's workspace changes; none for a draft
-    /// or a clean workspace.
-    pub fn composer_review(&self, expanded: bool) -> Option<ComposerReview> {
+    /// The summary for an open conversation's workspace changes; none for a
+    /// side chat, draft, or clean workspace.
+    pub fn composer_review(&self, is_side_chat: bool) -> Option<ComposerReview> {
+        if is_side_chat {
+            return None;
+        }
         self.navigation.thread_id.as_ref()?;
         let review = self
             .workspace
             .review
             .as_ref()
             .filter(|review| !review.files.is_empty())?;
-        let files = review.files.len();
-        let shown = if expanded {
-            files
-        } else {
-            files.min(REVIEW_ROWS)
-        };
         Some(ComposerReview {
-            files,
+            files: review.files.len() as u64,
             additions: review.additions,
             deletions: review.deletions,
-            rows: review.files[..shown].to_vec(),
-            folded: files.checked_sub(REVIEW_ROWS).filter(|more| *more > 0),
         })
     }
 }

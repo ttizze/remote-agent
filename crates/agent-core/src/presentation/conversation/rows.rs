@@ -167,6 +167,7 @@ impl ConversationRows {
                 timestamp_ms: item.data.timestamp_ms,
                 steer: false,
                 queued: false,
+                edit_turn_id: None,
             };
             let row = project_row(
                 &prefix,

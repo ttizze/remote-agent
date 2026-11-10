@@ -53,7 +53,6 @@ impl Application {
         let mut id = None;
         self.state.send_if_modified(|state| {
             if state.host.is_empty()
-                || state.account_locked()
                 || state
                     .worktrees
                     .as_ref()
@@ -84,7 +83,7 @@ impl Application {
         let Some(editor) = state
             .worktrees
             .as_ref()
-            .filter(|editor| editor.id == token && editor.host == state.host && !editor.pending)
+            .filter(|editor| editor.id == token && editor.host == state.host)
         else {
             return false;
         };
@@ -94,10 +93,15 @@ impl Application {
             .map(Vec::as_slice)
             .unwrap_or_default();
         match action {
+            // Closing the settings page must not wait for a Host read to
+            // finish. The request job checks the editor id before publishing
+            // its result, so dropping the editor safely discards a late
+            // response.
             WorktreeAction::Close {} => {
                 self.state
                     .send_modify(|state| Arc::make_mut(state).worktrees = None);
             }
+            _ if editor.pending => return false,
             WorktreeAction::Host { id } => {
                 if state.hosts.iter().any(|host| host.id == id) {
                     self.select_host(id, false);
@@ -293,7 +297,7 @@ mod tests {
             stop: tokio_util::sync::CancellationToken::new(),
             runtime: runtime.handle().clone(),
             jobs: Default::default(),
-            selection_path,
+            selection_path: Some(selection_path),
             #[cfg(desktop)]
             onboarding_path: std::path::PathBuf::new(),
             explorer_width_path,
@@ -317,6 +321,43 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn account_pending_worktree_request_can_close_before_late_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, app) = isolated_application(directory.path().into());
+        app.state.send_modify(|state| {
+            let state = Arc::make_mut(state);
+            state.host = "missing".into();
+            state.account_pending = true;
+        });
+        assert!(app.snapshot().account_locked());
+
+        app.open_worktrees();
+        let editor = app
+            .snapshot()
+            .worktrees
+            .clone()
+            .expect("account-pending read should create an editor");
+        assert!(
+            editor.pending,
+            "opening the editor should start its request"
+        );
+
+        app.worktree_action(&editor.id, WorktreeAction::Close {});
+        assert!(app.snapshot().worktrees.is_none());
+
+        // The missing Host completes the request asynchronously after Close.
+        // Its response must be ignored rather than recreating the editor.
+        app.jobs.close();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), app.jobs.wait())
+                .await
+                .unwrap();
+        });
+        assert!(app.snapshot().worktrees.is_none());
+        runtime.block_on(app.shutdown()).unwrap();
     }
 
     #[test]
@@ -460,9 +501,17 @@ mod tests {
             });
         });
         app.worktree_action("editor", WorktreeAction::Close {});
-        assert!(app.snapshot().worktrees.is_some());
-        app.state
-            .send_modify(|state| Arc::make_mut(state).worktrees.as_mut().unwrap().pending = false);
+        assert!(app.snapshot().worktrees.is_none());
+        app.state.send_modify(|state| {
+            Arc::make_mut(state).worktrees = Some(WorktreeEditor {
+                id: "editor".into(),
+                host: "missing".into(),
+                settings: Some(saved.clone()),
+                pending: false,
+                error: None,
+                receipt: None,
+            })
+        });
         app.worktree_action("old-editor", WorktreeAction::Close {});
         app.worktree_action(
             "editor",

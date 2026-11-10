@@ -43,8 +43,7 @@ expect_inside 承認方法を変更
 expect_inside "Fixture Model"
 expect_inside 音声をCodexで文字起こし
 expect_inside "AI に依頼する"
-expect_inside レビューする
-expect_apart "2 件のファイルを変更" レビューする
+expect_inside "2件のファイル"
 screenshot icon
 press 承認方法を変更
 expect "承認を求める"

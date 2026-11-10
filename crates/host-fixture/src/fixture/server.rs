@@ -775,7 +775,12 @@ impl Threads {
     /// child of `parent` that has answered, which clients can read and resume.
     fn spawn_subagent(&mut self, parent: &str, suffix: &str) {
         let id = scenario::subagent_thread(suffix);
-        let mut thread = Thread::new(id.clone(), Value::Null);
+        let cwd = self
+            .by_id
+            .get(parent)
+            .map(|thread| thread.borrow().metadata["cwd"].clone())
+            .unwrap_or(Value::Null);
+        let mut thread = Thread::new(id.clone(), cwd);
         thread
             .metadata
             .insert("parentThreadId".into(), parent.into());
@@ -785,7 +790,7 @@ impl Threads {
         thread
             .metadata
             .insert("preview".into(), "Review the change".into());
-        thread.turns.push(Rc::new(RefCell::new(json!({"id":format!("turn-{id}"),"status":"completed","items":[
+        thread.turns.push(Rc::new(RefCell::new(json!({"id":format!("turn-{id}"),"status":"completed","startedAtMs":1700000000000_u64,"completedAtMs":1700000004500_u64,"durationMs":4500,"items":[
             {"id":format!("prompt-{id}"),"type":"userMessage","content":[{"type":"text","text":"Review the change"}]},
             {"id":format!("answer-{id}"),"type":"agentMessage","phase":"final_answer","text":"Reviewed."}]}))));
         self.by_id.insert(id, Rc::new(RefCell::new(thread)));
@@ -1120,6 +1125,24 @@ pub(super) fn remove_if_present(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_spawned_child_keeps_its_parents_workspace_when_its_history_is_read() {
+        let mut threads = Threads::default();
+        threads.by_id.insert(
+            "parent".into(),
+            Rc::new(RefCell::new(Thread::new(
+                "parent".into(),
+                json!("/workspace"),
+            ))),
+        );
+        threads.spawn_subagent("parent", "one");
+        let child = threads.by_id[&scenario::subagent_thread("one")].borrow();
+        let value = serde_json::to_value(&*child).unwrap();
+        assert_eq!(value["cwd"], "/workspace");
+        assert_eq!(value["parentThreadId"], "parent");
+        assert!(history::persisted(&child).is_none());
+    }
 
     #[test]
     fn fixture_resets_do_not_reuse_live_turn_or_item_identities() {

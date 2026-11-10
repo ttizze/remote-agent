@@ -95,15 +95,6 @@ impl WorkspaceReview {
     pub fn diff_files(&self) -> Vec<crate::presentation::diff::WorkspaceDiffFile> {
         crate::presentation::diff::diff_files(&self.0)
     }
-    pub fn file_count(&self) -> u64 {
-        self.0.files.len() as u64
-    }
-    pub fn additions(&self) -> u64 {
-        self.0.additions
-    }
-    pub fn deletions(&self) -> u64 {
-        self.0.deletions
-    }
     pub fn unchanged(&self, other: Arc<Self>) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }

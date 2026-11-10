@@ -1,4 +1,6 @@
-import SwiftUI
+#if os(iOS)
+    import SwiftUI
+#endif
 
 public struct NativeBrowserCredentials: Decodable {
     public struct Profile: Decodable {
@@ -41,65 +43,65 @@ public enum BrowserCredentialsAction {
     case deletePasswords(origin: String)
 }
 
-public struct BrowserCredentialsView: View {
-    let credentials: NativeBrowserCredentials
-    let send: (BrowserCredentialsAction) -> Void
-    let close: () -> Void
+#if os(iOS)
+    public struct BrowserCredentialsView: View {
+        let credentials: NativeBrowserCredentials
+        let send: (BrowserCredentialsAction) -> Void
+        let close: () -> Void
 
-    public init(
-        credentials: NativeBrowserCredentials,
-        send: @escaping (BrowserCredentialsAction) -> Void,
-        close: @escaping () -> Void
-    ) {
-        self.credentials = credentials; self.send = send; self.close = close
-    }
+        public init(
+            credentials: NativeBrowserCredentials,
+            send: @escaping (BrowserCredentialsAction) -> Void,
+            close: @escaping () -> Void
+        ) {
+            self.credentials = credentials; self.send = send; self.close = close
+        }
 
-    public var body: some View {
-        NavigationStack {
-            List {
-                Section("接続先のブラウザから取り込む") {
-                    if credentials.profiles.isEmpty {
-                        Text("取り込めるブラウザプロファイルがありません。")
+        public var body: some View {
+            NavigationStack {
+                List {
+                    Section("接続先のブラウザから取り込む") {
+                        if credentials.profiles.isEmpty {
+                            Text("取り込めるブラウザプロファイルがありません。")
+                        }
+                        ForEach(credentials.profiles, id: \.label) { profile in
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text(profile.label)
+                                Button("ログイン状態（Cookie）") { send(.importCookies(profile: profile.id)) }
+                                Button("保存パスワード → Keychain") { send(.importPasswords(profile: profile.id)) }
+                            }.padding(.vertical, 4)
+                        }
                     }
-                    ForEach(credentials.profiles, id: \.label) { profile in
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(profile.label)
-                            Button("ログイン状態（Cookie）") { send(.importCookies(profile: profile.id)) }
-                            Button("保存パスワード → Keychain") { send(.importPasswords(profile: profile.id)) }
-                        }.padding(.vertical, 4)
-                    }
-                }
-                if !credentials.importErrors.isEmpty {
-                    Section("読み取れなかったブラウザ") {
-                        ForEach(credentials.importErrors, id: \.browser) { error in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(error.browser)
-                                Text(verbatim: error.message).font(.caption).foregroundStyle(.secondary)
+                    if !credentials.importErrors.isEmpty {
+                        Section("読み取れなかったブラウザ") {
+                            ForEach(credentials.importErrors, id: \.browser) { error in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(error.browser)
+                                    Text(verbatim: error.message).font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
-                }
-                if let origin = credentials.origin {
-                    Section("保存パスワード · \(origin)") {
-                        if credentials.accounts.isEmpty {
-                            Text(verbatim: credentials.passwordError ?? "このサイトの保存パスワードはありません。")
-                        }
-                        ForEach(credentials.accounts, id: \.self) { username in
-                            Button(username.isEmpty ? "ユーザー名なし" : username) {
-                                send(.fillPassword(origin: origin, username: username))
+                    if let origin = credentials.origin {
+                        Section("保存パスワード · \(origin)") {
+                            if credentials.accounts.isEmpty {
+                                Text(verbatim: credentials.passwordError ?? "このサイトの保存パスワードはありません。")
                             }
+                            ForEach(credentials.accounts, id: \.self) { username in
+                                Button(username.isEmpty ? "ユーザー名なし" : username) {
+                                    send(.fillPassword(origin: origin, username: username))
+                                }
+                            }
+                            Button("このサイトの保存パスワードを削除", role: .destructive) {
+                                send(.deletePasswords(origin: origin))
+                            }.disabled(credentials.accounts.isEmpty)
                         }
-                        Button("このサイトの保存パスワードを削除", role: .destructive) {
-                            send(.deletePasswords(origin: origin))
-                        }.disabled(credentials.accounts.isEmpty)
                     }
                 }
-            }
-            .navigationTitle("ブラウザデータ")
-            #if os(iOS)
+                .navigationTitle("ブラウザデータ")
                 .navigationBarTitleDisplayMode(.inline)
-            #endif
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("閉じる", action: close) } }
+            }
         }
     }
-}
+#endif

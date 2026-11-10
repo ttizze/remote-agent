@@ -7,22 +7,22 @@ type "AI に依頼する" "ツールを確認します"
 press 送信
 expect "シミュレータで完了しました。" 30000
 press 右パネルを切り替え
-press ファイル after ツールを閉じる
-press hello.txt after ツールを閉じる
-expect "日本語のファイル" after ツールを閉じる
+press ファイル after ツールを追加
+press hello.txt after ツールを追加
+expect "日本語のファイル" after ツールを追加
 expect ファイル一覧の幅を変更
-expect nested after ツールを閉じる
+expect nested after ツールを追加
 screenshot explorer
-drag nested "AI に依頼する" after ツールを閉じる
+drag nested "AI に依頼する" after ツールを追加
 screenshot dragging
 drop
 expect "[nested](nested)"
-press nested after ツールを閉じる
-expect child.txt after ツールを閉じる
+press nested after ツールを追加
+expect child.txt after ツールを追加
 key shift+f10
 press メンションをコピー
 expect_clipboard "[nested](nested)"
 drag ファイル一覧の幅を変更 "日本語のファイル*"
 drop
-expect "日本語のファイル" after ツールを閉じる
+expect "日本語のファイル" after ツールを追加
 screenshot widened

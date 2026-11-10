@@ -1,6 +1,6 @@
 # The tool panel opens the files of the conversation's project, a file, and its diff.
-# The changed-files bar above the composer names the same files, so the panel's
-# rows are found after the panel's own "ツールを閉じる" button.
+# The changed-files badge above the composer opens the full diff; the panel's
+# file rows are found after its own "ツールを追加" button.
 # iOS: testSimulatorWorkbenchStartsEmptyAndOwnsOnlyOpenedTabs, testSimulatorReviewsTheOpenSessionsWorktree
 expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
@@ -10,16 +10,16 @@ expect "シミュレータで完了しました。" 30000
 press 右パネルを切り替え
 expect "機能を開く"
 screenshot tools
-press ファイル after ツールを閉じる
-expect "nested" after ツールを閉じる
-press hello.txt after ツールを閉じる
-expect "日本語のファイル" after ツールを閉じる
+press ファイル after ツールを追加
+expect "nested" after ツールを追加
+press hello.txt after ツールを追加
+expect "日本語のファイル" after ツールを追加
 expect_absent "new file mode"
 screenshot file
 press ツールを追加
 press 差分
-expect "new file mode" after ツールを閉じる
-expect "編集を確認します。" after ツールを閉じる
+expect "new file mode" after ツールを追加
+expect "編集を確認します。" after ツールを追加
 screenshot diff
 press ツールを閉じる
 expect_absent "機能を開く"

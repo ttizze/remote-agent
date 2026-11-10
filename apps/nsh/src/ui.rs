@@ -2,44 +2,104 @@
 //! Text input, scrolling, menus, alerts and web views stay the platform's.
 use agent_core::presentation::conversation::ActionTone;
 use nsh_core::{
-    element::{ImageSrc, Rgba, desktop::MenuItem, rgb, rgba},
+    element::{AdaptiveColor, ImageSrc, Reactive, Rgba, desktop::MenuItem, rgb, rgba},
     prelude::*,
 };
 use serde_json::Value;
 
-pub(crate) mod colors {
-    use super::{Rgba, rgb, rgba};
+/// A color for each appearance, T3 Code's light and dark values of one token.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Tone {
+    light: Rgba,
+    dark: Rgba,
+}
 
-    pub(crate) const BACKGROUND: Rgba = rgb(0x080808);
-    pub(crate) const SIDEBAR: Rgba = rgb(0x000000);
-    pub(crate) const SURFACE: Rgba = rgb(0x0f0f0f);
-    pub(crate) const RAISED: Rgba = rgb(0x141414);
-    pub(crate) const SELECTED: Rgba = rgb(0x282828);
-    pub(crate) const BORDER: Rgba = rgb(0x303030);
-    pub(crate) const FOREGROUND: Rgba = rgb(0xe6e6e6);
-    pub(crate) const MUTED: Rgba = rgb(0xa6a6a6);
+impl Tone {
+    pub(crate) const fn new(light: Rgba, dark: Rgba) -> Self {
+        Self { light, dark }
+    }
+
+    /// The same color in both appearances: a brand's, or one on a filled control.
+    pub(crate) const fn same(color: Rgba) -> Self {
+        Self::new(color, color)
+    }
+
+    /// This color with `opacity` of `to` over it, in each appearance.
+    pub(crate) fn blend(self, to: Self, opacity: f32) -> Self {
+        let blend = |from: Rgba, to: Rgba| {
+            let mix = |a: f32, b: f32| a * (1.0 - opacity) + b * opacity;
+            Rgba {
+                r: mix(from.r, to.r),
+                g: mix(from.g, to.g),
+                b: mix(from.b, to.b),
+                a: 1.0,
+            }
+        };
+        Self::new(blend(self.light, to.light), blend(self.dark, to.dark))
+    }
+
+    pub(crate) fn opacity(self, opacity: f32) -> Self {
+        Self::new(self.light.opacity(opacity), self.dark.opacity(opacity))
+    }
+
+    pub(crate) fn alpha(self, alpha: f32) -> Self {
+        Self::new(self.light.alpha(alpha), self.dark.alpha(alpha))
+    }
+}
+
+impl From<Tone> for AdaptiveColor {
+    fn from(tone: Tone) -> Self {
+        Self::new(tone.light, tone.dark)
+    }
+}
+
+impl IntoReactive<AdaptiveColor> for Tone {
+    fn into_reactive(self) -> Reactive<AdaptiveColor> {
+        Reactive::Static(self.into())
+    }
+}
+
+pub(crate) mod colors {
+    use super::{Tone, rgb, rgba};
+
+    pub(crate) const BACKGROUND: Tone = Tone::new(rgb(0xfcfcfc), rgb(0x080808));
+    pub(crate) const SIDEBAR: Tone = Tone::new(rgb(0xfafafa), rgb(0x000000));
+    pub(crate) const SURFACE: Tone = Tone::new(rgb(0xffffff), rgb(0x0f0f0f));
+    pub(crate) const RAISED: Tone = Tone::new(rgb(0xffffff), rgb(0x141414));
+    pub(crate) const SELECTED: Tone = Tone::new(rgb(0xe4e4e7), rgb(0x282828));
+    pub(crate) const BORDER: Tone = Tone::new(rgb(0xe4e4e7), rgb(0x303030));
+    pub(crate) const FOREGROUND: Tone = Tone::new(rgb(0x18181b), rgb(0xe6e6e6));
+    pub(crate) const MUTED: Tone = Tone::new(rgb(0x71717a), rgb(0xa6a6a6));
     /// T3 Code's `--primary`.
-    pub(crate) const ACCENT: Rgba = rgb(0x346bf1);
-    // T3 Code's dark theme, for the conversation's header and the banners
-    // over its timeline and composer.
+    pub(crate) const ACCENT: Tone = Tone::new(rgb(0x1b4ed8), rgb(0x346bf1));
+    // T3 Code's theme, for the conversation's header and the banners over
+    // its timeline and composer.
     /// `--foreground` (neutral-100).
-    pub(crate) const T3_FOREGROUND: Rgba = rgb(0xf5f5f5);
+    pub(crate) const T3_FOREGROUND: Tone = Tone::new(rgb(0x18181b), rgb(0xf5f5f5));
     /// `--muted-foreground`: neutral-500 with a tenth of white.
-    pub(crate) const T3_MUTED: Rgba = rgb(0x818181);
+    pub(crate) const T3_MUTED: Tone = Tone::new(rgb(0x71717a), rgb(0x818181));
     /// `--accent`: a pressed or hovered ghost control, white at 4%.
     #[cfg(desktop)]
-    pub(crate) const T3_ACCENT: Rgba = rgba(0xffffff0a);
+    pub(crate) const T3_ACCENT: Tone = Tone::new(rgb(0xf4f4f5), rgba(0xffffff0a));
     /// `--input`: an outlined control's edge, white at 8%.
-    pub(crate) const T3_INPUT: Rgba = rgba(0xffffff14);
+    pub(crate) const T3_INPUT: Tone = Tone::new(rgb(0xd4d4d8), rgba(0xffffff14));
     /// `--warning` (amber-500).
-    pub(crate) const WARNING: Rgba = rgb(0xfe9a00);
+    pub(crate) const WARNING: Tone = Tone::new(rgb(0xfe9a00), rgb(0xfe9a00));
     /// A ghost control under the pointer: the selection fill at half opacity.
-    pub(crate) const GHOST_HOVER: Rgba = rgba(0x28282880);
+    pub(crate) const GHOST_HOVER: Tone = Tone::new(rgba(0xe4e4e780), rgba(0x28282880));
     /// A sidebar row under the pointer.
-    pub(crate) const ROW_HOVER: Rgba = rgba(0x282828cc);
+    pub(crate) const ROW_HOVER: Tone = Tone::new(rgba(0xe4e4e7cc), rgba(0x282828cc));
 }
 
 pub(crate) const RADIUS: f32 = 6.0;
+pub(crate) const HEADER_HEIGHT: f32 = 52.0;
+
+/// T3 Code's distance from the window's end to its top-right controls (12
+/// points and a pixel), past the window controls Windows draws over the bar.
+#[cfg(desktop)]
+pub(crate) fn titlebar_end_inset() -> Points {
+    px(13.0 + nsh_core::element::desktop::title_bar().right.0)
+}
 
 /// An icon: its markup, drawn in the current text color. Every platform draws
 /// the same Lucide set, as the existing desktop client did, so icons side by
@@ -63,9 +123,10 @@ impl Icon {
     pub(crate) const ARROW_LEFT: Self = icon!(ArrowLeft);
     pub(crate) const ARROW_RIGHT: Self = icon!(ArrowRight);
     pub(crate) const ARROW_UP: Self = icon!(ArrowUp);
+    pub(crate) const ARROW_DOWN: Self = icon!(ArrowDown);
     pub(crate) const GIT_FORK: Self = icon!(GitFork);
-    pub(crate) const UNDO: Self = icon!(Undo2);
     pub(crate) const WRAP: Self = icon!(TextWrap);
+    #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);
     pub(crate) const MINIMIZE: Self = icon!(Minimize2);
     pub(crate) const WARNING: Self = icon!(TriangleExclamationPoint);
@@ -92,7 +153,6 @@ impl Icon {
     pub(crate) const FOLDER: Self = icon!(Folder);
     pub(crate) const GLOBE: Self = icon!(Globe);
     pub(crate) const NETWORK: Self = icon!(Network);
-    pub(crate) const LAYOUT: Self = icon!(PanelsRightBottom);
     pub(crate) const KEYBOARD: Self = icon!(Keyboard);
     pub(crate) const FOLDER_PLUS: Self = icon!(FolderPlus);
     pub(crate) const LOADER: Self = icon!(Loader);
@@ -106,6 +166,7 @@ impl Icon {
     pub(crate) const PANEL_LEFT_CLOSE: Self = icon!(PanelLeftClose);
     #[cfg(desktop)]
     pub(crate) const PANEL_LEFT_OPEN: Self = icon!(PanelLeftOpen);
+    #[cfg(desktop)]
     pub(crate) const PANEL_RIGHT: Self = icon!(PanelRight);
     #[cfg(desktop)]
     pub(crate) const PANEL_BOTTOM: Self = icon!(PanelBottom);
@@ -233,14 +294,24 @@ pub(crate) fn action_button(
     press: impl Fn() + 'static,
 ) -> nsh_base::ButtonElement {
     let (fill, foreground, hover, outline) = match tone {
-        ActionTone::Primary => (rgb(0xf5f5f5), rgb(0x0f0f0f), rgb(0xd4d4d4), rgb(0xf5f5f5)),
+        ActionTone::Primary => (
+            Tone::new(rgb(0x18181b), rgb(0xf5f5f5)),
+            Tone::new(rgb(0xffffff), rgb(0x0f0f0f)),
+            Tone::new(rgb(0x3f3f46), rgb(0xd4d4d4)),
+            Tone::new(rgb(0x18181b), rgb(0xf5f5f5)),
+        ),
         ActionTone::Secondary => (
-            rgba(0x00000000),
+            Tone::same(rgba(0x00000000)),
             colors::FOREGROUND,
             colors::GHOST_HOVER,
             colors::BORDER,
         ),
-        ActionTone::Danger => (rgb(0x301214), rgb(0xff6467), rgb(0x3d171a), rgb(0x301214)),
+        ActionTone::Danger => (
+            Tone::new(rgb(0xfef2f2), rgb(0x301214)),
+            Tone::new(rgb(0xdc2626), rgb(0xff6467)),
+            Tone::new(rgb(0xfee2e2), rgb(0x3d171a)),
+            Tone::new(rgb(0xfecaca), rgb(0x301214)),
+        ),
     };
     let title = title.into_reactive();
     nsh_base::button()
@@ -722,7 +793,7 @@ pub(crate) fn search(query: Signal<String>, placeholder: &'static str) -> View {
                 .on_change(move |text: &str| query.set(text.to_owned()))
                 .text_size(px(14.0))
                 .text_color(colors::FOREGROUND)
-                .placeholder_color(colors::MUTED)
+                .placeholder_color(move || nsh_core::element::color(colors::MUTED))
                 .flex_1()
                 .min_w_0(),
         )

@@ -9,5 +9,5 @@ press 右パネルを切り替え
 expect "機能を開く"
 screenshot launcher
 key f
-expect "nested" after ツールを閉じる 10000
-expect "hello.txt" after ツールを閉じる
+expect "nested" after ツールを追加 10000
+expect "hello.txt" after ツールを追加

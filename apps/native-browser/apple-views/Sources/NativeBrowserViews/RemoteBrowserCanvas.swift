@@ -1,11 +1,10 @@
-import SwiftUI
-
 public enum BrowserPointerAction {
     case click(x: Double, y: Double)
     case scroll(x: Double, y: Double, deltaX: Double, deltaY: Double)
 }
 
 #if os(iOS)
+    import SwiftUI
     import UIKit
 
     public struct RemoteBrowserCanvas: UIViewRepresentable {

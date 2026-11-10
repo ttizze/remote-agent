@@ -753,6 +753,20 @@ impl HostRpcService {
     where
         F: std::future::Future<Output = Result<ThreadResponse, Failure>>,
     {
+        let response = self.native_thread(agent, start).await?;
+        self.notify_thread(response.thread.clone()).await?;
+        Ok(response)
+    }
+
+    /// A native session no client has heard of yet.
+    pub(super) async fn native_thread<F>(
+        &self,
+        agent: &dyn Agent,
+        start: impl FnOnce(Option<serde_json::Value>) -> F,
+    ) -> Result<ThreadResponse, Failure>
+    where
+        F: std::future::Future<Output = Result<ThreadResponse, Failure>>,
+    {
         let scope = uuid::Uuid::new_v4().to_string();
         let mut response = start(self.browser_config(&scope)?).await?;
         if let Some(browser) = self.inner.browser.get()
@@ -762,8 +776,13 @@ impl HostRpcService {
         }
         let projects = self.project_snapshot().await?;
         describe_thread(&mut response.thread, agent.capabilities(), &projects);
-        self.notify_session_updated(response.thread.clone(), &projects.projects);
         Ok(response)
+    }
+
+    pub(super) async fn notify_thread(&self, thread: Thread) -> Result<(), Failure> {
+        let projects = self.project_snapshot().await?;
+        self.notify_session_updated(thread, &projects.projects);
+        Ok(())
     }
 }
 

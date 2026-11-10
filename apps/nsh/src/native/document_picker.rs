@@ -1,4 +1,4 @@
-//! UIDocumentPicker imports local copies; the app uploads only selected paths.
+//! UIDocumentPicker imports copies and exports local files using Files.
 use nsh_core::JsonValue;
 use nsh_platform_ios::{ComponentContext, NativeComponent};
 use objc2::{
@@ -61,7 +61,13 @@ impl NativeComponent for DocumentPicker {
         &self.view
     }
     fn set_prop(&mut self, name: &str, value: Option<&JsonValue>) {
-        if name != "open" || value.and_then(JsonValue::as_u64).unwrap_or_default() == 0 {
+        let export = (name == "export")
+            .then(|| value.and_then(JsonValue::as_str))
+            .flatten()
+            .filter(|path| !path.is_empty());
+        if export.is_none()
+            && (name != "open" || value.and_then(JsonValue::as_u64).unwrap_or_default() == 0)
+        {
             return;
         }
         if self
@@ -81,13 +87,23 @@ impl NativeComponent for DocumentPicker {
         while let Some(presented) = controller.presentedViewController() {
             controller = presented;
         }
-        let data = UTType::typeWithIdentifier(&NSString::from_str("public.data")).unwrap();
-        let picker = UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(
-            UIDocumentPickerViewController::alloc(self.view.mtm()),
-            &NSArray::from_retained_slice(&[data]),
-            true,
-        );
-        picker.setAllowsMultipleSelection(true);
+        let picker = if let Some(path) = export {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+            UIDocumentPickerViewController::initForExportingURLs_asCopy(
+                UIDocumentPickerViewController::alloc(self.view.mtm()),
+                &NSArray::from_retained_slice(&[url]),
+                true,
+            )
+        } else {
+            let data = UTType::typeWithIdentifier(&NSString::from_str("public.data")).unwrap();
+            let picker = UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(
+                UIDocumentPickerViewController::alloc(self.view.mtm()),
+                &NSArray::from_retained_slice(&[data]),
+                true,
+            );
+            picker.setAllowsMultipleSelection(true);
+            picker
+        };
         picker.setDelegate(Some(ProtocolObject::from_ref(&*self.delegate)));
         controller.presentViewController_animated_completion(&picker, true, None);
         self.picker = Some(picker);

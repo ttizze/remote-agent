@@ -652,6 +652,101 @@ impl Operation for ForkSession {
         }
     }
 }
+pub use agent_protocol::operations::RewindSession;
+
+/// What the user sent in `turn`: its text and the files that can be attached again.
+fn sent_input(
+    snapshot: &Snapshot,
+    session: &crate::session::SessionRef,
+    turn: &agent_protocol::ids::TurnId,
+) -> Option<(String, Vec<Attachment>)> {
+    use agent_protocol::items::{ItemBody, MessagePart};
+    let thread = snapshot.sessions.conversations.get(session)?;
+    let turn = thread
+        .turns
+        .iter()
+        .flatten()
+        .find(|candidate| candidate.id == *turn)?;
+    let (text, content) = turn
+        .items
+        .iter()
+        .flatten()
+        .find_map(|item| match item.body() {
+            ItemBody::UserMessage { text, content } => Some((text, content)),
+            _ => None,
+        })?;
+    let mut texts = Vec::new();
+    let mut attachments = Vec::new();
+    for part in content {
+        match part {
+            MessagePart::Text { text } => texts.push(text.as_str()),
+            MessagePart::Image { source } if source.starts_with('/') => {
+                attachments.push(Attachment {
+                    name: file_name(source),
+                    path: source.clone(),
+                    is_image: true,
+                });
+            }
+            MessagePart::Attachment { name, path } => attachments.push(Attachment {
+                name: name.clone(),
+                path: path.clone(),
+                is_image: false,
+            }),
+            MessagePart::Image { .. } | MessagePart::Invocation { .. } => {}
+        }
+    }
+    Some((
+        text.clone().unwrap_or_else(|| texts.join("\n")),
+        attachments,
+    ))
+}
+
+fn file_name(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+impl Operation for RewindSession {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Rewind {
+            session: self.thread_id.clone(),
+        })
+    }
+    rpc_operation!();
+    fn invalidates(&self) -> bool {
+        true
+    }
+    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        let id = self.thread_id;
+        if let Some((text, attachments)) = sent_input(snapshot, &id, &self.turn_id) {
+            let drafts = Arc::make_mut(&mut snapshot.input.drafts);
+            let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
+            draft.text = text;
+            for attachment in attachments {
+                if !draft.attachments.contains(&attachment) {
+                    draft.attachments.push(attachment);
+                }
+            }
+        }
+        // The held turns continue past the rewound end and would be kept.
+        Arc::make_mut(&mut snapshot.sessions.conversations).remove(&id);
+        let mut effects = open_thread(
+            snapshot,
+            pane_id,
+            output.thread,
+            output.model,
+            output.effort,
+            output.service_tier,
+        );
+        effects.push(Effect::execute(ReadThread::new(id)));
+        effects
+    }
+    fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.sessions.conversations).remove(&self.thread_id);
+        refresh_thread(snapshot, pane_id, output.thread);
+        Vec::new()
+    }
+}
+
 pub use agent_protocol::operations::CreateSession;
 pub use agent_protocol::operations::RetryPreparation;
 

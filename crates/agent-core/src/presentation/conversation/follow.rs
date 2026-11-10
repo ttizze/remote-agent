@@ -19,7 +19,8 @@ pub struct ScrollPosition {
 
 /// Whether the conversation follows its end once it moved from `previous` to
 /// `now`. Moving toward the start stops following, unless the content shrank
-/// under the reader or cannot scroll at all; reaching the end, by the reader
+/// or the viewport grew under the reader (a closing keyboard pulls the offset
+/// back), or it cannot scroll at all; reaching the end, by the reader
 /// or by following, follows again; anything else keeps `following`. Without
 /// a `previous` position, a following conversation was at its end.
 pub fn follows_end(following: bool, previous: Option<ScrollPosition>, now: ScrollPosition) -> bool {
@@ -28,7 +29,9 @@ pub fn follows_end(following: bool, previous: Option<ScrollPosition>, now: Scrol
         ..now
     }));
     let toward_start = previous.is_some_and(|previous| {
-        now.offset < previous.offset - 0.5 && now.content >= previous.content - 0.5
+        now.offset < previous.offset - 0.5
+            && now.content >= previous.content - 0.5
+            && now.viewport <= previous.viewport + 0.5
     });
     if toward_start && now.content > now.viewport {
         return false;
@@ -87,6 +90,19 @@ mod tests {
         for content in [300., 500.] {
             assert!(follows_end(true, Some(at(10., content)), at(0., content)));
         }
+    }
+
+    #[test]
+    fn a_growing_viewport_keeps_following_at_the_end() {
+        // The keyboard closes: the viewport grows by 300 and the offset is
+        // pulled back to the new end, with nobody scrolling.
+        let typing = at(1500., 2000.);
+        let closed = ScrollPosition {
+            offset: 1200.,
+            viewport: 800.,
+            content: 2000.,
+        };
+        assert!(follows_end(true, Some(typing), closed));
     }
 
     #[test]

@@ -55,6 +55,7 @@ pub struct Ivars {
     effects: Rc<RefCell<Vec<Effect>>>,
     changed: Sender<Event>,
     dialog: RefCell<Option<Pending>>,
+    dialog_opened: tokio::sync::Notify,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -199,6 +200,7 @@ impl Delegate {
                 effects,
                 changed,
                 dialog: RefCell::new(None),
+                dialog_opened: tokio::sync::Notify::new(),
             });
         let delegate: Retained<Self> = unsafe { msg_send![super(new), init] };
         unsafe {
@@ -215,7 +217,28 @@ impl Delegate {
             message: format!("{origin}\n{message}"),
             completion: Some(completion),
         });
+        self.ivars().dialog_opened.notify_waiters();
         let _ = self.ivars().changed.try_send(Event::Changed);
+    }
+    /// A modal pauses JavaScript, including acknowledgements of native input.
+    /// Return control to the client so it can answer before awaiting more JS.
+    pub async fn until_dialog<T>(&self, work: impl std::future::Future<Output = T>) -> Option<T> {
+        let opened = async {
+            loop {
+                let notified = self.ivars().dialog_opened.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.ivars().dialog.borrow().is_some() {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::select! {
+            biased;
+            () = opened => None,
+            result = work => Some(result),
+        }
     }
     pub fn dialog(&self) -> Option<BrowserDialog> {
         self.ivars()

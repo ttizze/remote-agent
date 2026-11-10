@@ -12,15 +12,11 @@
         B805E1000000000000000001 /* RemoteBrowserCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = B805E1000000000000000002; };
 		C0DE00000000000000000B01 /* NavigationAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000B02 /* NavigationAppearance.swift */; };
 		EB35FB642FBD2BAAE63C4417 /* ConversationMediaPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB82712EB6C081752DD49DF7 /* ConversationMediaPresentation.swift */; };
-		144475AC4BF43F9C23481CEA /* ConversationListLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CF4B0B87EF0B5062C0FDD15 /* ConversationListLayout.swift */; };
         F11E00000000000000000001 /* file-icons in Resources */ = {isa = PBXBuildFile; fileRef = F11E00000000000000000002 /* file-icons */; };
         BEE100000000000000000001 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = BEE100000000000000000002; };
 		36EC1BF85BB52BB71505A303 /* ErrorNotices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DCF44CEC164E07252AA639F /* ErrorNotices.swift */; };
-		C0DE00000000000000000801 /* ConversationList.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000802 /* ConversationList.swift */; };
         C0DE00000000000000000701 /* BrowserScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000702 /* BrowserScreen.swift */; };
         C0DE00000000000000000703 /* BrowserCredentialsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000704 /* BrowserCredentialsSheet.swift */; };
-		C0DE00000000000000000601 /* ConversationTextLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000602 /* ConversationTextLayout.swift */; };
-		C0DE00000000000000000C01 /* ConversationTextDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000C02 /* ConversationTextDiagnostics.swift */; };
 		C0DE0000000000000000029A /* ModelSelectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE0000000000000000039A /* ModelSelectionUITests.swift */; };
 		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
@@ -41,10 +37,9 @@
 		665D9C527D3738090B08598A /* TaskConnections.swift in Sources */ = {isa = PBXBuildFile; fileRef = C566DFC61A2F26347BE616E6 /* TaskConnections.swift */; };
 		CB49F882BDB040D193481C41 /* ConnectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C92E660B9BEE4F45B54F9762; };
 		FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613A5AAB450EC067108110F3 /* ConversationScreen.swift */; };
-		F9897A4D00C8F44425414C1F /* ConversationRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */; };
+		A9C1000000000000000000F2 /* NshConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F1 /* NshConversationView.swift */; };
+		A9C1000000000000000000F4 /* ConversationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F3 /* ConversationQueue.swift */; };
 		2DCDAABCD1000D782FF1BE5B /* ConversationMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63950266A2798560BC414B70 /* ConversationMedia.swift */; };
-		FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */; };
-		AAC15282ED580E15F2FE6024 /* ConversationMarkdownContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */; };
 		1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */; };
 		A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */; };
 		B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2036041A039EEBAA78D55844 /* AppPresentationData.swift */; };
@@ -69,8 +64,6 @@
 		C0DE00000000000000000202 /* AccountViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000203 /* AccountViews.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
 		C0DE00000000000000000110 /* AppViewConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000010 /* AppViewConnection.swift */; };
-		C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentation.swift */; };
-		C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000005 /* ConversationTextSelection.swift */; };
 		C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000006 /* ConversationSideChat.swift */; };
 		CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */; };
 		B2E000270000000000000001 /* ConversationRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E000270000000000000002 /* ConversationRequest.swift */; };
@@ -98,15 +91,11 @@
         B805E1000000000000000002 /* RemoteBrowserCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-browser/apple-views/Sources/NativeBrowserViews/RemoteBrowserCanvas.swift; sourceTree = SOURCE_ROOT; };
 		C0DE00000000000000000B02 /* NavigationAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationAppearance.swift; sourceTree = "<group>"; };
 		AB82712EB6C081752DD49DF7 /* ConversationMediaPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMediaPresentation.swift; sourceTree = "<group>"; };
-		3CF4B0B87EF0B5062C0FDD15 /* ConversationListLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListLayout.swift; sourceTree = "<group>"; };
         F11E00000000000000000002 /* file-icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "file-icons"; path = "../file-icons"; sourceTree = "<group>"; };
         BEE100000000000000000002 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = ../../../crates/agent-core/src/localization/Localizable.xcstrings; sourceTree = SOURCE_ROOT; };
 		5DCF44CEC164E07252AA639F /* ErrorNotices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorNotices.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000802 /* ConversationList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationList.swift; sourceTree = "<group>"; };
         C0DE00000000000000000702 /* BrowserScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserScreen.swift; sourceTree = "<group>"; };
         C0DE00000000000000000704 /* BrowserCredentialsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserCredentialsSheet.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000602 /* ConversationTextLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTextLayout.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000C02 /* ConversationTextDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTextDiagnostics.swift; sourceTree = "<group>"; };
 		C0DE0000000000000000039A /* ModelSelectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSelectionUITests.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000402 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
@@ -129,10 +118,9 @@
 		C566DFC61A2F26347BE616E6 /* TaskConnections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConnections.swift; sourceTree = "<group>"; };
 		C92E660B9BEE4F45B54F9762 /* ConnectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSettings.swift; sourceTree = "<group>"; };
 		613A5AAB450EC067108110F3 /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
-		F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRows.swift; sourceTree = "<group>"; };
+		A9C1000000000000000000F1 /* NshConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NshConversationView.swift; sourceTree = "<group>"; };
+		A9C1000000000000000000F3 /* ConversationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationQueue.swift; sourceTree = "<group>"; };
 		63950266A2798560BC414B70 /* ConversationMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMedia.swift; sourceTree = "<group>"; };
-		D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdown.swift; sourceTree = "<group>"; };
-		AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdownContent.swift; sourceTree = "<group>"; };
 		CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMediaPickers.swift; sourceTree = "<group>"; };
 		2036041A039EEBAA78D55844 /* AppPresentationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresentationData.swift; sourceTree = "<group>"; };
@@ -157,8 +145,6 @@
 		C0DE00000000000000000203 /* AccountViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountViews.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000010 /* AppViewConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewConnection.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000004 /* ConversationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentation.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000005 /* ConversationTextSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTextSelection.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000006 /* ConversationSideChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChat.swift; sourceTree = "<group>"; };
 		1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileEditor.swift; sourceTree = "<group>"; };
 		B2E000270000000000000002 /* ConversationRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRequest.swift; sourceTree = "<group>"; };
@@ -243,12 +229,9 @@
 				C0DE00000000000000000A0A /* WorkspaceDetails.swift */,
 				4134613DBAED1B9229F23DE5 /* ConversationMediaImport.swift */,
 				109E523F621AEB123226918A /* ConversationHistory.swift */,
-				C0DE00000000000000000802 /* ConversationList.swift */,
 				AB82712EB6C081752DD49DF7 /* ConversationMediaPresentation.swift */,
-				3CF4B0B87EF0B5062C0FDD15 /* ConversationListLayout.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
-				C0DE00000000000000000004 /* ConversationPresentation.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000010 /* AppViewConnection.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
@@ -261,6 +244,8 @@
 				C92E660B9BEE4F45B54F9762 /* ConnectionSettings.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
+				A9C1000000000000000000F1 /* NshConversationView.swift */,
+				A9C1000000000000000000F3 /* ConversationQueue.swift */,
                 C30000000000000000000004 /* TerminalScreen.swift */,
                 F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */,
                 C0DE00000000000000000702 /* BrowserScreen.swift */,
@@ -269,17 +254,11 @@
                 B805E1000000000000000002 /* RemoteBrowserCanvas.swift */,
                 B805E1000000000000000004 /* BrowserCredentialsView.swift */,
                 C0DE00000000000000000704 /* BrowserCredentialsSheet.swift */,
-				F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */,
 				B2E000270000000000000002 /* ConversationRequest.swift */,
 				63950266A2798560BC414B70 /* ConversationMedia.swift */,
-				C0DE00000000000000000005 /* ConversationTextSelection.swift */,
 				F11E00000000000000000004 /* FileIcon.swift */,
-				C0DE00000000000000000602 /* ConversationTextLayout.swift */,
-				C0DE00000000000000000C02 /* ConversationTextDiagnostics.swift */,
 				C0DE00000000000000000006 /* ConversationSideChat.swift */,
-				D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */,
 				123AEE37BEE0000000000002 /* ConversationVisualization.swift */,
-				AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
 				1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */,
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
@@ -319,6 +298,7 @@
 				A10000000000000000000021 /* Frameworks */,
 				A10000000000000000000022 /* Resources */,
 				F70000000000000000000023 /* Embed App Extensions */,
+				F70000000000000000000024 /* Embed NSH Native Parts */,
 			);
 			buildRules = ();
 			dependencies = (F70000000000000000000050,);
@@ -407,6 +387,21 @@
 		F70000000000000000000050 = {isa = PBXTargetDependency; target = F70000000000000000000040; targetProxy = F70000000000000000000051; };
 /* End PBXTargetDependency section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		F70000000000000000000024 /* Embed NSH Native Parts */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "Embed NSH Native Parts";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "platform=ios\n[[ $PLATFORM_NAME == iphonesimulator ]] && platform=ios-simulator\nframework=\"$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/BexNshNative.framework\"\n/usr/bin/ditto \"$AGENT_CARGO_TARGET_DIR/nsh-native/release/$platform/BexNshNative.framework\" \"$framework\"\nif [[ -n ${EXPANDED_CODE_SIGN_IDENTITY:-} ]]; then\n    codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none \"$framework\"\nfi\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F11E00000000000000000001 /* file-icons in Resources */, BEE100000000000000000001 /* Localizable.xcstrings in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 		B20000000000000000000022 /* Resources */ = {
@@ -440,12 +435,9 @@
 				C0DE00000000000000000A09 /* WorkspaceDetails.swift in Sources */,
 				110EFBD84D6039D2705F2B1F /* ConversationMediaImport.swift in Sources */,
 				556D7396D1777928A463D2DF /* ConversationHistory.swift in Sources */,
-				C0DE00000000000000000801 /* ConversationList.swift in Sources */,
 				EB35FB642FBD2BAAE63C4417 /* ConversationMediaPresentation.swift in Sources */,
-				144475AC4BF43F9C23481CEA /* ConversationListLayout.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
-				C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000110 /* AppViewConnection.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
@@ -458,6 +450,8 @@
 				CB49F882BDB040D193481C41 /* ConnectionSettings.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
+				A9C1000000000000000000F2 /* NshConversationView.swift in Sources */,
+				A9C1000000000000000000F4 /* ConversationQueue.swift in Sources */,
                 C30000000000000000000003 /* TerminalScreen.swift in Sources */,
                 D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */,
                 C0DE00000000000000000701 /* BrowserScreen.swift in Sources */,
@@ -466,17 +460,11 @@
                 B805E1000000000000000001 /* RemoteBrowserCanvas.swift in Sources */,
                 B805E1000000000000000003 /* BrowserCredentialsView.swift in Sources */,
                 C0DE00000000000000000703 /* BrowserCredentialsSheet.swift in Sources */,
-				F9897A4D00C8F44425414C1F /* ConversationRows.swift in Sources */,
 				B2E000270000000000000001 /* ConversationRequest.swift in Sources */,
 				2DCDAABCD1000D782FF1BE5B /* ConversationMedia.swift in Sources */,
-				C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */,
 				F11E00000000000000000003 /* FileIcon.swift in Sources */,
-				C0DE00000000000000000601 /* ConversationTextLayout.swift in Sources */,
-				C0DE00000000000000000C01 /* ConversationTextDiagnostics.swift in Sources */,
 				C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */,
-				FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */,
 				123AEE37BEE0000000000001 /* ConversationVisualization.swift in Sources */,
-				AAC15282ED580E15F2FE6024 /* ConversationMarkdownContent.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */,
 				A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */,

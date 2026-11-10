@@ -820,6 +820,12 @@ struct ReviewWorkspace {
     pub cwd: String,
 }
 #[uniffi::remote(Record)]
+struct WriteWorkspaceFile {
+    pub cwd: String,
+    pub relative_path: String,
+    pub text: String,
+}
+#[uniffi::remote(Record)]
 struct RemoveWorktree {
     pub path: String,
 }
@@ -847,6 +853,11 @@ struct LoadVisualization {
 struct ForkSession {
     pub thread_id: SessionRef,
     pub last_turn_id: agent_protocol::ids::TurnId,
+}
+#[uniffi::remote(Record)]
+struct RewindSession {
+    pub thread_id: SessionRef,
+    pub turn_id: agent_protocol::ids::TurnId,
 }
 #[uniffi::remote(Record)]
 struct CreateSession {

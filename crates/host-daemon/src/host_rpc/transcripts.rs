@@ -123,7 +123,25 @@ impl Transcripts {
     pub(crate) fn import(
         &self,
         conversation: &SessionRef,
+        response: ThreadResponse,
+    ) -> Result<(), String> {
+        self.store(conversation, response, true)
+    }
+
+    /// Replace everything held for `conversation`, recorded turns included.
+    pub(crate) fn replace(
+        &self,
+        conversation: &SessionRef,
+        response: ThreadResponse,
+    ) -> Result<(), String> {
+        self.store(conversation, response, false)
+    }
+
+    fn store(
+        &self,
+        conversation: &SessionRef,
         mut response: ThreadResponse,
+        keep_recorded: bool,
     ) -> Result<(), String> {
         let native = response.thread.turns.take().unwrap_or_default();
         // Live execution supplies status; a stored observation would go stale.
@@ -135,7 +153,7 @@ impl Transcripts {
         let key = params![conversation.provider.key(), conversation.id];
         self.write(|transaction| {
             let mut recorded = Vec::new();
-            {
+            if keep_recorded {
                 let mut rows = transaction
                     .prepare("SELECT body FROM turns WHERE provider = ?1 AND id = ?2 ORDER BY position")
                     .map_err(failure)?;

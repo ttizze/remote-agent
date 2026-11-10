@@ -65,13 +65,6 @@ extension ConversationModel {
 }
 
 extension ThreadScreen {
-    var selectionActions: ConversationSelectionActions {
-        let ask: ((String) -> Void)? = isSideChat ? nil : { text in
-            model.askSelectionInSideChat(text)
-            openTools?(.sideChat)
-        }
-        return ConversationSelectionActions(addToChat: model.addSelectionToChat, askInSideChat: ask)
-    }
 }
 
 struct ConversationSideChat: View {
@@ -88,8 +81,7 @@ struct ConversationSideChat: View {
                     Button("再試行") { Task { await request.prepare() } }
                 }.padding()
             } else if let chat = request.chat {
-                ThreadScreen(model: chat, environment: environment,
-                             conversation: chat.conversation, isSideChat: true)
+                ThreadScreen(model: chat, environment: environment, isSideChat: true)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

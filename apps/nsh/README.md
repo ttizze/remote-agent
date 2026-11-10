@@ -18,7 +18,7 @@ Developer ID のない環境では、`AGENT_CODE_SIGN_IDENTITY=-` で ad hoc 署
 iPhone Simulator 用アプリをビルド:
 
 ```sh
-scripts/dev-env.sh just nsh-ios-simulator
+scripts/dev-env.sh just nsh-ios
 ```
 
 生成物は `target/nsh-preview/ios-simulator/Bex NSH Preview.app` です。
@@ -28,6 +28,19 @@ Simulator には対象のデバイス ID を指定してインストールしま
 scripts/dev-env.sh xcrun simctl install DEVICE_ID 'target/nsh-preview/ios-simulator/Bex NSH Preview.app'
 scripts/dev-env.sh xcrun simctl launch DEVICE_ID com.bex.nsh-preview
 ```
+
+実機用は `com.bex.nsh-preview` 専用の Development／Ad Hoc プロビジョニングプロファイルと、その証明書を指定します。
+通常の Bex と別のアプリとして入り、既存のデータは保持されます。
+
+```sh
+AGENT_IOS_PROFILE=/path/to/preview.mobileprovision \
+AGENT_IOS_SIGN_IDENTITY='Apple Distribution: …' \
+scripts/dev-env.sh just nsh-ios ios
+scripts/dev-env.sh xcrun devicectl device install app --device DEVICE_ID 'target/nsh-preview/ios/Bex NSH Preview.app'
+scripts/dev-env.sh xcrun devicectl device process launch --device DEVICE_ID com.bex.nsh-preview
+```
+
+署名用キーチェーンを指定する場合は `AGENT_CODE_SIGN_KEYCHAIN` を設定します。接続先 Host はアプリ内でペアリングします。
 
 ナビゲーション・ツールバー・一覧・検索・ボタン・メニューは UIKit／AppKit の標準コントロールを使います。
 NSH の native component API はコントロールへのデータとイベントの接続に使います。Swift の部品は `apple/` の `BexNshNative.framework` で、アプリの Frameworks から読み込みます。

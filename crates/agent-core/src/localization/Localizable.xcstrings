@@ -33,6 +33,54 @@
         }
       }
     },
+    "Markdownとして保存…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download as markdown…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Markdownとして保存…"
+          }
+        }
+      }
+    },
+    "ここから編集": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit from here"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ここから編集"
+          }
+        }
+      }
+    },
+    "ここから編集しますか？": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit from here?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ここから編集しますか？"
+          }
+        }
+      }
+    },
     "このアカウントの規約・初期設定を確認できます。完了後、アカウントを選び直してください。": {
       "localizations": {
         "en": {
@@ -45,6 +93,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "このアカウントの規約・初期設定を確認できます。完了後、アカウントを選び直してください。"
+          }
+        }
+      }
+    },
+    "この発言の前まで会話を巻き戻します。発言と添付は入力欄に戻ります。ファイルの変更はそのまま残ります。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rewind the chat to before this message. Your message and attachments return to the composer. File changes stay as they are."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この発言の前まで会話を巻き戻します。発言と添付は入力欄に戻ります。ファイルの変更はそのまま残ります。"
+          }
+        }
+      }
+    },
+    "サイドバーの幅を変更": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resize sidebar"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイドバーの幅を変更"
           }
         }
       }
@@ -77,6 +157,150 @@
           "stringUnit": {
             "state": "translated",
             "value": "その他の承認方法"
+          }
+        }
+      }
+    },
+    "ツールパネルのサイズを変更": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resize tool panel"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ツールパネルのサイズを変更"
+          }
+        }
+      }
+    },
+    "ワークスペースに保存…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save to workspace…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースに保存…"
+          }
+        }
+      }
+    },
+    "ワークスペース内のパス": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace-relative path"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース内のパス"
+          }
+        }
+      }
+    },
+    "ワークツリーを利用できません。再読み込みしてください。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Worktrees are unavailable. Reload to try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリーを利用できません。再読み込みしてください。"
+          }
+        }
+      }
+    },
+    "ワークツリー一覧を読み込めませんでした。再読み込みしてください。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load worktrees. Reload to try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークツリー一覧を読み込めませんでした。再読み込みしてください。"
+          }
+        }
+      }
+    },
+    "会話を巻き戻せませんでした": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not rewind the conversation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話を巻き戻せませんでした"
+          }
+        }
+      }
+    },
+    "元のサイズに戻す": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore panel size"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "元のサイズに戻す"
+          }
+        }
+      }
+    },
+    "巻き戻す": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rewind"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "巻き戻す"
+          }
+        }
+      }
+    },
+    "設定を閉じる": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close settings"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "設定を閉じる"
           }
         }
       }
@@ -3809,38 +4033,6 @@
         }
       }
     },
-    "セルをコンパクトに表示": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "セルをコンパクトに表示"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Compact cells"
-          }
-        }
-      }
-    },
-    "セルを折り返す": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "セルを折り返す"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wrap cells"
-          }
-        }
-      }
-    },
     "ソース": {
       "localizations": {
         "ja": {
@@ -7181,22 +7373,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ready for input"
-          }
-        }
-      }
-    },
-    "入力欄で編集": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "入力欄で編集"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Edit in composer"
           }
         }
       }
@@ -15389,54 +15565,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "タブ"
-          }
-        }
-      }
-    },
-    "表示位置": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Position"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "表示位置"
-          }
-        }
-      }
-    },
-    "右に表示": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show on right"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "右に表示"
-          }
-        }
-      }
-    },
-    "下に表示": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show at bottom"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "下に表示"
           }
         }
       }

@@ -7,9 +7,9 @@ type "AI に依頼する" "ツールを確認します"
 press 送信
 expect "シミュレータで完了しました。" 30000
 press 右パネルを切り替え
-press ファイル after ツールを閉じる
-press hello.txt after ツールを閉じる
-expect "日本語のファイル" after ツールを閉じる
+press ファイル after ツールを追加
+press hello.txt after ツールを追加
+expect "日本語のファイル" after ツールを追加
 # The list beside the open file follows its search field.
 expect nested after ファイルを検索
 click cmd nested after ファイルを検索

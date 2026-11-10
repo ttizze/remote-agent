@@ -8,12 +8,12 @@ expect "シミュレータで完了しました。" 30000
 press 右パネルを切り替え
 press ツールを追加
 press ブラウザ
-expect "ブラウザの URL" after ツールを閉じる 10000
+expect "ブラウザの URL" after ツールを追加 10000
 expect "検索または URL を入力"
 screenshot browser
 press ツールを追加
 press ターミナル
-expect "/project" after ツールを閉じる 10000
+expect "/project" after ツールを追加 10000
 expect_absent "ブラウザの URL"
 press ツールを追加
 press エージェント

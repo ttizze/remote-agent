@@ -99,6 +99,7 @@ struct Ticket {
     width: u32,
     view: Rc<wry::WebView>,
     input: Retained<input::InputAck>,
+    delegate: Retained<delegate::Delegate>,
 }
 
 fn build(
@@ -622,6 +623,7 @@ impl State {
             width: page.width,
             view: tab.view.clone(),
             input: tab.input.clone(),
+            delegate: tab.delegate.clone(),
         })
     }
     fn check(&self, ticket: &Ticket) -> Result<(), String> {
@@ -919,7 +921,13 @@ async fn run(
                     ],
                     _ => unreachable!(),
                 };
-                platform::pointer(&ticket.view, &ticket.input, &events).await?;
+                if let Some(result) = ticket
+                    .delegate
+                    .until_dialog(platform::pointer(&ticket.view, &ticket.input, &events))
+                    .await
+                {
+                    result?;
+                }
             }
 
             BrowserAction::Type { text } => platform::insert(&ticket.view, text)?,
@@ -999,8 +1007,9 @@ async fn run(
                 | BrowserAction::Fill { .. }
                 | BrowserAction::ClickElement { .. }
         )
-    ) {
-        read("true", true).await?;
+    ) && let Some(result) = ticket.delegate.until_dialog(read("true", true)).await
+    {
+        result?;
     }
     let mut frame = capture_frame(
         owner,
@@ -1033,48 +1042,51 @@ async fn capture_frame(
         let Some(ticket) = ticket else {
             return Ok(frame);
         };
-        let result = async {
-            if matches!(capture, Capture::Snapshot) && frame.dialog.is_none() {
-                frame.page_text = platform::receive(platform::evaluate(
-                    &ticket.view,
-                    include_str!("snapshot.generated.js"),
-                    true,
-                ))
-                .await?
-                .as_str()
-                .ok_or("ページ情報を取得できません。")?
-                .to_owned();
-            }
-            if frame.dialog.is_none()
-                && (matches!(capture, Capture::Snapshot)
-                    || (matches!(capture, Capture::Viewer) && renderer != frame.renderer_id))
-            {
-                frame.input_kind = serde_json::from_value(
-                    platform::receive(platform::evaluate(
+        let result = ticket
+            .delegate
+            .until_dialog(async {
+                if matches!(capture, Capture::Snapshot) {
+                    frame.page_text = platform::receive(platform::evaluate(
                         &ticket.view,
-                        agent_protocol::browser::INPUT_KIND_SCRIPT,
+                        include_str!("snapshot.generated.js"),
                         true,
                     ))
-                    .await?,
-                )
-                .map_err(|_| "ページの入力先を取得できません。")?;
-                frame.image =
-                    platform::receive(platform::snapshot(&ticket.view, ticket.width)).await?;
-                if frame.image.len() > 4 * 1024 * 1024 {
-                    return Err("ブラウザ画像が大きすぎます。".into());
+                    .await?
+                    .as_str()
+                    .ok_or("ページ情報を取得できません。")?
+                    .to_owned();
                 }
-                use base64::Engine;
-                frame.image_id = base64::engine::general_purpose::STANDARD
-                    .encode(ring::digest::digest(&ring::digest::SHA256, &frame.image));
-            }
-            Ok::<_, String>(())
-        }
-        .await;
+                if matches!(capture, Capture::Snapshot)
+                    || (matches!(capture, Capture::Viewer) && renderer != frame.renderer_id)
+                {
+                    frame.input_kind = serde_json::from_value(
+                        platform::receive(platform::evaluate(
+                            &ticket.view,
+                            agent_protocol::browser::INPUT_KIND_SCRIPT,
+                            true,
+                        ))
+                        .await?,
+                    )
+                    .map_err(|_| "ページの入力先を取得できません。")?;
+                    frame.image =
+                        platform::receive(platform::snapshot(&ticket.view, ticket.width)).await?;
+                    if frame.image.len() > 4 * 1024 * 1024 {
+                        return Err("ブラウザ画像が大きすぎます。".into());
+                    }
+                    use base64::Engine;
+                    frame.image_id = base64::engine::general_purpose::STANDARD
+                        .encode(ring::digest::digest(&ring::digest::SHA256, &frame.image));
+                }
+                Ok::<_, String>(())
+            })
+            .await
+            .unwrap_or(Ok(()));
         let valid = (|| {
             let owner = state(owner)?;
             let mut owner = owner.borrow_mut();
             owner.refresh();
             owner.check(&ticket)?;
+            frame.dialog = ticket.delegate.dialog();
             if frame.dialog.is_some() {
                 if let Some(cached) = owner
                     .images

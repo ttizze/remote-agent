@@ -657,9 +657,12 @@ impl Conversations {
 
 fn owner<'a>(rows: &'a [Conversation], native: &SessionRef) -> Option<&'a Conversation> {
     rows.iter().find(|row| {
-        row.bindings
-            .iter()
-            .any(|binding| &binding.session == native)
+        // After a rewind the public ID can name a released native session.
+        &row.id == native
+            || row
+                .bindings
+                .iter()
+                .any(|binding| &binding.session == native)
     })
 }
 

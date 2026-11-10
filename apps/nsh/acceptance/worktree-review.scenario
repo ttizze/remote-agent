@@ -6,9 +6,9 @@ expect "検証プロジェクト" 30000
 press 検証プロジェクト
 press "Worktree conversation" 20000
 expect "History for Worktree conversation" 20000
-expect "1 件のファイルを変更"
-press レビューする
-expect "+Session worktree first" after ツールを閉じる 20000
-expect "-original" after ツールを閉じる
+expect "1件のファイル"
+press 変更を表示
+expect "+Session worktree first" after ツールを追加 20000
+expect "-original" after ツールを追加
 expect_absent "Project-only change"
 screenshot review

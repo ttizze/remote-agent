@@ -1,8 +1,8 @@
 use crate::l10n::{localized, tr, tr_format};
-use crate::{Connection, native};
-use agent_core::presentation::composer::footer;
+use crate::{Connection, native, workbench::Workbench};
 use agent_core::presentation::folder_menu::{FolderChoice, folder_choices};
 use agent_core::state::{Intent, follow_up::QueueAction, operations as op};
+use agent_core::{panels::PanelKind, presentation::composer::footer};
 use agent_protocol::operations::FollowUp;
 use nsh_core::{GlassEffect, element::input, prelude::*};
 use serde_json::json;
@@ -17,7 +17,7 @@ pub(crate) fn shortcut(
         keystroke,
         KeyOptions {
             when,
-            repeat: false,
+            ..Default::default()
         },
         handler,
     );
@@ -384,10 +384,14 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             })
             // As T3 Code's and the desktop client's composers, pasted images (a
             // screenshot) and files are attached and the text copied with them
-            // is left out. The field inserts a paste of text alone itself, so
-            // it stays undoable.
-            .paste_behavior(nsh_core::PasteBehavior::ReportFiles)
+            // is left out. A paste of text alone goes in as the user's edit,
+            // so it stays undoable.
+            .paste_behavior(nsh_core::PasteBehavior::Report)
             .on_paste(move |paste: &nsh_core::PasteEvent| {
+                if paste.files.is_empty() && paste.uris.is_empty() {
+                    field_ref.insert_text(paste.text.clone());
+                    return;
+                }
                 let sources: Vec<_> = paste
                     .files
                     .iter()
@@ -711,7 +715,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                                             if inactive() {
                                                 colors::BORDER
                                             } else {
-                                                rgb(0xffffff)
+                                                crate::ui::Tone::same(rgb(0xffffff))
                                             }
                                         })
                                         .text_color(move || {
@@ -847,8 +851,10 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
         .pt(move || if is_desktop() { px(8.0) } else { px(12.0) })
         .pb(move || if is_desktop() { px(16.0) } else { px(12.0) })
         .gap(move || if is_desktop() { px(4.0) } else { px(8.0) });
-    #[cfg(desktop)]
-    let column = column.child(when(is_desktop, crate::desktop_workspace::review_card));
+    // The shared core predicate hides this for side chats, new threads, and
+    // empty reviews. The Diff route and native glass button are available on
+    // both NSH targets, so the adapter is not desktop-only.
+    let column = column.child(review_card());
     // As the desktop client's composer, Escape discards a recording (or its
     // permission request) before it is transcribed.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -859,7 +865,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                 "escape",
                 KeyOptions {
                     when: nsh_core::keymap::When::Always,
-                    repeat: false,
+                    ..Default::default()
                 },
                 move |_| dictation.cancel(),
             );
@@ -960,7 +966,12 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                     )))
             },
         ))
-        .child(when(is_desktop, desktop_context))
+        // T3 Code's context strip: where a new chat will run, chosen before its
+        // first message and fixed after it.
+        .child(when(
+            move || is_desktop() && controls.with(|c| c.navigation.thread_id.is_none()),
+            desktop_context,
+        ))
         .child(when(is_desktop, shortcuts))
         .child(when(
             move || follow_up.with(|f| !f.queue.is_empty()),
@@ -992,6 +1003,77 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                     .text_size(px(11.0))
             },
         ))
+}
+
+/// The workspace-change badge shared by NSH composer adapters, matching the
+/// current iOS composer: counts only, with the full diff opened separately.
+fn review_card() -> impl IntoElement {
+    use crate::ui::colors;
+    let connection = use_context::<Connection>().unwrap();
+    let workspace = use_context::<Workbench>().unwrap();
+    let is_side_chat = connection.pane.is_some();
+    let review = computed(move || {
+        connection
+            .publication
+            .with(|p| p.pane().composer_review(is_side_chat))
+    });
+    let open = move || {
+        let cwd = connection
+            .composer
+            .with_untracked(|p| p.controls.navigation.cwd.clone());
+        workspace.open(PanelKind::Diff, Some(cwd), None);
+    };
+    when(
+        move || review.with(Option::is_some),
+        move || {
+            nsh_base::button()
+                .accessibility_label(Some(SharedString::from(tr("変更を表示"))))
+                .self_center()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .h(px(32.0))
+                .px_3()
+                .rounded_full()
+                .glass_effect(GlassEffect::Regular)
+                .text_size(px(13.0))
+                .hover(|s| s.bg(colors::GHOST_HOVER))
+                .active(|s| s.bg(colors::SELECTED))
+                .on_press(open)
+                .child(
+                    text(move || {
+                        let files = review.with(|r| r.as_ref().map_or(0, |r| r.files));
+                        tr_format("{0}件のファイル", [&files])
+                    })
+                    .text_color(colors::ACCENT),
+                )
+                .child(change_counts(
+                    move || review.with(|r| r.as_ref().map_or(0, |r| r.additions)),
+                    move || review.with(|r| r.as_ref().map_or(0, |r| r.deletions)),
+                ))
+        },
+    )
+}
+
+/// Added and removed lines, in the same compact form as the iOS badge.
+fn change_counts(
+    additions: impl Fn() -> u64 + Copy + 'static,
+    deletions: impl Fn() -> u64 + Copy + 'static,
+) -> View {
+    view()
+        .flex_row()
+        .gap_1()
+        .child(
+            text(move || format!("+{}", additions()))
+                .text_size(px(12.0))
+                .text_color(nsh_core::element::rgb(0x37cf77)),
+        )
+        .child(
+            text(move || format!("−{}", deletions()))
+                .text_size(px(12.0))
+                .text_color(nsh_core::element::rgb(0xff6259)),
+        )
 }
 
 /// The folder menu's item IDs: a folder's carries its path after the prefix.

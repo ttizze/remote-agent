@@ -6,7 +6,7 @@ use crate::{
 use agent_core::{
     client::AgentError,
     localization::UiLanguage,
-    panels::{PanelKind, PanelLayout, PanelScope, Panels},
+    panels::{PanelKind, PanelScope, Panels},
     presentation::view::Presentation,
     state::{DraftKey, Intent},
     store::SideChatStart,
@@ -238,7 +238,7 @@ pub(crate) struct Application {
     stop: CancellationToken,
     runtime: tokio::runtime::Handle,
     jobs: tokio_util::task::TaskTracker,
-    selection_path: PathBuf,
+    selection_path: Option<PathBuf>,
     #[cfg(desktop)]
     onboarding_path: PathBuf,
     #[cfg(any(desktop, test))]
@@ -259,8 +259,35 @@ impl Application {
         root: PathBuf,
         local: Option<agent_local_host::launch::HostScope>,
     ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        let selection_path = root.join("connection-selection.json");
-        let selection = connections::load_selection(&selection_path)?;
+        Self::start(root, local, None)
+    }
+
+    #[cfg(target_os = "ios")]
+    pub(crate) fn embedded(
+        root: PathBuf,
+        borrowed: crate::client::BorrowedSession,
+    ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
+        Self::start(root, None, Some(borrowed))
+    }
+
+    fn start(
+        root: PathBuf,
+        local: Option<agent_local_host::launch::HostScope>,
+        borrowed: Option<crate::client::BorrowedSession>,
+    ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
+        let selection_path = borrowed
+            .is_none()
+            .then(|| root.join("connection-selection.json"));
+        let selection = match &selection_path {
+            Some(path) => connections::load_selection(path)?,
+            None => agent_core::presentation::connection_list::ConnectionSelection {
+                host_id: borrowed.as_ref().map(|borrowed| borrowed.host.clone()),
+                all: false,
+            },
+        };
+        let language = borrowed
+            .as_ref()
+            .map(|borrowed| borrowed.session.snapshot().catalog.ui_language);
         #[cfg(any(desktop, test))]
         let explorer_width_path = root.join("file-explorer-width.json");
         // As the language, an unreadable width is the default's.
@@ -276,10 +303,10 @@ impl Application {
         let onboarding_path = root.join(onboarding::COMPLETED);
         #[cfg(desktop)]
         let scope = local.clone();
-        let (runtime, client, incoming) = Client::new(root, local)?;
+        let (runtime, client, incoming) = Client::start(root, local, borrowed)?;
         // The device's language, which Core's copy follows too; an unreadable
         // choice is the default, as on a first launch.
-        let language = client.device.language();
+        let language = language.unwrap_or_else(|| client.device.language());
         crate::l10n::set(language);
         #[cfg(desktop)]
         let updater = scope.map(|scope| {
@@ -514,9 +541,10 @@ impl Application {
         );
     }
 
-    pub fn set_panel_layout(&self, scope: PanelScope, layout: PanelLayout) {
+    #[cfg(any(desktop, test))]
+    pub fn set_panel_maximized(&self, scope: PanelScope, maximized: bool) {
         self.state.send_modify(|state| {
-            let panels = state.panels.clone().set_layout(scope, layout);
+            let panels = state.panels.clone().set_maximized(scope, maximized);
             Arc::make_mut(state).panels = panels;
         });
     }
@@ -691,9 +719,12 @@ impl Application {
         self.jobs.close();
         self.jobs.wait().await;
         // Producer jobs have stopped; include changes accepted during a save.
-        let saved =
-            connections::save_selection(self.selection_path.clone(), self.snapshot().selection())
-                .await;
+        let saved = match &self.selection_path {
+            Some(path) => {
+                connections::save_selection(path.clone(), self.snapshot().selection()).await
+            }
+            None => Ok(()),
+        };
         let closed = self.client.shutdown().await;
         closed.and(saved)
     }
@@ -812,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn native_views_observe_the_same_tabs_layout_navigation_and_file_target() {
+    fn native_views_observe_the_same_tabs_size_navigation_and_file_target() {
         let directory = tempfile::tempdir().unwrap();
         let (runtime, application) = Application::new(directory.path().into(), None).unwrap();
         let mut sidebar = application.subscribe();
@@ -830,14 +861,14 @@ mod tests {
             .get(scope.clone())
             .active
             .unwrap();
-        application.set_panel_layout(scope.clone(), PanelLayout::Bottom);
+        application.set_panel_maximized(scope.clone(), true);
         application.navigate(Navigation::Settings(true));
         application.navigate(Navigation::Provider(Some(ProviderKind::Codex)));
         let first = sidebar.borrow_and_update().clone();
         let second = tools.borrow_and_update().clone();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(first.file_line, Some((id, Some(7))));
-        assert_eq!(first.panels.get(scope.clone()).layout, PanelLayout::Bottom);
+        assert!(first.panels.get(scope.clone()).maximized);
         assert!(first.settings);
         assert_eq!(first.provider, Some(ProviderKind::Codex));
         application.close_panel(scope.clone(), id);

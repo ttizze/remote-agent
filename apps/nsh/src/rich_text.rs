@@ -113,6 +113,7 @@ pub(crate) struct Surroundings {
     pub files: crate::files::Browser,
     pub preview: crate::media::Preview,
     pub workspace: crate::workbench::Workbench,
+    pub external_actions: Option<crate::native::ExternalActions>,
     /// The bar of actions on the text selected in the list's messages.
     #[cfg(desktop)]
     pub selection: crate::selection_bar::SelectionBar,
@@ -126,6 +127,7 @@ impl Surroundings {
             files: use_context::<crate::files::Browser>().unwrap(),
             preview: use_context::<crate::media::Preview>().unwrap(),
             workspace: use_context::<crate::workbench::Workbench>().unwrap(),
+            external_actions: use_context::<crate::native::ExternalActions>(),
             #[cfg(desktop)]
             selection: crate::selection_bar::SelectionBar::new(),
         }
@@ -282,9 +284,10 @@ fn target(connection: Connection) -> Memo<String> {
 /// in a side chat, a link pressed, or an item of a file chip's menu chosen.
 #[cfg(any(desktop, target_os = "ios"))]
 fn action(surroundings: Surroundings, data: &Value) {
-    let Surroundings {
-        connection, files, ..
-    } = surroundings;
+    if let Some(actions) = surroundings.external_actions {
+        return actions.emit(data.clone());
+    }
+    let connection = surroundings.connection;
     // TextKit's selection changed: where it is, in the window's content.
     #[cfg(target_os = "macos")]
     if data["action"] == "selection" {
@@ -349,7 +352,7 @@ fn action(surroundings: Surroundings, data: &Value) {
         #[cfg(desktop)]
         Some("file") => crate::file_actions::choose(
             connection,
-            files,
+            surroundings.files,
             target.link(text.into()),
             data["id"].as_str().unwrap_or_default(),
         ),
@@ -399,11 +402,9 @@ fn view_parts(
     let Surroundings {
         connection, files, ..
     } = surroundings;
-    let parts = computed(parts);
-    view().w_full().gap_3().child(each(
-        move || parts.get().into_iter().enumerate().collect::<Vec<_>>(),
-        |(index, part): &(usize, Part)| (*index, std::mem::discriminant(part)),
-        move |part, _| match part.with_untracked(|(_, part)| part.clone()) {
+    let parts = computed(move || std::sync::Arc::new(parts()));
+    let render = move |part: ReadSignal<(usize, Part)>, _: ReadSignal<usize>| {
+        part.with_untracked(|(_, value)| match value {
             Part::Rule => view()
                 .w_full()
                 .h(px(1.0))
@@ -414,19 +415,40 @@ fn view_parts(
                 // for another row; unwrapped code keeps its lines.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let message = move |wrap: Signal<bool>| {
-                    let is_code = move || part.with(|(_, part)| matches!(part, Part::Code { .. }));
                     native("bex.messageText")
                         .prop("data", move || {
+                            // A recycled native cell can finish its pending
+                            // update after the message owning these values left
+                            // the conversation. It has no document to update.
+                            let (Some(width), Some(target)) =
+                                (max_width.try_get(), target.try_get())
+                            else {
+                                return Value::Null;
+                            };
                             part.with(|(_, part)| {
+                                let code = matches!(part, Part::Code { .. });
                                 let (Part::Text(blocks) | Part::Code { blocks, .. }) = part else {
                                     return Value::Null;
                                 };
-                                json!({"blocks": blocks, "secondary": kind() == Kind::Activity,
-                        "role": if kind() == Kind::User { "user" } else { "assistant" },
-                        "target": target.get(), "sideChat": connection.pane.is_none(), "cell": cell,
-                        "maxWidth": if is_code() && !wrap.get() { 1_000_000.0 } else { (max_width.get() - if is_code() { 2.0 * CODE_INSET } else { 0.0 }).max(0.0) },
-                        // The selection menu's items, which TextKit shows.
-                        "menu": {"quote": tr("チャットに追加"), "sideChat": tr("サイドチャットで質問")}})
+                                let kind = kind();
+                                let width = if code && !wrap.get() {
+                                    1_000_000.0
+                                } else {
+                                    (width - if code { 2.0 * CODE_INSET } else { 0.0 }).max(0.0)
+                                };
+                                json!({
+                                    "blocks": blocks,
+                                    "secondary": kind == Kind::Activity,
+                                    "role": if kind == Kind::User { "user" } else { "assistant" },
+                                    "target": target,
+                                    "sideChat": connection.pane.is_none(),
+                                    "cell": cell,
+                                    "maxWidth": width,
+                                    "menu": {
+                                        "quote": tr("チャットに追加"),
+                                        "sideChat": tr("サイドチャットで質問"),
+                                    },
+                                })
                             })
                         })
                         .on_native_event(move |event: &NativeEvent| {
@@ -459,7 +481,6 @@ fn view_parts(
                     })
                 },
                 crate::media::ImageSize::Natural,
-
             )
             .into_element(),
             Part::Link(_) => crate::ui::row_text_button(tr("ファイルを開く"), move || {
@@ -480,16 +501,71 @@ fn view_parts(
             // start and end too, where a paragraph's fall away.
             Part::Table { .. } => view()
                 .w_full()
-                .pt(move || px(if part.with(|(index, _)| *index == 0) { 10.4 } else { 0.0 }))
+                .pt(move || {
+                    px(if part.with(|(index, _)| *index == 0) {
+                        10.4
+                    } else {
+                        0.0
+                    })
+                })
                 .pb(move || {
-                    let last = part.with(|(index, _)| *index + 1)
-                        == parts.with(Vec::len);
+                    let last = Some(part.with(|(index, _)| *index + 1))
+                        == parts.try_get().map(|parts| parts.len());
                     px(if last { 10.4 } else { 0.0 })
                 })
                 .child(table(surroundings, part, target, kind, max_width))
                 .into_element(),
-        },
-    ))
+        })
+    };
+    let key = |(index, part): &(usize, Part)| (*index, std::mem::discriminant(part));
+    let all = move || {
+        each(
+            move || parts.with(|parts| parts.iter().cloned().enumerate().collect::<Vec<_>>()),
+            key,
+            render,
+        )
+    };
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let content = {
+        let multiple =
+            move || cell.is_none() && parts.try_get().is_some_and(|parts| parts.len() > 1);
+        view()
+            .w_full()
+            .gap_3()
+            .child(when(multiple, move || {
+                // A message can contain thousands of code blocks. Recycle
+                // its parts against the conversation's viewport. A list has
+                // no intrinsic cross-axis size: supply the lane width so a
+                // shrink-to-fit user bubble cannot collapse its cells to zero.
+                virtual_list(
+                    move || parts.try_get().map_or(0, |parts| parts.len()),
+                    move |at| {
+                        view().w_full().child(each(
+                            move || {
+                                parts.try_get().map_or_else(Vec::new, |parts| {
+                                    parts
+                                        .get(at.index())
+                                        .cloned()
+                                        .map(|part| (at.index(), part))
+                                        .into_iter()
+                                        .collect::<Vec<_>>()
+                                })
+                            },
+                            key,
+                            render,
+                        ))
+                    },
+                )
+                .viewport(nsh_core::ListViewport::Parent)
+                .estimated_item_size(px(80.0))
+                .row_gap(px(12.0))
+                .w(move || px(max_width.try_get().unwrap_or_default()))
+            }))
+            .child(when(move || !multiple(), all))
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let content = view().w_full().gap_3().child(all());
+    content
 }
 
 /// Text as it is, or a code block in the desktop client's frame: its language
@@ -713,12 +789,11 @@ fn table(
             }
         })
     };
-    let compact = signal(false);
     // T3 Code's table: rows ruled below, no frame, the header row's cells a
     // little taller. As its `min-width: max-content` table, each column is as
-    // wide as its widest cell, a cell's text wrapping past 24rem (unless the
-    // cells are compact), the columns sharing what the lane has left over and
-    // the table scrolling sideways past the lane.
+    // wide as its widest cell, a cell's text wrapping past 24rem, the columns
+    // sharing what the lane has left over and the table scrolling sideways
+    // past the lane.
     let rule = crate::conversation::look::RULE;
     // The text's width in each cell, by row and column, as laid out.
     let measured = signal(HashMap::<(usize, usize), f32>::new());
@@ -760,14 +835,7 @@ fn table(
                         move |cell, _| {
                             let index = cell.with_untracked(|(index, _)| *index);
                             let width = move || column(index);
-                            // Wrapping past 24rem, or not at all.
-                            let cap = move || {
-                                if compact.get() {
-                                    1_000_000.0
-                                } else {
-                                    CELL_MAX - CELL_INSET
-                                }
-                            };
+                            let cap = CELL_MAX - CELL_INSET;
                             view()
                                 .flex_none()
                                 .items_start()
@@ -782,7 +850,7 @@ fn table(
                                 .child(
                                     view()
                                         .flex_none()
-                                        .max_w(move || px(cap()))
+                                        .max_w(px(cap))
                                         .on_layout(move |bounds: &Bounds<Points>| {
                                             let laid = bounds.size.width.0;
                                             if measured.with_untracked(|measured| {
@@ -798,7 +866,7 @@ fn table(
                                             move || cell.with(|(_, parts)| parts.clone()),
                                             target,
                                             kind,
-                                            computed(cap),
+                                            computed(move || cap),
                                             Some(if header { "header" } else { "body" }),
                                         )),
                                 )
@@ -810,60 +878,26 @@ fn table(
     view()
         .w_full()
         .child(scroll().horizontal().w_full().child(frame()))
-        // T3 Code's table actions below it: the cells' wrapping at its start,
-        // copying as Markdown or CSV from a menu at its end.
+        // T3 Code's table action below it: copying as Markdown or CSV from a menu.
         .child(
-            view()
-                .mt(px(2.0))
-                .flex_row()
-                .justify_between()
-                .child(each(
-                    move || vec![compact.get()],
-                    |compact: &bool| *compact,
-                    move |shown, _| {
-                        let compact_now = shown.get_untracked();
-                        let button = crate::ui::icon_button_sized(
-                            if compact_now {
-                                crate::ui::Icon::MAXIMIZE
-                            } else {
-                                crate::ui::Icon::MINIMIZE
-                            },
-                            tr(if compact_now {
-                                "セルを折り返す"
-                            } else {
-                                "セルをコンパクトに表示"
-                            }),
-                            24.0,
-                            12.0,
-                            move || compact.update(|compact| *compact = !*compact),
+            view().mt(px(2.0)).flex_row().justify_end().child(
+                crate::ui::icon_button_sized(
+                    crate::ui::Icon::COPY,
+                    tr("表をコピー"),
+                    24.0,
+                    12.0,
+                    move || {
+                        crate::ui::popup(
+                            &serde_json::json!([
+                                {"id": "markdown", "title": tr("Markdownをコピー")},
+                                {"id": "csv", "title": tr("CSVをコピー")},
+                            ]),
+                            move |id| copy(id == "markdown"),
                         )
-                        .text_color(crate::conversation::look::MUTED);
-                        // Wrapped cells are T3 Code's pressed, `secondary` state.
-                        if compact_now {
-                            button
-                        } else {
-                            button.bg(crate::ui::colors::SELECTED)
-                        }
                     },
-                ))
-                .child(
-                    crate::ui::icon_button_sized(
-                        crate::ui::Icon::COPY,
-                        tr("表をコピー"),
-                        24.0,
-                        12.0,
-                        move || {
-                            crate::ui::popup(
-                                &serde_json::json!([
-                                    {"id": "markdown", "title": tr("Markdownをコピー")},
-                                    {"id": "csv", "title": tr("CSVをコピー")},
-                                ]),
-                                move |id| copy(id == "markdown"),
-                            )
-                        },
-                    )
-                    .text_color(crate::conversation::look::MUTED),
-                ),
+                )
+                .text_color(crate::conversation::look::MUTED),
+            ),
         )
 }
 
@@ -1050,12 +1084,8 @@ mod drawn {
                     .font_family(SharedString::from("monospace"))
                     .bg(colors::RAISED);
             }
-            // The app's look is dark: a run's own color is its dark variant.
-            if let Some(color) = run["darkColor"]
-                .as_u64()
-                .and_then(|c| u32::try_from(c).ok())
-            {
-                span = span.text_color(rgb(color));
+            if let Some(color) = tone(run) {
+                span = span.text_color(color);
             }
             if let Some(link) = run["link"].as_str().map(str::to_owned) {
                 if let Some(chip) = run.get("file") {
@@ -1085,15 +1115,26 @@ mod drawn {
     /// A file chip as the desktop client's: its glyph and label in the file's accent, at
     /// medium weight, its full path and size over it, its menu on a secondary
     /// press; a press opens it as a link does.
+    /// A run's own color in each appearance (`lightColor`, `darkColor`).
+    fn tone(run: &Value) -> Option<crate::ui::Tone> {
+        let color = |key: &str| {
+            run[key]
+                .as_u64()
+                .and_then(|c| u32::try_from(c).ok())
+                .map(rgb)
+        };
+        Some(crate::ui::Tone::new(
+            color("lightColor")?,
+            color("darkColor")?,
+        ))
+    }
+
     fn chip_span<O, C>(label: Text, chip: &Value, link: String, links: Links<O, C>) -> Text
     where
         O: Fn(String, bool) + Copy + 'static,
         C: Fn(String, String) + Copy + 'static,
     {
-        let color = chip["darkColor"]
-            .as_u64()
-            .and_then(|c| u32::try_from(c).ok())
-            .map_or(colors::ACCENT, rgb);
+        let color = tone(chip).unwrap_or(colors::ACCENT);
         let glyph = if chip["folder"].as_bool().unwrap_or(false) {
             crate::ui::icon(crate::ui::Icon::FOLDER, 14.0).into_element()
         } else {

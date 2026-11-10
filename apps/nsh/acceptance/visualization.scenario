@@ -6,5 +6,5 @@ type "AI に依頼する" "[visualize] [immediate] 図を表示します"
 press 送信
 expect "ファイルを開く" 30000
 press ファイルを開く
-expect "icon-options" after ツールを閉じる 20000
+expect "icon-options" after ツールを追加 20000
 screenshot opened

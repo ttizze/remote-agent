@@ -1,24 +1,19 @@
-# The changed-files bar's review opens the diff, whose panel moves below the
-# conversation or fills the window, and closes.
+# The changed-files bar's review opens the diff, whose panel fills the window
+# and closes.
 # iOS: testSimulatorReviewsTheOpenSessionsWorktree
 expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
 type "AI に依頼する" "[immediate] 変更を確認します"
 press 送信
 expect "シミュレータで完了しました。" 30000
-expect "2 件のファイルを変更"
-press レビューする
-expect "new file mode" after ツールを閉じる 20000
-expect "+編集を確認します。" after ツールを閉じる
-press 表示位置
-press 下に表示
-expect "new file mode"
-screenshot below
-press 表示位置
+expect "2件のファイル"
+press 変更を表示
+expect "new file mode" after ツールを追加 20000
+expect "+編集を確認します。" after ツールを追加
 press 拡大表示
 expect "new file mode"
 screenshot expanded
-press 表示位置
-press 右に表示
+press 元のサイズに戻す
+expect "new file mode"
 press ツールを閉じる
 expect_absent "new file mode"

@@ -1,4 +1,7 @@
-import SwiftUI
+import Foundation
+#if os(iOS)
+    import SwiftUI
+#endif
 
 struct ProjectEditorData: Decodable {
     let id: String
@@ -7,6 +10,7 @@ struct ProjectEditorData: Decodable {
     let error: String?
 }
 
+#if os(iOS)
 /// The phones' project editor; the Mac draws its dialog with NSH.
 struct ProjectEditorPresenter: View {
     let editor: ProjectEditorData?
@@ -68,3 +72,5 @@ private struct ProjectEditorForm: View {
         #endif
     }
 }
+
+#endif

@@ -1,10 +1,12 @@
-//! The Host's rendered page where SwiftUI does not show it: the image fitted
+//! The PC browser surface in NSH: the image fitted
 //! to the panel; clicks and wheel scrolls at its page coordinates and, on a
 //! desktop, typing after a click into it; the page's dialog; and the Host's
 //! browser data to import.
 use crate::l10n::{localized, tr, tr_format};
 use crate::{native, shared::Shared, ui};
-use agent_core::{browser_view, presentation::conversation::ActionTone};
+#[cfg(not(target_os = "macos"))]
+use agent_core::browser_view;
+use agent_core::presentation::conversation::ActionTone;
 use agent_protocol::browser::{BrowserAction, BrowserCredentials, BrowserFrame, BrowserKey};
 use nsh_core::{AutoCapitalize, keymap::When, prelude::*};
 
@@ -86,45 +88,77 @@ pub(super) fn page(
             move || {
                 let width = move || px((f64::from(page().0) * scale()) as f32);
                 let height = move || px((f64::from(page().1) * scale()) as f32);
-                view()
-                    .w(width)
-                    .h(height)
+                #[cfg(target_os = "macos")]
+                return view()
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
                     .child(
-                        nsh_core::element::image(move || {
-                            format!("data:image/jpeg;base64,{}", image.get())
-                        })
+                        native("bex.browser.canvas")
+                            .prop("data", move || {
+                                serde_json::json!({
+                                    "image": image.get(), "enabled": accepts_input.get()
+                                })
+                            })
+                            .on_native_event(move |event: &NativeEvent| {
+                                if let Ok(action) =
+                                    serde_json::from_value::<BrowserAction>(event.data.clone())
+                                {
+                                    if matches!(action, BrowserAction::Click { .. }) {
+                                        field.focus();
+                                    }
+                                    send(action);
+                                }
+                            })
+                            .w(width)
+                            .h(height),
+                    )
+                    .into_element();
+                #[cfg(not(target_os = "macos"))]
+                {
+                    view()
                         .w(width)
-                        .h(height),
-                    )
-                    .child(
-                        native::wheel_area(move |wheel: native::Scroll| {
-                            let (width, height) = page();
-                            if let Some(action) = browser_view::scroll_action(
-                                (f64::from(wheel.x), f64::from(wheel.y)),
-                                (f64::from(wheel.dx), f64::from(wheel.dy)),
-                                scale(),
-                                width,
-                                height,
-                            ) {
-                                send(action);
-                            }
-                        })
-                        .absolute()
-                        .inset_0()
-                        .on_press(move |event: &PressEvent| {
-                            field.focus();
-                            let (width, height) = page();
-                            if let Some(action) = browser_view::click_action(
-                                f64::from(event.position.x.0),
-                                f64::from(event.position.y.0),
-                                scale(),
-                                width,
-                                height,
-                            ) {
-                                send(action);
-                            }
-                        }),
-                    )
+                        .h(height)
+                        .child(
+                            nsh_core::element::image(move || {
+                                format!("data:image/jpeg;base64,{}", image.get())
+                            })
+                            .w(width)
+                            .h(height),
+                        )
+                        .child(
+                            native::wheel_area(move |wheel: native::Scroll| {
+                                let (width, height) = page();
+                                if let Some(action) = browser_view::scroll_action(
+                                    (f64::from(wheel.x), f64::from(wheel.y)),
+                                    (f64::from(wheel.dx), f64::from(wheel.dy)),
+                                    scale(),
+                                    width,
+                                    height,
+                                ) {
+                                    send(action);
+                                }
+                            })
+                            .absolute()
+                            .inset_0()
+                            .on_press(move |event: &PressEvent| {
+                                field.focus();
+                                let (width, height) = page();
+                                if let Some(action) = browser_view::click_action(
+                                    f64::from(event.position.x.0),
+                                    f64::from(event.position.y.0),
+                                    scale(),
+                                    width,
+                                    height,
+                                ) {
+                                    send(action);
+                                }
+                            }),
+                        )
+                        .into_element()
+                }
             },
         ))
         .child(when(
@@ -133,7 +167,21 @@ pub(super) fn page(
         ))
         .child(when(
             move || browsing() && dialog.with(Option::is_some),
-            move || dialog_card(dialog, send),
+            move || {
+                nsh_base::dialog()
+                    .close_on_escape(false)
+                    .close_on_backdrop_press(false)
+                    .on_cancel(move || {
+                        send(BrowserAction::Dialog {
+                            accept: false,
+                            text: String::new(),
+                        });
+                    })
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .child(dialog_card(dialog, send))
+            },
         ))
         .child(dynamic(move || {
             credentials
@@ -143,16 +191,14 @@ pub(super) fn page(
         .into_element()
 }
 
-/// The keyboard's target once the page was clicked: transparent, it takes
-/// typed and pasted text, composition included, and keeps what it holds
-/// selected so each change is only the text just typed.
+/// The keyboard's target once the page was clicked. Forward native insertions;
+/// whole-value changes can include earlier keys while a selection is in flight.
 fn keyboard(
     field: ElementRef,
     accepts_input: Memo<bool>,
     send: impl Fn(BrowserAction) -> bool + Copy + 'static,
 ) -> impl IntoElement {
     let focused = signal(false);
-    let typed = signal(String::new());
     view()
         .child(
             nsh_core::element::input()
@@ -165,25 +211,28 @@ fn keyboard(
                 .opacity(0.0)
                 .caret(false)
                 .readonly(move || !accepts_input.get())
+                .multiline(true)
                 .auto_correct(false)
                 .auto_capitalize(AutoCapitalize::None)
-                .value(move || typed.get())
                 .on_focus(move || focused.set(true))
                 .on_blur(move || focused.set(false))
                 .on_change(move |text: &str| {
-                    typed.set(text.to_owned());
                     if !text.is_empty() {
-                        send(BrowserAction::Type { text: text.into() });
                         field.set_selection(0, text.encode_utf16().count() as u32);
                     }
                 })
                 .on_key_press(move |key: &str| {
-                    let key = match key {
-                        "Backspace" => BrowserKey::Backspace,
-                        "Enter" => BrowserKey::Enter,
-                        _ => return,
+                    let action = match key {
+                        "Backspace" => BrowserAction::Key {
+                            key: BrowserKey::Backspace,
+                        },
+                        "Enter" => BrowserAction::Key {
+                            key: BrowserKey::Enter,
+                        },
+                        "Escape" | "" => return,
+                        text => BrowserAction::Type { text: text.into() },
                     };
-                    send(BrowserAction::Key { key });
+                    send(action);
                 }),
         )
         // Keys that do not type text, bound only while the page has the keyboard.
@@ -196,6 +245,7 @@ fn keyboard(
                         KeyOptions {
                             when: When::Always,
                             repeat: true,
+                            ..Default::default()
                         },
                         move |_| {
                             send(BrowserAction::Key { key });
@@ -223,10 +273,8 @@ fn dialog_card(
         send(BrowserAction::Dialog { accept, text });
     };
     view()
-        .absolute()
-        .left(px(16.0))
-        .right(px(16.0))
-        .top(px(16.0))
+        .w_full()
+        .max_w(px(480.0))
         .gap_3()
         .p_4()
         .rounded(px(12.0))
@@ -248,6 +296,7 @@ fn dialog_card(
                     .label(tr("入力"))
                     .value(move || reply.get())
                     .on_change(move |text: &str| reply.set(text.to_owned()))
+                    .on_submit(move |_: &str| answer(true))
             },
         ))
         .child(

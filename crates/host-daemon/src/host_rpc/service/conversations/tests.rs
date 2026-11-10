@@ -822,6 +822,143 @@ async fn unimported_handoff(directory: &Path) -> HandoffFixture {
     }
 }
 
+fn message_texts(response: &ThreadResponse) -> Vec<String> {
+    response
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .flat_map(|turn| turn.items.iter().flatten())
+        .filter_map(|item| match item.body() {
+            ItemBody::UserMessage { content, .. } => content.iter().find_map(|part| match part {
+                agent_protocol::items::MessagePart::Text { text } => Some(text.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn rewinding_keeps_the_conversation_and_continues_without_the_later_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let b = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let root = a
+        .create(directory.path().to_str().unwrap(), None, None)
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let host = service(directory.path(), &a, &b);
+    let client = host.open_session();
+    let codex = ProviderKind::Codex;
+    send(&host, client.id(), &root, codex, "one", "first")
+        .await
+        .unwrap();
+    let edited = send(&host, client.id(), &root, codex, "two", "second")
+        .await
+        .unwrap()
+        .turn_id
+        .unwrap();
+    send(&host, client.id(), &root, codex, "three", "third")
+        .await
+        .unwrap();
+
+    let rewound: ThreadResponse = call(
+        &host,
+        client.id(),
+        Call::RewindSession(op::RewindSession::new(root.clone(), edited)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rewound.thread.id.as_ref(), Some(&root));
+    assert_eq!(message_texts(&rewound), ["first"]);
+    assert_eq!(
+        message_texts(&history(&host, client.id(), &root).await),
+        ["first"]
+    );
+
+    // The next message goes to a native session that never saw the removed turns.
+    send(&host, client.id(), &root, codex, "four", "again")
+        .await
+        .unwrap();
+    let delivered = a.inputs.lock().unwrap().last().unwrap().thread_id.clone();
+    assert_ne!(delivered, root);
+    let next = a.records.lock().unwrap()[&delivered.id].clone();
+    assert_eq!(message_texts(&next), ["first", "again"]);
+    let reopened = history(&host, client.id(), &root).await;
+    assert_eq!(message_texts(&reopened), ["first", "again"]);
+
+    // Rewinding past the first message leaves an empty conversation that still works.
+    let first = reopened.thread.turns.as_ref().unwrap()[0].id.clone();
+    let empty: ThreadResponse = call(
+        &host,
+        client.id(),
+        Call::RewindSession(op::RewindSession::new(root.clone(), first)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty.thread.id.as_ref(), Some(&root));
+    assert!(message_texts(&empty).is_empty());
+    send(&host, client.id(), &root, codex, "five", "restart")
+        .await
+        .unwrap();
+    assert_eq!(
+        message_texts(&history(&host, client.id(), &root).await),
+        ["restart"]
+    );
+}
+
+#[tokio::test]
+async fn rewinding_refuses_running_work_and_unknown_turns_without_a_new_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let b = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let root = a
+        .create(directory.path().to_str().unwrap(), None, None)
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let host = service(directory.path(), &a, &b);
+    let client = host.open_session();
+    let turn = send(
+        &host,
+        client.id(),
+        &root,
+        ProviderKind::Codex,
+        "one",
+        "first",
+    )
+    .await
+    .unwrap()
+    .turn_id
+    .unwrap();
+    let before = a.records.lock().unwrap().len();
+    let rewind = |turn: TurnId| {
+        call::<ThreadResponse>(
+            &host,
+            client.id(),
+            Call::RewindSession(op::RewindSession::new(root.clone(), turn)),
+        )
+    };
+    assert_eq!(
+        rewind("missing".into()).await.unwrap_err().code,
+        "invalid_turn"
+    );
+    {
+        let mut records = a.records.lock().unwrap();
+        let record = records.get_mut(&root.id).unwrap();
+        let last = record.thread.turns.as_mut().unwrap().last_mut().unwrap();
+        Arc::make_mut(last).status = TurnStatus::Running;
+    }
+    assert_eq!(rewind(turn).await.unwrap_err().code, "conversation_busy");
+    assert_eq!(a.records.lock().unwrap().len(), before);
+}
+
 #[tokio::test]
 async fn native_fork_rejects_an_unsupported_provider_before_execution() {
     let directory = tempfile::tempdir().unwrap();

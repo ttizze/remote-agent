@@ -18,5 +18,5 @@ menu "*確認したファイルです。*"
 press フルパスをコピー
 expect_clipboard "/project/hello.txt:2"
 press "*hello.txt · L2"
-expect "日本語のファイル" after ツールを閉じる 20000
+expect "日本語のファイル" after ツールを追加 20000
 screenshot opened

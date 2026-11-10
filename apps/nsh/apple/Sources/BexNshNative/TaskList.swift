@@ -1,4 +1,7 @@
-import SwiftUI
+import Foundation
+#if os(iOS)
+    import SwiftUI
+#endif
 #if os(iOS)
     import UIKit
 #else
@@ -70,6 +73,7 @@ struct TaskMenuItem: Decodable {
     let children: [TaskMenuItem]?
 }
 
+#if os(iOS)
 private struct TaskMenuEntries: View {
     let items: [TaskMenuItem]
     let send: ([String: String]) -> Void
@@ -265,3 +269,5 @@ private extension View {
             .listRowBackground(Color.clear)
     }
 }
+
+#endif

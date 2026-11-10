@@ -266,6 +266,7 @@ impl HostRpcService {
                         | Call::ChangeQueue(_)
                         | Call::RenameSession(_)
                         | Call::ForkSession(_)
+                        | Call::RewindSession(_)
                         | Call::RetryPreparation(_)
                 )
             }) {
@@ -278,10 +279,12 @@ impl HostRpcService {
                 Call::Submit(_)
                     | Call::ChangeQueue(_)
                     | Call::ForkSession(_)
+                    | Call::RewindSession(_)
                     | Call::AnswerSession(_)
                     | Call::StartTerminal(_)
                     | Call::StartAccountTerminal(_)
                     | Call::WriteFile(_)
+                    | Call::WriteWorkspaceFile(_)
                     | Call::Upload(_)
                     | Call::ReviewWorkspace(_)
             ) {
@@ -539,30 +542,38 @@ impl HostRpcService {
             | Call::ReadFileMetadata(_)
             | Call::ReadFile(_)
             | Call::WriteFile(_)
+            | Call::WriteWorkspaceFile(_)
             | Call::Upload(_)
             | Call::Download(_)
             | Call::ReadVisualization(_) => {
                 self.inner.files.request(session, request.clone()).await?
             }
-            Call::ForkSession(params) => {
-                let target = target_session.expect("session-scoped fork");
-                self.fork_session(target, params).await?.into()
-            }
-            Call::Interrupt(params) => {
-                let target = target_session.expect("session-scoped interrupt");
-                self.interrupt(target, params).await?.into()
-            }
-            Call::ChangeQueue(params) => {
-                let target = target_session.expect("session-scoped queue");
-                self.change_queue(target, &params.change).await?.into()
-            }
-            Call::RenameSession(params) => {
-                let target = target_session.expect("session-scoped rename");
-                self.rename_session(target, params).await?.into()
+            Call::ForkSession(_)
+            | Call::RewindSession(_)
+            | Call::Interrupt(_)
+            | Call::ChangeQueue(_)
+            | Call::RenameSession(_) => {
+                let target = target_session.expect("session-scoped conversation change");
+                self.change_conversation(target, request).await?
             }
             _ => self.provider_request(request).await?,
         };
         Ok(response)
+    }
+
+    async fn change_conversation(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+        request: &Call,
+    ) -> Result<Body, Failure> {
+        Ok(match request {
+            Call::ForkSession(params) => self.fork_session(target, params).await?.into(),
+            Call::RewindSession(params) => self.rewind_session(target, params).await?.into(),
+            Call::Interrupt(params) => self.interrupt(target, params).await?.into(),
+            Call::ChangeQueue(params) => self.change_queue(target, &params.change).await?.into(),
+            Call::RenameSession(params) => self.rename_session(target, params).await?.into(),
+            _ => unreachable!("only conversation changes are routed here"),
+        })
     }
 
     /// Dispatch remaining provider requests; unknown requests return method_not_found.
@@ -786,6 +797,7 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
     match request {
         Call::Submit(p) => (Some(&p.thread_id), Some(p.client_user_message_id.as_str())),
         Call::ForkSession(p) => (Some(&p.thread_id), None),
+        Call::RewindSession(p) => (Some(&p.thread_id), None),
         Call::Interrupt(p) => (Some(&p.thread_id), None),
         Call::ChangeQueue(p) => (Some(&p.thread_id), None),
         Call::RetryPreparation(p) => (Some(&p.thread_id), None),

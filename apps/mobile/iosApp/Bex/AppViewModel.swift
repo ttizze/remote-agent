@@ -13,6 +13,8 @@ final class AppViewModel {
     }
 
     private(set) var settings: SettingsPresentation
+    /// This device's composer behavior, which the settings choose.
+    private(set) var composerPreferences: ComposerPreferences
     private(set) var connectionStates: [String: HostConnectionState] = [:]
     private(set) var isConnected = false
     private(set) var loadingThreads = false
@@ -58,6 +60,7 @@ final class AppViewModel {
         let empty = Presentation.empty(language: language)
         publication = empty
         settings = empty.settings()
+        composerPreferences = empty.composer().controls().followUp.preferences
         observeLiveActivityRequests()
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let available = path.status == .satisfied
@@ -82,6 +85,10 @@ final class AppViewModel {
     }
 
     deinit { pathMonitor.cancel() }
+
+    func selectComposerPreferences(_ value: ComposerPreferences) {
+        perform(.setComposerPreferences(preferences: value))
+    }
 
     func selectLanguage(_ value: UiLanguage) {
         // UserDefaults keeps the existing non-throwing mobile save contract.
@@ -281,6 +288,10 @@ extension AppViewModel {
         publication = value
         if changes.settings {
             settings = value.settings()
+        }
+        let preferences = value.composer().controls().followUp.preferences
+        if composerPreferences != preferences {
+            composerPreferences = preferences
         }
         updateConnection(connected: next.connected(), loading: next.operationRunning(key: .sessionList))
         let scopes: [ErrorScope] = [.application, .projects, .settings, .workspace]

@@ -58,8 +58,7 @@ pub enum TurnRow {
     /// its latest word.
     Subagent {
         id: String,
-        name: String,
-        message: String,
+        agent: crate::presentation::agents::SubagentPresentation,
     },
     /// A divider across the work, as T3 Code's context compaction.
     Divider { id: String, label: String },
@@ -130,14 +129,10 @@ pub fn turn_rows(
             }
             ConversationRowContent::Activity { item, .. } => match place(language, item) {
                 Place::Work if !hidden => work.push(row),
-                Place::Alone(alone) => {
-                    let alone = *alone;
+                Place::Alone(rows) => {
                     flush(&mut work, &mut out, false);
-                    // A subagent's later activity is the row it already has.
-                    let repeated = matches!(alone, TurnRow::Subagent { .. })
-                        && matches!(out.last(), Some(TurnRow::Subagent { .. }));
-                    if !hidden && !repeated {
-                        out.push(alone);
+                    if !hidden {
+                        out.extend(rows);
                     }
                 }
                 Place::Work | Place::Hidden => {}
@@ -194,9 +189,36 @@ pub fn turn_rows(
             out.retain(|row| !matches!(row, TurnRow::Live { .. } | TurnRow::Thinking));
         }
     }
+    let mut out = merge_subagents(out);
     trailing_actions(&mut out);
     if status == TurnStatus::Interrupted {
         out.push(TurnRow::Interrupted);
+    }
+    out
+}
+
+/// A child keeps its first row's position while later activity updates it.
+fn merge_subagents(rows: Vec<TurnRow>) -> Vec<TurnRow> {
+    let mut out = Vec::new();
+    let mut positions = std::collections::HashMap::new();
+    for row in rows {
+        if let TurnRow::Subagent { agent, .. } = &row
+            && let Some(target) = &agent.target
+        {
+            if let Some(&index) = positions.get(target) {
+                if let TurnRow::Subagent { agent: old, .. } = &mut out[index] {
+                    if !agent.message.is_empty() {
+                        old.message = agent.message.clone();
+                    }
+                    if agent.status != TurnStatus::Unknown {
+                        old.status = agent.status;
+                    }
+                }
+                continue;
+            }
+            positions.insert(target.clone(), out.len());
+        }
+        out.push(row);
     }
     out
 }
@@ -262,7 +284,7 @@ enum Place {
     /// Among the work, in its group or alone.
     Work,
     /// Apart from the work, which it ends: a plan, a subagent, a divider.
-    Alone(Box<TurnRow>),
+    Alone(Vec<TurnRow>),
     /// Not at all: work without an outcome to show (an image looked at, a
     /// sleep, review mode entered or left).
     Hidden,
@@ -273,21 +295,22 @@ fn place(language: UiLanguage, item: &RenderedItem) -> Place {
         return Place::Work;
     };
     match native.body() {
-        ItemBody::Plan { text } => Place::Alone(Box::new(TurnRow::Plan {
+        ItemBody::Plan { text } => Place::Alone(vec![TurnRow::Plan {
             id: item.data.id.clone(),
             title: plan_title(text).unwrap_or_else(|| language.text("work.plan.proposed").into()),
             text: text.clone(),
-        })),
-        ItemBody::Subagent { states, .. } => Place::Alone(Box::new(TurnRow::Subagent {
-            id: item.data.id.clone(),
-            name: language.text("work.subagent").into(),
-            message: states
-                .iter()
-                .rev()
-                .find_map(|state| state.message.clone())
-                .unwrap_or_default(),
-        })),
-        ItemBody::Compaction {} => Place::Alone(Box::new(TurnRow::Divider {
+        }]),
+        ItemBody::Subagent { .. } => Place::Alone(
+            crate::presentation::agents::subagent_rows(language, native)
+                .into_iter()
+                .enumerate()
+                .map(|(index, agent)| TurnRow::Subagent {
+                    id: format!("{}:{index}", item.data.id),
+                    agent,
+                })
+                .collect(),
+        ),
+        ItemBody::Compaction {} => Place::Alone(vec![TurnRow::Divider {
             id: item.data.id.clone(),
             label: language
                 .text(if native.status == crate::models::ItemStatus::Running {
@@ -296,7 +319,7 @@ fn place(language: UiLanguage, item: &RenderedItem) -> Place {
                     "work.compaction.done"
                 })
                 .into(),
-        })),
+        }]),
         ItemBody::ImageView { .. } | ItemBody::Sleep {} | ItemBody::Review { .. } => Place::Hidden,
         _ => Place::Work,
     }
@@ -308,6 +331,24 @@ fn plan_title(text: &str) -> Option<String> {
         .find_map(|line| line.trim_start().strip_prefix('#'))
         .map(|heading| heading.trim_start_matches('#').trim().to_owned())
         .filter(|heading| !heading.is_empty())
+}
+
+/// The suggested name and complete Markdown exported by a plan's actions.
+pub fn plan_export(text: &str) -> (String, String) {
+    let title = plan_title(text).unwrap_or_default();
+    let mut name = String::new();
+    for character in title.to_lowercase().chars() {
+        if character.is_ascii_alphanumeric() {
+            name.push(character);
+        } else if !"`'\".,!?()[]{}".contains(character) && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    let name = name.trim_matches('-');
+    (
+        format!("{}.md", if name.is_empty() { "plan" } else { name }),
+        format!("{}\n", text.trim_end()),
+    )
 }
 
 fn activity_item(row: &ConversationRow) -> Option<&Arc<RenderedItem>> {

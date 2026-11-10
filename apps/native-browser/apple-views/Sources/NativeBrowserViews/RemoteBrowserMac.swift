@@ -1,31 +1,9 @@
 #if os(macOS)
     import AppKit
-    import SwiftUI
-
-    public struct RemoteBrowserCanvas: NSViewRepresentable {
-        let image: NSImage
-        let acceptsInput: Bool
-        let send: (BrowserPointerAction) -> Void
-
-        public init(image: NSImage, acceptsInput: Bool, send: @escaping (BrowserPointerAction) -> Void) {
-            self.image = image
-            self.acceptsInput = acceptsInput
-            self.send = send
-        }
-
-        public func makeNSView(context _: Context) -> BrowserCanvasView {
-            BrowserCanvasView()
-        }
-
-        public func updateNSView(_ view: BrowserCanvasView, context _: Context) {
-            view.display(image)
-            view.send = acceptsInput ? send : nil
-        }
-    }
 
     public final class BrowserCanvasView: NSScrollView {
         private let page = NSImageView()
-        var send: ((BrowserPointerAction) -> Void)?
+        public var send: ((BrowserPointerAction) -> Void)?
         private var previousSize = CGSize.zero
 
         public init() {
@@ -34,6 +12,8 @@
             allowsMagnification = true
             hasVerticalScroller = true
             hasHorizontalScroller = true
+            autohidesScrollers = true
+            drawsBackground = false
             page.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(tapped)))
             setAccessibilityLabel("ホストのBexブラウザ")
         }
@@ -43,7 +23,7 @@
             fatalError("init(coder:) has not been implemented")
         }
 
-        func display(_ image: NSImage) {
+        public func display(_ image: NSImage) {
             let changed = page.image?.size != image.size
             page.image = image
             if changed {
@@ -55,11 +35,12 @@
 
         override public func layout() {
             super.layout()
-            guard bounds.size != previousSize, bounds.width > 0, page.bounds.width > 0 else { return }
-            previousSize = bounds.size
-            minMagnification = min(1, bounds.width / page.bounds.width)
+            guard contentSize != previousSize, contentSize.width > 0, contentSize.height > 0,
+                  page.bounds.width > 0, page.bounds.height > 0 else { return }
+            previousSize = contentSize
+            minMagnification = min(1, contentSize.width / page.bounds.width, contentSize.height / page.bounds.height)
             maxMagnification = max(2, minMagnification * 4)
-            magnification = minMagnification
+            magnify(toFit: page.bounds)
         }
 
         override public func scrollWheel(with event: NSEvent) {

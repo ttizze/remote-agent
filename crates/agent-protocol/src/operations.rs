@@ -243,6 +243,18 @@ pub struct WriteFile {
     pub text: String,
 }
 
+/// Writes `text` to `relative_path` in the workspace at `cwd`, making its
+/// folders and replacing a file already there, as T3 Code saves a plan to
+/// the workspace; the path stays inside the workspace. Replies with the
+/// workspace-relative path written.
+#[derive(Debug, Serialize, Clone, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteWorkspaceFile {
+    pub cwd: String,
+    pub relative_path: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -565,6 +577,27 @@ impl ForkSession {
         output: &crate::models::ThreadResponse,
     ) -> Result<(), &'static str> {
         validate_thread(output, None)
+    }
+}
+
+/// Returns a conversation to just before `turn_id`, which is removed with
+/// every turn after it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindSession {
+    pub thread_id: crate::session::SessionRef,
+    pub turn_id: crate::ids::TurnId,
+}
+
+impl RewindSession {
+    pub fn new(thread_id: crate::session::SessionRef, turn_id: crate::ids::TurnId) -> Self {
+        Self { thread_id, turn_id }
+    }
+    pub(crate) fn validate(
+        &self,
+        output: &crate::models::ThreadResponse,
+    ) -> Result<(), &'static str> {
+        validate_thread(output, Some(&self.thread_id))
     }
 }
 

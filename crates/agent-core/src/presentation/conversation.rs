@@ -16,7 +16,7 @@ pub use follow::{FOLLOW_REARM_DISTANCE, ScrollPosition, away_from_end, follows_e
 mod images;
 pub mod rows;
 mod timeline;
-pub use timeline::{TurnRow, turn_rows};
+pub use timeline::{TurnRow, plan_export, turn_rows};
 mod work;
 pub use work::{LiveActivity, WorkRowLabel};
 mod row_binding;
@@ -80,6 +80,9 @@ pub struct ConversationRow {
     pub steer: bool,
     /// A user message that waited in the queue and then started its turn.
     pub queued: bool,
+    /// The turn "Edit from here" returns to just before: set on the message
+    /// that opened a settled turn whose provider can continue from an earlier point.
+    pub edit_turn_id: Option<agent_protocol::ids::TurnId>,
 }
 
 fn conversation_row_id(
@@ -210,7 +213,7 @@ pub fn minimap_markers(
 
 /// A message's time of day as T3 Code shows it in each language: `2:17 AM`,
 /// `14:17`.
-pub fn time_of_day(language: UiLanguage, hour: u32, minute: u32) -> String {
+fn time_of_day(language: UiLanguage, hour: u32, minute: u32) -> String {
     match language {
         UiLanguage::English => format!(
             "{}:{minute:02} {}",
@@ -219,6 +222,44 @@ pub fn time_of_day(language: UiLanguage, hour: u32, minute: u32) -> String {
         ),
         UiLanguage::Japanese => format!("{hour:02}:{minute:02}"),
     }
+}
+
+/// A date on the viewer's calendar.
+#[derive(Debug, Clone, Copy)]
+pub struct CalendarDay {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+}
+
+/// When a message was sent, as T3 Code's `formatDayAwareTimestamp`: the time
+/// today, "yesterday" the day before, and the date before that, its year only
+/// when it is not this one.
+pub fn day_aware_time(
+    language: UiLanguage,
+    hour: u32,
+    minute: u32,
+    date: CalendarDay,
+    days_ago: i64,
+    this_year: i32,
+) -> String {
+    let time = time_of_day(language, hour, minute);
+    if days_ago <= 0 {
+        return time;
+    }
+    if days_ago == 1 {
+        return match language {
+            UiLanguage::English => format!("yesterday at {time}"),
+            UiLanguage::Japanese => format!("昨日 {time}"),
+        };
+    }
+    let CalendarDay { year, month, day } = date;
+    let date = match (language, year == this_year) {
+        (_, true) => format!("{month}/{day}"),
+        (UiLanguage::English, false) => format!("{month}/{day}/{year}"),
+        (UiLanguage::Japanese, false) => format!("{year}/{month}/{day}"),
+    };
+    format!("{date} {time}")
 }
 
 /// The widest the column of messages and of the composer grows, as T3 Code's
@@ -753,6 +794,7 @@ pub fn project_conversation(
             timestamp_ms: None,
             steer: false,
             queued: false,
+            edit_turn_id: None,
             content: ConversationRowContent::PendingRequest {
                 request: Box::new(request(language, source)),
             },
@@ -772,6 +814,7 @@ pub fn project_conversation(
             timestamp_ms: None,
             steer: false,
             queued: false,
+            edit_turn_id: None,
             content: ConversationRowContent::Preparation {
                 preparation: preparation_presentation(language, preparation),
             },
@@ -1234,6 +1277,7 @@ fn render_turn(
     use ConversationRowContent::*;
     let steering = std::cell::Cell::new(false);
     let queued_shown = std::cell::Cell::new(false);
+    let edit_shown = std::cell::Cell::new(false);
     let mut rows = Vec::new();
     let mut occurrences = HashMap::new();
     let mut push = |mut content: ConversationRowContent| {
@@ -1274,6 +1318,7 @@ fn render_turn(
                 started
                     .zip(source.duration_ms)
                     .and_then(|(start, duration)| start.checked_add(duration))
+                    .or(started)
             }),
             _ => None,
         };
@@ -1281,12 +1326,19 @@ fn render_turn(
         let steer = user && steering.get();
         // The message that started a turn after waiting in the queue.
         let queued = user && !steer && source.queued && !queued_shown.replace(true);
+        let edit_turn_id = (user
+            && !steer
+            && supports_fork
+            && source.status != models::TurnStatus::Running
+            && !edit_shown.replace(true))
+        .then(|| source.id.clone());
         rows.push(ConversationRow {
             id,
             content,
             timestamp_ms,
             steer,
             queued,
+            edit_turn_id,
         });
     };
     if let Some(text) = handoff {
@@ -1473,6 +1525,18 @@ pub enum ActionTone {
     Primary,
     Secondary,
     Danger,
+}
+
+/// T3 Code leads with a one-time grant and marks denial; broader grants stay
+/// secondary.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn choice_tone(effect: agent_protocol::requests::ChoiceEffect) -> ActionTone {
+    use agent_protocol::requests::ChoiceEffect;
+    match effect {
+        ChoiceEffect::Allow => ActionTone::Primary,
+        ChoiceEffect::Deny => ActionTone::Danger,
+        ChoiceEffect::AllowLasting => ActionTone::Secondary,
+    }
 }
 
 impl Request {
@@ -2436,6 +2500,59 @@ mod tests {
                 .map(|row| (row.queued, row.steer))
                 .collect();
             assert_eq!(marks, [(queued, false), (false, true)]);
+        }
+    }
+
+    #[test]
+    fn only_the_message_opening_a_settled_forkable_turn_can_be_edited_from() {
+        let user = |id: &str| {
+            json!({"id":id,"status":"completed","clientInputId":id,
+            "body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}})
+        };
+        let answer = |id: &str| {
+            json!({"id":id,"status":"completed","clientInputId":null,
+            "body":{"inline":{"body":{"assistantText":{"text":id,"phase":"final"}}}}})
+        };
+        for (status, fork, expected) in [
+            ("completed", true, [Some("turn"), None]),
+            ("failed", true, [Some("turn"), None]),
+            ("running", true, [None, None]),
+            ("completed", false, [None, None]),
+        ] {
+            let mut snapshot = Snapshot::default();
+            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+                agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "thread".into(),
+                },
+                Arc::new(
+                    serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},
+                        "capabilities":{"fork":fork},
+                        "turns":[{"id":"turn","status":status,
+                            "items":[user("opened"),answer("first"),user("steered"),answer("second")]}]}))
+                    .unwrap(),
+                ),
+            );
+            let rendered = project_snapshot(snapshot, None);
+            let edits: Vec<_> = rendered.turns[0]
+                .rows
+                .iter()
+                .filter(|row| matches!(row.content, ConversationRowContent::User { .. }))
+                .map(|row| row.edit_turn_id.as_ref().map(|id| id.as_str()))
+                .collect();
+            assert_eq!(edits, expected);
+        }
+    }
+
+    #[test]
+    fn request_choices_rank_as_t3_ranks_approval_decisions() {
+        use agent_protocol::requests::ChoiceEffect;
+        for (effect, tone) in [
+            (ChoiceEffect::Allow, ActionTone::Primary),
+            (ChoiceEffect::AllowLasting, ActionTone::Secondary),
+            (ChoiceEffect::Deny, ActionTone::Danger),
+        ] {
+            assert_eq!(choice_tone(effect), tone);
         }
     }
 
@@ -3828,6 +3945,32 @@ mod minimap_tests {
     fn a_single_message_needs_no_map() {
         assert!(minimap_markers(&[], None, 400.).is_empty());
         assert!(minimap_markers(&[2], Some((0, 9)), 400.).is_empty());
+    }
+
+    #[test]
+    fn a_message_time_names_its_day_as_t3_code_does() {
+        let date = CalendarDay {
+            year: 2026,
+            month: 11,
+            day: 7,
+        };
+        let cases = [
+            (date, 0, 2026, "2:05 PM", "14:05"),
+            (date, -1, 2026, "2:05 PM", "14:05"),
+            (date, 1, 2026, "yesterday at 2:05 PM", "昨日 14:05"),
+            (date, 2, 2026, "11/7 2:05 PM", "11/7 14:05"),
+            (date, 370, 2027, "11/7/2026 2:05 PM", "2026/11/7 14:05"),
+        ];
+        for (date, days_ago, this_year, english, japanese) in cases {
+            assert_eq!(
+                day_aware_time(UiLanguage::English, 14, 5, date, days_ago, this_year),
+                english
+            );
+            assert_eq!(
+                day_aware_time(UiLanguage::Japanese, 14, 5, date, days_ago, this_year),
+                japanese
+            );
+        }
     }
 
     #[test]

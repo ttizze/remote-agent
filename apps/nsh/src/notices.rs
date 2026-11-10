@@ -15,7 +15,10 @@ use nsh_core::{element::rgba, prelude::*};
 pub(crate) fn thread_error() -> impl IntoElement {
     use agent_protocol::session::SessionRef;
     // T3's `--error` (red-500 with a tenth of white) and `--error-foreground`.
-    const ERROR: nsh_core::element::Rgba = nsh_core::element::rgb(0xfb414a);
+    const ERROR: crate::ui::Tone = crate::ui::Tone::new(
+        nsh_core::element::rgb(0xfb2c36),
+        nsh_core::element::rgb(0xfb414a),
+    );
     let connection = use_context::<Connection>().unwrap();
     let dismissed = signal(Vec::<(Option<SessionRef>, String)>::new());
     let shown = computed(move || {
@@ -51,7 +54,7 @@ pub(crate) fn thread_error() -> impl IntoElement {
                     .border_color(rgba(0xfb414a52))
                     // T3's glass: the page at 80% under 4% of the error colour
                     // (unblurred: AppKit's blur lightens it).
-                    .bg(rgba(0x140c0dcc))
+                    .bg(crate::ui::Tone::new(rgba(0xfef2f2cc), rgba(0x140c0dcc)))
                     .child(
                         view()
                             .h(px(20.0))
@@ -75,7 +78,7 @@ pub(crate) fn thread_error() -> impl IntoElement {
                         .number_of_lines(3)
                         .text_size(px(14.0))
                         .line_height(px(20.0))
-                        .text_color(rgba(0xff6467cc)),
+                        .text_color(crate::ui::Tone::new(rgba(0xe7000bcc), rgba(0xff6467cc))),
                     )
                     .child(
                         ui::bare_button(tr("エラーを閉じる"), move || {

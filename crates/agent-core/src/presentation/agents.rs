@@ -23,6 +23,127 @@ pub struct AgentSummary {
 
 type AgentEntries = BTreeMap<String, (SessionRef, Option<SessionRef>, AgentSummary)>;
 
+/// A child conversation named by a provider's subagent activity. A provider
+/// without a conversation identity cannot offer navigation to that child.
+#[derive(Clone, PartialEq)]
+pub struct SubagentPresentation {
+    pub target: Option<SessionRef>,
+    pub name: String,
+    pub message: String,
+    pub status: TurnStatus,
+}
+
+impl SubagentPresentation {
+    pub fn status(&self, child: Option<&crate::models::Thread>) -> TurnStatus {
+        child
+            .and_then(|child| child.turns.as_ref()?.last())
+            .map(|turn| turn.status)
+            .filter(|status| *status != TurnStatus::Unknown)
+            .unwrap_or(self.status)
+    }
+
+    pub fn name(&self, child: Option<&crate::models::Thread>) -> String {
+        child
+            .and_then(|child| child.name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| self.name.clone())
+    }
+}
+
+/// Elapsed wall time of the child's own work. A partial history cannot give its
+/// original start, and unknown timings stay unknown.
+pub fn subagent_elapsed(
+    language: UiLanguage,
+    child: Option<&crate::models::Thread>,
+    now_seconds: f64,
+) -> Option<String> {
+    let child = child?;
+    if child.history_has_more == Some(true) {
+        return None;
+    }
+    let turns = child.turns.as_ref()?;
+    let starts = |turn: &crate::models::Turn| {
+        turn.started_at_ms
+            .map(|ms| ms as f64)
+            .or_else(|| turn.started_at.map(|seconds| seconds * 1000.0))
+            .filter(|ms| ms.is_finite())
+    };
+    let start = turns
+        .iter()
+        .filter_map(|turn| starts(turn))
+        .min_by(f64::total_cmp);
+    let end = turns
+        .iter()
+        .filter_map(|turn| {
+            if turn.status == TurnStatus::Running {
+                return Some(now_seconds * 1000.0);
+            }
+            turn.completed_at_ms
+                .map(|ms| ms as f64)
+                .or_else(|| Some(starts(turn)? + turn.duration_ms? as f64))
+        })
+        .filter(|ms| ms.is_finite())
+        .max_by(f64::total_cmp);
+    let elapsed = match (start, end) {
+        (Some(start), Some(end)) => (end - start).max(0.0) as u64,
+        _ if turns.len() == 1 => turns[0].duration_ms?,
+        _ => return None,
+    };
+    Some(super::elapsed_text(language, elapsed))
+}
+
+pub(super) fn subagent_rows(language: UiLanguage, item: &Item) -> Vec<SubagentPresentation> {
+    let ItemBody::Subagent {
+        receivers,
+        states,
+        prompt,
+        ..
+    } = item.body()
+    else {
+        return Vec::new();
+    };
+    let mut targets: Vec<_> = receivers
+        .iter()
+        .chain(states.iter().map(|state| &state.session))
+        .collect();
+    let mut seen = HashSet::new();
+    targets.retain(|target| seen.insert((*target).clone()));
+    let row = |target: Option<&SessionRef>| {
+        let state = states.iter().find(|state| Some(&state.session) == target);
+        SubagentPresentation {
+            target: target.cloned(),
+            name: prompt
+                .as_deref()
+                .and_then(|text| text.lines().find(|line| !line.trim().is_empty()))
+                .unwrap_or_else(|| language.text("work.subagent"))
+                .to_owned(),
+            message: state
+                .and_then(|state| state.message.clone())
+                .unwrap_or_default(),
+            status: state
+                .map(|state| state.status)
+                .unwrap_or(if target.is_some() {
+                    TurnStatus::Unknown
+                } else {
+                    match item.status {
+                        ItemStatus::Running => TurnStatus::Running,
+                        ItemStatus::Completed => TurnStatus::Completed,
+                        ItemStatus::Failed => TurnStatus::Failed,
+                        _ => TurnStatus::Unknown,
+                    }
+                }),
+        }
+    };
+    if targets.is_empty() {
+        vec![row(None)]
+    } else {
+        targets
+            .into_iter()
+            .map(|target| row(Some(target)))
+            .collect()
+    }
+}
+
 impl Snapshot {
     pub fn agent_panel(&self, pane: &crate::state::PaneState) -> Vec<AgentSummary> {
         let Some(root) = pane.navigation.thread_id.as_ref() else {
@@ -304,6 +425,125 @@ mod tests {
     use crate::models::{Item, ItemContent, Thread, Turn};
     use proptest::prelude::*;
     use std::sync::Arc;
+
+    #[test]
+    fn elapsed_uses_child_wall_time_and_freezes_when_the_child_finishes() {
+        let mut child = Thread {
+            turns: Some(vec![
+                Arc::new(Turn {
+                    status: TurnStatus::Completed,
+                    started_at_ms: Some(10_000),
+                    completed_at_ms: Some(12_000),
+                    ..Default::default()
+                }),
+                Arc::new(Turn {
+                    status: TurnStatus::Running,
+                    started_at: Some(20.0),
+                    ..Default::default()
+                }),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            subagent_elapsed(UiLanguage::English, Some(&child), 25.0).as_deref(),
+            Some("15s")
+        );
+        assert_eq!(
+            subagent_elapsed(UiLanguage::English, Some(&child), 26.0).as_deref(),
+            Some("16s")
+        );
+        let turn = Arc::make_mut(&mut child.turns.as_mut().unwrap()[1]);
+        turn.status = TurnStatus::Completed;
+        turn.completed_at_ms = Some(27_000);
+        assert_eq!(
+            subagent_elapsed(UiLanguage::English, Some(&child), 99.0).as_deref(),
+            Some("17s")
+        );
+        child.history_has_more = Some(true);
+        assert!(subagent_elapsed(UiLanguage::English, Some(&child), 99.0).is_none());
+        assert!(subagent_elapsed(UiLanguage::English, Some(&Thread::default()), 99.0).is_none());
+        assert!(subagent_elapsed(UiLanguage::English, None, 99.0).is_none());
+    }
+
+    #[test]
+    fn subagent_timing_keeps_unknown_data_unknown_and_clamps_clock_skew() {
+        let child = |turn: Turn| Thread {
+            turns: Some(vec![Arc::new(turn)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            subagent_elapsed(
+                UiLanguage::English,
+                Some(&child(Turn {
+                    started_at_ms: Some(10_000),
+                    duration_ms: Some(2_500),
+                    ..Default::default()
+                })),
+                100.0
+            )
+            .as_deref(),
+            Some("2s")
+        );
+        assert_eq!(
+            subagent_elapsed(
+                UiLanguage::English,
+                Some(&child(Turn {
+                    duration_ms: Some(2_500),
+                    ..Default::default()
+                })),
+                100.0
+            )
+            .as_deref(),
+            Some("2s")
+        );
+        assert_eq!(
+            subagent_elapsed(
+                UiLanguage::English,
+                Some(&child(Turn {
+                    started_at_ms: Some(30_000),
+                    completed_at_ms: Some(20_000),
+                    ..Default::default()
+                })),
+                100.0
+            )
+            .as_deref(),
+            Some("0s")
+        );
+        assert!(
+            subagent_elapsed(UiLanguage::English, Some(&child(Turn::default())), 100.0).is_none()
+        );
+        let agent = SubagentPresentation {
+            target: None,
+            name: "Review".into(),
+            message: String::new(),
+            status: TurnStatus::Completed,
+        };
+        assert_eq!(
+            agent.status(Some(&child(Turn {
+                status: TurnStatus::Running,
+                ..Default::default()
+            }))),
+            TurnStatus::Running
+        );
+        assert_eq!(
+            agent.status(Some(&child(Turn::default()))),
+            TurnStatus::Completed
+        );
+        assert_eq!(
+            agent.name(Some(&Thread {
+                name: Some("Reviewer".into()),
+                ..Default::default()
+            })),
+            "Reviewer"
+        );
+        assert_eq!(
+            agent.name(Some(&Thread {
+                name: Some("  ".into()),
+                ..Default::default()
+            })),
+            "Review"
+        );
+    }
 
     fn session(id: &str) -> SessionRef {
         SessionRef {

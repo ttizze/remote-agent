@@ -68,6 +68,105 @@ impl HostRpcService {
         row: &Conversation,
         turn_id: &agent_protocol::ids::TurnId,
     ) -> Result<ThreadResponse, Failure> {
+        let (fork, inherited) = self.branch(row, turn_id).await?;
+        self.inner
+            .transcripts
+            .import(&fork.id, inherited)
+            .map_err(transcripts::storage_failure)?;
+        self.inner.conversations.save(fork.clone())?;
+        self.publish_conversation(&fork).await
+    }
+
+    /// Returns a conversation to just before `params.turn_id`, as T3 Code's
+    /// "Edit from here": its public identity stays while a native session
+    /// holding only the earlier turns takes over.
+    pub(super) async fn rewind_session(
+        &self,
+        target: &SessionRef,
+        params: &op::RewindSession,
+    ) -> Result<ThreadResponse, Failure> {
+        let busy = || {
+            Failure::new(
+                "conversation_busy",
+                "Stop the current work and clear the queue before rewinding.",
+            )
+        };
+        if !self.inner.router.queue(target).inputs.is_empty() {
+            return Err(busy());
+        }
+        let row = match self.inner.conversations.get(target)? {
+            Some(row) => row,
+            None => {
+                Conversation::new(&self.native_history(target, HistoryUse::Read).await?.thread)?
+            }
+        };
+        if row.startup.is_some() {
+            return Err(busy());
+        }
+        let history = self.conversation_history(&row, HistoryUse::Import).await?;
+        let turns = history.thread.turns.as_deref().unwrap_or_default();
+        if turns
+            .iter()
+            .any(|turn| turn.status == agent_protocol::models::TurnStatus::Running)
+        {
+            return Err(busy());
+        }
+        let index = turns
+            .iter()
+            .rposition(|turn| turn.id == params.turn_id)
+            .ok_or_else(|| Failure::new("invalid_turn", "Rewind target turn is unavailable."))?;
+        let (mut rewound, kept) = match index.checked_sub(1) {
+            Some(previous) => self.branch(&row, &turns[previous].id).await?,
+            None => self.restart(&row, &history).await?,
+        };
+        rewound.id = row.id;
+        rewound.name = row.name;
+        rewound.preview = row.preview;
+        self.inner
+            .transcripts
+            .replace(&rewound.id, kept)
+            .map_err(transcripts::storage_failure)?;
+        self.inner.conversations.save(rewound.clone())?;
+        self.publish_conversation(&rewound).await
+    }
+
+    /// A new native session for a conversation rewound past its first turn.
+    async fn restart(
+        &self,
+        row: &Conversation,
+        history: &ThreadResponse,
+    ) -> Result<(Conversation, ThreadResponse), Failure> {
+        let agent = self.creation_agent(row.active.provider, None)?;
+        let model = history.model.as_ref().map(|model| model.id.as_str());
+        let response = self
+            .native_thread(agent.as_ref(), |browser| {
+                agent.create(&row.cwd, model, browser)
+            })
+            .await?;
+        let mut restarted = Conversation::new(&response.thread)?;
+        restarted.cover(0);
+        let mut empty = response;
+        empty.thread.turns = Some(Vec::new());
+        Ok((restarted, empty))
+    }
+
+    async fn publish_conversation(&self, row: &Conversation) -> Result<ThreadResponse, Failure> {
+        let page = Self::conversation_page(
+            self.conversation_history(row, HistoryUse::Read).await?,
+            None,
+            5,
+        )?;
+        self.notify_thread(page.thread.clone()).await?;
+        Ok(page)
+    }
+
+    /// An unsaved conversation continuing `row` after `turn_id`, and the
+    /// history it inherits.
+    async fn branch(
+        &self,
+        row: &Conversation,
+        turn_id: &agent_protocol::ids::TurnId,
+    ) -> Result<(Conversation, ThreadResponse), Failure> {
         use crate::host_rpc::conversations::Segment;
         let (native, turn) = row.source(turn_id)?;
         if !row.sources().any(|source| *source == native) {
@@ -132,7 +231,7 @@ impl HostRpcService {
             .ok_or_else(|| Failure::new("invalid_turn", "Fork source turn is unavailable."))?
             + 1;
         let response = self
-            .start_thread(agent.as_ref(), |browser| {
+            .native_thread(agent.as_ref(), |browser| {
                 agent.fork(&native.id, &turn, browser)
             })
             .await?;
@@ -173,16 +272,7 @@ impl HostRpcService {
             end: None,
         });
         fork.cover(boundary);
-        self.inner
-            .transcripts
-            .import(&fork.id, inherited)
-            .map_err(transcripts::storage_failure)?;
-        self.inner.conversations.save(fork.clone())?;
-        Self::conversation_page(
-            self.conversation_history(&fork, HistoryUse::Read).await?,
-            None,
-            5,
-        )
+        Ok((fork, inherited))
     }
     pub fn set_history_scope(&self, directory: std::path::PathBuf, isolated: bool) {
         let _ = self.inner.history_scope.set((directory, isolated));

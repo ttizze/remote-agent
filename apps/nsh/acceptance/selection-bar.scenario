@@ -23,14 +23,14 @@ expect_absent 詳細を表示 10000
 # Asking in a side chat quotes the selection there.
 select "*Needle Alpha*" Bravo
 press サイドチャットで質問
-expect "> Bravo" after ツールを閉じる 10000
+expect "> Bravo" after ツールを追加 10000
 # The right-click menu still offers the selection's actions.
 select "*Needle Alpha*" Alpha
 menu "*Needle Alpha*"
 press サイドチャットで質問
-expect "> Alpha" after ツールを閉じる 10000
+expect "> Alpha" after ツールを追加 10000
 # Explaining sends the side chat's first message at once.
 select "*Needle Alpha*" Alpha
 press 詳細を表示
-expect "次の選択範囲について詳しく説明してください。" after ツールを閉じる 30000
+expect "次の選択範囲について詳しく説明してください。" after ツールを追加 30000
 screenshot explained

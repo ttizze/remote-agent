@@ -14,21 +14,16 @@ struct ThreadScreen: View {
     @Environment(\.locale) private var locale
     let model: ConversationModel
     let environment: ConversationEnvironment
-    let conversation: ConversationPresentation?
     var isSideChat = false
     var openTools: ((PanelKind?) -> Void)?
     @State var openedDirectory: WorkspaceDestination?
     @State var mediaPresentation = ConversationMediaPresentation()
-    @State var scroll = ConversationScrollState()
-    @State var expandedItemIds = Set<String>()
 
     var body: some View {
         chatContent
             .modifier(ConversationMediaPresenter(presentation: mediaPresentation))
             .onDisappear(perform: mediaPresentation.cancelPending)
             .onChange(of: model.draftKey) {
-                expandedItemIds.removeAll()
-                scroll.following = true
                 openedDirectory = nil
                 mediaPresentation.reset()
             }
@@ -72,34 +67,10 @@ struct ThreadScreen: View {
             if let notice = model.notice, errorText(language: locale.appLanguage, error: notice) != history?.error {
                 AppNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
-            if let thread = conversation {
-                let rows = thread.rows
-                let hasHistory = thread.id != nil && history != nil
-                let ids: [ConversationList.RowID] = (hasHistory ? [.history] : []) + rows.map { .message($0.id) }
-                let showLatest = !scroll.latestVisible && !rows.isEmpty
-                GeometryReader { geometry in
-                    ConversationList(ids: ids, scroll: scroll, following: scroll.following,
-                                     accessibilityValue: threadAccessibilityValue(
-                                         thread,
-                                         itemCount: thread.projection.sourceItemCount()
-                                     ),
-                                     viewportHeight: geometry.size.height) { index in
-                        let row = index - (hasHistory ? 1 : 0)
-                        return AnyView(Group {
-                            if row < 0, let session = thread.id, let history {
-                                historyControl(history, session: session)
-                            } else if rows.indices.contains(row) {
-                                conversationRow(rows[row])
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .environment(\.locale, locale))
-                    }
-                    .ignoresSafeArea(.container, edges: .bottom)
-                }
-                .id(model.draftKey)
-                .overlay(alignment: .bottom) { latestButton(visible: showLatest).padding(.bottom, 6) }
+            if model.hasConversation {
+                NshConversationView(host: model.host, session: model.session, pane: model.pane,
+                                    perform: messageAction)
+                    .accessibilityIdentifier("task.detail")
             } else if model.isNewThread {
                 ScrollView {
                     newThreadContext
@@ -127,19 +98,6 @@ struct ThreadScreen: View {
                                  isSideChat: isSideChat, openTools: openTools)
         }
     }
-
-    @ViewBuilder private func latestButton(visible: Bool) -> some View {
-        if visible {
-            Button { scroll.following = true } label: {
-                Image(systemName: "arrow.down").font(.title3.weight(.medium))
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel("最新のメッセージへ")
-            .accessibilityIdentifier("task.latest")
-        }
-    }
 }
 
 /// Conversation navigation
@@ -157,6 +115,32 @@ extension ThreadScreen {
             environment.hostName ?? "Mac",
             environment.connecting ? localizedUiText(language: locale.appLanguage, source: "接続中…") : ""
         ].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    /// What a message asks for: its selection quoted in the composer or asked
+    /// about in a side chat, or a link opened.
+    func messageAction(_ action: String, _ text: String) {
+        switch action {
+        case "quote":
+            model.addSelectionToChat(text)
+        case "sideChat", "explain":
+            guard !isSideChat else { return }
+            model.askSelectionInSideChat(text)
+            openTools?(.sideChat)
+        case "link":
+            guard let url = URL(string: text) else { return }
+            if url.scheme == "https" || url.scheme == "http" ||
+                markdownFileTarget(source: text, cwd: mediaAccess.cwd, surface: .mobile) == nil {
+                UIApplication.shared.open(url)
+            } else {
+                mediaAccess.presentation.openLink(text, resolve: mediaAccess.resolve,
+                                                  download: mediaAccess.download,
+                                                  openDirectory: mediaAccess.openDirectory,
+                                                  openFile: mediaAccess.openFile)
+            }
+        default:
+            break
+        }
     }
 
     var conversationActions: some View {

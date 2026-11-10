@@ -38,12 +38,22 @@ impl SendShortcut {
 }
 
 /// This device's composer behavior, shared by every Host and window.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerPreferences {
     pub follow_up: FollowUp,
     pub send_shortcut: SendShortcut,
+}
+
+/// T3 Code's defaults: a message sent while a turn runs steers it.
+impl Default for ComposerPreferences {
+    fn default() -> Self {
+        Self {
+            follow_up: FollowUp::Steer,
+            send_shortcut: SendShortcut::default(),
+        }
+    }
 }
 
 /// What a message sent now asks a running turn for: the preference, or its

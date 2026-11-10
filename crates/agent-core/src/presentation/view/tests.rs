@@ -63,6 +63,40 @@ fn snapshot() -> Snapshot {
     state
 }
 
+#[test]
+fn workspace_review_publications_refresh_the_native_composer_summary() {
+    use agent_protocol::models::{ChangedFile, WorkspaceReview};
+    let mut state = snapshot();
+    let mut previous = Presentation::project(Arc::new(state.clone()), "", None).unwrap();
+    for (additions, deletions) in [(7, 2), (19, 5)] {
+        Arc::make_mut(&mut Arc::make_mut(state.panes.primary_mut()).workspace).review =
+            Some(Arc::new(WorkspaceReview {
+                branch: "main".into(),
+                additions,
+                deletions,
+                files: vec![ChangedFile {
+                    path: "src/main.rs".into(),
+                    status: "M".into(),
+                    additions: Some(additions),
+                    deletions: Some(deletions),
+                }],
+                diff: String::new(),
+            }));
+        let next = Presentation::project(Arc::new(state.clone()), "", Some(&previous)).unwrap();
+        assert!(next.changes(previous).groups.panes);
+        let review = next.composer_review(false).unwrap();
+        assert_eq!(
+            (review.files, review.additions, review.deletions),
+            (1, additions, deletions)
+        );
+        previous = next;
+    }
+    Arc::make_mut(&mut Arc::make_mut(state.panes.primary_mut()).workspace).review = None;
+    let next = Presentation::project(Arc::new(state), "", Some(&previous)).unwrap();
+    assert!(next.changes(previous).groups.panes);
+    assert_eq!(next.composer_review(false), None);
+}
+
 #[tokio::test]
 async fn navigation_and_cancellation_do_not_wait_for_transcript_projection() {
     use std::sync::{Mutex, mpsc};

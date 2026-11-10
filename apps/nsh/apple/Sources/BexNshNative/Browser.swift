@@ -1,5 +1,8 @@
 import NativeBrowserViews
-import SwiftUI
+import Foundation
+#if os(iOS)
+    import SwiftUI
+#endif
 
 #if os(macOS)
     import AppKit
@@ -29,13 +32,7 @@ struct BrowserData: Decodable {
 struct BrowserDialog: Decodable { let message: String; let prompt: Bool }
 @MainActor private final class BrowserOwner {
     #if os(macOS)
-        let view = NSHostingView(rootView: BrowserViewport(
-            image: nil,
-            enabled: false,
-            dialog: nil,
-            credentials: nil,
-            send: { _ in }
-        ))
+        let view = BrowserCanvasView()
     #else
         let view = NativeHostingView(rootView: BrowserViewport(
             image: nil,
@@ -61,23 +58,28 @@ struct BrowserDialog: Decodable { let message: String; let prompt: Bool }
             encodedImage = content.image
             image = Data(base64Encoded: content.image).flatMap(BrowserImage.init(data:))
         }
-        let root = BrowserViewport(
-            image: image,
-            enabled: content.enabled,
-            dialog: content.dialog,
-            credentials: content.credentials
-        ) { [weak self] value in
-            guard let self, let data = try? JSONSerialization.data(withJSONObject: value) else { return }
-            data.withUnsafeBytes { self.callback?(self.context, $0.bindMemory(to: UInt8.self).baseAddress, data.count) }
-        }
         #if os(macOS)
-            view.rootView = root
+            if let image { view.display(image) }
+            view.send = content.enabled ? { [weak self] action in
+                switch action {
+                case let .click(x, y): self?.emit(["Click": ["x": x, "y": y]])
+                case let .scroll(x, y, dx, dy): self?.emit(["Scroll": ["x": x, "y": y, "delta_x": dx, "delta_y": dy]])
+                }
+            } : nil
         #else
-            view.controller.rootView = root
+            view.controller.rootView = BrowserViewport(
+                image: image, enabled: content.enabled, dialog: content.dialog, credentials: content.credentials
+            ) { [weak self] value in self?.emit(value) }
         #endif
     }
+    private func emit(_ value: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return }
+        data.withUnsafeBytes { callback?(context, $0.bindMemory(to: UInt8.self).baseAddress, data.count) }
+    }
+
 }
 
+#if os(iOS)
 private struct BrowserViewport: View {
     let image: BrowserImage?
     let enabled: Bool
@@ -136,6 +138,8 @@ private struct BrowserViewport: View {
     }
 }
 
+#endif
+
 @_cdecl("bex_nsh_browser_create")
 @MainActor public func browserCreate(
     _ context: UnsafeMutableRawPointer?,
@@ -147,11 +151,7 @@ private struct BrowserViewport: View {
 @_cdecl("bex_nsh_browser_view")
 @MainActor public func browserView(_ handle: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
     let owner = Unmanaged<BrowserOwner>.fromOpaque(handle).takeUnretainedValue()
-    #if os(macOS)
-        return Unmanaged.passUnretained(owner.view).toOpaque()
-    #else
-        return Unmanaged.passUnretained(owner.view).toOpaque()
-    #endif
+    return Unmanaged.passUnretained(owner.view).toOpaque()
 }
 
 @_cdecl("bex_nsh_browser_update")

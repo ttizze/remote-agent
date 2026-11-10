@@ -181,7 +181,7 @@ description = "A finished turn that edited files: how each client shows the chan
 nsh = ["send [workspace-edit] 編集を確認します", "wait 4000", "fixture /release-inputs", "expect \"シミュレータで完了しました。\" 30000"]
 t3 = [{ send = "[workspace-edit] 編集を確認します" }, { waitText = "Working for" }, { waitMs = 3000 }, { release = true }, { waitText = "シミュレータで完了しました。" }]
 column = "composer"
-elements = ["composer", "composer-overlay", "assistant-text", "changed-files-card", "changed-files-row"]
+elements = ["composer", "composer-overlay", "assistant-text", "changed-files-card"]
 
 [[state]]
 name = "history-minimap"
@@ -814,14 +814,6 @@ kind = "box"
 group = "bex-only"
 t3 = "[data-timeline-row-kind=message] [data-changed-files], [data-timeline-row-kind=assistant-meta]"
 nsh = { text = "Show changes", up = "background" }
-
-[[element]]
-id = "changed-files-row"
-what = "Changed file row"
-kind = "text"
-group = "bex-only"
-t3 = "[data-timeline-row-kind=assistant-meta] button"
-nsh = { text = "hello.txt", role = "AXStaticText" }
 
 [[element]]
 id = "minimap"

@@ -11,18 +11,30 @@ pub(super) struct Pane {
     host: String,
     core: OnceCell<Arc<AgentPane>>,
     stop: CancellationToken,
+    owned: bool,
 }
 
 impl Pane {
     fn close(&self) {
         self.stop.cancel();
-        if let Some(core) = self.core.get() {
+        if let Some(core) = self.core.get().filter(|_| self.owned) {
             core.retire();
         }
     }
 }
 
 impl Client {
+    pub(super) fn attach_pane(&self, host: String, pane: Arc<AgentPane>) {
+        self.panes.lock().unwrap().insert(
+            1,
+            Arc::new(Pane {
+                host,
+                core: OnceCell::new_with(Some(pane)),
+                stop: CancellationToken::new(),
+                owned: false,
+            }),
+        );
+    }
     pub fn prepare_side_chat(
         self: &Arc<Self>,
         id: u64,
@@ -43,6 +55,7 @@ impl Client {
                         host: host.clone(),
                         core: OnceCell::new(),
                         stop: CancellationToken::new(),
+                        owned: true,
                     })
                 })
                 .clone()

@@ -11,8 +11,8 @@ press 承認
 expect "シミュレータで完了しました。" 30000
 type "AI に依頼する" "Keep this draft"
 press 右パネルを切り替え
-press ファイル after ツールを閉じる
-press hello.txt after ツールを閉じる
+press ファイル after ツールを追加
+press hello.txt after ツールを追加
 expect "日本語のファイル" after 保存 10000
 type hello.txt "Saved from Mac\n" after 保存
 expect "Saved from Mac" after 保存
@@ -20,7 +20,7 @@ press 保存
 expect_absent 処理中… 10000
 press ツールを追加
 press 差分
-expect "Saved from Mac" after ツールを閉じる 10000
+expect "Saved from Mac" after ツールを追加 10000
 screenshot saved-diff
 press ツールを閉じる
 expect "Keep this draft"

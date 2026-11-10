@@ -450,6 +450,7 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
+                .chain(value["agentThreadId"].as_str())
                 .map(|id| SessionRef {
                     provider: ProviderKind::Codex,
                     id: id.into(),
@@ -1055,6 +1056,11 @@ mod tests {
             matches!(subagent.body(),ItemBody::Subagent {states,..} if states[0].session.provider == ProviderKind::Codex && states[0].status == TurnStatus::Running)
         );
         let future = json!({"id":"u","type":"futureItem","unknown":[1,2,3]});
+        let activity = parse_item(json!({"id":"activity","type":"subAgentActivity","status":"completed","kind":"started","agentThreadId":"child"})).unwrap();
+        assert!(
+            matches!(activity.body(), ItemBody::Subagent { receivers, .. }
+            if receivers == &vec![SessionRef {provider: ProviderKind::Codex, id:"child".into()}])
+        );
         assert!(
             matches!(parse_item(future.clone()).unwrap().body(),ItemBody::Custom {value,..} if value == &future)
         );

@@ -2,46 +2,6 @@ import AgentCore
 import SwiftUI
 import WebKit
 
-struct ConversationVisualization: View {
-    @Environment(\.locale) private var locale
-    let path: String
-    let media: ConversationMediaAccess
-    @State private var html: String?
-    @State private var error: String?
-
-    var body: some View {
-        VStack(alignment: .leading) {
-            if let html {
-                Button("インタラクティブ表示を拡大") {
-                    media.presentation.visualization = .init(html: html)
-                }
-                .accessibilityIdentifier("visualize.expand")
-                VisualizationWebView(html: html).frame(height: 420)
-            } else if let error {
-                Text(verbatim: localizedUiFormat(
-                    language: locale.appLanguage,
-                    source: "表示できません: {0}",
-                    arguments: [localizedErrorMessage(language: locale.appLanguage, error: error)]
-                )).font(.caption)
-            } else {
-                ProgressView("インタラクティブ表示を読み込み中…")
-            }
-        }
-        .task(id: "\(media.host ?? ""):\(media.cwd):\(path)") {
-            html = nil; error = nil
-            do {
-                let document = try await media.visualization(path)
-                try Task.checkCancellation()
-                html = document
-            } catch {
-                if !Task.isCancelled {
-                    self.error = error.localizedDescription
-                }
-            }
-        }
-    }
-}
-
 /// HTML receives no native message handlers, cookies, file origin or popup capability.
 struct VisualizationWebView: View {
     let html: String

@@ -12,6 +12,17 @@ pub(crate) struct LocalFile {
 }
 
 impl LocalFile {
+    #[cfg(target_os = "ios")]
+    pub fn markdown(filename: String, text: String) -> Result<Self, std::io::Error> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(filename);
+        std::fs::write(&path, text)?;
+        Ok(Self {
+            _directory: directory,
+            path,
+        })
+    }
+
     fn create(root: PathBuf, filename: &str) -> Result<Self, AgentError> {
         agent_local_host::create_state_directory(&root).map_err(error)?;
         let directory = tempfile::tempdir_in(root).map_err(error)?;

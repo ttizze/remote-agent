@@ -1,19 +1,19 @@
-# The changed-files card opens the diff at the file pressed; the diff notes a
-# binary file's change in place of Git's marker, jumps to a file it lists,
-# and copies itself.
+# The changed-files badge opens the full diff; the diff notes a binary file's
+# change in place of Git's marker, jumps to a file selected from its menu, and
+# copies itself.
 fixture /binary-file
 expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
 type "AI に依頼する" "[immediate] 変更を確認します"
 press 送信
 expect "シミュレータで完了しました。" 30000
-expect "3 件のファイルを変更"
-press pixel.bin
-expect "バイナリファイルが変更されました" after ツールを閉じる 20000
+expect "3件のファイル"
+press 変更を表示
+expect "バイナリファイルが変更されました" after ツールを追加 20000
 expect_absent "Binary files"
 press 差分のファイルを選択
 press hello.txt
-expect "+編集を確認します。" after ツールを閉じる
+expect "+編集を確認します。" after ツールを追加
 screenshot diff
 press 差分をコピー
 expect_clipboard "diff --git"

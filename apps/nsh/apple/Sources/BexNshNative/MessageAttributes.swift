@@ -138,8 +138,19 @@ struct MessageMenuTitles: Decodable, Equatable {
                     .font: font(size: size, mono: block.code, bold: false, italic: false)
                 ]))
             }
-            result.addAttribute(.paragraphStyle, value: paragraph,
-                                range: NSRange(location: start, length: result.length - start))
+            let range = NSRange(location: start, length: result.length - start)
+            result.addAttribute(.paragraphStyle, value: paragraph, range: range)
+            #if os(macOS)
+                // TextKit fills inline backgrounds to the line's bounds.
+                // Centre the text optically between its cap and ascender
+                // heights, retaining room for accents, using its native
+                // baseline attribute rather than shifting or repainting it.
+                let base = font(size: size, mono: block.code,
+                                bold: block.header != nil || cell == "header", italic: false)
+                let ascent = block.code ? base.ascender : (base.ascender + base.capHeight) / 2
+                let leading = lineHeight(block, size: size) - (ascent - base.descender)
+                result.addAttribute(.baselineOffset, value: max(0, leading / 2), range: range)
+            #endif
         }
         return result
     }
@@ -155,8 +166,8 @@ struct MessageMenuTitles: Decodable, Equatable {
             // and `leading-snug` (1.375) code, the extra half above and half
             // below the glyphs; blocks 0.65rem apart, list items 0.25rem, a
             // heading 1.25rem below what precedes it (margins collapse).
-            // TextKit puts a line's extra height above its glyphs; the text
-            // view moves them up by half of it (`halfLeading`).
+            // TextKit puts a line's extra height above its glyphs; the native
+            // baseline attribute centres them without moving its backgrounds.
             paragraph.minimumLineHeight = lineHeight(block, size: size)
             paragraph.maximumLineHeight = lineHeight(block, size: size)
             // Items of one list: a numbered list next to a bulleted one is
@@ -195,15 +206,6 @@ struct MessageMenuTitles: Decodable, Equatable {
             size * (block.code ? 1.375 : block.header == nil ? 1.625 : 1.3)
         }
 
-        /// Half the extra height of the first block's lines: CSS centres a
-        /// line's glyphs in it where TextKit puts them at its bottom.
-        static func halfLeading(_ blocks: [MessageParagraph], cell: String? = nil) -> CGFloat {
-            guard let block = blocks.first else { return 0 }
-            let size = Self.size(block, cell: cell)
-            let font = font(size: size, mono: block.code, bold: block.header != nil || cell == "header",
-                            italic: false)
-            return max(0, (lineHeight(block, size: size) - (font.ascender - font.descender)) / 2)
-        }
     #endif
 
     /// Whether the run at `position` is part of the caption a chip's author
@@ -255,7 +257,7 @@ struct MessageMenuTitles: Decodable, Equatable {
     private static func color(secondary: Bool, answer: Bool = false) -> MessageColor {
         #if os(macOS)
             // T3 Code's answer: the foreground at 80%.
-            secondary ? .secondaryLabelColor : answer ? NSColor(white: 0.74, alpha: 1) : .labelColor
+            secondary ? .secondaryLabelColor : answer ? NSColor.labelColor.withAlphaComponent(0.8) : .labelColor
         #else
             secondary ? .secondaryLabel : .label
         #endif

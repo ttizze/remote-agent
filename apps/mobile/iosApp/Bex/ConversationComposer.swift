@@ -63,22 +63,27 @@ struct ConversationComposer: View {
             && answering == nil && !dictation.isRecording && !dictation.requestingPermission && !model.transcribing
             && !model.transferring && !preparingMedia
         return VStack(spacing: 12) {
-            if !isSideChat, !model.isNewThread, let review = model.files.review(), review.fileCount() > 0 {
+            if let review = model.composerReview {
                 Button { openTools?(.diff) } label: {
                     HStack(spacing: 10) {
                         Text(verbatim: localizedUiFormat(
                             language: locale.appLanguage,
                             source: "{0}件のファイル",
-                            arguments: [String(review.fileCount())]
+                            arguments: [String(review.files)]
                         )).foregroundStyle(.tint)
-                        Text("+\(review.additions())").foregroundColor(.green)
-                        Text("−\(review.deletions())").foregroundColor(.red)
+                        Text("+\(review.additions)").foregroundColor(.green)
+                        Text("−\(review.deletions)").foregroundColor(.red)
                     }
                     .font(.subheadline.monospacedDigit())
                 }
                 .buttonStyle(.glass)
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("task.diff")
+            }
+            if !controls.followUp.queue.isEmpty, let threadId = model.navigation.threadId {
+                ConversationQueue(followUp: controls.followUp) {
+                    model.perform(.queue(threadId: threadId, action: $0))
+                }
             }
             if let error = model.transferError {
                 AppNotice(text: error)
@@ -192,7 +197,7 @@ struct ConversationComposer: View {
                 ComposerStopButton(turnId: runningTurnId, interrupting: model.interruptingTurnId == runningTurnId,
                                    stop: model.interrupt)
             } else {
-                sendButton()
+                sendButton(hasAttachments: hasAttachments)
             }
         }
     }
@@ -222,7 +227,7 @@ struct ConversationComposer: View {
         .accessibilityIdentifier("dictation.toggle")
     }
 
-    func sendButton() -> some View {
+    func sendButton(hasAttachments: Bool) -> some View {
         Button {
             // Commit native text before Store can clear the accepted draft.
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)

@@ -252,7 +252,7 @@ fn stopping_retries_failure_and_does_not_depend_on_message_input_availability() 
 }
 
 #[test]
-fn the_review_card_folds_past_three_files_and_needs_a_conversation_with_changes() {
+fn the_review_summary_needs_a_conversation_with_changes() {
     use agent_protocol::models::{ChangedFile, WorkspaceReview};
     let with_files = |count: usize| {
         let mut snapshot = snapshot();
@@ -273,15 +273,13 @@ fn the_review_card_folds_past_three_files_and_needs_a_conversation_with_changes(
             }));
         snapshot
     };
-    let paths = |review: &ComposerReview| {
-        review
-            .rows
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<Vec<_>>()
-    };
     assert_eq!(snapshot().panes.primary().composer_review(false), None);
-    assert_eq!(with_files(0).panes.primary().composer_review(true), None);
+    assert_eq!(with_files(0).panes.primary().composer_review(false), None);
+    assert_eq!(
+        with_files(3).panes.primary().composer_review(true),
+        None,
+        "side chats do not show the workspace badge"
+    );
 
     let three = with_files(3)
         .panes
@@ -289,25 +287,8 @@ fn the_review_card_folds_past_three_files_and_needs_a_conversation_with_changes(
         .composer_review(false)
         .unwrap();
     assert_eq!((three.files, three.additions, three.deletions), (3, 7, 2));
-    assert_eq!(three.rows.len(), 3);
-    assert_eq!(three.folded, None, "three files need no toggle");
 
-    let four = with_files(4);
-    let folded = four.panes.primary().composer_review(false).unwrap();
-    assert_eq!(
-        paths(&folded),
-        ["src/日本語-0.rs", "src/日本語-1.rs", "src/日本語-2.rs"]
-    );
-    assert_eq!(folded.folded, Some(1));
-    let expanded = four.panes.primary().composer_review(true).unwrap();
-    assert_eq!(expanded.rows.len(), 4);
-    assert_eq!(
-        expanded.folded,
-        Some(1),
-        "the toggle stays to fold it again"
-    );
-
-    let mut draft = four;
+    let mut draft = with_files(4);
     Arc::make_mut(draft.panes.primary_mut()).navigation = Arc::new(Navigation {
         thread_id: None,
         draft_key: "draft".into(),
@@ -321,11 +302,11 @@ fn the_review_card_folds_past_three_files_and_needs_a_conversation_with_changes(
 }
 
 #[test]
-fn the_review_action_is_named_from_a_24rem_card() {
-    assert!(super::review_action_labelled(384.));
-    assert!(super::review_action_labelled(720.));
-    assert!(!super::review_action_labelled(383.9));
-    assert!(!super::review_action_labelled(0.));
+fn a_new_device_steers_a_running_turn_as_t3_code_does() {
+    assert_eq!(
+        crate::state::ComposerPreferences::default().follow_up,
+        FollowUp::Steer
+    );
 }
 
 #[test]
@@ -351,6 +332,8 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
         (false, true, true, false, FollowUp::Steer, FollowUp::Steer),
     ] {
         let mut snapshot = snapshot();
+        // This device asks to queue; its opposite steers.
+        snapshot.input.composer_preferences.follow_up = FollowUp::Queue;
         Arc::make_mut(&mut snapshot.sessions.conversations).insert(
             session(),
             Arc::new(Thread {

@@ -7,7 +7,8 @@ import Foundation
 
 typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
 
-/// TextKit owns selection, copying, hit testing and glyph measurement. NSH receives only its intrinsic size and actions.
+/// TextKit owns selection, copying, hit testing and glyph measurement. NSH receives only its intrinsic size and
+/// actions.
 @MainActor final class MessageTextOwner {
     let context: UnsafeMutableRawPointer?
     var callback: MessageCallback?
@@ -46,17 +47,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         private var reported = false
         private var geometryObservers: [NSKeyValueObservation] = []
         private var lastVisibleRect: NSRect = .zero
-        /// How far the glyphs move up to sit in their lines as CSS centres
-        /// them (`MessageAttributes.halfLeading`).
-        var halfLeading: CGFloat = 0 {
-            didSet { if halfLeading != oldValue { needsDisplay = true } }
-        }
-
-        override var textContainerOrigin: NSPoint {
-            let origin = super.textContainerOrigin
-            return NSPoint(x: origin.x, y: origin.y - halfLeading)
-        }
-
         func watchScrollingGeometry() {
             geometryObservers.removeAll()
             lastVisibleRect = .zero
@@ -73,14 +63,20 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                     // Track both halves, including the deferred bounds commit: a
                     // transiently clipped text view cannot retain its old pixels.
                     geometryObservers.append(layer.observe(\.position, options: [.old, .new]) { _, change in
-                        if change.oldValue != change.newValue { redraw() }
+                        if change.oldValue != change.newValue {
+                            redraw()
+                        }
                     })
                     geometryObservers.append(layer.observe(\.bounds, options: [.old, .new]) { _, change in
-                        if change.oldValue != change.newValue { redraw() }
+                        if change.oldValue != change.newValue {
+                            redraw()
+                        }
                     })
                     geometryObservers.append(layer.observe(\.sublayerTransform, options: [.old, .new]) { _, change in
                         if let old = change.oldValue, let new = change.newValue,
-                           !CATransform3DEqualToTransform(old, new) { redraw() }
+                           !CATransform3DEqualToTransform(old, new) {
+                            redraw()
+                        }
                     })
                 }
                 ancestor = current.superview
@@ -123,10 +119,10 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             return rects
         }
 
-        // NSH scrolls a container's sublayers before committing its NSView
-        // bounds. TextKit's inherited visibleRect follows those stale bounds
-        // and suppresses glyphs until the trailing scroll commit. Convert the
-        // actual layer clips instead, keeping TextKit on the displayed frame.
+        /// NSH scrolls a container's sublayers before committing its NSView
+        /// bounds. TextKit's inherited visibleRect follows those stale bounds
+        /// and suppresses glyphs until the trailing scroll commit. Convert the
+        /// actual layer clips instead, keeping TextKit on the displayed frame.
         override var visibleRect: NSRect {
             guard let own = layer, let root = window?.contentView?.layer else { return super.visibleRect }
             var rect = bounds.intersection(own.convert(root.bounds, from: root))
@@ -135,44 +131,54 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 if current.masksToBounds || current.mask != nil {
                     rect = rect.intersection(own.convert(current.bounds, from: current))
                 }
-                if current === root { break }
+                if current === root {
+                    break
+                }
                 ancestor = current.superlayer
             }
             return rect.isNull ? .zero : rect
         }
+
         #if DEBUG
-        // Acceptance observes completed native draws, rather than text merely
-        // published to accessibility (which includes offscreen list cells).
-        private var paints = RenderProbe.Paints()
+            /// Acceptance observes completed native draws, rather than text merely
+            /// published to accessibility (which includes offscreen list cells).
+            private var paints = RenderProbe.Paints()
 
-        @objc func bexPaintedAtForText(_ expected: String, since: TimeInterval, visiblePrefix: Bool) -> Double {
-            guard let manager = layoutManager, let container = textContainer,
-                  !visibleRect.isEmpty else { return 0 }
-            let glyphs = manager.glyphRange(forBoundingRect: visibleRect, in: container)
-            let range = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
-            let visible = (string as NSString).substring(with: range)
-            if visiblePrefix { return paints.firstVisible(prefix: expected, in: visible) ?? 0 }
-            guard visible.contains(expected) else { return 0 }
-            return paints.first(for: expected, since: since) ?? 0
-        }
+            @objc func bexPaintedAtForText(_ expected: String, since: TimeInterval, visiblePrefix: Bool) -> Double {
+                guard let manager = layoutManager, let container = textContainer,
+                      !visibleRect.isEmpty else { return 0 }
+                let glyphs = manager.glyphRange(forBoundingRect: visibleRect, in: container)
+                let range = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+                let visible = (string as NSString).substring(with: range)
+                if visiblePrefix {
+                    return paints.firstVisible(prefix: expected, in: visible) ?? 0
+                }
+                guard visible.contains(expected) else { return 0 }
+                return paints.first(for: expected, since: since) ?? 0
+            }
 
-        func resetPaints() { paints.clear() }
+            func resetPaints() {
+                paints.clear()
+            }
 
-        func preparePaints(for content: String) {
-            paints.update(previous: string, current: content)
-        }
+            func preparePaints(for content: String) {
+                paints.update(previous: string, current: content)
+            }
 
-        override func draw(_ dirtyRect: NSRect) {
-            super.draw(dirtyRect)
-            guard RenderProbe.enabled, let manager = layoutManager, let container = textContainer else { return }
-            let rect = visibleRect.intersection(dirtyRect)
-            guard !rect.isEmpty else { return }
-            let glyphs = manager.glyphRange(forBoundingRect: rect, in: container)
-            let range = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
-            let painted = (string as NSString).substring(with: range)
-            paints.record(painted, at: Date.timeIntervalSinceReferenceDate)
-            RenderProbe.record("draw", self, painted: painted)
-        }
+            override func draw(_ dirtyRect: NSRect) {
+                super.draw(dirtyRect)
+                guard RenderProbe.enabled || RenderProbe.timings,
+                      let manager = layoutManager, let container = textContainer else { return }
+                let rect = visibleRect.intersection(dirtyRect)
+                guard !rect.isEmpty else { return }
+                let glyphs = manager.glyphRange(forBoundingRect: rect, in: container)
+                let range = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+                let painted = RenderProbe.enabled ? (string as NSString).substring(with: range) : ""
+                if RenderProbe.enabled {
+                    paints.record(painted, at: Date.timeIntervalSinceReferenceDate)
+                }
+                RenderProbe.record("draw", self, painted: painted)
+            }
 
         #endif
 
@@ -228,7 +234,9 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         }
 
         func textViewDidChangeSelection(_: Notification) {
-            if !selecting { reportSelection() }
+            if !selecting {
+                reportSelection()
+            }
         }
 
         override func resignFirstResponder() -> Bool {
@@ -279,7 +287,11 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             quote.representedObject = ["action": "quote", "text": selected, "target": target]
             menu.insertItem(quote, at: 0)
             if document.sideChat {
-                let side = NSMenuItem(title: document.menu.sideChat, action: #selector(quoteSelection(_:)), keyEquivalent: "")
+                let side = NSMenuItem(
+                    title: document.menu.sideChat,
+                    action: #selector(quoteSelection(_:)),
+                    keyEquivalent: ""
+                )
                 side.target = self
                 side.representedObject = ["action": "sideChat", "text": selected, "target": target]
                 menu.insertItem(side, at: 1)
@@ -371,14 +383,19 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         func update(_ document: MessageDocument) {
             guard text.document != document else { return }
             #if DEBUG
-            if document.target != text.document.target || document.role != text.document.role
-                || document.maxWidth != text.document.maxWidth { text.resetPaints() }
+                RenderProbe.record("update.begin", text)
+            #endif
+            #if DEBUG
+                if document.target != text.document.target || document.role != text.document.role
+                    || document.maxWidth != text.document.maxWidth {
+                    text.resetPaints()
+                }
             #endif
             text.document = document
             text.setAccessibilityIdentifier("message.\(document.role)-text")
             refresh()
             #if DEBUG
-            RenderProbe.record("update", text)
+                RenderProbe.record("update", text)
             #endif
         }
 
@@ -404,10 +421,11 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 && (text.string as NSString).substring(with: range) == (content.string as NSString)
                 .substring(with: range)
             #if DEBUG
-            if RenderProbe.enabled { text.preparePaints(for: content.string) }
+                if RenderProbe.enabled {
+                    text.preparePaints(for: content.string)
+                }
             #endif
             text.textStorage?.setAttributedString(content)
-            text.halfLeading = MessageAttributes.halfLeading(document.blocks, cell: document.cell)
             // The natural size comes from TextKit's own layout, whose glyphs the
             // wrapped layout below reuses, rather than a second typesetting pass.
             if let container = text.textContainer, let manager = text.layoutManager {
@@ -436,7 +454,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
             reportSize(CGSize(width: max(0, measuredSize.width), height: height))
             #if DEBUG
-            RenderProbe.record("layout", text)
+                RenderProbe.record("layout", text)
             #endif
         }
     }
@@ -446,7 +464,14 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         var document = MessageDocument.empty
 
         init() {
-            super.init(frame: .zero, textContainer: nil)
+            let container = NSTextContainer(size: .zero)
+            let manager = NSLayoutManager()
+            let storage = NSTextStorage()
+            storage.addLayoutManager(manager)
+            manager.addTextContainer(container)
+            super.init(frame: .zero, textContainer: container)
+            container.widthTracksTextView = false
+            container.heightTracksTextView = false
             isEditable = false
             isSelectable = true
             isScrollEnabled = false
@@ -532,9 +557,18 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let keep = range.length > 0 && NSMaxRange(range) <= content.length && NSMaxRange(range) <= text
                 .attributedText.length
                 && (text.text as NSString).substring(with: range) == (content.string as NSString).substring(with: range)
-            text.attributedText = content
-            let size = content.size()
-            reportSize(CGSize(width: ceil(size.width), height: ceil(size.height)))
+            text.textStorage.setAttributedString(content)
+            // Reuse the native glyph layout for both measurements. TextKit 2's
+            // sizeThatFits on a full-height review retypesets the entire text.
+            let container = text.textContainer
+            let manager = text.layoutManager
+            container.size = CGSize(width: 1_000_000, height: CGFloat.greatestFiniteMagnitude)
+            manager.ensureLayout(for: container)
+            let size = manager.usedRect(for: container).size
+            let width = max(1, min(ceil(size.width), document.maxWidth))
+            container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+            manager.ensureLayout(for: container)
+            reportSize(CGSize(width: ceil(size.width), height: ceil(manager.usedRect(for: container).maxY)))
             text.selectedRange = keep ? range : NSRange(location: 0, length: 0)
             setNeedsLayout()
         }
@@ -542,9 +576,9 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         override func layoutSubviews() {
             super.layoutSubviews()
             guard bounds.width > 0 else { return }
-            let height = ceil(text.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height)
-            text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
-            reportSize(CGSize(width: max(0, measuredSize.width), height: height))
+            // The frame can still belong to the previous recycled row. The
+            // document supplies its width; resizing the view needs no reflow.
+            text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: max(0, measuredSize.height))
         }
     }
 #endif

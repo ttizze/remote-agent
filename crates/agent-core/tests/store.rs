@@ -3023,6 +3023,75 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
 }
 
 #[tokio::test]
+async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer() {
+    let source = SessionRef {
+        provider: ProviderKind::Codex,
+        id: "thread".into(),
+    };
+    let mut initial = snapshot();
+    let user = |id: &str, content: serde_json::Value| json!({"id":id,"status":"completed","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":content}}}}});
+    let kept = json!({"id":"kept","status":"completed","items":[user("a",json!([{"text":{"text":"earlier"}}]))]});
+    let thread: Thread = serde_json::from_value(json!({
+        "id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"idle",
+        "turns":[kept.clone(),
+            {"id":"edit","status":"completed","items":[user("b",json!([
+                {"text":{"text":"send this again"}},
+                {"image":{"source":"/fixture/shot.png"}},
+                {"image":{"source":"data:image/png;base64,AAAA"}},
+                {"attachment":{"name":"notes.md","path":"/fixture/notes.md"}}
+            ]))]},
+            {"id":"later","status":"completed","items":[user("c",json!([{"text":{"text":"removed"}}]))]}]
+    })).unwrap();
+    Arc::make_mut(&mut initial.sessions.conversations).insert(source.clone(), Arc::new(thread));
+    Arc::make_mut(&mut initial.input.drafts).insert(
+        source.clone().into(),
+        Arc::new(Draft {
+            text: "replaced".into(),
+            ..Default::default()
+        }),
+    );
+    let (store, mut reader, writer) = setup(initial).await;
+    let rewind = store.dispatch(Intent::RewindSession(op::RewindSession::new(
+        source.clone(),
+        "edit".into(),
+    )));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/session/rewind");
+    assert_eq!(request["params"]["turnId"], "edit");
+    writer
+        .reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","turns":[kept]}}}))
+        .await
+        .unwrap();
+    rewind.await.unwrap();
+    let snapshot = store.snapshot();
+    let turns = snapshot.sessions.conversations[&source]
+        .turns
+        .clone()
+        .unwrap();
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<Vec<_>>(),
+        ["kept"]
+    );
+    let draft = &snapshot.input.drafts[&DraftKey::from(source)];
+    assert_eq!(draft.text, "send this again");
+    assert_eq!(
+        draft
+            .attachments
+            .iter()
+            .map(|file| (file.name.as_str(), file.path.as_str(), file.is_image))
+            .collect::<Vec<_>>(),
+        [
+            ("shot.png", "/fixture/shot.png", true),
+            ("notes.md", "/fixture/notes.md", false)
+        ]
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn fork_failure_clears_progress_and_allows_retry() {
     let (store, mut reader, writer) = setup(snapshot()).await;
     let selected_before = store

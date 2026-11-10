@@ -337,6 +337,34 @@ impl WorkspaceFiles {
                 })
                 .map(Body::from)
             }
+            Call::WriteWorkspaceFile(params) => {
+                validate_text(&params.text)?;
+                let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+                let target = workspace_target(&params.cwd, &params.relative_path)?;
+                let temporary = format!(".bex-plan-{}.tmp", uuid::Uuid::new_v4());
+                let mut options = cap_std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use cap_std::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut file = target.directory.open_with(&temporary, &options)?;
+                let result = (|| {
+                    file.write_all(params.text.as_bytes())?;
+                    file.sync_all()?;
+                    // Windows cannot rename an open file.
+                    drop(file);
+                    target
+                        .directory
+                        .rename(&temporary, &target.directory, &target.name)
+                })();
+                if result.is_err() {
+                    let _ = target.directory.remove_file(&temporary);
+                }
+                result.context("write the file")?;
+                Ok(Body::from(target.relative))
+            }
             _ => Err(anyhow::anyhow!("not a file request")),
         }
     }
@@ -543,6 +571,64 @@ fn read_file(path: &Path, requested: &Path) -> Result<FileContent> {
         truncated,
     })
 }
+/// The opened parent directory and leaf name of a workspace-relative file.
+struct WorkspaceTarget {
+    directory: cap_std::fs::Dir,
+    name: std::ffi::OsString,
+    relative: String,
+}
+
+/// Resolve relative paths with directory capabilities so intermediate links
+/// cannot redirect a workspace write outside its root.
+fn workspace_target(cwd: &str, relative: &str) -> Result<WorkspaceTarget> {
+    use std::path::Component;
+    let root =
+        cap_std::fs::Dir::open_ambient_dir(absolute_path(&cwd)?, cap_std::ambient_authority())
+            .context("open the workspace")?;
+    let mut parts = Vec::new();
+    for component in Path::new(relative.trim()).components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_owned()),
+            Component::CurDir => {}
+            Component::ParentDir if parts.pop().is_some() => {}
+            _ => return Err(anyhow!("the path must stay inside the workspace")),
+        }
+    }
+    if parts.is_empty() {
+        return Err(anyhow!("a file path is required"));
+    }
+    let path: PathBuf = parts.iter().collect();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // Directory capabilities resolve links beneath this root and retain the
+    // opened directory across the atomic replacement, including concurrent
+    // path changes. A path check followed by ordinary I/O would race symlinks.
+    root.create_dir_all(parent)
+        .context("make the file's folders inside the workspace")?;
+    let directory = root.open_dir(parent)?;
+    let name = path
+        .file_name()
+        .context("a file path is required")?
+        .to_owned();
+    if directory
+        .symlink_metadata(&name)
+        .is_ok_and(|metadata| metadata.is_symlink())
+    {
+        return Err(anyhow!("the file must not be a symbolic link"));
+    }
+    Ok(WorkspaceTarget {
+        directory,
+        name,
+        relative: parts
+            .iter()
+            .map(|part| part.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    })
+}
+
 fn validate_text(text: &str) -> Result<()> {
     if text.contains('\0') {
         return Err(anyhow!("binary file; download it instead"));
@@ -592,6 +678,85 @@ fn digest_file(file: &mut File) -> Result<(u64, [u8; 32])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workspace_file_is_written_inside_the_workspace_with_its_folders() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(workspace.path().join("attachments"));
+        let cwd = workspace.path().to_str().unwrap().to_owned();
+        let write = |relative: &str, text: &str| {
+            files.dispatch(
+                1,
+                Call::WriteWorkspaceFile(agent_protocol::operations::WriteWorkspaceFile {
+                    cwd: cwd.clone(),
+                    relative_path: relative.into(),
+                    text: text.into(),
+                }),
+            )
+        };
+        let Body::Text(written) = write(" plans/./ship-it.md ", "# Ship it\n").unwrap() else {
+            panic!("a path")
+        };
+        assert_eq!(*written, "plans/ship-it.md");
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("plans/ship-it.md")).unwrap(),
+            "# Ship it\n"
+        );
+        // A plan saved again replaces the file.
+        write("plans/ship-it.md", "# Shipped\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("plans/ship-it.md")).unwrap(),
+            "# Shipped\n"
+        );
+        write("root.md", "Root\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("root.md")).unwrap(),
+            "Root\n"
+        );
+        assert!(write("root.md", "binary\0text").is_err());
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("root.md")).unwrap(),
+            "Root\n"
+        );
+        assert!(write("plans", "cannot replace a directory").is_err());
+        write("root.md", "Recovered\n").unwrap();
+        for escaping in [
+            "../escape.md",
+            "/tmp/escape.md",
+            "plans/../../escape.md",
+            "",
+        ] {
+            assert!(write(escaping, "x").is_err(), "{escaping}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), workspace.path().join("link")).unwrap();
+            assert!(write("link/escape.md", "x").is_err());
+            assert!(!outside.path().join("escape.md").exists());
+            std::os::unix::fs::symlink(
+                outside.path().join("missing"),
+                workspace.path().join("dangling"),
+            )
+            .unwrap();
+            assert!(write("dangling/escape.md", "x").is_err());
+            assert!(!outside.path().join("missing").exists());
+            // Relative links within the root remain usable.
+            std::os::unix::fs::symlink("plans", workspace.path().join("relative-link")).unwrap();
+            write("relative-link/inside.md", "inside\n").unwrap();
+            assert_eq!(
+                fs::read_to_string(workspace.path().join("plans/inside.md")).unwrap(),
+                "inside\n"
+            );
+            std::os::unix::fs::symlink(
+                outside.path().join("leaf.md"),
+                workspace.path().join("leaf-link.md"),
+            )
+            .unwrap();
+            assert!(write("leaf-link.md", "x").is_err());
+            assert!(!outside.path().join("leaf.md").exists());
+        }
+    }
 
     #[tokio::test]
     async fn home_links_resolve_list_read_write_and_download_on_the_host() {

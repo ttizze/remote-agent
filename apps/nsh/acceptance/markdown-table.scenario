@@ -1,6 +1,5 @@
 # A Markdown table shows its cells, copies itself as Markdown or CSV from its
-# copy menu, compacts its cells, and shows again when the conversation is
-# reopened.
+# copy menu, and shows again when the conversation is reopened.
 # iOS: testSimulatorRendersMarkdownTableAndReopensIt
 expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
@@ -14,9 +13,6 @@ expect_clipboard "| 構成 | 利点 | 負担 |"
 press 表をコピー
 press CSVをコピー
 expect_clipboard "\"構成\",\"利点\",\"負担\""
-press セルをコンパクトに表示
-expect セルを折り返す
-screenshot compact
 press 新しいチャット
 expect_absent "Codexハーネス＋Claude接続"
 press 検証プロジェクト

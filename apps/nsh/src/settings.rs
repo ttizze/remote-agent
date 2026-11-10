@@ -14,7 +14,10 @@ use agent_core::{
     updates::{Channel, UpdatePhase},
 };
 use agent_protocol::{operations::FollowUp, session::ProviderKind};
-use nsh_core::{element::ImageSrc, prelude::*};
+use nsh_core::{
+    element::{ImageSrc, overlay as overlay_element},
+    prelude::*,
+};
 use serde_json::json;
 
 mod worktrees;
@@ -63,25 +66,28 @@ impl Page {
     }
 }
 
-pub(crate) fn overlay(hosts: Memo<Vec<Host>>) -> View {
+pub(crate) fn overlay(hosts: Memo<Vec<Host>>) -> impl IntoElement {
     let connection = use_context::<Connection>().unwrap();
     let page = signal(Page::General);
     // A provider chosen from outside (the model picker's accounts) shows its page.
+    let previous_provider = stored(None::<ProviderKind>);
     effect(move || {
-        if connection.state.with(|state| state.provider.is_some()) {
+        let provider = connection.state.with(|state| state.provider).or_else(|| {
+            connection
+                .settings
+                .with(|settings| settings.account_login().map(|login| login.provider))
+        });
+        if previous_provider.replace(provider) != provider && provider.is_some() {
             page.set(Page::Providers);
         }
     });
-    let locked = computed(move || connection.state.with(|state| state.account_locked()));
     let close = move || {
-        if !locked.get_untracked() {
-            connection
-                .application
-                .with(|app| app.navigate(Navigation::Settings(false)));
-        }
+        connection
+            .application
+            .with(|app| app.navigate(Navigation::Settings(false)));
     };
     environment::read_settings(connection);
-    view()
+    overlay_element()
         .absolute()
         .top(px(0.0))
         .left(px(0.0))
@@ -90,9 +96,23 @@ pub(crate) fn overlay(hosts: Memo<Vec<Host>>) -> View {
         .items_center()
         .justify_center()
         .p(px(40.0))
-        .bg(rgba(0x080808a3))
-        .backdrop_blur(px(4.0))
-        .on_press(close)
+        // The backdrop is a separate standard button.  Making the overlay
+        // itself pressable turns the entire settings tree into one AppKit
+        // accessibility button and also makes it its own press target.
+        .on_cancel(close)
+        .child(
+            view()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .bg(rgba(0x080808a3))
+                .backdrop_blur(px(4.0))
+                .role(AccessibilityRole::Button)
+                .label(SharedString::from(tr("設定を閉じる")))
+                .on_press(close),
+        )
         .child(
             view()
                 .flex_row()
@@ -105,39 +125,34 @@ pub(crate) fn overlay(hosts: Memo<Vec<Host>>) -> View {
                 .border_color(colors::BORDER)
                 .overflow_hidden()
                 .bg(colors::BACKGROUND)
-                .on_press(|| {})
                 .child(navigation(page))
                 .child(
-                    view()
-                        .flex_1()
-                        .min_w_0()
-                        .child(header(page, close, locked))
-                        .child(
-                            scroll().flex_1().child(
-                                view()
-                                    .w_full()
-                                    .max_w(px(928.0))
-                                    .p_8()
-                                    .gap_8()
-                                    .child(heading(page))
-                                    .child(when(
-                                        move || page.get() == Page::General,
-                                        move || general(connection),
-                                    ))
-                                    .child(when(
-                                        move || page.get() == Page::Providers,
-                                        move || providers(connection),
-                                    ))
-                                    .child(when(
-                                        move || page.get() == Page::Environments,
-                                        move || environments(connection, hosts),
-                                    ))
-                                    .child(when(
-                                        move || page.get() == Page::Worktrees,
-                                        move || worktrees::page(connection),
-                                    )),
-                            ),
+                    view().flex_1().min_w_0().child(header(page, close)).child(
+                        scroll().flex_1().child(
+                            view()
+                                .w_full()
+                                .max_w(px(928.0))
+                                .p_8()
+                                .gap_8()
+                                .child(heading(page))
+                                .child(when(
+                                    move || page.get() == Page::General,
+                                    move || general(connection),
+                                ))
+                                .child(when(
+                                    move || page.get() == Page::Providers,
+                                    move || providers(connection),
+                                ))
+                                .child(when(
+                                    move || page.get() == Page::Environments,
+                                    move || environments(connection, hosts),
+                                ))
+                                .child(when(
+                                    move || page.get() == Page::Worktrees,
+                                    move || worktrees::page(connection),
+                                )),
                         ),
+                    ),
                 ),
         )
 }
@@ -192,7 +207,7 @@ fn navigation(page: Signal<Page>) -> View {
 }
 
 /// The breadcrumb and the close button.
-fn header(page: Signal<Page>, close: impl Fn() + 'static, locked: Memo<bool>) -> View {
+fn header(page: Signal<Page>, close: impl Fn() + 'static) -> View {
     view()
         .flex_row()
         .items_center()
@@ -213,7 +228,7 @@ fn header(page: Signal<Page>, close: impl Fn() + 'static, locked: Memo<bool>) ->
                 .flex_1()
                 .text_size(px(14.0)),
         )
-        .child(ui::icon_button(Icon::CLOSE, tr("閉じる"), close).enabled(move || !locked.get()))
+        .child(ui::icon_button(Icon::CLOSE, tr("閉じる"), close))
 }
 
 fn heading(page: Signal<Page>) -> View {

@@ -19,9 +19,14 @@ final class ConversationModel {
     private(set) var conversationContext: ConversationContext
     private(set) var composer: ComposerPresentation
     private(set) var composerControls: ComposerControls
+    /// The shared core summary for the workspace-change badge. Keep this on
+    /// the observable model because `publication` is intentionally ignored by
+    /// Observation and workspace reviews can change without composer changes.
+    private(set) var composerReview: ComposerReview?
     private(set) var files: AgentCore.Files
     private(set) var terminals = Terminals.empty()
-    private(set) var conversation: ConversationPresentation?
+    /// The open conversation has rows for its NSH timeline to draw.
+    private(set) var hasConversation = false
     private(set) var agents: [AgentSummary] = []
     var notice: String?
     var sideChatRequest: SideChatRequest?
@@ -32,10 +37,6 @@ final class ConversationModel {
     let workbenchInstance = UUID()
     var workbenchSideChats: [UInt64: SideChatRequest] = [:]
     @ObservationIgnored private var observation: Task<Void, Never>?
-    @ObservationIgnored private var presentationTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingPresentation: ProjectionInput?
-    @ObservationIgnored private var recentConversations: [ConversationPresentation] = []
-    @ObservationIgnored private var activityExpansionOverrides = [String: String]()
 
     var store: AgentStore? {
         session.store()
@@ -53,6 +54,7 @@ final class ConversationModel {
         self.composer = composer
         composerControls = composer.controls()
         files = empty.snapshot().files(paneId: "")!
+        composerReview = empty.composerReview(isSideChat: pane != nil)
         if let value = try? currentPresentation() {
             publish(value)
         }
@@ -119,6 +121,7 @@ final class ConversationModel {
         if changes.composerControls {
             composerControls = value.composer().controls()
         }
+        composerReview = value.composerReview(isSideChat: pane != nil)
         if changes.context {
             conversationContext = value.conversationContext()
         }
@@ -135,7 +138,7 @@ final class ConversationModel {
             isConnected = next.connected()
         }
         if changes.conversation {
-            projectConversation(value.conversation())
+            hasConversation = value.conversation() != nil
         }
     }
 
@@ -219,12 +222,6 @@ extension ConversationModel {
         set { perform(.setDraftText(threadId: coreDraftKey, text: newValue)) }
     }
 
-    func loadOlderHistory(_ id: SessionRef) {
-        guard selectedThreadId == id else { return }
-        notice = nil
-        perform(.readOlder(threadId: id))
-    }
-
     func send() {
         perform(.submit(
             threadId: navigation.threadId,
@@ -251,8 +248,7 @@ extension ConversationModel {
             preparation: preparation?.id(),
             audio: audio,
             send: sendImmediately,
-            clientUserMessageId: UUID().uuidString,
-            alternate: false
+            clientUserMessageId: UUID().uuidString
         ))) { [weak self] _ in
             withExtendedLifetime(preparation) {
                 self?.persist()
@@ -276,13 +272,6 @@ extension ConversationModel {
         perform(.answerQuestion(requestId: requestId, action: action))
     }
 
-    func readItemDetails(threadId: SessionRef, turnId: String, itemId: String) async -> String? {
-        do {
-            _ = try await outcome(for: .readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId)))
-            return nil
-        } catch { return error.localizedDescription }
-    }
-
     func download(_ path: String) async throws -> URL {
         try await inTemporaryDirectory { directory in
             let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
@@ -297,83 +286,4 @@ extension ConversationModel {
             perform(intent) { continuation.resume(with: $0) }
         }
     }
-
-    func forkAndOpen(through turnId: String, completion: @escaping (String?) -> Void) {
-        guard let threadId = selectedThreadId else { completion(nil); return }
-        perform(.forkSession(ForkSession(threadId: threadId, lastTurnId: turnId))) { [self] result in
-            guard selectedThreadId == threadId else { completion(nil); return }
-            switch result {
-            case let .success(.startedThread(id)):
-                openThread(id)
-                completion(nil)
-            case let .failure(error): completion(error.localizedDescription)
-            default: completion("会話を分岐できませんでした。")
-            }
-        }
-    }
-
-    func toggleActivity(_ id: String) {
-        guard let conversation,
-              conversation.scope == snapshot.panelScope(host: host, draft: coreDraftKey),
-              let change = conversation.projection.toggleActivity(id: id, expansion: activityExpansionOverrides)
-        else { return }
-        activityExpansionOverrides = change.expansion
-        projectConversation(publication.conversation())
-        if let params = change.loadItems {
-            perform(.loadTurnItems(params))
-        }
-    }
-
-    private func projectConversation(_ rendered: RenderedConversation?) {
-        guard let rendered else {
-            conversation = nil
-            pendingPresentation = nil
-            activityExpansionOverrides.removeAll()
-            return
-        }
-        let scope = snapshot.panelScope(host: host, draft: coreDraftKey)
-        if conversation?.scope != scope {
-            activityExpansionOverrides.removeAll()
-            conversation = recentConversations.first { $0.scope == scope }
-        }
-        pendingPresentation = ProjectionInput(
-            rendered: rendered,
-            scope: scope,
-            connection: snapshot.connectionGeneration(),
-            expansion: activityExpansionOverrides
-        )
-        guard presentationTask == nil else { return }
-        presentationTask = Task { [weak self] in
-            while let self, let input = pendingPresentation {
-                pendingPresentation = nil
-                let rendered = await Task.detached(priority: .userInitiated) { [previous = conversation] in
-                    ConversationPresentation.project(input.rendered, scope: input.scope,
-                                                     expansion: input.expansion, previous: previous)
-                }.value
-                if snapshot.panelScope(host: host, draft: coreDraftKey) == input.scope,
-                   snapshot.connectionGeneration() == input.connection,
-                   snapshot.uiLanguage() == input.rendered.language(),
-                   activityExpansionOverrides == input.expansion,
-                   publication.conversation() != nil {
-                    conversation = rendered
-                    // Expansion resets with the scope, so only collapsed rows can be shown on reopen.
-                    if rendered.id != nil, input.expansion.isEmpty {
-                        recentConversations.removeAll { $0.scope == rendered.scope }
-                        recentConversations.insert(rendered, at: 0)
-                        if recentConversations.count > 3 {
-                            recentConversations.removeLast()
-                        }
-                    }
-                }
-            }
-            self?.presentationTask = nil
-        }
-    }
-}
-
-private struct ProjectionInput {
-    let rendered: RenderedConversation
-    let scope: PanelScope
-    let connection: UInt64
-    let expansion: [String: String]
 }

@@ -68,11 +68,18 @@ nsh-parity *args:
 prune-idle-builds *args:
     node scripts/prune-idle-builds.ts "$@"
 
-# Build the NSH preview app for an iPhone simulator.
-nsh-ios-simulator:
-    bash apps/nsh/build-native.sh ios-simulator
-    CC=/usr/bin/clang CXX=/usr/bin/clang++ CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang cargo build --locked -p agent-nsh --target aarch64-apple-ios-sim
-    bash apps/nsh/package.sh
+# Build the NSH iPhone preview; devices require AGENT_IOS_PROFILE and AGENT_IOS_SIGN_IDENTITY.
+nsh-ios platform="ios-simulator":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$1" in
+        ios) rust_target=aarch64-apple-ios ;;
+        ios-simulator) rust_target=aarch64-apple-ios-sim ;;
+        *) printf 'Use ios or ios-simulator.\n' >&2; exit 2 ;;
+    esac
+    bash apps/nsh/build-native.sh "$1"
+    CC=/usr/bin/clang CXX=/usr/bin/clang++ CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=/usr/bin/clang CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang cargo build --locked -p agent-nsh --target "$rust_target"
+    bash apps/nsh/package.sh "$1"
 
 macos-unit-tests:
     cargo test --locked -p native-focus --test native_focus

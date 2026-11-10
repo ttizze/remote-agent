@@ -117,6 +117,8 @@ impl HostFixture {
                 host_daemon::providers::deepseek::DeepSeek::load(
                     program.to_owned(),
                     directory.join("deepseek"),
+                    None,
+                    None,
                 )
                 .await?
                 .into(),

@@ -1,9 +1,9 @@
 use crate::l10n::{localized, tr, tr_format};
+use crate::ui::Tone;
 use crate::{
     Connection,
     shared::Shared,
     ui::{self, Enabled, Icon, colors},
-    workbench::{Reveal, Workbench},
 };
 use agent_core::{
     presentation::{
@@ -105,7 +105,6 @@ pub(crate) fn workspace_summary(
 
 pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
     let connection = use_context::<Connection>().unwrap();
-    let workspace = use_context::<Workbench>().unwrap();
     let cwd = stored(cwd);
     let host = stored(host);
     let review = computed(move || {
@@ -190,6 +189,14 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
         _ => String::new(),
     };
     let list = element_ref();
+    let paths = move || {
+        files.with(|files| {
+            files
+                .as_ref()
+                .map(|files| files.iter().map(|file| file.path.clone()).collect())
+                .unwrap_or_else(Vec::new)
+        })
+    };
     let show_file = move |path: String| {
         collapsed.update(|collapsed| {
             collapsed.remove(&path);
@@ -200,27 +207,6 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
         if let Some(index) = index {
             crate::conversation::reveal_row(list, index as u32);
         }
-    };
-    // The changed-files card's file shows once the files do.
-    effect(move || {
-        if body.get() != DiffBody::Files {
-            return;
-        }
-        if let Some(path) = workspace.take_reveal(|reveal| match reveal {
-            #[cfg(desktop)]
-            Reveal::DiffFile(path) => Some(path.clone()),
-            Reveal::Page(_) => None,
-        }) {
-            show_file(path);
-        }
-    });
-    let paths = move || {
-        files.with(|files| {
-            files
-                .as_ref()
-                .map(|files| files.iter().map(|file| file.path.clone()).collect())
-                .unwrap_or_else(Vec::new)
-        })
     };
     view()
         .flex_1()
@@ -480,10 +466,19 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
 fn diff_line(line: Memo<Option<DiffRow>>) -> View {
     let tint = move || {
         line.with(|line| match line.as_ref().map(|line| line.kind.as_str()) {
-            Some("+") => (rgb(0x14291d), rgb(0x9be9a8)),
-            Some("-") => (rgb(0x321c20), rgb(0xffa2a2)),
-            Some("@") => (rgb(0x232b38), rgb(0x9cc7f5)),
-            _ => (colors::SURFACE, rgb(0xd0d0d0)),
+            Some("+") => (
+                Tone::new(rgb(0xdcfce7), rgb(0x14291d)),
+                Tone::new(rgb(0x166534), rgb(0x9be9a8)),
+            ),
+            Some("-") => (
+                Tone::new(rgb(0xfee2e2), rgb(0x321c20)),
+                Tone::new(rgb(0x991b1b), rgb(0xffa2a2)),
+            ),
+            Some("@") => (
+                Tone::new(rgb(0xdbeafe), rgb(0x232b38)),
+                Tone::new(rgb(0x1e40af), rgb(0x9cc7f5)),
+            ),
+            _ => (colors::SURFACE, Tone::new(rgb(0x3f3f46), rgb(0xd0d0d0))),
         })
     };
     let code = |content: Text| {

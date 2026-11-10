@@ -1,8 +1,7 @@
 import Foundation
-import SwiftUI
-#if os(macOS)
-    import AppKit
-#else
+
+#if os(iOS)
+    import SwiftUI
     import UIKit
 #endif
 
@@ -16,6 +15,7 @@ enum DetailsContent: Decodable {
     case taskList(data: TaskListData)
 }
 
+#if os(iOS)
 private struct DetailsView: View {
     let content: DetailsContent
     var send: ([String: String]) -> Void = { _ in }
@@ -58,11 +58,7 @@ private struct DetailsView: View {
         self.callback = callback
     }
 
-    #if os(macOS)
-        let view = NSHostingView(rootView: DetailsView(content: .separator))
-    #else
-        let view = NativeHostingView(rootView: DetailsView(content: .separator))
-    #endif
+    let view = NativeHostingView(rootView: DetailsView(content: .separator))
 
     func update(_ data: Data) {
         let content: DetailsContent
@@ -75,11 +71,7 @@ private struct DetailsView: View {
             guard let self, let data = try? JSONSerialization.data(withJSONObject: action) else { return }
             data.withUnsafeBytes { self.callback?(self.context, $0.bindMemory(to: UInt8.self).baseAddress, data.count) }
         }
-        #if os(macOS)
-            view.rootView = root
-        #else
-            view.controller.rootView = root
-        #endif
+        view.controller.rootView = root
     }
 }
 
@@ -105,9 +97,7 @@ private struct DetailsView: View {
 @MainActor public func detailsRelease(_ handle: UnsafeMutableRawPointer) {
     let owner = Unmanaged<DetailsOwner>.fromOpaque(handle).takeRetainedValue()
     owner.callback = nil
-    #if os(iOS)
-        owner.view.detach()
-    #else
-        _ = owner
-    #endif
+    owner.view.detach()
 }
+
+#endif

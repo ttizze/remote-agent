@@ -51,6 +51,37 @@ extension LaunchUITests {
         captureScreen(app, named: "Wrapped draft expands the native composer")
     }
 
+    func testSimulatorNshConversationSendsAndShowsTheReply() throws {
+        let app = try connectedSimulatorApp()
+        let compose = app.buttons["tasks.new.project.simulator-project"]
+        XCTAssertTrue(compose.waitUntilExists(timeout: 10)); compose.tap()
+        submitSimulatorConversation(app, promptText: "[success] [immediate] Start the simulator conversation")
+        let text = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@",
+                               "シミュレータで完了", "シミュレータで完了")
+        let reply = app.descendants(matching: .any).matching(text).firstMatch
+        XCTAssertTrue(reply.waitUntilExists(timeout: 30), "The NSH conversation did not show the reply")
+        captureScreen(app, named: "NSH conversation with its reply")
+    }
+
+    func testSimulatorNshConversationShowsInputSentWhileATurnRuns() throws {
+        let app = try connectedSimulatorApp()
+        let compose = app.buttons["tasks.new.project.simulator-project"]
+        XCTAssertTrue(compose.waitUntilExists(timeout: 10)); compose.tap()
+        submitSimulatorConversation(app, promptText: "[delayed-input] Hold this turn")
+        let message = app.textFields["task.message"]
+        XCTAssertTrue(message.waitUntilExists(timeout: 10))
+        message.tap(); message.typeText("Sent while the turn runs")
+        let send = app.buttons["task.send"]
+        let enabled = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: send)
+        wait(for: [enabled], timeout: 10)
+        send.tap()
+        sleep(4)
+        captureScreen(app, named: "NSH conversation after input sent while the turn runs")
+        try simulatorFixture("release-inputs")
+        sleep(6)
+        captureScreen(app, named: "NSH conversation after the held turn finished")
+    }
+
     func testSimulatorCanStartAConversationInAProject() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This isolated conversation-start E2E runs only in the iOS Simulator")

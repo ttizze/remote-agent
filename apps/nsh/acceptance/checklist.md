@@ -115,7 +115,7 @@ first; the note says which), **n/a** (no Mac equivalent).
 | Composer: Escape discards a recording | not yet | recording needs the system's microphone permission |
 | Composer: folder menu (no project, a project, another folder) | covered | folder-menu |
 | Thread details card (workspace, editor, changes, sources) | partial | attachments (sources); the editor button opens an external app |
-| Changed-files bar and review | covered | review-panel, worktree-review, diff-files (a file row opens the diff at that file) |
+| Changed-files bar and review | covered | review-panel, worktree-review, diff-files (the badge opens the diff and its file menu jumps to a file) |
 | Diff: binary files, file menu, copying the diff | covered | diff-files |
 | Image viewer: zoom by steps, pinch and ⌘ + wheel, reset, save, the conversation's generated images | covered | image-viewer (⌘ + wheel; a trackpad pinch is not posted, and Core's `ImageZoom::gestured` tests both) |
 | An image's menu: save as | covered | image-save-as |
@@ -123,7 +123,7 @@ first; the note says which), **n/a** (no Mac equivalent).
 | Tool panel: files, file preview, diff, close | covered | tool-panel |
 | File list beside an open file: workspace tree, drag into the composer, Shift+F10 menu, resizing, ⌘/Shift-click selection | partial | explorer, file-tree-selection (⌘-click adds rows, Shift-click extends to a row, and the selection drags together); the width surviving a relaunch is unit-tested, and the handle takes no arrow keys (NSH handles take only drags and VoiceOver steps) |
 | File chips: glyph, accent, caption, menu, opening, size tooltip, ⌘-click to the editor | partial | file-chips (⌘-click opens the fixture Host's only editor, a fake one the runner gives it); the size tooltip is a text attribute that AppKit's link elements do not expose to accessibility (MessageTests checks it) |
-| Tool panel: layout, browser, terminal, agents, side chat | covered | review-panel (layout), tools, browser, terminal-paste, terminal-query, terminal-reopen, side-chat |
+| Tool panel: layout, browser, terminal, agents, side chat | covered | review-panel (maximize), tools, browser, terminal-paste, terminal-query, terminal-reopen, side-chat |
 | Settings: general, providers, environment, worktrees | covered | settings, environment-settings |
 | Settings: display language | covered | display-language |
 | The menus NSH makes (app, Edit, Window) in the UI language | covered | menu-labels (Japanese, then English as soon as English is chosen, without a relaunch) |

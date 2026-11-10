@@ -8,7 +8,7 @@ expect "シミュレータで完了しました。" 30000
 press 右パネルを切り替え
 press ツールを追加
 press ターミナル
-expect "/project" after ツールを閉じる 10000
+expect "/project" after ツールを追加 10000
 copy "AGENT_PASTE='日本語\nsecond line'"
 type ターミナル "" after 終了
 # The Edit menu's Paste answers ⌘V while the app is frontmost.

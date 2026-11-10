@@ -1,9 +1,6 @@
-import SwiftUI
 #if os(iOS)
+    import SwiftUI
     import UIKit
-#endif
-
-#if os(iOS)
     /// NSH owns the outer UIView; the native hosting controller joins its parent controller.
     @MainActor final class NativeHostingView<Content: View>: UIView {
         let controller: UIHostingController<Content>

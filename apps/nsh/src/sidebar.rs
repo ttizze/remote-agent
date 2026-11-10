@@ -3,20 +3,15 @@ use crate::l10n::{tr, tr_format};
 use crate::{
     Connection,
     application::{Host, ListRequest, Navigation},
-    ui::{self, Enabled, Icon, colors},
+    ui::{self, Enabled, HEADER_HEIGHT, Icon, colors},
 };
 use nsh_core::prelude::*;
 use serde_json::json;
 
 pub(crate) const WIDTH: f32 = 272.0;
-pub(crate) const HEADER_HEIGHT: f32 = 44.0;
 
-/// `sheet`: over the content in a narrow window, as wide as it is given.
-pub(crate) fn sidebar(
-    hosts: Memo<Vec<Host>>,
-    compose: impl Fn() + 'static,
-    sheet: bool,
-) -> impl IntoElement {
+/// The sidebar fills its native split pane or narrow-window sheet.
+pub(crate) fn sidebar(hosts: Memo<Vec<Host>>, compose: impl Fn() + 'static) -> impl IntoElement {
     let connection = use_context::<Connection>().unwrap();
     let query = signal(String::new());
     let navigate = move |action| {
@@ -27,14 +22,8 @@ pub(crate) fn sidebar(
     let connected = move || connection.settings.with(|p| p.connected());
     // Going somewhere from the sidebar closes its sheet, as T3 Code's.
     let leave = move || navigate(Navigation::LeftSidebar(window().width.0));
-    let column = view();
-    let column = if sheet {
-        column.flex_1()
-    } else {
-        column.w(px(WIDTH))
-    };
-    column
-        .flex_shrink_0()
+    view()
+        .size_full()
         .bg(colors::SIDEBAR)
         .border_r_1()
         .border_r_color(colors::BORDER)
@@ -119,12 +108,7 @@ pub(crate) fn sheet(
         .right(px(0.0))
         .bottom(px(0.0))
         .flex_row()
-        .child(
-            view()
-                .w(width)
-                .flex_row()
-                .child(sidebar(hosts, compose, true)),
-        )
+        .child(view().w(width).flex_row().child(sidebar(hosts, compose)))
         // T3's backdrop: the content dimmed to 60% and blurred by 4 points
         // (`bg-background/60 backdrop-blur-xs`). The sheet hides the rest of
         // it, so it lies beside the sheet, after it for assistive technologies.
@@ -135,7 +119,10 @@ pub(crate) fn sheet(
                 .left(width)
                 .right(px(0.0))
                 .bottom(px(0.0))
-                .bg(rgba(0x08080899))
+                .bg(ui::Tone::new(
+                    nsh_core::element::rgba(0xfcfcfc99),
+                    nsh_core::element::rgba(0x08080899),
+                ))
                 .backdrop_blur(px(4.0))
                 .role(AccessibilityRole::Button)
                 .label(SharedString::from(tr("サイドバーを閉じる")))
@@ -200,16 +187,14 @@ pub(crate) fn conversation_header(
 ) -> impl IntoElement {
     view()
         // T3's `--workspace-topbar-height`.
-        .h(px(52.0))
+        .h(px(HEADER_HEIGHT))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap_3()
-        // T3's `--workspace-gutter` before the breadcrumb, and its toggles
-        // 12 points and a pixel from the window's end, where Windows draws
-        // its window controls over the bar.
+        // T3's `--workspace-gutter` before the breadcrumb.
         .pl(px(20.0))
-        .pr(move || px(13.0 + nsh_core::element::desktop::title_bar().right.0))
+        .pr(ui::titlebar_end_inset)
         .window_drag(true)
         .style_when(move || !sidebar.get(), |s| s.pl_0())
         .child(when(
@@ -217,39 +202,24 @@ pub(crate) fn conversation_header(
             move || header(false, toggle_sidebar),
         ))
         .child(breadcrumb)
-        .child(
-            view()
-                .window_drag(false)
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(toggles),
-        )
+        .child(toggles)
 }
 
 /// T3 Code's panel layout controls: the thread details beside the timeline
-/// (while there is room for them), the terminal, and the right panel (while
-/// it is closed).
+/// (while there is room for them), then the terminal and the right panel,
+/// which the panel's own top-right controls replace while it is open.
 pub(crate) fn panel_toggles(
     details: Signal<bool>,
     details_inline: impl Fn() -> bool + Copy + 'static,
     panel_open: impl Fn() -> bool + Copy + 'static,
     open_panel: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
-    use agent_core::panels::PanelKind;
     let workbench = use_context::<crate::workbench::Workbench>().unwrap();
-    let terminal = move || {
-        workbench.state.with(|state| {
-            state.open
-                && state
-                    .selected()
-                    .is_some_and(|surface| surface.kind == PanelKind::Terminal)
-        })
-    };
     view()
         .flex_row()
         .items_center()
         .gap_1()
+        .window_drag(false)
         .child(when(details_inline, move || {
             ui::toggle(
                 Icon::DETAILS,
@@ -258,30 +228,19 @@ pub(crate) fn panel_toggles(
                 move || details.update(|open| *open = !*open),
             )
         }))
-        .child(
-            ui::toggle(
-                Icon::PANEL_BOTTOM,
-                tr("ターミナルを切り替え"),
-                terminal,
-                move || {
-                    if terminal() {
-                        workbench.hide();
-                    } else {
-                        crate::workbench::open_tool("terminal");
-                    }
-                },
-            )
-            .enabled(|| crate::workbench::tool_enabled("terminal")),
-        )
         .child(when(
             move || !panel_open(),
             move || {
-                ui::toggle(
-                    Icon::PANEL_RIGHT,
-                    tr("右パネルを切り替え"),
-                    panel_open,
-                    open_panel,
-                )
+                view()
+                    .flex_row()
+                    .gap_1()
+                    .child(crate::workbench::terminal_toggle(workbench))
+                    .child(ui::toggle(
+                        Icon::PANEL_RIGHT,
+                        tr("右パネルを切り替え"),
+                        panel_open,
+                        open_panel,
+                    ))
             },
         ))
 }

@@ -220,7 +220,7 @@ fn row(
             .top(px(edge))
             .h(px(2.0))
             .rounded_full()
-            .bg(rgba(0xe6e6e6b3))
+            .bg(crate::ui::Tone::new(rgba(0x18181bb3), rgba(0xe6e6e6b3)))
     };
     view()
         .flex_row()
@@ -237,7 +237,7 @@ fn row(
             if editing() {
                 colors::SELECTED
             } else {
-                rgba(0x00000000)
+                crate::ui::Tone::same(rgba(0x00000000))
             }
         })
         .on_mouse_move(over)

@@ -15,8 +15,10 @@ expect "何に取り組みますか？"
 key return
 expect_absent "何に取り組みますか？" 10000
 expect "シミュレータで完了しました。" 30000
-# The composer, after its destination menu, is empty again.
-expect_absent 会話 after 接続先
+# The conversation has started: where it runs is no longer offered.
+expect_absent "フォルダ:"
+# The composer is empty again.
+expect_absent 会話 after "AI に依頼する"
 # Live conversion keeps the whole message marked: the send button sends it,
 # after the text typed before it.
 press 新しいチャット
@@ -29,7 +31,7 @@ press 送信
 expect_absent "何に取り組みますか？" 10000
 expect "シミュレータで完了しました。" 30000
 expect "前置き 送ります" 10000
-expect_absent "前置き" after 接続先
+expect_absent "前置き" after "AI に依頼する"
 screenshot sent
 # A conversion committed by the input method itself sends with the button.
 press 新しいチャット
@@ -41,4 +43,4 @@ press 送信
 expect_absent "何に取り組みますか？" 10000
 expect "シミュレータで完了しました。" 30000
 expect "二度目" 10000
-expect_absent "二度目" after 接続先
+expect_absent "二度目" after "AI に依頼する"

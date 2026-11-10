@@ -18,7 +18,7 @@ use agent_core::{
 };
 use agent_protocol::file_tree::EntryKind;
 use nsh_core::{
-    element::{ImageSrc, Rgba, rgb, rgba},
+    element::{ImageSrc, rgb, rgba},
     prelude::*,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -396,6 +396,7 @@ fn tree(owner: String, root: Memo<Option<String>>) -> impl Element {
         let options = KeyOptions {
             when: nsh_core::keymap::When::Always,
             repeat: true,
+            ..Default::default()
         };
         on_key_with(keystroke, options, move |_| {
             if engaged.get_untracked()
@@ -747,10 +748,10 @@ fn tree_row(
 
 // The desktop client's tree inks: a row under the pointer and a selected row
 // (the foreground at 7% and 12%), glyphs, and ignored entries.
-const ROW_HOVER: Rgba = rgba(0xe6e6e612);
-const ROW_SELECTED: Rgba = rgba(0xe6e6e61f);
-const GLYPH: Rgba = rgb(0x84848a);
-const IGNORED: Rgba = rgb(0x4a4a4e);
+const ROW_HOVER: ui::Tone = ui::Tone::new(rgba(0x18181b12), rgba(0xe6e6e612));
+const ROW_SELECTED: ui::Tone = ui::Tone::new(rgba(0x18181b1f), rgba(0xe6e6e61f));
+const GLYPH: ui::Tone = ui::Tone::new(rgb(0x71717a), rgb(0x84848a));
+const IGNORED: ui::Tone = ui::Tone::new(rgb(0xa1a1aa), rgb(0x4a4a4e));
 
 include!(concat!(env!("OUT_DIR"), "/file_icons.rs"));
 

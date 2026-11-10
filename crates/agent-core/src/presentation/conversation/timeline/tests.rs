@@ -104,7 +104,9 @@ fn names(rows: &[TurnRow]) -> Vec<String> {
             TurnRow::Requested { label, approval } => format!("requested {label} {approval}"),
             TurnRow::Retrying { label } => format!("retrying {label}"),
             TurnRow::Plan { title, text, .. } => format!("plan {title}: {text}"),
-            TurnRow::Subagent { name, message, .. } => format!("subagent {name}: {message}"),
+            TurnRow::Subagent { agent, .. } => {
+                format!("subagent {}: {}", agent.name, agent.message)
+            }
             TurnRow::Divider { label, .. } => format!("divider {label}"),
             TurnRow::Actions(row) => match &row.content {
                 ConversationRowContent::Response { item, .. } => {
@@ -399,6 +401,68 @@ fn plans_subagents_and_compaction_stand_apart_and_neutral_work_hides() {
             "work Web search",
             "divider Context compacted",
             "interrupted"
+        ]
+    );
+}
+
+#[test]
+fn plan_exports_keep_all_markdown_and_suggest_a_safe_filename() {
+    assert_eq!(plan_export("# ship.it").0, "shipit.md");
+    assert_eq!(plan_export("# A  /  B").0, "a-b.md");
+    assert_eq!(
+        plan_export("# Ship (it)!\n\n- one\n\n"),
+        ("ship-it.md".into(), "# Ship (it)!\n\n- one\n".into())
+    );
+    assert_eq!(
+        plan_export("# 計画\n本文"),
+        ("plan.md".into(), "# 計画\n本文\n".into())
+    );
+    assert_eq!(
+        plan_export("no heading"),
+        ("plan.md".into(), "no heading\n".into())
+    );
+}
+
+#[test]
+fn each_child_remains_navigable_when_adjacent_activity_updates_another_child() {
+    let subagent = |id: &str, children: Vec<(&str, &str)>| {
+        item(
+            id,
+            "completed",
+            json!({"subagent":{
+                "tool":"spawnAgent", "prompt":null, "model":null, "effort":null, "sender":null,
+                "receivers":[], "states":children.into_iter().map(|(child, message)| json!({
+                    "session":{"provider":"codex","id":child}, "status":"completed", "message":message
+                })).collect::<Vec<_>>(), "agentId":null, "result":null
+            }}),
+        )
+    };
+    let mut update = subagent("update", vec![("one", "Finished")]);
+    update["body"]["inline"]["body"]["subagent"]["states"][0]["status"] = "unknown".into();
+    let turn = turn(
+        UiLanguage::English,
+        "interrupted",
+        vec![
+            subagent("spawn", vec![("one", "First"), ("two", "Second")]),
+            update,
+        ],
+        None,
+    );
+    let agents = turn_rows(&turn, &HashMap::new(), &HashSet::new())
+        .into_iter()
+        .filter_map(|row| {
+            if let TurnRow::Subagent { agent, .. } = row {
+                Some((agent.target.unwrap().id, agent.message, agent.status))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        agents,
+        [
+            ("one".into(), "Finished".into(), TurnStatus::Completed),
+            ("two".into(), "Second".into(), TurnStatus::Completed)
         ]
     );
 }

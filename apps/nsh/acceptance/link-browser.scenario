@@ -8,7 +8,7 @@ press 送信
 expect "ページへのリンクです。" 30000
 expect_absent "ブラウザの URL"
 click cmd 検証ページを開く
-expect "ブラウザの URL" after ツールを閉じる 10000
+expect "ブラウザの URL" after ツールを追加 10000
 expect "/browser-page" after "ブラウザの URL" 10000
 # The page's own address comes with the Host's frame, as does its button for
 # the default browser.

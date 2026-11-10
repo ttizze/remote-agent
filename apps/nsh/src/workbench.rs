@@ -1,6 +1,6 @@
 use crate::l10n::{localized, tr, tr_format};
 use crate::{Connection, application::Application, shared::Shared, ui};
-use agent_core::panels::{PanelKind, PanelLayout, PanelScope, PanelState, PanelSurface, PanelTool};
+use agent_core::panels::{PanelKind, PanelScope, PanelState, PanelSurface, PanelTool};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -10,18 +10,8 @@ pub(crate) struct Workbench {
     application: Stored<Arc<Application>>,
     pub scope: Memo<PanelScope>,
     pub state: Memo<PanelState>,
-    /// What the panel just opened shows once it is ready; it clears it then.
-    reveal: Signal<Option<Reveal>>,
-}
-
-/// What a panel shows first, as the desktop client's surfaces did.
-#[derive(Clone, PartialEq)]
-pub(crate) enum Reveal {
-    /// The Diff panel's file, unfolded and scrolled to.
-    #[cfg(desktop)]
-    DiffFile(String),
-    /// The browser's page, loaded in it.
-    Page(String),
+    /// The browser URL to load once its panel is ready; it clears it then.
+    reveal: Signal<Option<String>>,
 }
 
 impl Workbench {
@@ -44,24 +34,17 @@ impl Workbench {
         });
     }
 
-    /// Opens the Diff panel of `cwd`, scrolled to `file` when one is given.
-    #[cfg(desktop)]
-    pub fn review(self, cwd: String, file: Option<String>) {
-        self.open(PanelKind::Diff, Some(cwd), None);
-        self.reveal.set(file.map(Reveal::DiffFile));
-    }
-
     /// Opens `url` in the in-app browser.
     pub fn browse(self, url: String) {
         self.open(PanelKind::Browser, None, None);
-        self.reveal.set(Some(Reveal::Page(url)));
+        self.reveal.set(Some(url));
     }
 
-    /// Takes what `reveal` holds when `take` accepts it.
-    pub fn take_reveal<T>(self, take: impl Fn(&Reveal) -> Option<T>) -> Option<T> {
-        let taken = self.reveal.with(|reveal| reveal.as_ref().and_then(&take))?;
+    /// Takes the URL held for the newly opened browser panel.
+    pub fn take_reveal(self) -> Option<String> {
+        let taken = self.reveal.get();
         self.reveal.set(None);
-        Some(taken)
+        taken
     }
 
     pub fn hide(self) {
@@ -77,11 +60,6 @@ impl Workbench {
     fn close(self, id: u64) {
         self.application
             .with(|application| application.close_panel(self.scope.get_untracked(), id));
-    }
-
-    fn set_layout(self, layout: PanelLayout) {
-        self.application
-            .with(|application| application.set_panel_layout(self.scope.get_untracked(), layout));
     }
 
     pub fn terminal_handle(self, id: u64) -> String {
@@ -215,6 +193,7 @@ pub(crate) fn screen(leading: Option<AnyElement>) -> impl IntoElement {
         .flex_1()
         .min_h_0()
         .pb_keyboard()
+        .accessibility_elements_hidden(move || !workspace.state.with(|state| state.open))
         .child(header(workspace, leading))
         .child(each(
             move || {
@@ -294,30 +273,16 @@ fn file(_: u64) -> AnyElement {
     crate::editor::editors().into_element()
 }
 
-/// The panel bar's height: the conversation header's beside it.
-const HEADER_HEIGHT: f32 = 44.0;
-
 /// T3 Code's panel tab bar: a tab for each open surface and the add-tool menu,
-/// then the layout menu and closing the panel.
+/// then the panel's controls.
 fn header(workspace: Workbench, leading: Option<AnyElement>) -> View {
-    use ui::Icon;
-    let browser = use_context::<crate::files::Browser>().unwrap();
-    view()
-        .h(px(HEADER_HEIGHT))
+    let bar = view()
+        .h(px(ui::HEADER_HEIGHT))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap_1()
         .pl_2()
-        // Windows draws its window controls over the end of a top bar.
-        .pr(move || {
-            let controls = if workspace.state.with(|s| s.layout) == PanelLayout::Bottom {
-                0.0
-            } else {
-                nsh_core::element::desktop::title_bar().right.0
-            };
-            px(12.0 + controls)
-        })
         .window_drag(true)
         .child(leading)
         .child(
@@ -333,23 +298,79 @@ fn header(workspace: Workbench, leading: Option<AnyElement>) -> View {
                     ))
                     .child(view().window_drag(false).child(add_tool())),
             ),
-        )
-        .child(when(is_desktop, move || {
-            view()
-                .flex_row()
-                .gap_1()
-                .window_drag(false)
-                .child(ui::icon_button(
-                    Icon::LAYOUT,
-                    tr("表示位置"),
-                    move || layout_menu(workspace),
-                ))
-                .child(ui::icon_button(
-                    Icon::PANEL_RIGHT,
-                    tr("ツールを閉じる"),
-                    move || browser.close(),
-                ))
+        );
+    #[cfg(desktop)]
+    let bar = bar
+        .pr(ui::titlebar_end_inset)
+        .child(panel_controls(workspace));
+    #[cfg(not(desktop))]
+    let bar = bar.pr_3();
+    bar
+}
+
+/// T3 Code's controls of an open panel: maximizing it, then the terminal and
+/// right panel toggles where the conversation's header has them while it is closed.
+#[cfg(desktop)]
+fn panel_controls(workspace: Workbench) -> impl IntoElement {
+    use ui::Icon;
+    let browser = use_context::<crate::files::Browser>().unwrap();
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .window_drag(false)
+        .child(dynamic(move || {
+            let maximized = workspace.state.with(|state| state.maximized);
+            let (glyph, label) = if maximized {
+                (Icon::MINIMIZE, tr("元のサイズに戻す"))
+            } else {
+                (Icon::MAXIMIZE, tr("拡大表示"))
+            };
+            ui::toggle(
+                glyph,
+                label,
+                move || maximized,
+                move || {
+                    workspace.application.with(|app| {
+                        app.set_panel_maximized(workspace.scope.get_untracked(), !maximized)
+                    })
+                },
+            )
         }))
+        .child(terminal_toggle(workspace))
+        .child(ui::toggle(
+            Icon::PANEL_RIGHT,
+            tr("ツールを閉じる"),
+            || true,
+            move || browser.close(),
+        ))
+}
+
+/// T3 Code's terminal toggle, at the same place with the panel open or closed.
+#[cfg(desktop)]
+pub(crate) fn terminal_toggle(workbench: Workbench) -> impl IntoElement {
+    use ui::Enabled;
+    let open = move || {
+        workbench.state.with(|state| {
+            state.open
+                && state
+                    .selected()
+                    .is_some_and(|surface| surface.kind == PanelKind::Terminal)
+        })
+    };
+    ui::toggle(
+        ui::Icon::PANEL_BOTTOM,
+        tr("ターミナルを切り替え"),
+        open,
+        move || {
+            if open() {
+                workbench.hide();
+            } else {
+                open_tool("terminal");
+            }
+        },
+    )
+    .enabled(|| tool_enabled("terminal"))
 }
 
 /// The add-tool menu: a popup from a small button on the desktop; the system's
@@ -422,28 +443,6 @@ fn tab(workspace: Workbench, surface: ReadSignal<PanelSurface>) -> View {
         )
 }
 
-/// The panel's place, right of, below or instead of the conversation; the
-/// current one checked.
-fn layout_menu(workspace: Workbench) {
-    let layouts = [
-        (PanelLayout::Right, "right", tr("右に表示")),
-        (PanelLayout::Bottom, "bottom", tr("下に表示")),
-        (PanelLayout::Expanded, "expanded", tr("拡大表示")),
-    ];
-    let current = workspace.state.with_untracked(|s| s.layout);
-    let items = layouts
-        .iter()
-        .map(
-            |(layout, id, title)| json!({"id": id, "title": title, "selected": *layout == current}),
-        )
-        .collect::<Vec<_>>();
-    ui::popup(&json!(items), move |id| {
-        if let Some((layout, ..)) = layouts.iter().find(|(_, key, _)| *key == id) {
-            workspace.set_layout(*layout);
-        }
-    });
-}
-
 /// T3 Code's empty panel: the tools as rows under a heading, each with its
 /// key. As T3 Code's launcher it takes the keyboard, so a tool's key opens it
 /// until a text field is focused again.
@@ -457,7 +456,7 @@ fn picker() -> impl IntoElement {
                 &tool.shortcut.to_lowercase(),
                 KeyOptions {
                     when: nsh_core::keymap::When::NotEditing,
-                    repeat: false,
+                    ..Default::default()
                 },
                 move |_| open_tool(&tool.key),
             );

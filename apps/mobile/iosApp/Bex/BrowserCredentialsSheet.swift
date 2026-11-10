@@ -6,7 +6,6 @@ struct BrowserCredentialsSheet: View {
     let credentials: BrowserCredentials
     let send: (BrowserAction) -> Void
     let close: () -> Void
-    @Environment(\.locale) private var locale
 
     var body: some View {
         BrowserCredentialsView(credentials: NativeBrowserCredentials(

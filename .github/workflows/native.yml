@@ -489,7 +489,7 @@ jobs:
           AGENT_CODE_SIGN_IDENTITY: '-'
         run: nix develop .#native --command just build-desktop-macos dev
       - name: Build and package the native NSH iPhone app
-        run: nix develop .#ios-build --command just nsh-ios-simulator
+        run: nix develop .#ios-build --command just nsh-ios
   iphone-tests:
     # A cold shared build can outlast the artifact receiver's deadline.
     # Start consumers only after publication, outside the producer's Apple slot.
