@@ -164,15 +164,15 @@ test('a failed checkout ends the session while the client is still connected', a
   assert.equal(await done, 1);
 });
 
-for (const [name, leave] of [
-  ['closes its connection', client => client.stdin.end()],
-  ['stops sending heartbeats', () => {}],
+for (const [name, leave, edit] of [
+  ['closes its connection', client => client.stdin.end(), undefined],
+  ['stops sending heartbeats', () => {}, script => script.replace('read -r -t 120', 'read -r -t 1')],
 ]) {
-  test(`a run queued for the worktree lock stops when its client ${name}`, async t => {
+  test(`a run queued for the worktree lock stops when its client ${name}`, { timeout: 30_000 }, async t => {
     const { client, locker, done } = await builderRun(
       t,
       { flock: '[[ $1 == -n ]] && exit 1\necho $$ > "$FIXTURE_LOCKER"\nexec sleep 60\n' },
-      script => script.replace('read -r -t 120', 'read -r -t 1'),
+      edit,
     );
     await until(() => existsSync(locker) && readFileSync(locker, 'utf8').trim());
     leave(client);
