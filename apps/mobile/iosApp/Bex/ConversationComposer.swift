@@ -192,7 +192,7 @@ struct ConversationComposer: View {
                 ComposerStopButton(turnId: runningTurnId, interrupting: model.interruptingTurnId == runningTurnId,
                                    stop: model.interrupt)
             } else {
-                sendButton()
+                sendButton(hasAttachments: hasAttachments)
             }
         }
     }
@@ -222,7 +222,7 @@ struct ConversationComposer: View {
         .accessibilityIdentifier("dictation.toggle")
     }
 
-    func sendButton() -> some View {
+    func sendButton(hasAttachments: Bool) -> some View {
         Button {
             // Commit native text before Store can clear the accepted draft.
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)

@@ -1563,6 +1563,18 @@ pub enum ActionTone {
     Danger,
 }
 
+/// A one-time grant leads the native choice buttons; denial is destructive
+/// and broader grants remain secondary.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn choice_tone(effect: agent_protocol::requests::ChoiceEffect) -> ActionTone {
+    use agent_protocol::requests::ChoiceEffect;
+    match effect {
+        ChoiceEffect::Allow => ActionTone::Primary,
+        ChoiceEffect::Deny => ActionTone::Danger,
+        ChoiceEffect::AllowLasting => ActionTone::Secondary,
+    }
+}
+
 impl Request {
     /// The one line T3 Code shows under an approval's label: the provider's
     /// reason, else what it would run, else the label itself.
@@ -2587,6 +2599,18 @@ mod tests {
                 .map(|row| row.edit_turn_id.as_ref().map(|id| id.as_str()))
                 .collect();
             assert_eq!(edits, expected);
+        }
+    }
+
+    #[test]
+    fn native_request_choices_emphasize_one_time_grants_and_denials() {
+        use agent_protocol::requests::ChoiceEffect;
+        for (effect, expected) in [
+            (ChoiceEffect::Allow, ActionTone::Primary),
+            (ChoiceEffect::Deny, ActionTone::Danger),
+            (ChoiceEffect::AllowLasting, ActionTone::Secondary),
+        ] {
+            assert_eq!(choice_tone(effect), expected);
         }
     }
 

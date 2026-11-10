@@ -257,8 +257,7 @@ extension ConversationModel {
             preparation: preparation?.id(),
             audio: audio,
             send: sendImmediately,
-            clientUserMessageId: UUID().uuidString,
-            alternate: false
+            clientUserMessageId: UUID().uuidString
         ))) { [weak self] _ in
             withExtendedLifetime(preparation) {
                 self?.persist()
