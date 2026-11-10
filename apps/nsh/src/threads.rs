@@ -481,19 +481,8 @@ fn desktop_rows(
             .py_3()
             .child(each(
                 move || entries.get(),
-                |row: &Row| {
-                    format!(
-                        "{}|{}|{}|{}|{}|{:?}",
-                        row_id(row.scope.as_ref(), &row.action),
-                        row.title,
-                        row.expanded,
-                        row.loading,
-                        row.enabled,
-                        row.indicators.as_ref().map(|i| i.label()),
-                    )
-                },
+                |row: &Row| row_id(row.scope.as_ref(), &row.action),
                 move |row, position| {
-                    let row = row.get_untracked();
                     // Items are 4 pt apart, as the desktop client's; a section's
                     // title sits flush against what it heads.
                     let after_section = move || {
@@ -508,17 +497,20 @@ fn desktop_rows(
                                 })
                             })
                     };
-                    let spaced =
-                        !matches!(row.action, Action::ProjectHeader | Action::Heading(None));
                     view()
                         .mt(move || {
+                            let spaced = row.with(|row| {
+                                !matches!(row.action, Action::ProjectHeader | Action::Heading(None))
+                            });
                             px(if spaced && position.get() > 0 && !after_section() {
                                 4.0
                             } else {
                                 0.0
                             })
                         })
-                        .child(desktop_row(row, sources, selected, activate))
+                        .child(dynamic(move || {
+                            desktop_row(row.get(), sources, selected, activate)
+                        }))
                 },
             ))
             .child(each(
@@ -583,17 +575,20 @@ fn desktop_row(
         Action::Expand(_) => {
             let compose = row.compose.as_ref().map(|action| {
                 let compose_id = row_id(row.scope.as_ref(), action);
-                let connected = sources.with_untracked(|sources| {
-                    sources
-                        .iter()
-                        .any(|source| Some(&source.scope) == row.scope.as_ref() && source.connected)
+                let scope = row.scope.clone();
+                let connected = computed(move || {
+                    sources.with(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| Some(&source.scope) == scope.as_ref() && source.connected)
+                    })
                 });
                 ui::small_icon_button(
                     Icon::NEW_CHAT,
                     tr("このプロジェクトで新しいチャット"),
                     move || activate("compose", &compose_id, None),
                 )
-                .enabled(move || connected)
+                .enabled(move || connected.get())
             });
             let menu = row.menu.clone();
             let toggle = id.clone();
@@ -850,6 +845,85 @@ fn row_id(scope: Option<&ListScope>, action: &Action) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ConnectionList;
+
+    impl Component for ConnectionList {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn view(_: (), _: Scope<NoEvent>) -> impl IntoElement {
+            let connected = signal(false);
+            let sources = computed(move || {
+                vec![ListSource {
+                    scope: scope("local", "scope"),
+                    connected: connected.get(),
+                }]
+            });
+            let entries = computed(move || {
+                let mut list = fixture_list();
+                list.projects[0].icon = None;
+                list.projects[0].roots = vec![agent_protocol::models::ProjectRoot {
+                    path: "/project".into(),
+                }];
+                fixture_rows(Some(&list), false, "local", "scope", true, connected.get())
+            });
+            view()
+                .child(
+                    nsh_base::button()
+                        .accessibility_label("Toggle connection")
+                        .on_press(move || connected.update(|value| *value = !*value)),
+                )
+                .child(desktop_rows(
+                    entries,
+                    sources,
+                    computed(Vec::new),
+                    |_, _, _| {},
+                ))
+        }
+    }
+
+    #[test]
+    fn desktop_new_chat_and_add_project_follow_connection_without_reopening_projects() {
+        use nsh_core::{ApproxTextEngine, Core, EventKind, EventPayload, MountItem, element::Root};
+        let mut core = Core::new(
+            ApproxTextEngine,
+            nsh_core::geometry::size(px(900.0), px(700.0)),
+        );
+        core.set_components(nsh_base::registry());
+        core.mount_root(&Root::new::<ConnectionList>(|| ()));
+        let mut buttons = std::collections::BTreeMap::new();
+        for connected in [false, true, false, true] {
+            let batch = core.commit().unwrap();
+            for item in batch.items {
+                match item {
+                    MountItem::ViewProps { id, props } => {
+                        buttons.insert(id, props.accessibility);
+                    }
+                    MountItem::Delete { id } => {
+                        buttons.remove(&id);
+                    }
+                    _ => {}
+                }
+            }
+            for label in [
+                tr("このプロジェクトで新しいチャット"),
+                tr("プロジェクトを追加"),
+            ] {
+                let button = buttons
+                    .values()
+                    .find(|value| value.label.as_deref() == Some(label))
+                    .unwrap();
+                assert_eq!(button.state.disabled, !connected, "{label}");
+            }
+            let toggle = buttons
+                .iter()
+                .find(|(_, value)| value.label.as_deref() == Some("Toggle connection"))
+                .unwrap()
+                .0;
+            assert!(core.component_event(*toggle, EventKind::Press, &EventPayload::None));
+        }
+    }
 
     fn scope(host: &str, storage: &str) -> ListScope {
         ListScope {
