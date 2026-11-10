@@ -35,7 +35,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
 }
 
 #if os(macOS)
-    final class MessageTextView: NSTextView, NSTextViewDelegate, NSLayoutManagerDelegate {
+    final class MessageTextView: NSTextView, NSTextViewDelegate {
         var action: (([String: Any]) -> Void)?
         var document = MessageDocument.empty
         /// The modifier keys of the click being handled: a link opens from
@@ -189,7 +189,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             storage.addLayoutManager(manager)
             manager.addTextContainer(container)
             super.init(frame: .zero, textContainer: container)
-            manager.delegate = self
             wantsLayer = true
             isEditable = false
             isSelectable = true
@@ -217,24 +216,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         @available(*, unavailable)
         required init?(coder _: NSCoder) {
             fatalError("init(coder:) is unavailable")
-        }
-
-        /// Lines are as tall as T3 Code's (`MessageAttributes`): TextKit adds
-        /// the leading of a fallback font below a line holding its glyph,
-        /// which the line's inline backgrounds would fill.
-        nonisolated func layoutManager(_ manager: NSLayoutManager,
-                                       shouldSetLineFragmentRect rect: UnsafeMutablePointer<NSRect>,
-                                       lineFragmentUsedRect used: UnsafeMutablePointer<NSRect>,
-                                       baselineOffset _: UnsafeMutablePointer<CGFloat>,
-                                       in _: NSTextContainer, forGlyphRange glyphs: NSRange) -> Bool {
-            let style = manager.textStorage?.attribute(
-                .paragraphStyle, at: manager.characterIndexForGlyph(at: glyphs.location), effectiveRange: nil
-            ) as? NSParagraphStyle
-            guard let line = style?.maximumLineHeight, line > 0, used.pointee.height > line else { return false }
-            let leading = used.pointee.height - line
-            rect.pointee.size.height -= leading
-            used.pointee.size.height -= leading
-            return true
         }
 
         override func mouseDown(with event: NSEvent) {

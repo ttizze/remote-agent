@@ -266,49 +266,46 @@ final class MessageTests: XCTestCase {
             XCTAssertEqual(actions.last?["id"] as? String, "code")
         }
 
-        @MainActor func testALineIsT3CodesLineTallWhateverItsScripts() {
-            // A bracket falls back to a font whose leading would grow its line.
-            for (role, text) in [("assistant", "シミュレータで完了しました。"), ("user", "[groups] 完了した作業を確認します")] {
+        @MainActor func testMessagesKeepNativeLineHeightsAndBaselinesAcrossScripts() throws {
+            for role in ["assistant", "user"] {
+                let text = String(repeating: "lib.rs · L695 [groups] 日本語 ไทย 🧑🏽‍💻 and more words ", count: 3)
                 let run = MessageRun(text: text, strong: false, emphasis: false, strikethrough: false, code: false,
                                      link: nil, darkColor: nil, lightColor: nil)
                 let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
                                              depth: 0, alignment: "left", runs: [run])
                 let view = MessageTextContainer()
-                var heights: [CGFloat] = []
+                var height: CGFloat?
                 view.send = {
-                    if let height = $0["measuredHeight"] as? CGFloat {
-                        heights.append(height)
+                    if let measured = $0["measuredHeight"] as? CGFloat {
+                        height = measured
                     }
                 }
                 view.update(MessageDocument(blocks: [block], secondary: false, role: role, target: "t",
-                                            sideChat: false, maxWidth: 600,
+                                            sideChat: false, maxWidth: 200,
                                             menu: MessageMenuTitles(quote: "", sideChat: "")))
-                // T3 Code's `text-sm leading-relaxed`: 22.75 points.
-                XCTAssertEqual(heights.last, 23, role)
-            }
-        }
-
-        @MainActor func testEveryLineIsT3CodesLineTallWhateverItsScripts() throws {
-            // TextKit adds a fallback font's leading below a line holding its
-            // glyph: the Japanese font's for a middle dot or a bracket where
-            // Japanese is preferred, the Thai font's anywhere.
-            let run = MessageRun(text: "lib.rs · L695 [groups] の作業を確認します ไทย and more words",
-                                 strong: false, emphasis: false, strikethrough: false, code: false,
-                                 link: nil, darkColor: nil, lightColor: nil)
-            let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
-                                         depth: 0, alignment: "left", runs: [run])
-            let view = MessageTextContainer()
-            view.update(MessageDocument(blocks: [block, block], secondary: false, role: "assistant", target: "t",
-                                        sideChat: false, maxWidth: 200,
-                                        menu: MessageMenuTitles(quote: "", sideChat: "")))
-            let manager = try XCTUnwrap(view.text.layoutManager)
-            var heights: [CGFloat] = []
-            manager.enumerateLineFragments(
-                forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)
-            ) { _, used, _, _, _ in heights.append(used.height) }
-            XCTAssertGreaterThan(heights.count, 2, "the paragraphs wrap")
-            for height in heights {
-                XCTAssertEqual(height, 22.75, accuracy: 0.01)
+                // The OS chooses room for each script, including fallback fonts.
+                let reference = NSLayoutManager()
+                let storage = NSTextStorage(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+                let container = NSTextContainer(size: CGSize(width: 200, height: CGFloat.greatestFiniteMagnitude))
+                container.lineFragmentPadding = 0
+                storage.addLayoutManager(reference)
+                reference.addTextContainer(container)
+                reference.ensureLayout(for: container)
+                XCTAssertEqual(height, ceil(reference.usedRect(for: container).height), role)
+                let actual = try XCTUnwrap(view.text.layoutManager)
+                XCTAssertEqual(actual.numberOfGlyphs, reference.numberOfGlyphs)
+                var lines = 0
+                actual.enumerateLineFragments(
+                    forGlyphRange: NSRange(location: 0, length: actual.numberOfGlyphs)
+                ) { _, used, _, glyphs, _ in
+                    let first = glyphs.location
+                    let expected = reference.lineFragmentUsedRect(forGlyphAt: first, effectiveRange: nil)
+                    XCTAssertEqual(used.height, expected.height, accuracy: 0.01, role)
+                    XCTAssertEqual(actual.location(forGlyphAt: first).y,
+                                   reference.location(forGlyphAt: first).y, accuracy: 0.01, role)
+                    lines += 1
+                }
+                XCTAssertGreaterThan(lines, 2, "the multilingual message wraps")
             }
         }
 
@@ -344,22 +341,10 @@ final class MessageTests: XCTestCase {
                 let traits = font.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
                 let weight = traits?[.weight] as? CGFloat ?? 0
                 XCTAssertEqual(weight >= NSFont.Weight.semibold.rawValue, bold, cell)
-                let view = MessageTextContainer()
-                var heights: [CGFloat] = []
-                view.send = {
-                    if let height = $0["measuredHeight"] as? CGFloat {
-                        heights.append(height)
-                    }
-                }
-                view.update(MessageDocument(blocks: [block], secondary: false, role: "assistant", target: "t",
-                                            sideChat: false, maxWidth: 600,
-                                            menu: MessageMenuTitles(quote: "", sideChat: ""), cell: cell))
-                // 12 points at `leading-relaxed`: 19.5.
-                XCTAssertEqual(heights.last, 20, cell)
             }
         }
 
-        @MainActor func testInlineCodeGlyphsAreCenteredInTheNativeBackground() throws {
+        @MainActor func testInlineCodeGlyphsFitInsideTheNativeBackground() throws {
             for strong in [false, true] {
                 let code = "session-25VpGP"
                 let block = MessageParagraph(header: nil, marker: "•", code: false, quoted: false,
@@ -396,7 +381,6 @@ final class MessageTests: XCTestCase {
                                            y: line.minY + origin.y - bounds.maxY,
                                            width: bounds.width, height: bounds.height))
                 }
-                XCTAssertEqual(background.midY, ink.midY, accuracy: 0.5)
                 XCTAssertGreaterThan(ink.minY, background.minY)
                 XCTAssertLessThan(ink.maxY, background.maxY)
             }
@@ -405,8 +389,16 @@ final class MessageTests: XCTestCase {
         @MainActor func testInlineCodeBackgroundsStayInsideTheirFirstAndWrappedLines() throws {
             let code = "hasPrefix(\"# 日本語 🧑🏽‍💻\") source source source source"
             let runs = [
-                MessageRun(text: "保持契約の ", strong: false, emphasis: false, strikethrough: false,
-                           code: false, link: nil, darkColor: nil, lightColor: nil),
+                MessageRun(
+                    text: "保持契約の lib.rs · L695 [groups] ไทย ",
+                    strong: false,
+                    emphasis: false,
+                    strikethrough: false,
+                    code: false,
+                    link: nil,
+                    darkColor: nil,
+                    lightColor: nil
+                ),
                 MessageRun(text: code, strong: false, emphasis: false, strikethrough: false,
                            code: true, link: nil, darkColor: nil, lightColor: nil)
             ]

@@ -151,7 +151,7 @@ struct MessageMenuTitles: Decodable, Equatable {
                     to: result
                 )
             }
-            let paragraph = style(block, size: size, at: index, of: blocks)
+            let paragraph = style(block, at: index, of: blocks)
             if index + 1 < blocks.count {
                 result.append(NSAttributedString(string: "\n", attributes: [
                     .font: font(size: size, mono: block.code, bold: false, italic: false)
@@ -159,36 +159,17 @@ struct MessageMenuTitles: Decodable, Equatable {
             }
             let range = NSRange(location: start, length: result.length - start)
             result.addAttribute(.paragraphStyle, value: paragraph, range: range)
-            #if os(macOS)
-                // TextKit fills inline backgrounds to the line's bounds.
-                // Centre the text optically between its cap and ascender
-                // heights, retaining room for accents, using its native
-                // baseline attribute rather than shifting or repainting it.
-                let base = font(size: size, mono: block.code,
-                                bold: block.header != nil || cell == "header", italic: false)
-                let ascent = block.code ? base.ascender : (base.ascender + base.capHeight) / 2
-                let leading = lineHeight(block, size: size) - (ascent - base.descender)
-                result.addAttribute(.baselineOffset, value: max(0, leading / 2), range: range)
-            #endif
         }
         return result
     }
 
     /// The paragraph style of the block at `index`.
-    private static func style(_ block: MessageParagraph, size: CGFloat, at index: Int,
+    private static func style(_ block: MessageParagraph, at index: Int,
                               of blocks: [MessageParagraph]) -> NSParagraphStyle {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = block.alignment == "center" ? .center : block.alignment == "right" ? .right : .left
         let last = index + 1 == blocks.count
         #if os(macOS)
-            // T3 Code's lines: `leading-relaxed` (1.625) text, 1.3 headings
-            // and `leading-snug` (1.375) code, the extra half above and half
-            // below the glyphs; blocks 0.65rem apart, list items 0.25rem, a
-            // heading 1.25rem below what precedes it (margins collapse).
-            // TextKit puts a line's extra height above its glyphs; the native
-            // baseline attribute centres them without moving its backgrounds.
-            paragraph.minimumLineHeight = lineHeight(block, size: size)
-            paragraph.maximumLineHeight = lineHeight(block, size: size)
             // Items of one list: a numbered list next to a bulleted one is
             // another list, a paragraph's spacing apart.
             let numbered = { (marker: String?) in marker.map { $0.hasSuffix(".") } }
@@ -217,15 +198,6 @@ struct MessageMenuTitles: Decodable, Equatable {
         #endif
         return block.header.map { headings[min(5, max(0, $0 - 1))] } ?? base
     }
-
-    #if os(macOS)
-        /// A block's line as T3 Code's: `leading-relaxed` text, 1.3
-        /// headings, `leading-snug` code.
-        private static func lineHeight(_ block: MessageParagraph, size: CGFloat) -> CGFloat {
-            size * (block.code ? 1.375 : block.header == nil ? 1.625 : 1.3)
-        }
-
-    #endif
 
     /// Whether the run at `position` is part of the caption a chip's author
     /// wrote before it: a link to the same target, up to the chip.
