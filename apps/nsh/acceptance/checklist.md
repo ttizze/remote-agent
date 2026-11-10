@@ -93,6 +93,7 @@ first; the note says which), **n/a** (no Mac equivalent).
 | Sidebar: a conversation's Copy submenu (path, branch, title, ID) | covered | thread-copy |
 | Sidebar: unseen completions, changes from the source branch | covered | unseen-completion, worktree-changes |
 | New-chat hero: project choice, start without a project | covered | new-chat-hero |
+| Thread details: inline visibility, narrow-window popover, tool panel and Escape | mapped | thread-details (Native clients CI) |
 | Conversation: messages, folded work, approvals, questions | covered | send-message, folded-work, live-work, approval, question-choice, question-skip, question-back |
 | Conversation: errors, reconnecting, opening and its failure | covered | failed-turn, retry-stream, history-loading, history-retry |
 | Conversation: copy, edit in composer, fork from a message, quote a selection | covered | message-actions, fork, claude-fork-while-running, fork-failure |

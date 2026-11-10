@@ -1,0 +1,28 @@
+# Details stay reachable beside a wide conversation, in a narrow window,
+# and while the tool panel is open. A popup never changes inline visibility.
+expect "検証プロジェクト" 30000
+window 1360 800
+expect ソース
+press スレッド詳細を切り替え
+expect_absent ソース
+window 900 800
+press スレッド詳細を切り替え
+expect ソース
+screenshot popover
+key escape
+expect_absent ソース
+press スレッド詳細を切り替え
+expect ソース
+window 1360 800
+expect_absent ソース
+press スレッド詳細を切り替え
+expect ソース
+screenshot inline
+press 右パネルを切り替え
+expect_absent ソース
+press スレッド詳細を切り替え
+expect ソース
+key escape
+expect_absent ソース
+press ツールを閉じる
+expect ソース

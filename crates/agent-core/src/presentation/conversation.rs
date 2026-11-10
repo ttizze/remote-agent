@@ -308,6 +308,18 @@ pub fn lane_padding(window_width: f32) -> f32 {
     if window_width >= 640. { 20. } else { 12. }
 }
 
+/// T3 Code's thread details card, beside the chat lane when it fits and
+/// anchored to its header button as a popover otherwise.
+pub const DETAILS_CARD_WIDTH: f32 = 280.;
+pub const DETAILS_CARD_GAP: f32 = 12.;
+
+/// Keep a 640 pt conversation, its gutter and 32 pt clearance beside the
+/// card. `canvas_height` excludes the conversation's header.
+pub fn details_card_inline(canvas_width: f32, canvas_height: f32) -> bool {
+    canvas_width - DETAILS_CARD_WIDTH - DETAILS_CARD_GAP - 32. - lane_padding(canvas_width) >= 640.
+        && canvas_height - DETAILS_CARD_GAP * 2. >= 160.
+}
+
 /// The side gutter T3 Code's minimap needs to stay shown.
 const MINIMAP_PERSISTENT_GUTTER: f32 = 48.;
 
@@ -4051,6 +4063,21 @@ mod minimap_tests {
         assert_eq!(lane_padding(640.), 20.);
         assert_eq!(lane_padding(1440.), 20.);
         assert_eq!(lane_padding(0.), 12.);
+    }
+
+    #[rstest::rstest]
+    #[case(984., 184., true)]
+    #[case(983.9, 800., false)]
+    #[case(1280., 183.9, false)]
+    #[case(1280., 800., true)]
+    #[case(700., 800., false)]
+    #[case(0., 0., false)]
+    fn details_keep_a_readable_conversation_or_use_the_header_popover(
+        #[case] width: f32,
+        #[case] height: f32,
+        #[case] inline: bool,
+    ) {
+        assert_eq!(details_card_inline(width, height), inline);
     }
 
     #[test]

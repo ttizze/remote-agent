@@ -192,6 +192,24 @@ t3 = [{ send = "[immediate] 一つ目を確認します" }, { waitText = "シミ
 column = "composer"
 elements = ["composer", "composer-overlay", "minimap", "minimap-strip", "user-bubble", "timeline-gutter-text"]
 
+# ── Thread details ────────────────────────────────────────────────────────
+
+[[state]]
+name = "details-inline"
+screen = "Thread details"
+description = "The details card beside a conversation: its surface, editor and changes row."
+nsh = ["send [immediate] 詳細を確認します", "expect \"シミュレータで完了しました。\" 30000"]
+t3 = [{ send = "[immediate] 詳細を確認します" }, { waitText = "シミュレータで完了しました。" }]
+elements = ["details-card", "details-editor", "details-changes"]
+
+[[state]]
+name = "details-popover"
+screen = "Thread details"
+description = "The same details card opened from the header while the right panel occupies its space."
+nsh = ["send [immediate] 詳細を確認します", "expect \"シミュレータで完了しました。\" 30000", "press \"Toggle right panel\"", "press \"Toggle thread details\"", "expect Sources"]
+t3 = [{ send = "[immediate] 詳細を確認します" }, { waitText = "シミュレータで完了しました。" }, { click = "button[aria-label='Toggle right panel']" }, { click = "button[aria-label='Toggle thread details panel']" }, { waitFor = "[data-thread-details-panel=popover]" }]
+elements = ["details-card", "details-editor", "details-changes"]
+
 # ── Sidebar (compared with the GPUI client) ─────────────────────────────────
 
 [[state]]
@@ -827,6 +845,29 @@ what = "Answer text's left edge (the timeline's side gutter)"
 kind = "box"
 t3 = "[data-message-role=assistant] .chat-markdown"
 nsh = { text = "シミュレータで完了しました。" }
+
+[[element]]
+id = "details-card"
+what = "Thread details card"
+kind = "box"
+t3 = "[data-thread-details-card]"
+nsh = { text = "thread-details-card" }
+
+[[element]]
+id = "details-editor"
+what = "Thread details: open in editor"
+kind = "text"
+t3 = "[data-thread-details-card] [role=group][aria-label='Open in editor'] > button:first-child"
+nsh = { text = "thread-details-editor" }
+anchor = "details-card"
+
+[[element]]
+id = "details-changes"
+what = "Thread details: changes"
+kind = "text"
+t3 = "[data-thread-details-card] button:has(> svg.lucide-file-diff)"
+nsh = { text = "thread-details-changes" }
+anchor = "details-card"
 
 # Sidebar elements, against GPUI's source at b539d6069^ (apps/desktop) and
 # gpui-component 0.9.0, the version it used.

@@ -202,8 +202,7 @@ pub(crate) fn conversation_header(
         .child(toggles)
 }
 
-/// T3 Code's panel layout controls: the thread details beside the timeline
-/// (while there is room for them), then the terminal and the right panel,
+/// T3 Code's panel layout controls: the thread details card, then the terminal and the right panel,
 /// which the panel's own top-right controls replace while it is open.
 pub(crate) fn panel_toggles(
     details: Signal<bool>,
@@ -217,14 +216,7 @@ pub(crate) fn panel_toggles(
         .items_center()
         .gap_1()
         .window_drag(false)
-        .child(when(details_inline, move || {
-            ui::toggle(
-                Icon::DETAILS,
-                tr("スレッド詳細を切り替え"),
-                move || details.get(),
-                move || details.update(|open| *open = !*open),
-            )
-        }))
+        .child(crate::desktop_workspace::toggle(details, details_inline))
         .child(when(
             move || !panel_open(),
             move || {

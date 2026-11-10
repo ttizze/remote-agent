@@ -122,7 +122,7 @@ reason). Reasons recur:
 
 | State | Source | Status |
 |---|---|---|
-| Thread details panel (workspace, editor, scripts, version control) | `chat/ThreadDetailsPanel.tsx`, `ThreadDetailsCard.tsx` | not yet: not mapped (both open it by default; NSH's right panel differs in kind) |
+| Thread details card: inline and popover | `chat/ThreadDetailsPanel.tsx`, `ThreadDetailsCard.tsx` | mapped: `details-inline`, `details-popover` (surface, editor and changes row); NSH retains sources; project scripts, Git actions and thread relationships remain absent |
 | Diff / review panel | `DiffPanel.tsx`, `DiffPanelShell.tsx` | not yet: not mapped (NSH `review-panel` scenario reaches it) |
 | File preview and file browser | `files/FilePreviewPanel.tsx`, `files/FileBrowserPanel.tsx` | not yet: not mapped |
 | Browser preview panel and mini player | `preview/PreviewPanel.tsx`, `preview/ThreadPreviewMiniPlayer.tsx` | not yet: service (a page to load) |

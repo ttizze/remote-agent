@@ -127,6 +127,8 @@ impl Icon {
     pub(crate) const ARROW_UP: Self = icon!(ArrowUp);
     pub(crate) const ARROW_DOWN: Self = icon!(ArrowDown);
     pub(crate) const GIT_FORK: Self = icon!(GitFork);
+    #[cfg(desktop)]
+    pub(crate) const GIT_BRANCH: Self = icon!(GitBranch);
     pub(crate) const WRAP: Self = icon!(TextWrap);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);

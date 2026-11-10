@@ -427,7 +427,12 @@ fn app_content(
             let maximized = move || tools() && workspace.state.with(|s| s.maximized);
             let tool_width = signal(540.0_f32);
             let details = signal(true);
-            let details_inline = move || window().width.0 >= 1080.0 && !tools();
+            let details_inline = move || {
+                agent_core::presentation::conversation::details_card_inline(
+                    canvas() - if tools() { tool_width.get() } else { 0.0 },
+                    window().height.0 - ui::HEADER_HEIGHT,
+                )
+            };
             let main = move || {
                 nsh_base::h_resizable()
                     .handle_class("bg-border group-hover:bg-primary group-active:bg-primary")
@@ -483,7 +488,13 @@ fn app_content(
                                             )
                                             .child(when(
                                                 move || details.get() && details_inline(),
-                                                desktop_workspace::card,
+                                                move || {
+                                                    use agent_core::presentation::conversation::DETAILS_CARD_GAP;
+                                                    view()
+                                                        .p(px(DETAILS_CARD_GAP))
+                                                        .pl_0()
+                                                        .child(desktop_workspace::card())
+                                                },
                                             )),
                                     ),
                             ),
