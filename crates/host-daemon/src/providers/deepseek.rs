@@ -1487,7 +1487,7 @@ mod tests {
         })
         .collect::<BTreeMap<_, _>>();
         *adapter.0.records.lock().await = records.clone();
-        for scope in [SessionListScope::All, SessionListScope::Roots] {
+        for scope in [SessionListScope::All, SessionListScope::Roots(&[])] {
             for (query, ids) in [
                 ("", vec!["a", "b", "c", "d"]),
                 (" ", vec!["a", "b", "c", "d"]),
@@ -1525,7 +1525,7 @@ mod tests {
             (
                 "",
                 None,
-                SessionListScope::Roots,
+                SessionListScope::Roots(&[]),
                 2,
                 vec!["a", "b"],
                 Some("b"),

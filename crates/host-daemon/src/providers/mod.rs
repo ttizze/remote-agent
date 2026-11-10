@@ -146,11 +146,11 @@ pub(crate) struct SessionPage {
 
 #[derive(Clone, Copy)]
 pub(crate) enum SessionListScope<'a> {
-    /// Tasks a person opened. Runs other agents and scripts start through a
-    /// provider CLI (`claude -p`, `codex exec`) are not tasks.
-    Roots,
+    /// Tasks a person opened, including these Host-owned native sessions.
+    /// Unowned SDK and noninteractive CLI runs belong to other agents or scripts.
+    Roots(&'a [SessionRef]),
     /// Tasks and their subagents, so a subagent match can surface its task.
-    WithSubagents,
+    WithSubagents(&'a [SessionRef]),
     /// Every native session, including agent-started runs whose activity
     /// still occupies a workspace.
     All,

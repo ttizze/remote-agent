@@ -10,6 +10,8 @@ const MAX_SESSIONS_PER_PROVIDER: usize = 5_000;
 impl HostRpcService {
     pub(super) async fn scan_projects(&self) -> Result<ProjectScan, Failure> {
         let projects = self.project_snapshot().await?;
+        let owned = self.inner.conversations.active_sessions("")?;
+        let scope = SessionListScope::Roots(&owned);
         let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
         let sources = futures_util::future::join_all(
             self.inner
@@ -20,15 +22,8 @@ impl HostRpcService {
                     matches!(provider, ProviderKind::Codex | ProviderKind::Claude)
                 })
                 .map(|(provider, agent)| async move {
-                    let pages = session_pages(
-                        agent.as_ref(),
-                        "",
-                        SessionListScope::Roots,
-                        100,
-                        100,
-                        Some(deadline),
-                        None,
-                    );
+                    let pages =
+                        session_pages(agent.as_ref(), "", scope, 100, 100, Some(deadline), None);
                     futures_util::pin_mut!(pages);
                     let mut threads = Vec::new();
                     let mut warning = None;
@@ -350,7 +345,7 @@ mod tests {
         assert!(scan.projects[0].registered);
         // Import only registers folders. Native titles and IDs remain readable without a CLI.
         let agent = &service.inner.providers.all()[0].1;
-        let page = Agent::list(agent.as_ref(), "", None, SessionListScope::Roots, 100)
+        let page = Agent::list(agent.as_ref(), "", None, SessionListScope::Roots(&[]), 100)
             .await
             .unwrap();
         assert_eq!(

@@ -1,6 +1,6 @@
 //! Read-only access to Claude's native transcript tree. Never repairs or writes
 //! transcripts, and never launches the CLI to list or display a conversation.
-use super::native;
+use super::{SessionListScope, native};
 use agent_protocol::{
     execution::*,
     ids::ItemId,
@@ -40,7 +40,7 @@ pub(super) fn list_page(
     running: Vec<Thread>,
     search: &str,
     cursor: Option<&str>,
-    include_print_mode: bool,
+    scope: SessionListScope<'_>,
     limit: u32,
 ) -> Result<super::SessionPage> {
     let mut candidates: Vec<_> = files(home)?
@@ -64,6 +64,16 @@ pub(super) fn list_page(
         .iter()
         .filter_map(|t| t.id.as_ref().map(|id| id.id.clone()))
         .collect();
+    let owned: Option<HashSet<_>> = match scope {
+        SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
+            owned
+                .iter()
+                .filter(|id| id.provider == ProviderKind::Claude)
+                .map(|id| id.id.as_str())
+                .collect(),
+        ),
+        _ => None,
+    };
     for thread in running {
         let id = thread.id.as_ref().unwrap().id.clone();
         if !candidates
@@ -96,8 +106,14 @@ pub(super) fn list_page(
         let mut summary = if let Some(path) = path {
             match summary(&path) {
                 Ok(Summary {
-                    print_mode: true, ..
-                }) if !include_print_mode && !active.contains(&id) => continue,
+                    automated: true, ..
+                }) if owned
+                    .as_ref()
+                    .is_some_and(|owned| !owned.contains(id.as_str()))
+                    && !active.contains(&id) =>
+                {
+                    continue;
+                }
                 Ok(Summary { thread, branch, .. }) => super::SessionSummary { thread, branch },
                 Err(error) => {
                     let mut thread = Thread {
@@ -241,9 +257,9 @@ struct SummaryMetadata<'a> {
 pub(super) struct Summary {
     pub thread: Thread,
     pub branch: Option<String>,
-    /// Started by `claude -p`, which other agents and scripts use for one-off
-    /// runs; Host-started tasks use the SDK entrypoint instead.
-    pub print_mode: bool,
+    /// SDK entrypoints also occur on CLI reviews launched from an SDK session.
+    /// Only Host ownership distinguishes these from the person's Bex conversations.
+    pub automated: bool,
 }
 
 /// Extract metadata without loading complete tool output or message bodies.
@@ -333,7 +349,7 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
     Ok(Summary {
         thread,
         branch,
-        print_mode: entrypoint.as_deref() == Some("sdk-cli"),
+        automated: matches!(entrypoint.as_deref(), Some("sdk-cli" | "sdk-ts" | "sdk-py")),
     })
 }
 
@@ -1099,7 +1115,15 @@ mod tests {
                 )
                 .unwrap();
         }
-        let first = list_page(root.path(), vec![], "", None, false, 3).unwrap();
+        let first = list_page(
+            root.path(),
+            vec![],
+            "",
+            None,
+            SessionListScope::Roots(&[]),
+            3,
+        )
+        .unwrap();
         assert_eq!(
             first
                 .data
@@ -1114,7 +1138,7 @@ mod tests {
             vec![],
             "",
             first.next_cursor.as_deref(),
-            false,
+            SessionListScope::Roots(&[]),
             3,
         )
         .unwrap();
@@ -1131,20 +1155,48 @@ mod tests {
             vec![],
             "",
             second.next_cursor.as_deref(),
-            false,
+            SessionListScope::Roots(&[]),
             3,
         )
         .unwrap();
         assert_eq!(last.data.len(), 2);
         assert!(last.next_cursor.is_none());
-        let found = list_page(root.path(), vec![], "title 1", None, false, 3).unwrap();
+        let found = list_page(
+            root.path(),
+            vec![],
+            "title 1",
+            None,
+            SessionListScope::Roots(&[]),
+            3,
+        )
+        .unwrap();
         assert_eq!(found.data.len(), 1);
         assert!(found.next_cursor.is_none());
-        assert!(list_page(root.path(), vec![], "", Some("bad"), false, 3).is_err());
-        assert!(list_page(root.path(), vec![], "", Some("9"), false, 3).is_err());
+        assert!(
+            list_page(
+                root.path(),
+                vec![],
+                "",
+                Some("bad"),
+                SessionListScope::Roots(&[]),
+                3
+            )
+            .is_err()
+        );
+        assert!(
+            list_page(
+                root.path(),
+                vec![],
+                "",
+                Some("9"),
+                SessionListScope::Roots(&[]),
+                3
+            )
+            .is_err()
+        );
     }
     #[test]
-    fn task_listings_omit_print_mode_runs_started_by_other_agents() {
+    fn task_listings_omit_unowned_sdk_runs_started_by_other_agents() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("projects/p");
         fs::create_dir_all(&project).unwrap();
@@ -1156,6 +1208,10 @@ mod tests {
             ("agent", ["sdk-cli", "sdk-cli"]),
             ("agent-opened-by-host", ["sdk-cli", "sdk-ts"]),
             ("agent-running-in-host", ["sdk-cli", "sdk-ts"]),
+            ("NSH message text sizing", ["sdk-ts", "sdk-ts"]),
+            ("python-agent", ["sdk-py", "sdk-py"]),
+            ("terminal-resumed-by-agent", ["cli", "sdk-ts"]),
+            ("sdk-later-interactive", ["sdk-ts", "cli"]),
         ];
         for (index, (name, entrypoints)) in transcripts.into_iter().enumerate() {
             let id = Uuid::from_u128(index as u128 + 1).to_string();
@@ -1174,33 +1230,49 @@ mod tests {
             }),
             ..Default::default()
         };
-        let listed = |include_print_mode| {
-            let mut names: Vec<_> = list_page(
-                root.path(),
-                vec![running.clone()],
-                "",
-                None,
-                include_print_mode,
-                10,
-            )
-            .unwrap()
-            .data
-            .into_iter()
-            .map(|summary| summary.thread.preview.unwrap())
-            .collect();
+        let owned = [2, 3].map(|id| SessionRef {
+            provider: ProviderKind::Claude,
+            id: Uuid::from_u128(id).to_string(),
+        });
+        let listed = |scope| {
+            let mut names: Vec<_> =
+                list_page(root.path(), vec![running.clone()], "", None, scope, 10)
+                    .unwrap()
+                    .data
+                    .into_iter()
+                    .map(|summary| summary.thread.preview.unwrap())
+                    .collect();
             names.sort();
             names
         };
         assert_eq!(
-            listed(false),
+            listed(SessionListScope::Roots(&owned)),
             [
                 "agent-running-in-host",
                 "host",
                 "host-resumed-by-agent",
-                "terminal"
+                "terminal",
+                "terminal-resumed-by-agent"
             ]
         );
-        assert_eq!(listed(true).len(), transcripts.len());
+        assert_eq!(
+            listed(SessionListScope::WithSubagents(&owned)),
+            listed(SessionListScope::Roots(&owned))
+        );
+        assert_eq!(listed(SessionListScope::All).len(), transcripts.len());
+        assert!(
+            list_page(
+                root.path(),
+                vec![],
+                "NSH message text sizing",
+                None,
+                SessionListScope::WithSubagents(&owned),
+                1
+            )
+            .unwrap()
+            .data
+            .is_empty()
+        );
     }
     #[test]
     fn a_send_now_prompt_continues_the_turn_it_cut() {

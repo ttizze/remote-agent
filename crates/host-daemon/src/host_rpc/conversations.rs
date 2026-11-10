@@ -499,7 +499,7 @@ impl Conversations {
             .collect())
     }
 
-    pub fn search_targets(&self, search: &str) -> Result<Vec<SessionRef>, Failure> {
+    pub fn active_sessions(&self, search: &str) -> Result<Vec<SessionRef>, Failure> {
         let state = self.state.lock().unwrap();
         let rows = state
             .as_ref()

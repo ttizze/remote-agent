@@ -330,7 +330,7 @@ impl Claude {
         &self,
         search: &str,
         cursor: Option<String>,
-        include_print_mode: bool,
+        scope: SessionListScope<'_>,
         limit: u32,
     ) -> anyhow::Result<SessionPage> {
         let home = self.native_home.clone();
@@ -345,13 +345,21 @@ impl Claude {
             })
             .collect();
         let search = search.to_owned();
+        let owned = match scope {
+            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => {
+                Some(owned.to_vec())
+            }
+            _ => None,
+        };
         tokio::task::spawn_blocking(move || {
             history::list_page(
                 &home,
                 running,
                 &search,
                 cursor.as_deref(),
-                include_print_mode,
+                owned
+                    .as_deref()
+                    .map_or(SessionListScope::All, SessionListScope::Roots),
                 limit,
             )
         })
@@ -2141,8 +2149,7 @@ impl Agent for Claude {
             });
             return Ok(SessionPage { data, next_cursor });
         }
-        let include_print_mode = matches!(scope, SessionListScope::All);
-        Claude::list(self, search, cursor, include_print_mode, limit)
+        Claude::list(self, search, cursor, scope, limit)
             .await
             .map_err(|e| Failure::new("session_list_failed", e))
     }
@@ -2727,7 +2734,7 @@ mod execution_tests {
         .await
         .unwrap();
         assert!(page.data.is_empty() && page.next_cursor.is_none());
-        let recent = Agent::list(&claude, "", None, SessionListScope::Roots, 30)
+        let recent = Agent::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
             .await
             .unwrap();
         assert_eq!(
@@ -2740,12 +2747,12 @@ mod execution_tests {
     }
 
     #[tokio::test]
-    async fn only_complete_listings_include_print_mode_runs() {
+    async fn task_listings_include_only_owned_sdk_runs() {
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("native/projects/p");
         std::fs::create_dir_all(&project).unwrap();
-        for (index, entrypoint) in [(1u128, "sdk-ts"), (2, "sdk-cli")] {
+        for (index, entrypoint) in [(1u128, "sdk-ts"), (2, "sdk-cli"), (3, "sdk-py"), (4, "cli")] {
             let id = Uuid::from_u128(index).to_string();
             let row = serde_json::json!({"type":"user","sessionId":id,"cwd":"/fixture","entrypoint":entrypoint,"message":{"content":entrypoint}});
             std::fs::write(project.join(format!("{id}.jsonl")), format!("{row}\n")).unwrap();
@@ -2757,12 +2764,23 @@ mod execution_tests {
         )
         .await
         .unwrap();
+        let owned = [SessionRef {
+            provider: ProviderKind::Claude,
+            id: Uuid::from_u128(1).to_string(),
+        }];
         for (scope, expected) in [
-            (SessionListScope::Roots, vec!["sdk-ts"]),
-            (SessionListScope::WithSubagents, vec!["sdk-ts"]),
-            (SessionListScope::All, vec!["sdk-cli", "sdk-ts"]),
+            (SessionListScope::Roots(&[]), vec!["cli"]),
+            (SessionListScope::Roots(&owned), vec!["cli", "sdk-ts"]),
+            (
+                SessionListScope::WithSubagents(&owned),
+                vec!["cli", "sdk-ts"],
+            ),
+            (
+                SessionListScope::All,
+                vec!["cli", "sdk-cli", "sdk-py", "sdk-ts"],
+            ),
         ] {
-            let mut listed: Vec<_> = Agent::list(&claude, "sdk", None, scope, 10)
+            let mut listed: Vec<_> = Agent::list(&claude, "", None, scope, 10)
                 .await
                 .unwrap()
                 .data
