@@ -288,6 +288,30 @@ final class MessageTests: XCTestCase {
             }
         }
 
+        @MainActor func testEveryLineIsT3CodesLineTallWhateverItsScripts() throws {
+            // TextKit adds a fallback font's leading below a line holding its
+            // glyph: the Japanese font's for a middle dot or a bracket where
+            // Japanese is preferred, the Thai font's anywhere.
+            let run = MessageRun(text: "lib.rs · L695 [groups] の作業を確認します ไทย and more words",
+                                 strong: false, emphasis: false, strikethrough: false, code: false,
+                                 link: nil, darkColor: nil, lightColor: nil)
+            let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
+                                         depth: 0, alignment: "left", runs: [run])
+            let view = MessageTextContainer()
+            view.update(MessageDocument(blocks: [block, block], secondary: false, role: "assistant", target: "t",
+                                        sideChat: false, maxWidth: 200,
+                                        menu: MessageMenuTitles(quote: "", sideChat: "")))
+            let manager = try XCTUnwrap(view.text.layoutManager)
+            var heights: [CGFloat] = []
+            manager.enumerateLineFragments(
+                forGlyphRange: NSRange(location: 0, length: manager.numberOfGlyphs)
+            ) { _, used, _, _, _ in heights.append(used.height) }
+            XCTAssertGreaterThan(heights.count, 2, "the paragraphs wrap")
+            for height in heights {
+                XCTAssertEqual(height, 22.75, accuracy: 0.01)
+            }
+        }
+
         @MainActor func testItemsOfOneListSitCloserThanTwoLists() {
             let item = { (marker: String, text: String) in
                 MessageParagraph(header: nil, marker: marker, code: false, quoted: false, depth: 1,
