@@ -224,7 +224,7 @@ fn summary_card(
         .py_2()
         .text_color(colors::t3_foreground().opacity(0.8))
         .child(
-            row(Icon::FOLDER_OPEN, move || summary.with(|s| s.directory.clone()))
+            row(Icon::FOLDER_OPEN, text(move || summary.with(|s| s.directory.clone())))
                 .mx_2()
                 .text_color(colors::t3_muted())
                 .on_press(move || act(Action::Files))
@@ -238,10 +238,11 @@ fn summary_card(
                     .flex_row()
                     .items_center()
                     .child(
-                        row(Icon::EXTERNAL_LINK, move || {
-                            summary.with(|s| s.editor_label.clone())
-                        })
-                        .test_id("thread-details-editor")
+                        row(
+                            Icon::EXTERNAL_LINK,
+                            text(move || summary.with(|s| s.editor_label.clone()))
+                                .test_id("thread-details-editor"),
+                        )
                         .flex_1()
                         .on_press(move || {
                             if let Some(editor) = summary.with_untracked(|s| s.editor) {
@@ -301,8 +302,7 @@ fn summary_card(
                 .flex_row()
                 .items_center()
                 .child(
-                    row(Icon::DIFF, || tr("変更").to_owned())
-                        .test_id("thread-details-changes")
+                    row(Icon::DIFF, text(tr("変更")).test_id("thread-details-changes"))
                         .flex_1()
                         .on_press(move || act(Action::Diff))
                         .disabled(move || !enabled() || !has_directory())
@@ -358,13 +358,13 @@ fn summary_card(
             |(path, _): &(String, String)| path.clone(),
             move |source, _| {
                 let (path, title) = source.get_untracked();
-                row(Icon::FILE_TEXT, move || title.clone())
+                row(Icon::FILE_TEXT, text(move || title.clone()))
                     .mx_2()
                     .on_press(move || act(Action::Source(path.clone())))
             },
         ))
         .child(
-            row(Icon::FOLDER, || tr("すべてのファイル").to_owned())
+            row(Icon::FOLDER, text(tr("すべてのファイル")))
                 .mx_2()
                 .on_press(move || act(Action::Files))
                 .disabled(move || !enabled()),
@@ -379,7 +379,7 @@ fn separator() -> View {
 }
 
 /// T3's details row: 32 pt, 13 pt medium text, a 16 pt muted icon.
-fn row(glyph: crate::ui::Icon, title: impl Fn() -> String + 'static) -> nsh_base::ButtonElement {
+fn row(glyph: crate::ui::Icon, title: Text) -> nsh_base::ButtonElement {
     use crate::ui::{self, colors};
     nsh_base::button()
         .h(px(32.0))
@@ -396,7 +396,7 @@ fn row(glyph: crate::ui::Icon, title: impl Fn() -> String + 'static) -> nsh_base
                 .child(ui::icon(glyph, 16.0)),
         )
         .child(
-            text(title)
+            title
                 .flex_1()
                 .min_w_0()
                 .text_size(px(13.0))
