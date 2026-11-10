@@ -431,16 +431,18 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 }
             #endif
             text.textStorage?.setAttributedString(content)
-            // The natural size comes from TextKit's own layout, whose glyphs the
-            // wrapped layout below reuses, rather than a second typesetting pass.
             if let container = text.textContainer, let manager = text.layoutManager {
-                container.containerSize = CGSize(width: 1_000_000, height: CGFloat.greatestFiniteMagnitude)
-                manager.ensureLayout(for: container)
-                let size = manager.usedRect(for: container).size
-                let width = min(ceil(size.width), document.maxWidth)
+                // Answers already have a lane width; only shrink-to-fit text
+                // needs the additional unconstrained layout pass.
+                var width = document.maxWidth
+                if !document.fillsWidth {
+                    container.containerSize = CGSize(width: 1_000_000, height: CGFloat.greatestFiniteMagnitude)
+                    manager.ensureLayout(for: container)
+                    width = min(ceil(manager.usedRect(for: container).width), width)
+                }
                 container.containerSize = CGSize(width: max(1, width), height: .greatestFiniteMagnitude)
                 manager.ensureLayout(for: container)
-                reportSize(CGSize(width: ceil(size.width), height: ceil(manager.usedRect(for: container).height)))
+                reportSize(CGSize(width: width, height: ceil(manager.usedRect(for: container).height)))
             }
             text.setSelectedRange(keep ? range : NSRange(location: 0, length: 0))
             needsLayout = true
@@ -577,18 +579,21 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 .attributedText.length
                 && (text.text as NSString).substring(with: range) == (content.string as NSString).substring(with: range)
             text.attributedText = content
-            let size = content.size()
-            reportSize(CGSize(width: ceil(size.width), height: ceil(size.height)))
+            let width = document.fillsWidth ? document.maxWidth : min(ceil(content.size().width), document.maxWidth)
+            let size = text.sizeThatFits(CGSize(width: max(1, width), height: .greatestFiniteMagnitude))
+            // Publish the wrapped height before NSH lays out the row. Sending
+            // an unwrapped size first makes each delta move the list twice.
+            reportSize(CGSize(width: width, height: ceil(size.height)))
             text.selectedRange = keep ? range : NSRange(location: 0, length: 0)
             setNeedsLayout()
         }
 
         override func layoutSubviews() {
             super.layoutSubviews()
-            guard bounds.width > 0 else { return }
-            let height = ceil(text.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height)
-            text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
-            reportSize(CGSize(width: max(0, measuredSize.width), height: height))
+            guard measuredSize.width >= 0 else { return }
+            // The frame can still belong to the recycled cell's previous row.
+            // Its new document already supplied the width used for measurement.
+            text.frame = CGRect(origin: .zero, size: measuredSize)
         }
     }
 #endif

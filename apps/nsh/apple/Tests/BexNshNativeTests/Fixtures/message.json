@@ -37,5 +37,6 @@
   "sideChat": true,
   "cell": null,
   "maxWidth": 400,
+  "fillsWidth": false,
   "menu": {"quote": "チャットに追加", "sideChat": "サイドチャットで質問"}
 }

@@ -8,7 +8,7 @@ import XCTest
 final class MessageTests: XCTestCase {
     #if os(macOS)
         @MainActor func testCoreHighlightByteRangesPreserveUnicodeAndStyles() throws {
-            let data = Data(#"{"blocks":[{"header":null,"marker":null,"code":false,"quoted":false,"depth":0,"alignment":"left","runs":[{"text":"😀é ","strong":false,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":4,"end":6,"active":true}]},{"text":"bold","strong":true,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":0,"end":4,"active":false}]}]}],"secondary":false,"role":"assistant","target":"","sideChat":false,"maxWidth":500,"menu":{"quote":"","sideChat":""}}"#
+            let data = Data(#"{"blocks":[{"header":null,"marker":null,"code":false,"quoted":false,"depth":0,"alignment":"left","runs":[{"text":"😀é ","strong":false,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":4,"end":6,"active":true}]},{"text":"bold","strong":true,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":0,"end":4,"active":false}]}]}],"secondary":false,"role":"assistant","target":"","sideChat":false,"maxWidth":500,"fillsWidth":true,"menu":{"quote":"","sideChat":""}}"#
                 .utf8)
             let document = try JSONDecoder().decode(MessageDocument.self, from: data)
             let content = MessageAttributes.text(document.blocks, secondary: false, dark: true)
@@ -422,7 +422,7 @@ final class MessageTests: XCTestCase {
                                          depth: 0, alignment: "left", runs: [run])
             let document = MessageDocument(blocks: [block], secondary: false, role: "assistant",
                                            target: "fixture", sideChat: false, maxWidth: 740,
-                                           menu: MessageMenuTitles(quote: "", sideChat: ""))
+                                           menu: MessageMenuTitles(quote: "", sideChat: ""), fillsWidth: true)
             let view = MessageTextContainer()
             // A short user bubble occupied the same recycled native view.
             view.frame = CGRect(x: 0, y: 0, width: 167, height: 17)
@@ -440,6 +440,10 @@ final class MessageTests: XCTestCase {
             XCTAssertEqual(heights, [first], "a recycled frame must not publish a second, incorrect row height")
             XCTAssertEqual(view.text.textContainer?.containerSize.width, 740)
             XCTAssertGreaterThan(first, 17)
+            let url = try XCTUnwrap(Bundle.module.url(forResource: "message", withExtension: "json"))
+            try view.update(JSONDecoder().decode(MessageDocument.self, from: Data(contentsOf: url)))
+            XCTAssertLessThan(try XCTUnwrap(view.text.textContainer?.containerSize.width), 400,
+                              "a shrink-to-fit user bubble must retain its natural width")
         }
     #endif
 
