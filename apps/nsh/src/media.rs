@@ -817,7 +817,9 @@ fn loaded_image(
         .max_w(relative(1.0))
         .gap_2()
         .child(when(
-            move || loaded.get().is_some() && decode_error.get().is_none(),
+            // Refetch retains its old value. Do not decode the same broken
+            // cached file again before the replacement finishes loading.
+            move || loaded.get().is_some() && !loaded.loading() && decode_error.get().is_none(),
             move || {
                 let press = press.clone();
                 let image = image(move || {
@@ -980,6 +982,7 @@ mod tests {
             directory: image_directory.clone(),
         }));
         let mut nodes = std::collections::BTreeMap::new();
+        let mut sources = std::collections::BTreeMap::new();
         let mut until = |core: &mut Core<ApproxTextEngine>, label: &str, image_visible: bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
@@ -1005,6 +1008,10 @@ mod tests {
                             }
                             MountItem::Delete { id } => {
                                 nodes.remove(&id);
+                                sources.remove(&id);
+                            }
+                            MountItem::Image { id, source, .. } => {
+                                sources.insert(id, source);
                             }
                             _ => {}
                         }
@@ -1013,13 +1020,15 @@ mod tests {
                 if nodes.values().any(|label| label == "Test image") == image_visible
                     && let Some((id, _)) = nodes.iter().find(|(_, shown)| shown.as_str() == label)
                 {
-                    return *id;
+                    return (*id, sources.get(id).cloned().flatten());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             panic!("image did not reach {label}, image_visible={image_visible}");
         };
-        let image = until(&mut core, "Test image", true);
+        let (image, initial) = until(&mut core, "Test image", true);
+        let initial = initial.expect("a ready image must have its cached file");
+        assert!(!initial.uri.is_empty());
         assert!(core.component_event(
             image,
             EventKind::Error,
@@ -1027,7 +1036,7 @@ mod tests {
                 message: "Invalid image".into()
             }
         ));
-        let retry = until(&mut core, tr("再試行"), false);
+        let (retry, _) = until(&mut core, tr("再試行"), false);
         let (event, payload) = if cfg!(target_os = "macos") {
             (
                 EventKind::NativeEvent,
@@ -1040,7 +1049,13 @@ mod tests {
             (EventKind::Press, EventPayload::None)
         };
         assert!(core.component_event(retry, event, &payload));
-        until(&mut core, "Test image", true);
+        let (_, recovered) = until(&mut core, "Test image", true);
+        let recovered = recovered.expect("Retry must finish caching its image");
+        assert!(!recovered.uri.is_empty());
+        assert_ne!(
+            recovered.uri, initial.uri,
+            "Retry must decode the fresh cached file"
+        );
         drop(core);
     }
 }
