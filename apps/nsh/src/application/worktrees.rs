@@ -326,7 +326,14 @@ mod tests {
     #[test]
     fn account_pending_worktree_request_can_close_before_late_response() {
         let directory = tempfile::tempdir().unwrap();
-        let (runtime, app) = isolated_application(directory.path().into());
+        let (runtime, mut app) = isolated_application(directory.path().into());
+        // Publish responses only when driven below, so Close deterministically
+        // precedes the missing Host's response regardless of worker scheduling.
+        let responses = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        Arc::get_mut(&mut app).unwrap().runtime = responses.handle().clone();
         app.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             state.host = "missing".into();
@@ -351,7 +358,7 @@ mod tests {
         // The missing Host completes the request asynchronously after Close.
         // Its response must be ignored rather than recreating the editor.
         app.jobs.close();
-        runtime.block_on(async {
+        responses.block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(5), app.jobs.wait())
                 .await
                 .unwrap();

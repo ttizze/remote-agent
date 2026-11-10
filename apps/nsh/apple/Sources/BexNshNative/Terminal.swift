@@ -75,10 +75,10 @@ final class HostTerminalView: SwiftTerm.TerminalView {
             let request = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    pendingSelectionMenu = nil
-                    guard window?.firstResponder === self, !isHiddenOrHasHiddenAncestor,
-                          menuSelection == selected else { return }
-                    selectionMenu().popUp(positioning: nil, at: point, in: self)
+                    self.pendingSelectionMenu = nil
+                    guard self.window?.firstResponder === self, !self.isHiddenOrHasHiddenAncestor,
+                          self.menuSelection == selected else { return }
+                    self.selectionMenu().popUp(positioning: nil, at: point, in: self)
                 }
             }
             pendingSelectionMenu = request

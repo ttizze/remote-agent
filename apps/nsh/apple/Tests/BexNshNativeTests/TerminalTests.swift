@@ -4,10 +4,18 @@
     import XCTest
 
     @MainActor final class TerminalTests: XCTestCase {
-        @MainActor private final class Events {
+        @MainActor private final class Events: NSObject {
             var quoted: [String] = []
             var input: [UInt8] = []
+            var inputReceived: XCTestExpectation?
             var menus = 0
+
+            @objc func menuBegan(_ note: Notification) {
+                menus += 1
+                if let menu = note.object as? NSMenu {
+                    DispatchQueue.main.async { menu.cancelTracking() }
+                }
+            }
         }
 
         private func terminal(_ events: Events) throws -> (UnsafeMutableRawPointer, HostTerminalView) {
@@ -23,6 +31,7 @@
                         }
                         if kind == 1 {
                             events.input += data
+                            events.inputReceived?.fulfill()
                         }
                     }
                 }
@@ -96,11 +105,18 @@
             NSPasteboard.general.setString("echo 日本語", forType: .string)
             view.paste(self)
             XCTAssertTrue(events.input.isEmpty)
+            let input = expectation(description: "SwiftTerm delivers pasted input on the main queue")
+            events.inputReceived = input
             terminalInput(handle, true)
             view.paste(self)
+            wait(for: [input], timeout: 1)
+            events.inputReceived = nil
             XCTAssertEqual(String(decoding: events.input, as: UTF8.self), "echo 日本語")
             events.input = []
             feed("\u{1b}[6n", into: handle)
+            let replies = expectation(description: "queued terminal replies have been delivered")
+            DispatchQueue.main.async { replies.fulfill() }
+            wait(for: [replies], timeout: 1)
             XCTAssertTrue(events.input.isEmpty, "the Host answers terminal queries even while input is enabled")
             terminalInput(handle, false)
             view.paste(self)
@@ -118,17 +134,11 @@
             window.orderFront(nil)
             defer { window.close() }
             feed("selected text", into: handle)
-            let observer = NotificationCenter.default.addObserver(
-                forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main
-            ) { note in
-                MainActor.assumeIsolated {
-                    events.menus += 1
-                    if let menu = note.object as? NSMenu {
-                        DispatchQueue.main.async { menu.cancelTracking() }
-                    }
-                }
-            }
-            defer { NotificationCenter.default.removeObserver(observer) }
+            NotificationCenter.default.addObserver(
+                events, selector: #selector(Events.menuBegan(_:)),
+                name: NSMenu.didBeginTrackingNotification, object: nil
+            )
+            defer { NotificationCenter.default.removeObserver(events) }
             func click(_ type: NSEvent.EventType, count: Int, x: CGFloat = 10) throws -> NSEvent {
                 try XCTUnwrap(NSEvent.mouseEvent(
                     with: type, location: view.convert(NSPoint(x: x, y: view.bounds.maxY - 5), to: nil),
