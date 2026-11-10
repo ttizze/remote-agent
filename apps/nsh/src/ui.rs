@@ -161,6 +161,7 @@ impl Icon {
     pub(crate) const LOADER: Self = icon!(Loader);
     #[cfg(dictation)]
     pub(crate) const MICROPHONE: Self = icon!(Mic);
+    #[cfg(desktop)]
     pub(crate) const MONITOR: Self = icon!(Monitor);
     pub(crate) const NEW_CHAT: Self = icon!(SquarePen);
     pub(crate) const PENCIL: Self = icon!(Pencil);

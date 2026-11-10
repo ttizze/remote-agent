@@ -1,6 +1,5 @@
 use crate::l10n::{localized, tr, tr_format};
 use crate::{Connection, native, workbench::Workbench};
-use agent_core::presentation::folder_menu::{FolderChoice, folder_choices};
 use agent_core::state::{Intent, follow_up::QueueAction, operations as op};
 use agent_core::{panels::PanelKind, presentation::composer::footer};
 use agent_protocol::operations::FollowUp;
@@ -784,75 +783,6 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                     ),
             )
     };
-    let desktop_context = move || {
-        use crate::ui::{self, Enabled, Icon};
-        let hosts = computed(move || connection.state.with(|s| s.hosts.clone()));
-        let directory = computed(move || connection.context.with(|p| p.selected_directory()));
-        let choose = move || {
-            let host = connection.host.get_untracked();
-            let selected = directory.get_untracked();
-            let choices = connection.state.with_untracked(|state| {
-                let list = state
-                    .list_inputs()
-                    .into_iter()
-                    .find(|(list_host, _)| *list_host == host)
-                    .map(|(_, list)| list);
-                folder_choices(list.as_deref(), &selected, host == "local")
-            });
-            ui::popup(&folder_items(&choices), move |id| {
-                if let Some(cwd) = id.strip_prefix(FOLDER) {
-                    connection.dispatch(Intent::NewChat { cwd: cwd.into() });
-                    field_ref.focus();
-                } else if id == MORE_PROJECTS {
-                    connection.application.with(|application| {
-                        application.request_list(crate::application::ListRequest::MoreProjects)
-                    });
-                } else if id == CHOOSE_FOLDER {
-                    connection.state.with_untracked(|state| {
-                        crate::projects::add_folder(
-                            connection.application,
-                            &connection.host.get_untracked(),
-                            &state.list_sources(),
-                        )
-                    });
-                }
-            });
-        };
-        view()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .child(
-                ui::labeled_button(
-                    Icon::FOLDER,
-                    move || {
-                        let directory = directory.get();
-                        if directory.is_empty() {
-                            tr("チャット").to_owned()
-                        } else {
-                            agent_core::presentation::markdown::file_basename(&directory).to_owned()
-                        }
-                    },
-                    move || {
-                        let directory = directory.get();
-                        if directory.is_empty() {
-                            tr("フォルダ: チャット").to_owned()
-                        } else {
-                            tr_format("フォルダ: {0}", [&directory])
-                        }
-                    },
-                    choose,
-                )
-                .enabled(move || {
-                    !recording.get()
-                        && !requesting.get()
-                        && !connection.uploading()
-                        && controls.with(|c| !c.sending && !c.transcribing && !c.transferring)
-                }),
-            )
-            .child(crate::connections::destination(hosts, connection.host))
-    };
     use agent_core::presentation::conversation::{LANE_WIDTH, lane_padding};
     // The timeline's lane: the same width and padding beside it.
     let padding = move || lane_padding(window().width.0);
@@ -979,12 +909,6 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                     )))
             },
         ))
-        // T3 Code's context strip: where a new chat will run, chosen before its
-        // first message and fixed after it.
-        .child(when(
-            move || is_desktop() && controls.with(|c| c.navigation.thread_id.is_none()),
-            desktop_context,
-        ))
         .child(when(is_desktop, shortcuts))
         .child(when(
             move || follow_up.with(|f| !f.queue.is_empty()),
@@ -1087,32 +1011,6 @@ fn change_counts(
                 .text_size(px(12.0))
                 .text_color(nsh_core::element::rgb(0xff6259)),
         )
-}
-
-/// The folder menu's item IDs: a folder's carries its path after the prefix.
-const FOLDER: &str = "folder:";
-const MORE_PROJECTS: &str = "more-projects";
-const CHOOSE_FOLDER: &str = "choose-folder";
-
-fn folder_items(choices: &[FolderChoice]) -> serde_json::Value {
-    json!(
-        choices
-            .iter()
-            .map(|choice| match choice {
-                FolderChoice::Folder {
-                    path,
-                    title,
-                    checked,
-                } => json!({"id": format!("{FOLDER}{path}"), "title": localized(title.clone()), "selected": checked}),
-                FolderChoice::MoreProjects => {
-                    json!({"id": MORE_PROJECTS, "title": tr("さらにプロジェクトを読み込む")})
-                }
-                FolderChoice::ChooseFolder => {
-                    json!({"id": CHOOSE_FOLDER, "title": tr("別のフォルダを選択…")})
-                }
-            })
-            .collect::<Vec<_>>()
-    )
 }
 
 /// An attached file as T3 Code's composer chips: an image's thumbnail or a

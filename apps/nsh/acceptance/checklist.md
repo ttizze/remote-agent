@@ -113,7 +113,6 @@ first; the note says which), **n/a** (no Mac equivalent).
 | Composer: attach files, dictation, completions | partial | attachments, upload-failure, composer, dictation-denied; recording needs the system's microphone permission |
 | Composer: paste text at the selection and undo it (Edit > Undo and ⌘Z), paste an image without the text copied with it | covered | composer-paste |
 | Composer: Escape discards a recording | not yet | recording needs the system's microphone permission |
-| Composer: folder menu (no project, a project, another folder) | covered | folder-menu |
 | Thread details card (workspace, editor, changes, sources) | partial | attachments (sources); the editor button opens an external app |
 | Changed-files bar and review | covered | review-panel, worktree-review, diff-files (the badge opens the diff and its file menu jumps to a file) |
 | Diff: binary files, file menu, copying the diff | covered | diff-files |

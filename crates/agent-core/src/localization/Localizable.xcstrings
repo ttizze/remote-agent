@@ -17089,22 +17089,6 @@
         }
       }
     },
-    "別のフォルダを選択…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose another folder…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "別のフォルダを選択…"
-          }
-        }
-      }
-    },
     "OpenRouter · Flash 4.1 選択中": {
       "localizations": {
         "ja": {

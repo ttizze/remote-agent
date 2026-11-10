@@ -49,52 +49,6 @@ pub(crate) fn selector(
     .min_h(px(if is_desktop() { 28.0 } else { 44.0 }))
 }
 
-/// The composer's destination: the Host the next chat runs on.
-pub(crate) fn destination(hosts: Memo<Vec<Host>>, selected: Memo<String>) -> impl IntoElement {
-    #[cfg(not(target_os = "macos"))]
-    use crate::ui::{self, Icon};
-    let connection = use_context::<Connection>().unwrap();
-    let name = move || {
-        hosts.with(|hosts| {
-            hosts
-                .iter()
-                .find(|host| host.id == selected.get())
-                .map(|host| {
-                    if host.id == "local" {
-                        "Local".into()
-                    } else {
-                        host.name.clone()
-                    }
-                })
-                .unwrap_or_else(|| "Local".into())
-        })
-    };
-    let items = move || {
-        json!(hosts.with(|hosts| hosts
-            .iter()
-            .map(|host| json!({"id": host.id, "title": host.label(), "selected": host.id == selected.get()}))
-            .collect::<Vec<_>>()))
-    };
-    let select = move |id: &str| {
-        connection
-            .application
-            .with(|application| application.select_host(id.to_owned(), true))
-    };
-    #[cfg(target_os = "macos")]
-    {
-        native::menu("desktopcomputer", tr("接続先"), items, select)
-            .prop("title", move || json!(name()))
-            .prop("appearance", json!("plain"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        ui::labeled_button(Icon::MONITOR, name, name, move || {
-            ui::popup(&untracked(items), select)
-        })
-        .child(ui::icon(Icon::CHEVRON_DOWN, 14.0))
-    }
-}
-
 /// The Hosts this device can work on, and pairing another PC.
 pub(crate) fn screen(hosts: Memo<Vec<Host>>) -> impl IntoElement {
     use crate::ui::{self, colors};
