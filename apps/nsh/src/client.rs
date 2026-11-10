@@ -183,7 +183,16 @@ impl Client {
                         owner.resume(session, host).await;
                     }
                 }
-                Err(reason) => owner.report(reason),
+                Err(reason) => {
+                    // Removing or replacing this Host cancels restoration too.
+                    if owner
+                        .sessions
+                        .session(host.id)
+                        .is_some_and(|current| Arc::ptr_eq(&current, &session))
+                    {
+                        owner.report(reason);
+                    }
+                }
             }
         });
     }
