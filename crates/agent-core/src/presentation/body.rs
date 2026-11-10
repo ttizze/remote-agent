@@ -5,6 +5,7 @@ use crate::{
     state::Draft,
 };
 use std::{borrow::Cow, fmt::Write};
+mod tool_output;
 
 pub struct ItemBody {
     pub text: Option<String>,
@@ -326,11 +327,7 @@ pub(super) fn detail_blocks(
                 ));
             }
             if let Some(result) = result {
-                blocks.push(code(
-                    &serde_json::to_string_pretty(result).expect("result serializes"),
-                    Some("json"),
-                    "結果",
-                ));
+                blocks.extend(tool_output::result_blocks(language, result));
             }
             if let Some(error) = error {
                 blocks.push(code(
@@ -345,14 +342,7 @@ pub(super) fn detail_blocks(
                         blocks.extend(markdown_blocks(text.clone()))
                     }
                     agent_protocol::requests::ToolContent::Image { data_url } => {
-                        blocks.push(super::markdown::MarkdownBlock::Paragraph {
-                            runs: vec![super::markdown::MarkdownRun {
-                                text: language.text("ツールの画像").into(),
-                                image: Some(data_url.clone()),
-                                ..Default::default()
-                            }],
-                            style: Default::default(),
-                        })
+                        blocks.push(tool_output::image_block(language, data_url.clone()));
                     }
                 }
             }

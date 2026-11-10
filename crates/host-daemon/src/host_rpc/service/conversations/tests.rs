@@ -3577,21 +3577,31 @@ async fn recorded_items_with_reused_turn_ids_do_not_need_the_native_provider() {
 }
 
 #[tokio::test]
-async fn imports_copy_messages_and_viewed_images_while_host_turns_keep_activity() {
-    let directory = tempfile::tempdir().unwrap();
-    let directory = dunce::canonicalize(directory.path()).unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.join("claude"));
-    let host = service(&directory, &codex, &claude);
-    let client = host.open_session();
-    let root = codex
-        .create(directory.to_str().unwrap(), None, None)
-        .await
-        .unwrap()
-        .thread
-        .id
-        .unwrap();
-    let turn = |id: &str| Turn {
+async fn imports_copy_messages_and_tool_images_while_host_turns_keep_activity() {
+    use serde_json::{Value, json};
+    for deferred in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let directory = dunce::canonicalize(directory.path()).unwrap();
+        let mut codex = NativeAgent::new(ProviderKind::Codex, directory.join("codex"));
+        Arc::get_mut(&mut codex).unwrap().deferred_history = deferred;
+        let claude = NativeAgent::new(ProviderKind::Claude, directory.join("claude"));
+        let host = service(&directory, &codex, &claude);
+        let client = host.open_session();
+        let root = codex
+            .create(directory.to_str().unwrap(), None, None)
+            .await
+            .unwrap()
+            .thread
+            .id
+            .unwrap();
+        let tool = |kind: &str, result: Value, content: Value| {
+            serde_json::from_value::<ItemBody>(json!({"toolCall":{
+                "kind":kind,"tool":"capture","arguments":{},"result":result,"content":content
+            }}))
+            .unwrap()
+        };
+        let turn = |id: &str| {
+            Turn {
         id: id.into(),
         status: TurnStatus::Completed,
         items: Some(
@@ -3607,6 +3617,21 @@ async fn imports_copy_messages_and_viewed_images_while_host_turns_keep_activity(
                 ItemBody::ImageView {
                     path: format!("file:///tmp/{id}.png"),
                 },
+                tool(
+                    "mcp",
+                    json!({"content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]}),
+                    json!([]),
+                ),
+                tool(
+                    "dynamic",
+                    Value::Null,
+                    json!([{"image":{"dataUrl":"data:image/png;base64,aW1hZ2U="}}]),
+                ),
+                tool(
+                    "mcp",
+                    json!({"content":[{"type":"text","text":"No images"}]}),
+                    json!([]),
+                ),
                 ItemBody::AssistantText {
                     text: format!("{id} answer"),
                     phase: AssistantPhase::Final,
@@ -3624,43 +3649,94 @@ async fn imports_copy_messages_and_viewed_images_while_host_turns_keep_activity(
             .collect(),
         ),
         ..Default::default()
-    };
-    codex
-        .records
-        .lock()
-        .unwrap()
-        .get_mut(&root.id)
-        .unwrap()
-        .thread
-        .turns = Some(vec![Arc::new(turn("past"))]);
-    emit(
-        &codex.events,
-        AgentChange::Session {
-            session: root.clone(),
-            change: SessionChange::Turn {
-                turn: turn("live"),
-                completed: true,
+    }
+        };
+        codex
+            .records
+            .lock()
+            .unwrap()
+            .get_mut(&root.id)
+            .unwrap()
+            .thread
+            .turns = Some(vec![Arc::new(turn("past"))]);
+        if deferred {
+            codex.unreadable.lock().unwrap().insert("past-3".into());
+        }
+        emit(
+            &codex.events,
+            AgentChange::Session {
+                session: root.clone(),
+                change: SessionChange::Turn {
+                    turn: turn("live"),
+                    completed: true,
+                },
             },
-        },
-    )
-    .await
-    .unwrap();
-    history(&host, client.id(), &root).await;
-    imported_turns(&host, &root, &["past", "live"]).await;
-    let items = |id: &str| {
-        host.inner
+        )
+        .await
+        .unwrap();
+        history(&host, client.id(), &root).await;
+        imported_turns(&host, &root, &["past", "live"]).await;
+        let items = |id: &str| {
+            host.inner
+                .transcripts
+                .turn(&root, &id.into())
+                .unwrap()
+                .unwrap()
+                .items
+                .unwrap()
+                .iter()
+                .map(|item| item.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let expected: &[&str] = if deferred {
+            &["past-0", "past-2", "past-3", "past-4", "past-5", "past-6"]
+        } else {
+            &["past-0", "past-2", "past-3", "past-4", "past-6"]
+        };
+        assert_eq!(items("past"), expected);
+        assert_eq!(
+            items("live"),
+            [
+                "live-0", "live-1", "live-2", "live-3", "live-4", "live-5", "live-6"
+            ]
+        );
+        let imported = host
+            .inner
             .transcripts
-            .turn(&root, &id.into())
+            .turn(&root, &"past".into())
             .unwrap()
-            .unwrap()
+            .unwrap();
+        let image = imported
             .items
+            .as_ref()
             .unwrap()
             .iter()
-            .map(|item| item.id.to_string())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(items("past"), ["past-0", "past-2", "past-3"]);
-    assert_eq!(items("live"), ["live-0", "live-1", "live-2", "live-3"]);
+            .find(|item| item.id.as_str() == "past-3")
+            .unwrap();
+        assert_eq!(image.is_deferred(), deferred);
+        let read = op::ReadItem {
+            thread_id: root.clone(),
+            turn_id: "past".into(),
+            item_id: "past-3".into(),
+        };
+        if deferred {
+            assert!(
+                call::<op::ItemResponse>(&host, client.id(), Call::ReadItem(read.clone()))
+                    .await
+                    .is_err()
+            );
+            // An unreadable tool image must not block switching providers.
+            host.handoff_history(&root).await.unwrap();
+            codex.unreadable.lock().unwrap().remove("past-3");
+        }
+        let image: op::ItemResponse = call(&host, client.id(), Call::ReadItem(read))
+            .await
+            .unwrap();
+        assert!(!image.item.is_deferred());
+        assert!(
+            matches!(image.item.body(), ItemBody::ToolCall { result:Some(result),.. } if result["content"][0]["data"] == "aW1hZ2U=")
+        );
+    }
 }
 
 #[tokio::test]

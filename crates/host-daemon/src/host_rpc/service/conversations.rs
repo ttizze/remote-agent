@@ -16,8 +16,19 @@ pub(super) mod tests;
 pub(super) enum HistoryUse {
     Read,
     Excerpt,
-    /// A transcript copies messages and generated images in full.
+    /// A transcript copies messages and retains image-bearing tool results.
     Import,
+}
+
+fn handoff_content(body: &agent_protocol::items::ItemBody) -> bool {
+    use agent_protocol::items::ItemBody;
+    matches!(
+        body,
+        ItemBody::UserMessage { .. }
+            | ItemBody::AssistantText { .. }
+            | ItemBody::ImageGeneration { .. }
+            | ItemBody::ImageView { .. }
+    )
 }
 
 fn readable_history(state: Option<&agent_protocol::session::HistoryReadState>) -> bool {
@@ -366,10 +377,10 @@ impl HostRpcService {
                     turn.items_summary = false;
                 }
                 for item in turn.items.iter_mut().flatten() {
-                    // Handoffs deliberately omit reasoning and native tool
-                    // state. Their deferred bodies need not be recovered.
+                    // Tool output stays deferred until a client opens it.
+                    // Portable context does not consume native tool results.
                     if item.is_deferred()
-                        && (transcripts::content(item.body())
+                        && (handoff_content(item.body())
                             || (usage != HistoryUse::Import
                                 && matches!(
                                     item.body(),
@@ -636,7 +647,7 @@ impl HostRpcService {
             .iter()
             .flatten()
             .flat_map(|turn| turn.items.iter().flatten())
-            .any(|item| item.is_deferred() && transcripts::content(item.body()))
+            .any(|item| item.is_deferred() && handoff_content(item.body()))
         {
             return Err(Failure::new(
                 "incomplete_history",

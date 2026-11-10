@@ -2230,6 +2230,33 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         let history = local.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { session: serde_json::from_value(thread_id.clone()).unwrap(), limit: 5, include_activity: true , known_version: None})).await.map(|output| serde_json::to_value(output).unwrap()).unwrap()["response"].clone();
         assert_eq!(list["projects"][0]["roots"][0]["path"], directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["body"]["inline"]["body"]["toolCall"]["result"].is_object()));
+        let reopened = local.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+            session: serde_json::from_value(thread_id.clone()).unwrap(), limit: 5, include_activity: false, known_version: None,
+        })).await.unwrap().response.thread;
+        let snapshot = agent_core::state::Snapshot::default();
+        let rendered = agent_core::presentation::conversation::project_conversation(
+            agent_core::localization::UiLanguage::Japanese,
+            &snapshot.panes.primary().navigation.draft_key,
+            &snapshot.sessions.pending_submissions,
+            Arc::new(reopened), &None,
+        );
+        let tools: Vec<_> = rendered.turns[0].rows.iter().filter_map(|row| match &row.content {
+            agent_core::presentation::conversation::ConversationRowContent::Activity { item, .. } => Some(item),
+            _ => None,
+        }).filter(|item| {
+            item.data.id.starts_with("fixture-mcp-") || item.data.id.starts_with("fixture-dynamic-")
+        }).collect();
+        assert_eq!(tools.len(), 2);
+        for tool in tools {
+            let blocks = tool.detail_blocks();
+            let images: Vec<_> = blocks.iter().filter_map(|block| match block {
+                agent_core::presentation::markdown::MarkdownBlock::Paragraph { runs, .. } => Some(runs), _ => None,
+            }).flatten().filter_map(|run| run.image.as_deref()).collect();
+            assert_eq!(images.len(), 1);
+            let bytes = STANDARD.decode(images[0].strip_prefix("data:image/png;base64,").unwrap()).unwrap();
+            let decoded = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().unwrap();
+            assert_eq!((decoded.info().width, decoded.info().height), (1, 1));
+        }
         local.close().await;
         fixture.close().await.unwrap();
     }).await.expect("wire fixture deadline");

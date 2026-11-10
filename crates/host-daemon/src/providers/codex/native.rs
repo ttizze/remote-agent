@@ -655,12 +655,7 @@ pub(super) fn summary_items(items: Vec<Arc<Item>>) -> Vec<Arc<Item>> {
         .into_iter()
         .enumerate()
         .filter(|(index, item)| {
-            Some(*index) == user
-                || Some(*index) == answer
-                || matches!(
-                    item.body(),
-                    ItemBody::ImageGeneration { .. } | ItemBody::ImageView { .. }
-                )
+            Some(*index) == user || Some(*index) == answer || item.is_image_output()
         })
         .map(|(_, item)| item)
         .collect()
@@ -1083,6 +1078,10 @@ mod tests {
                 {"id":"inline","type":"imageGeneration","status":"completed","result":"base64"},
                 {"id":"failed","type":"imageGeneration","status":"failed"},
                 {"id":"screenshot","type":"imageView","path":"file:///tmp/blog.png"},
+                {"id":"mcp-image","type":"mcpToolCall","tool":"screenshot","result":{"content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]}},
+                {"id":"exec-image","type":"dynamicToolCall","tool":"exec","contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,aW1hZ2U="}]},
+                {"id":"text-tool","type":"dynamicToolCall","tool":"exec","contentItems":[{"type":"inputText","text":"No images"}]},
+                {"id":"invalid-image","type":"mcpToolCall","tool":"screenshot","result":{"content":[{"type":"image","mimeType":"image/png","data":3}]}},
                 {"id":"answer","type":"agentMessage","phase":phase,"text":"Here are the images"},
                 {"id":"tail-commentary","type":"agentMessage","phase":"commentary","text":"Activity"}
             ]})).unwrap();
@@ -1099,6 +1098,8 @@ mod tests {
                     "inline",
                     "failed",
                     "screenshot",
+                    "mcp-image",
+                    "exec-image",
                     "answer"
                 ]
             );
@@ -1112,6 +1113,12 @@ mod tests {
             assert_eq!(summary[4].status, ItemStatus::Failed);
             assert!(
                 matches!(summary[5].body(), ItemBody::ImageView { path } if path == "file:///tmp/blog.png")
+            );
+            assert!(
+                matches!(summary[6].body(), ItemBody::ToolCall { result:Some(result),.. } if result["content"][0]["data"] == "aW1hZ2U=")
+            );
+            assert!(
+                matches!(summary[7].body(), ItemBody::ToolCall { content,.. } if matches!(&content[0], agent_protocol::requests::ToolContent::Image { data_url } if data_url == "data:image/png;base64,aW1hZ2U="))
             );
         }
         assert!(summary_items(vec![]).is_empty());

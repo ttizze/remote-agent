@@ -329,10 +329,11 @@ impl ScenarioTurn {
             // the thread it started (which the fixture serves), and the
             // subagent's activity that thread.
             let child = subagent_thread(suffix);
+            let pixels = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=";
             for item in [
                 json!({"id":format!("fixture-plan-{suffix}"),"type":"plan","text":"確認計画"}),
-                json!({"id":format!("fixture-mcp-{suffix}"),"type":"mcpToolCall","server":"fixture","tool":"lookup","status":"completed","result":{"content":[{"type":"text","text":"Fixture lookup result"}]}}),
-                json!({"id":format!("fixture-dynamic-{suffix}"),"type":"dynamicToolCall","tool":"fixture","status":"completed","success":true}),
+                json!({"id":format!("fixture-mcp-{suffix}"),"type":"mcpToolCall","server":"fixture","tool":"lookup","status":"completed","result":{"content":[{"type":"text","text":"Fixture lookup result"},{"type":"image","mimeType":"image/png","data":pixels}]}}),
+                json!({"id":format!("fixture-dynamic-{suffix}"),"type":"dynamicToolCall","tool":"fixture","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":format!("data:image/png;base64,{pixels}")}]}),
                 json!({"id":format!("fixture-collab-{suffix}"),"type":"collabAgentToolCall","tool":"spawnAgent","status":"completed",
                     "prompt":"Review the change","senderThreadId":thread_id,"receiverThreadIds":[child],
                     "agentsStates":{child.clone():{"status":"completed","message":"Reviewed."}}}),
