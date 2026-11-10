@@ -15,6 +15,7 @@ enum Command {
     Wake,
     Read(oneshot::Sender<Vec<ConnectionPerformance>>),
     Ack(u64, u64, oneshot::Sender<()>),
+    Close(oneshot::Sender<()>),
 }
 
 pub(super) struct Journal {
@@ -59,6 +60,10 @@ impl Journal {
                         }
                         let _ = reply.send(());
                     }
+                    Command::Close(reply) => {
+                        let _ = reply.send(());
+                        break;
+                    }
                 }
             }
         })?;
@@ -83,6 +88,13 @@ impl Journal {
             return Vec::new();
         }
         receive.await.unwrap_or_default()
+    }
+
+    pub async fn close(&self) {
+        let (send, receive) = oneshot::channel();
+        if self.commands.send(Command::Close(send)).await.is_ok() {
+            let _ = receive.await;
+        }
     }
 
     pub async fn acknowledge(&self, report: &ConnectionPerformance) {

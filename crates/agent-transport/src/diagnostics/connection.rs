@@ -92,6 +92,16 @@ impl Trace {
         }
     }
 
+    /// Finish disk writes before the owning session's files can be removed.
+    /// Retained trace handles and their eventual drop cannot restart the journal.
+    pub async fn close(&self) {
+        self.sampler.lock().unwrap().take();
+        self.checkpoint();
+        if let Some(journal) = self.journal.get() {
+            journal.close().await;
+        }
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -455,6 +465,27 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for NetworkLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closing_preserves_the_last_report_and_never_recreates_removed_files() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("diagnostics");
+        let trace = Trace::with_enabled(true, "test-revision".into());
+        trace.persist(directory.clone()).unwrap();
+        trace.activate();
+        trace.record(ConnectionPhase::ClientBuild, 0, 0, 42);
+        trace.close().await;
+        let report: super::super::ConnectionPerformance = serde_json::from_slice(
+            &std::fs::read(directory.join(format!("{}.json", trace.id))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report.timeline.events.last().unwrap().value, 42);
+        std::fs::remove_dir_all(&directory).unwrap();
+        trace.record(ConnectionPhase::AppScene, 0, 0, 1);
+        trace.close().await;
+        drop(trace);
+        assert!(!directory.exists());
+    }
 
     #[test]
     fn native_lifecycle_callbacks_can_activate_without_a_runtime() {

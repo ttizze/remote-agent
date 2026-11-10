@@ -254,7 +254,11 @@ impl ClientSession {
     pub async fn shutdown(self: Arc<Self>) -> Result<(), AgentError> {
         self.retire();
         let closing = self.closing.lock().unwrap().as_ref().unwrap().clone();
-        closing.await
+        let result = closing.await;
+        // A restore rejected by retirement may still be closing its own Store.
+        // Its diagnostic writes must finish before platform files are deleted.
+        let _initializing = self.initialization.lock().await;
+        result
     }
 }
 
@@ -1111,15 +1115,7 @@ mod tests {
             assert_eq!(text(&storage.bytes.lock().unwrap()), "synchronous edit");
             let trace = crate::diagnostics::connection::Trace::new("next-revision".into());
             trace.persist(directory.path().into()).unwrap();
-            // Each trace has its own disk worker; reading the next trace does
-            // not wait for the previous trace's checkpoint to reach disk.
-            let reports = loop {
-                let reports = trace.pending_reports().await;
-                if !reports.is_empty() {
-                    break reports;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            };
+            let reports = trace.pending_reports().await;
             assert_eq!(reports.len(), 1);
             assert_eq!(reports[0].client_revision, "test-revision");
             assert!(
