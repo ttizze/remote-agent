@@ -7,12 +7,13 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "cargo-huacnlee";
-  version = "0.102.0-9-pr10-pr11";
+  version = "0.102.0-9-pr10-pr11-unit-locks";
   src = fetchurl {
     url = "https://github.com/huacnlee/cargo/archive/refs/tags/v0.102.0-9.tar.gz";
     sha256 = "49a63fc1e05890657c151034f67c2217a51aa65c7835ce423e1aa3bc2379547e";
   };
-  # Protect queued units from GC and keep patched dependency types identical.
+  # Protect queued units from GC, keep patched dependency types identical, and
+  # stop concurrent builds deadlocking on units the other has already built.
   patches = [ (fetchurl {
     # https://github.com/huacnlee/cargo/pull/10
     url = "https://github.com/huacnlee/cargo/compare/6ebb89197f5b3a88b637e28672e6d39d67343401...c8890c4515732718349ac350672e8ed900b77c51.diff";
@@ -21,13 +22,13 @@ rustPlatform.buildRustPackage {
     # https://github.com/huacnlee/cargo/pull/11
     url = "https://github.com/huacnlee/cargo/compare/6ebb89197f5b3a88b637e28672e6d39d67343401...0d289379554626589abec942295dec40cf4468aa.diff";
     sha256 = "5262aadcbf2a70e70bc5a18c752fa2983b7566ef90ab66b2707031f71cc405b6";
-  }) ];
+  }) ./shared-unit-locks.patch ];
   cargoHash = "sha256-c2jOozCbWUIq1rrqQm4KXNglyWgbc1dljaJn6hhv31U=";
   nativeBuildInputs = [ pkg-config makeWrapper ];
   buildInputs = [ openssl curl zlib ];
   nativeCheckInputs = [ git ];
   cargoBuildFlags = [ "--package" "cargo" "--bin" "cargo" ];
-  cargoTestFlags = [ "--package" "cargo" "--test" "testsuite" "fork_defaults::" ];
+  cargoTestFlags = [ "--package" "cargo" "--lib" "--test" "testsuite" "fork_defaults::" ];
   CARGO_FORK_AUTO_UPDATE = "0";
   postInstall = ''
     wrapProgram "$out/bin/cargo" \

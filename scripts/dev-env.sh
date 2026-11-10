@@ -38,7 +38,7 @@ fi
 touch "$agent_root/target/.last-used"
 agent_cargo_home=${CARGO_HOME:-${agent_build_root:-$HOME}/.cargo}
 export XDG_CACHE_HOME="$agent_root/target/tool-cache"
-agent_env_key=$({ git hash-object flake.nix flake.lock tools/github-release-binary.nix tools/cccc/package.nix tools/cargo/package.nix tools/node-runtime/package.nix; uname -sm; printf '%s\n' "$agent_env_shell"; } | git hash-object --stdin)
+agent_env_key=$({ git hash-object flake.nix flake.lock tools/github-release-binary.nix tools/cccc/package.nix tools/cargo/package.nix tools/cargo/shared-unit-locks.patch tools/node-runtime/package.nix; uname -sm; printf '%s\n' "$agent_env_shell"; } | git hash-object --stdin)
 agent_env_dir="$(git rev-parse --git-common-dir)/agent-dev-env/$agent_env_key"
 mkdir -p "$agent_env_dir"
 if [[ ! -f $agent_env_dir/env.sh ]]; then
