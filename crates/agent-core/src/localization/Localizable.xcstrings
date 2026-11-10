@@ -1,6 +1,18 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "貼り付け": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Paste" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "貼り付け" } }
+      }
+    },
+    "最新の出力に移動": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Jump to latest" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "最新の出力に移動" } }
+      }
+    },
     "Claude Code のアカウント確認": {
       "localizations": {
         "en": {

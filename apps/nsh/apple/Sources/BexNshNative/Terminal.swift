@@ -14,14 +14,137 @@ private enum HostPaste {
     @TaskLocal static var active = false
 }
 
+#if os(macOS)
+    struct TerminalMenu: Decodable {
+        var quote = "Add to chat"
+        var copy = "Copy"
+        var paste = "Paste"
+        var selectAll = "Select all"
+        var bottom = "Jump to latest"
+    }
+#endif
+
 /// Host owns terminal protocol responses. Only native typing and pasting go upstream.
-private final class HostTerminalView: SwiftTerm.TerminalView {
+final class HostTerminalView: SwiftTerm.TerminalView {
+    var acceptsInput = false
     #if os(macOS)
+        var menuTitles = TerminalMenu()
+        var quote: ((String) -> Void)?
+        private var handlingPointerEvent = false
+        private var pointerChangedSelection = false
+        private var pendingSelectionMenu: Timer?
+
         override func paste(_ sender: Any) {
+            guard acceptsInput else { return }
             HostPaste.$active.withValue(true) { super.paste(sender) }
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            cancelSelectionMenu()
+            pointerChangedSelection = false
+            handlingPointerEvent = true
+            defer { handlingPointerEvent = false }
+            super.mouseDown(with: event)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            handlingPointerEvent = true
+            defer { handlingPointerEvent = false }
+            super.mouseDragged(with: event)
+        }
+
+        override nonisolated func selectionChanged(source: SwiftTerm.Terminal) {
+            super.selectionChanged(source: source)
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    if handlingPointerEvent {
+                        pointerChangedSelection = true
+                    }
+                }
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            handlingPointerEvent = true
+            super.mouseUp(with: event)
+            handlingPointerEvent = false
+            guard pointerChangedSelection, let selected = menuSelection else { return }
+            let point = convert(event.locationInWindow, from: nil)
+            // Leave the next click free to extend a word selection to its line.
+            let delay = event.clickCount >= 2 ? NSEvent.doubleClickInterval : 0
+            let request = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    pendingSelectionMenu = nil
+                    guard window?.firstResponder === self, !isHiddenOrHasHiddenAncestor,
+                          menuSelection == selected else { return }
+                    selectionMenu().popUp(positioning: nil, at: point, in: self)
+                }
+            }
+            pendingSelectionMenu = request
+            // A run-loop timer leaves the main dispatch queue free while
+            // AppKit runs the menu's nested event loop.
+            RunLoop.main.add(request, forMode: .default)
+        }
+
+        func cancelSelectionMenu() {
+            pendingSelectionMenu?.invalidate()
+            pendingSelectionMenu = nil
+        }
+
+        override func menu(for _: NSEvent) -> NSMenu? {
+            cancelSelectionMenu()
+            let menu = selectionMenu()
+            menu.addItem(item(menuTitles.paste, #selector(paste(_:)), enabled: acceptsInput))
+            menu.addItem(item(menuTitles.selectAll, #selector(selectAll(_:))))
+            menu.addItem(item(menuTitles.bottom, #selector(jumpToLatest(_:))))
+            return menu
+        }
+
+        /// Snapshot the text while the menu is open; a changed selection cannot
+        /// add different output to the conversation.
+        func selectionMenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            let selected = menuSelection
+            let add = item(menuTitles.quote, #selector(quoteSelection(_:)), enabled: selected != nil)
+            add.representedObject = selected
+            menu.addItem(add)
+            let copy = item(menuTitles.copy, #selector(copySelection(_:)), enabled: selected != nil)
+            copy.representedObject = selected
+            menu.addItem(copy)
+            return menu
+        }
+
+        private var menuSelection: String? {
+            getSelection().flatMap { $0.trimmingCharacters(in: .newlines).isEmpty ? nil : $0 }
+        }
+
+        private func item(_ title: String, _ action: Selector, enabled: Bool = true) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = enabled
+            return item
+        }
+
+        @objc private func quoteSelection(_ sender: NSMenuItem) {
+            guard let selected = sender.representedObject as? String, getSelection() == selected else { return }
+            quote?(selected.replacingOccurrences(of: "\r\n", with: "\n").trimmingCharacters(in: .newlines))
+            selectNone()
+        }
+
+        @objc private func copySelection(_ sender: NSMenuItem) {
+            guard let selected = sender.representedObject as? String else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(selected, forType: .string)
+        }
+
+        @objc private func jumpToLatest(_: Any?) {
+            scroll(toPosition: 1)
         }
     #else
         override func paste(_ sender: Any?) {
+            guard acceptsInput else { return }
             HostPaste.$active.withValue(true) { super.paste(sender) }
         }
     #endif
@@ -32,12 +155,20 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
     }
 
     #if os(macOS)
-        // SwiftTerm's iOS view reads its screen to VoiceOver; its Mac view has no
-        // accessibility text. The visible rows are this text area's value, which
-        // SwiftTerm already announces as changed after each frame it draws.
-        override func isAccessibilityElement() -> Bool { true }
-        override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
-        override func accessibilityValue() -> Any? { screenText() }
+        /// SwiftTerm's iOS view reads its screen to VoiceOver; its Mac view has no
+        /// accessibility text. The visible rows are this text area's value, which
+        /// SwiftTerm already announces as changed after each frame it draws.
+        override func isAccessibilityElement() -> Bool {
+            true
+        }
+
+        override func accessibilityRole() -> NSAccessibility.Role? {
+            .textArea
+        }
+
+        override func accessibilityValue() -> Any? {
+            screenText()
+        }
 
         private var drawn: SwiftTerm.Terminal?
 
@@ -55,7 +186,10 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
         func screenText() -> String {
             guard let terminal = drawnTerminal() else { return "" }
             let rows = terminal.terminalLock.withLock {
-                (0 ..< terminal.rows).map { terminal.getLine(row: $0)?.translateToString(trimRight: true, skipNullCellsFollowingWide: true) ?? "" }
+                (0 ..< terminal.rows).map { terminal.getLine(row: $0)?.translateToString(
+                    trimRight: true,
+                    skipNullCellsFollowingWide: true
+                ) ?? "" }
             }
             return rows.reversed().drop(while: \.isEmpty).reversed().joined(separator: "\n")
         }
@@ -66,7 +200,6 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
     let view = HostTerminalView(frame: .zero)
     let context: UnsafeMutableRawPointer?
     var callback: TerminalCallback?
-    var acceptsInput = false
     var restoring = false
     #if os(macOS)
         var windowUpdates: NSObjectProtocol?
@@ -81,7 +214,9 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
         }
 
         func stopReportingFocus() {
-            if let windowUpdates { NotificationCenter.default.removeObserver(windowUpdates) }
+            if let windowUpdates {
+                NotificationCenter.default.removeObserver(windowUpdates)
+            }
             windowUpdates = nil
         }
     #endif
@@ -92,6 +227,13 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
         super.init()
         view.terminalDelegate = self
         #if os(macOS)
+            view.quote = { [weak self] text in
+                guard let self else { return }
+                let bytes = Array(text.utf8)
+                bytes.withUnsafeBufferPointer { buffer in
+                    self.callback?(self.context, 4, buffer.baseAddress, buffer.count, 0, 0)
+                }
+            }
             // SwiftTerm keeps its responder methods closed, so the window's
             // updates tell when the terminal takes or gives up the keyboard.
             windowUpdates = NotificationCenter.default.addObserver(
@@ -118,7 +260,7 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
     }
 
     func send(source _: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
-        guard acceptsInput else { return }
+        guard view.acceptsInput else { return }
         data.withUnsafeBufferPointer { buffer in
             callback?(context, 1, buffer.baseAddress, buffer.count, 0, 0)
         }
@@ -158,8 +300,22 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
 
 @_cdecl("bex_nsh_terminal_input")
 @MainActor public func terminalInput(_ handle: UnsafeMutableRawPointer, _ enabled: Bool) {
-    Unmanaged<TerminalOwner>.fromOpaque(handle).takeUnretainedValue().acceptsInput = enabled
+    Unmanaged<TerminalOwner>.fromOpaque(handle).takeUnretainedValue().view.acceptsInput = enabled
 }
+
+#if os(macOS)
+    @_cdecl("bex_nsh_terminal_menu")
+    @MainActor public func terminalMenu(
+        _ handle: UnsafeMutableRawPointer,
+        _ bytes: UnsafePointer<UInt8>?,
+        _ count: Int
+    ) {
+        guard let bytes, count > 0,
+              let titles = try? JSONDecoder().decode(TerminalMenu.self, from: Data(bytes: bytes, count: count))
+        else { return }
+        Unmanaged<TerminalOwner>.fromOpaque(handle).takeUnretainedValue().view.menuTitles = titles
+    }
+#endif
 
 @_cdecl("bex_nsh_terminal_feed")
 @MainActor public func terminalFeed(
@@ -185,6 +341,7 @@ private final class HostTerminalView: SwiftTerm.TerminalView {
     let owner = Unmanaged<TerminalOwner>.fromOpaque(handle).takeRetainedValue()
     owner.view.terminalDelegate = nil
     #if os(macOS)
+        owner.view.cancelSelectionMenu()
         owner.stopReportingFocus()
     #endif
     owner.callback = nil
