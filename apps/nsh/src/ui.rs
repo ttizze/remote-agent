@@ -223,6 +223,12 @@ impl Icon {
     const NOTIFY_ZAP: Self = icon!(Zap);
     /// Lucide 1 names circle-alert circle-exclamation-point.
     pub(crate) const ALERT: Self = icon!(CircleExclamationPoint);
+    /// T3 Code's sidebar statuses: working, waiting on background work, an
+    /// unseen completion and a pending approval.
+    pub(crate) const STATUS_WORKING: Self = icon!(CircleDashed);
+    pub(crate) const STATUS_WAITING: Self = icon!(CircleDotDashed);
+    pub(crate) const STATUS_DONE: Self = icon!(CircleCheck);
+    pub(crate) const STATUS_APPROVAL: Self = icon!(ShieldQuestionMark);
     const HAMMER: Self = icon!(Hammer);
 
     /// A notification row's icon, as T3 Code's work log draws it.

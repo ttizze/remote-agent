@@ -746,7 +746,7 @@ fn attention_badge(
     use crate::ui::{self, Icon};
     use agent_core::presentation::thread_status::ThreadAttention;
     let (icon, color) = match attention {
-        ThreadAttention::Approval => (Icon::SHIELD, 0xfbbf24),
+        ThreadAttention::Approval => (Icon::STATUS_APPROVAL, 0xfbbf24),
         ThreadAttention::Input => (Icon::QUESTION, 0x60a5fa),
         ThreadAttention::Failed => (Icon::ALERT, 0xf87171),
     };
@@ -781,25 +781,21 @@ fn indicators(indicators: native::RowIndicators) -> impl IntoElement {
         .child(match indicators.activity {
             // A badge says what a waiting chat waits for.
             Some(ThreadActivity::Waiting) if badged => None,
-            Some(ThreadActivity::Running | ThreadActivity::Waiting) => {
-                Some(ui::spinner().into_element())
-            }
-            Some(ThreadActivity::Unread) => Some(
+            // T3 Code's Working, Waiting and Done icons, in its status colours.
+            Some(ThreadActivity::Running | ThreadActivity::Waiting) => Some(
                 view()
-                    .w(px(8.0))
-                    .h(px(8.0))
-                    .rounded_full()
-                    .bg(nsh_core::element::rgb(0xffffff))
-                    .into_element(),
+                    .text_color(nsh_core::element::rgb(0x60a5fa))
+                    .child(ui::icon(Icon::STATUS_WORKING, 16.0)),
             ),
-            // As T3 Code's Waiting: grey and still, unlike a running spinner.
             Some(ThreadActivity::Background) => Some(
                 view()
-                    .w(px(8.0))
-                    .h(px(8.0))
-                    .rounded_full()
-                    .bg(crate::ui::colors::muted())
-                    .into_element(),
+                    .text_color(crate::ui::colors::muted())
+                    .child(ui::icon(Icon::STATUS_WAITING, 16.0)),
+            ),
+            Some(ThreadActivity::Unread) => Some(
+                view()
+                    .text_color(nsh_core::element::rgb(0x34d399))
+                    .child(ui::icon(Icon::STATUS_DONE, 16.0)),
             ),
             None => None,
         })
