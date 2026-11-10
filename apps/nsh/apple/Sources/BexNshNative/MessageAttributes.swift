@@ -94,9 +94,6 @@ struct MessageDocument: Decodable, Equatable {
     let menu: MessageMenuTitles
     /// A table's cell, `header` or `body`, whose text is smaller.
     var cell: String? = nil
-    /// Answers and wrapped code fill their lane; bubbles, table cells and
-    /// unwrapped code need their natural width instead.
-    var fillsWidth: Bool = false
 
     static let empty = MessageDocument(blocks: [], secondary: false, role: "assistant", target: "", sideChat: false,
                                        maxWidth: 0, menu: MessageMenuTitles(quote: "", sideChat: ""))

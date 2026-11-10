@@ -416,10 +416,6 @@ impl Target {
     }
 }
 
-fn fills_width(kind: Kind, table_cell: bool, unwrapped: bool) -> bool {
-    kind != Kind::User && !table_cell && !unwrapped
-}
-
 /// `cell`: a table's cell, `header` or `body`, whose text is T3 Code's
 /// smaller table text.
 fn view_parts(
@@ -474,8 +470,7 @@ fn view_parts(
                                     surroundings.find.highlighted()
                                 };
                                 let active = surroundings.find.active(&row, document);
-                                let unwrapped = code && wrap.is_some_and(|wrap| !wrap.get());
-                                let width = if unwrapped {
+                                let width = if code && wrap.is_some_and(|wrap| !wrap.get()) {
                                     1_000_000.0
                                 } else {
                                     (width - if code { 2.0 * CODE_INSET } else { 0.0 }).max(0.0)
@@ -494,7 +489,6 @@ fn view_parts(
                                     "sideChat": connection.pane.is_none(),
                                     "cell": cell,
                                     "maxWidth": width,
-                                    "fillsWidth": fills_width(kind, cell.is_some(), unwrapped),
                                     "menu": {
                                         "quote": tr("チャットに追加"),
                                         "sideChat": tr("サイドチャットで質問"),
@@ -1484,22 +1478,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bubbles_table_cells_and_unwrapped_code_keep_their_natural_width() {
-        for (kind, cell, unwrapped, fills) in [
-            (Kind::User, false, false, false),
-            (Kind::User, false, true, false),
-            (Kind::Response, false, false, true),
-            (Kind::Activity, false, false, true),
-            (Kind::Response, true, false, false),
-            (Kind::Activity, true, false, false),
-            (Kind::Response, false, true, false),
-            (Kind::Activity, false, true, false),
-        ] {
-            assert_eq!(fills_width(kind, cell, unwrapped), fills);
-        }
-    }
-
-    #[test]
     fn native_text_contract_preserves_unicode_style_links_and_selection_target() {
         let blocks = vec![paragraph(
             vec![
@@ -1525,7 +1503,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            json!({"blocks": blocks, "secondary": false, "role": "user", "target": "opaque-native-menu-target", "sideChat": true, "cell": null, "maxWidth": 400, "fillsWidth": false,
+            json!({"blocks": blocks, "secondary": false, "role": "user", "target": "opaque-native-menu-target", "sideChat": true, "cell": null, "maxWidth": 400,
                 "menu": {"quote": "チャットに追加", "sideChat": "サイドチャットで質問"}}),
             expected
         );

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise native message text, UIKit navigation and scroll geometry without a Simulator or Host.
+# Exercise UIKit navigation and scroll geometry on macOS without a Simulator or Host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 sdk=$(xcrun --sdk macosx --show-sdk-path)
@@ -10,15 +10,14 @@ target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
 output="$target/qa/ios-scroll/builds"
 mkdir -p "$output"
 run_test() {
-    local fixture=$1 name
-    name=$(basename "$fixture" .swift)
+    local name=$1
     shift
     local swift_flags=()
     if [[ ${1-} == --dev ]]; then
         swift_flags=(-D AGENT_DEV_DIAGNOSTICS)
         shift
     fi
-    local key app executable pending_dir pending
+    local fixture="apps/mobile/iosApp/UITests/Fixtures/$name.swift" key app executable pending_dir pending
     key=$({
         printf '%s\n' "$sdk" "$sdk_build" "$compiler" "$swift_target"
         printf '%s\n' "${swift_flags[*]-}"
@@ -67,8 +66,7 @@ PLIST
         fi
     fi
 }
-run_test apps/mobile/iosApp/UITests/Fixtures/navigation-tests.swift apps/mobile/iosApp/Bex/NavigationAppearance.swift
-run_test apps/mobile/iosApp/UITests/Fixtures/scroll-tests.swift apps/mobile/iosApp/Bex/ConversationList.swift apps/mobile/iosApp/Bex/ConversationListLayout.swift
-run_test apps/mobile/iosApp/UITests/Fixtures/text-view-tests.swift apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
-run_test apps/mobile/iosApp/UITests/Fixtures/text-view-tests.swift --dev apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
-run_test apps/nsh/apple/Tests/Fixtures/message-stream-tests.swift apps/nsh/apple/Sources/BexNshNative/{MessageAttributes,MessageText}.swift
+run_test navigation-tests apps/mobile/iosApp/Bex/NavigationAppearance.swift
+run_test scroll-tests apps/mobile/iosApp/Bex/ConversationList.swift apps/mobile/iosApp/Bex/ConversationListLayout.swift
+run_test text-view-tests apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
+run_test text-view-tests --dev apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
