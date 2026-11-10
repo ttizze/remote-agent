@@ -4,6 +4,12 @@
 filter = 'test(=oversized_session_opens_repeatedly_and_downloads_lossless_items_without_reconnecting)'
 threads-required = "num-test-threads"
 
+# These isolation contracts copy and start private provider executables within
+# ten seconds. Keep competing Host/SDK startups outside that existing budget.
+[[profile.default.overrides]]
+filter = 'binary(fixtures)'
+threads-required = "num-test-threads"
+
 # Resume must finish within 500 ms while history is held. Run its Host startup
 # without competing provider processes and keep the actual latency assertion.
 [[profile.default.overrides]]
