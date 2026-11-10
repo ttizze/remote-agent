@@ -21,7 +21,6 @@ mod devices;
 mod dictation;
 mod editor;
 mod environment;
-#[cfg(desktop)]
 mod file_actions;
 mod files;
 mod find;

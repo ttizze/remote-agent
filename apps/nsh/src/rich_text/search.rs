@@ -5,13 +5,7 @@ use agent_core::presentation::conversation::{TextMatch, find_matches};
 use serde_json::{Value, json};
 
 pub(crate) fn documents(source: String, cwd: String, home: Option<String>) -> Vec<String> {
-    #[cfg(desktop)]
-    let blocks = agent_core::presentation::markdown::desktop_markdown_blocks(source, cwd, home);
-    #[cfg(not(desktop))]
-    let blocks = {
-        let _ = (cwd, home);
-        agent_core::presentation::markdown::markdown_blocks(source)
-    };
+    let blocks = agent_core::presentation::markdown::workspace_markdown_blocks(source, cwd, home);
     fn collect(parts: &[Part], output: &mut Vec<String>) {
         for part in parts {
             match part {

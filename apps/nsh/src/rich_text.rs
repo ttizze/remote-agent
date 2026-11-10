@@ -159,16 +159,7 @@ impl Surroundings {
         if command && (link.starts_with("https://") || link.starts_with("http://")) {
             return self.workspace.browse(link);
         }
-        #[cfg(desktop)]
         crate::file_actions::press(self.connection, self.files, target.link(link), command);
-        #[cfg(not(desktop))]
-        self.files.open(
-            link,
-            target.cwd,
-            target.home,
-            target.host,
-            self.connection.client.get(),
-        );
     }
 }
 
@@ -191,8 +182,8 @@ pub(crate) fn content(
     )
 }
 
-/// A message's Markdown `source`: on the desktop, its file links and paths as
-/// the desktop client's chips, and its complete Mermaid blocks drawn.
+/// A message's Markdown, file chips and diagrams use one presentation on
+/// every NSH platform. Only the final native or drawn text adapter differs.
 pub(crate) fn message(
     surroundings: Surroundings,
     source: impl Fn() -> Option<String> + 'static,
@@ -205,57 +196,31 @@ pub(crate) fn message(
             return (Vec::new(), Vec::new());
         };
         let diagrams = diagrams(&source);
-        #[cfg(desktop)]
-        let blocks = agent_core::presentation::markdown::desktop_markdown_blocks(
+        let blocks = agent_core::presentation::markdown::workspace_markdown_blocks(
             source,
             connection
                 .composer
                 .with(|c| c.controls.navigation.cwd.clone()),
             connection.context.with(|c| c.home()),
         );
-        #[cfg(not(desktop))]
-        let blocks = agent_core::presentation::markdown::markdown_blocks(source);
         (blocks, diagrams)
     });
-    #[cfg(desktop)]
-    let content = {
-        let chips = computed(move || crate::file_actions::Chips::read(connection));
-        let paths = computed(move || {
-            document.with(|(blocks, _)| {
-                let mut paths = Vec::new();
-                for_each_file(blocks, &mut |file| paths.push(file.path.clone()));
-                paths
-            })
-        });
-        effect(move || crate::file_actions::read_metadata(connection, paths.get()));
-        computed(move || {
-            chips.with(|chips| {
-                document.with(|(blocks, diagrams)| {
-                    search::indexed(parts(
-                        blocks.clone(),
-                        if surroundings.find.highlighted().is_empty() {
-                            diagrams
-                        } else {
-                            &[]
-                        },
-                        &|file| Some(chips.chip(file)),
-                    ))
-                })
-            })
-        })
-    };
-    #[cfg(not(desktop))]
+    let chips = computed(move || crate::file_actions::Chips::read(connection));
+    let paths = computed(move || document.with(|(blocks, _)| file_paths(blocks)));
+    effect(move || crate::file_actions::read_metadata(connection, paths.get()));
     let content = computed(move || {
-        document.with(|(blocks, diagrams)| {
-            search::indexed(parts(
-                blocks.clone(),
-                if surroundings.find.highlighted().is_empty() {
-                    diagrams
-                } else {
-                    &[]
-                },
-                &|_| None,
-            ))
+        chips.with(|chips| {
+            document.with(|(blocks, diagrams)| {
+                search::indexed(parts(
+                    blocks.clone(),
+                    if surroundings.find.highlighted().is_empty() {
+                        diagrams
+                    } else {
+                        &[]
+                    },
+                    &|file| Some(chips.chip(file)),
+                ))
+            })
         })
     });
     view_parts(
@@ -268,21 +233,21 @@ pub(crate) fn message(
     )
 }
 
-/// Every file a document's runs name, its tables' included.
-#[cfg(desktop)]
-fn for_each_file(blocks: &[MarkdownBlock], visit: &mut impl FnMut(&MarkdownFileReference)) {
-    for block in blocks {
-        let runs: Vec<&MarkdownRun> = match block {
-            MarkdownBlock::Paragraph { runs, .. } => runs.iter().collect(),
-            MarkdownBlock::Table { rows, .. } => {
-                rows.iter().flatten().flat_map(|cell| &cell.runs).collect()
-            }
-            MarkdownBlock::Visualization { .. } => Vec::new(),
-        };
-        runs.into_iter()
-            .filter_map(|run| run.file.as_ref())
-            .for_each(&mut *visit);
-    }
+/// Host paths for the document's file metadata, including files in tables.
+fn file_paths(blocks: &[MarkdownBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .flat_map(|block| {
+            let (runs, rows) = match block {
+                MarkdownBlock::Paragraph { runs, .. } => (runs.as_slice(), &[][..]),
+                MarkdownBlock::Table { rows, .. } => (&[][..], rows.as_slice()),
+                MarkdownBlock::Visualization { .. } => (&[][..], &[][..]),
+            };
+            runs.iter()
+                .chain(rows.iter().flatten().flat_map(|cell| &cell.runs))
+        })
+        .filter_map(|run| run.file.as_ref().map(|file| file.path.clone()))
+        .collect()
 }
 
 /// Where the content's menus and links act: its Host, draft and workspace.
@@ -371,7 +336,6 @@ fn action(surroundings: Surroundings, data: &Value) {
             target,
             data["command"].as_bool().unwrap_or(false),
         ),
-        #[cfg(desktop)]
         Some("file") => crate::file_actions::choose(
             connection,
             surroundings.files,
@@ -404,7 +368,6 @@ fn selected(data: &Value) -> Option<crate::selection_bar::Selected> {
     })
 }
 
-#[cfg(desktop)]
 impl Target {
     fn link(self, link: String) -> crate::file_actions::LinkTarget {
         crate::file_actions::LinkTarget {
@@ -1001,10 +964,7 @@ fn table(
 mod drawn {
     use super::{Part, Surroundings, Target};
     use crate::ui::colors;
-    use nsh_core::{
-        element::{ImageSrc, rgb},
-        prelude::*,
-    };
+    use nsh_core::{element::rgb, prelude::*};
     use serde_json::Value;
 
     pub(super) fn message(
@@ -1022,7 +982,6 @@ mod drawn {
                 }
             },
             choose: move |link: String, id: String| {
-                #[cfg(desktop)]
                 if let Some(target) = target() {
                     crate::file_actions::choose(
                         surroundings.connection,
@@ -1031,8 +990,6 @@ mod drawn {
                         &id,
                     );
                 }
-                #[cfg(not(desktop))]
-                let _ = (link, id);
             },
         };
         let message = view().w_full().min_h(px(20.0)).gap_2().selectable(true);
@@ -1306,7 +1263,8 @@ mod drawn {
         let glyph = if chip["folder"].as_bool().unwrap_or(false) {
             crate::ui::icon(crate::ui::Icon::FOLDER, 14.0).into_element()
         } else {
-            svg(ImageSrc::svg_markup(
+            image(format!(
+                "data:image/png;base64,{}",
                 chip["icon"].as_str().unwrap_or_default(),
             ))
             .w(px(14.0))
@@ -1477,6 +1435,23 @@ fn parts(blocks: Vec<MarkdownBlock>, diagrams: &[(String, Diagram)], chip: Chip)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_metadata_covers_workspace_links_code_paths_and_table_cells() {
+        let blocks = agent_core::presentation::markdown::workspace_markdown_blocks(
+            "[統合前レビュー](src/SKILL.md) と `src/main.rs`、`81196806c`\n\n|file|\n|---|\n|[日本語](src/日本語.rs:4)|".into(),
+            "/repo".into(),
+            None,
+        );
+        assert_eq!(
+            file_paths(&blocks),
+            [
+                "/repo/src/SKILL.md",
+                "/repo/src/main.rs",
+                "/repo/src/日本語.rs"
+            ]
+        );
+    }
 
     #[test]
     fn native_text_contract_preserves_unicode_style_links_and_selection_target() {

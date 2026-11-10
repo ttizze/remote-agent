@@ -42,16 +42,40 @@ fn file_icons(manifest: &std::path::Path) {
         })
         .collect::<Vec<_>>();
     icons.sort();
+    use base64::Engine;
     let arms = icons
         .iter()
-        .map(|(name, path)| format!("        {name:?} => include_str!({:?}),\n", path.display()))
+        .map(|(name, path)| {
+            let data = base64::engine::general_purpose::STANDARD.encode(render_icon(path));
+            format!("        {name:?} => {data:?},\n")
+        })
         .collect::<String>();
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     std::fs::write(
         out.join("file_icons.rs"),
         format!(
-            "fn file_icon_markup(name: &str) -> Option<&'static str> {{\n    Some(match name {{\n{arms}        _ => return None,\n    }})\n}}\n"
+            "fn file_icon_data(name: &str) -> Option<&'static str> {{\n    Some(match name {{\n{arms}        _ => return None,\n    }})\n}}\n"
         ),
     )
     .unwrap();
+}
+
+/// Rasterize the shared SVG artwork once at build time. All OS text/image
+/// adapters receive the same PNG, with enough pixels for Retina text scaling.
+fn render_icon(source: &std::path::Path) -> Vec<u8> {
+    use resvg::{tiny_skia, usvg};
+    let tree =
+        usvg::Tree::from_data(&std::fs::read(source).unwrap(), &usvg::Options::default()).unwrap();
+    let scale = 128.0 / tree.size().width().max(tree.size().height());
+    let size = tree
+        .size()
+        .scale_to(tiny_skia::Size::from_wh(128.0, 128.0).unwrap())
+        .to_int_size();
+    let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height()).unwrap();
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.encode_png().unwrap()
 }

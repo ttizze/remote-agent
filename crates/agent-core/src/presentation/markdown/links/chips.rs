@@ -1,10 +1,10 @@
-//! Desktop file chips: authored file links and code spans in the desktop client's
+//! Workspace file chips: authored file links and code spans in T3 Code's
 //! grammar resolve against the workspace, and chips that share a basename name
 //! the shortest parent that tells them apart.
 use super::super::{MarkdownBlock, MarkdownRun};
 use super::*;
 
-/// The workspace desktop chips resolve against, as a Host path, and the Host's home.
+/// The workspace chips resolve against, as a Host path, and the Host's home.
 pub(in crate::presentation::markdown) struct Workspace<'a> {
     cwd: String,
     home: Option<&'a str>,
@@ -77,10 +77,10 @@ pub(in crate::presentation::markdown) fn label_parents(blocks: &mut [MarkdownBlo
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::{MarkdownBlock, MarkdownRun, desktop_markdown_blocks};
+    use super::super::super::{MarkdownBlock, MarkdownRun, workspace_markdown_blocks};
 
     fn runs(source: &str, cwd: &str, home: Option<&str>) -> Vec<MarkdownRun> {
-        desktop_markdown_blocks(source.into(), cwd.into(), home.map(str::to_owned))
+        workspace_markdown_blocks(source.into(), cwd.into(), home.map(str::to_owned))
             .into_iter()
             .flat_map(|block| match block {
                 MarkdownBlock::Paragraph { runs, .. } => runs,
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn table_cells_share_the_document_disambiguation() {
         let source = "| a |\n|---|\n| `src/a/index.ts` |\n\n`src/b/index.ts`";
-        let blocks = desktop_markdown_blocks(source.into(), "/repo".into(), None);
+        let blocks = workspace_markdown_blocks(source.into(), "/repo".into(), None);
         let MarkdownBlock::Table { rows, .. } = &blocks[0] else {
             panic!("the table is kept");
         };

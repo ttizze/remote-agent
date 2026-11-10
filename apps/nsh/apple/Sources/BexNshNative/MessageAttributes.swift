@@ -20,7 +20,7 @@ struct MessageRun: Decodable, Equatable {
     let link: String?
     let darkColor: UInt32?
     let lightColor: UInt32?
-    /// The desktop's chip of the file the run names.
+    /// The shared chip of the file the run names.
     var file: MessageFile?
     var highlights: [MessageHighlight]? = nil
 }
@@ -32,9 +32,10 @@ struct MessageHighlight: Decodable, Equatable {
     let active: Bool
 }
 
-/// A file chip as Core describes it: its glyph (a folder's, or the file's SVG),
+/// A file chip as Core describes it: its glyph (a folder's, or the file's artwork),
 /// its full path and size, its menu, and its accent in either look.
 struct MessageFile: Decodable, Equatable {
+    /// The shared SVG artwork rasterized at build time, as a base64 PNG.
     let icon: String?
     let folder: Bool
     let tooltip: String
@@ -54,6 +55,8 @@ extension NSAttributedString.Key {
     /// The chip a range of message text shows, and the link it opens.
     static let messageFile = NSAttributedString.Key("BexMessageFile")
     static let messageFindActive = NSAttributedString.Key("BexMessageFindActive")
+    /// The plain text replacing a chip's decorative icon and spacing when selected.
+    static let messageDecoration = NSAttributedString.Key("BexMessageDecoration")
 }
 
 /// What a chip's text carries: its link and the chip, for its menu.
@@ -118,7 +121,7 @@ struct MessageMenuTitles: Decodable, Equatable {
             let size = Self.size(block, cell: cell)
             if let marker = block.marker {
                 append(NSAttributedString(string: marker + " ", attributes: [
-                    .font: font(size: size, mono: block.code, bold: false, italic: false),
+                    .font: font(size: size, mono: block.code, weight: .regular, italic: false),
                     .foregroundColor: color(secondary: secondary, answer: answer, foreground: foreground)
                 ]), highlights: block.markerHighlights, to: result)
             }
@@ -133,15 +136,20 @@ struct MessageMenuTitles: Decodable, Equatable {
                     attributes[.underlineStyle] = nil
                 }
                 if let file = run.file, let link = run.link {
-                    attributes = chip(file, link: link, size: size, base: attributes, dark: dark)
-                    if let glyph = glyph(file, size: size) {
+                    let font = font(size: size, mono: false, weight: .medium, italic: false)
+                    attributes = chip(file, link: link, font: font, base: attributes, dark: dark)
+                    if let glyph = glyph(file, font: font) {
                         // A space sets the chip apart from its caption.
-                        let icon = NSMutableAttributedString(
-                            string: position > 0 && caption(block.runs, at: position - 1) ? " " : ""
-                        )
+                        let gap = position > 0 && caption(block.runs, at: position - 1) ? " " : ""
+                        let icon = NSMutableAttributedString(string: gap)
                         icon.append(NSAttributedString(attachment: glyph))
                         icon.append(NSAttributedString(string: " "))
                         icon.addAttributes(attributes, range: NSRange(location: 0, length: icon.length))
+                        icon.addAttribute(
+                            .messageDecoration,
+                            value: gap,
+                            range: NSRange(location: 0, length: icon.length)
+                        )
                         result.append(icon)
                     }
                 }
@@ -154,13 +162,32 @@ struct MessageMenuTitles: Decodable, Equatable {
             let paragraph = style(block, at: index, of: blocks)
             if index + 1 < blocks.count {
                 result.append(NSAttributedString(string: "\n", attributes: [
-                    .font: font(size: size, mono: block.code, bold: false, italic: false)
+                    .font: font(size: size, mono: block.code, weight: .regular, italic: false)
                 ]))
             }
             let range = NSRange(location: start, length: result.length - start)
             result.addAttribute(.paragraphStyle, value: paragraph, range: range)
         }
         return result
+    }
+
+    /// Copy and quotation use labels, without the icons drawn beside them.
+    static func selectedText(_ content: NSAttributedString, range: NSRange) -> String {
+        let selected = content.attributedSubstring(from: range)
+        let result = NSMutableString(string: selected.string)
+        var replacements: [(NSRange, String)] = []
+        selected.enumerateAttribute(.messageDecoration, in: NSRange(
+            location: 0,
+            length: selected.length
+        )) { value, range, _ in
+            if let text = value as? String {
+                replacements.append((range, text))
+            }
+        }
+        for (range, text) in replacements.reversed() {
+            result.replaceCharacters(in: range, with: text)
+        }
+        return result as String
     }
 
     /// The paragraph style of the block at `index`.
@@ -209,12 +236,13 @@ struct MessageMenuTitles: Decodable, Equatable {
 
     /// A chip's text as the desktop client's: the file's accent at medium
     /// weight, its path and size as its tooltip.
-    private static func chip(_ file: MessageFile, link: String, size: CGFloat,
+    private static func chip(_ file: MessageFile, link: String, font: MessageFont,
                              base: [NSAttributedString.Key: Any], dark: Bool) -> [NSAttributedString.Key: Any] {
         var result = base
-        result[.font] = MessageFont.systemFont(ofSize: size, weight: .medium)
+        result[.font] = font
         result[.foregroundColor] = rgb(dark ? file.darkColor : file.lightColor)
         result[.underlineStyle] = nil
+        result[.backgroundColor] = nil
         result[.messageFile] = MessageFileLink(link: link, file: file)
         // A path no URL holds still opens: the text view reports the string.
         result[.link] = result[.link] ?? link
@@ -225,17 +253,18 @@ struct MessageMenuTitles: Decodable, Equatable {
     }
 
     /// A chip's glyph at the text's size: the system folder, or the file's icon.
-    private static func glyph(_ file: MessageFile, size: CGFloat) -> NSTextAttachment? {
+    private static func glyph(_ file: MessageFile, font: MessageFont) -> NSTextAttachment? {
+        let data = file.icon.flatMap { Data(base64Encoded: $0) }
         #if os(macOS)
             let image = file.folder ? NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
-                : file.icon.flatMap { NSImage(data: Data($0.utf8)) }
+                : data.flatMap { NSImage(data: $0) }
         #else
-            let image = file.folder ? UIImage(systemName: "folder") : nil
+            let image = file.folder ? UIImage(systemName: "folder") : data.flatMap { UIImage(data: $0) }
         #endif
         guard let image else { return nil }
         let attachment = NSTextAttachment()
         attachment.image = image
-        let font = MessageFont.systemFont(ofSize: size)
+        let size = font.pointSize
         attachment.bounds = CGRect(x: 0, y: (font.capHeight - size) / 2, width: size, height: size)
         return attachment
     }
@@ -282,7 +311,12 @@ struct MessageMenuTitles: Decodable, Equatable {
                                    secondary: Bool, answer: Bool, dark: Bool,
                                    foreground: UInt32?) -> [NSAttributedString.Key: Any] {
         var result: [NSAttributedString.Key: Any] = [
-            .font: font(size: size, mono: code || run.code, bold: heading || run.strong, italic: run.emphasis),
+            .font: font(
+                size: size,
+                mono: code || run.code,
+                weight: heading || run.strong ? .semibold : .regular,
+                italic: run.emphasis
+            ),
             .foregroundColor: color(secondary: secondary, answer: answer, foreground: foreground)
         ]
         if let color = dark ? run.darkColor : run.lightColor {
@@ -296,6 +330,8 @@ struct MessageMenuTitles: Decodable, Equatable {
                 // color, as AppKit draws them.
                 result[.foregroundColor] = NSColor.linkColor
                 result[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            #else
+                result[.foregroundColor] = UIColor.link
             #endif
         }
         if run.strikethrough {
@@ -311,9 +347,9 @@ struct MessageMenuTitles: Decodable, Equatable {
         return result
     }
 
-    private static func font(size: CGFloat, mono: Bool, bold: Bool, italic: Bool) -> MessageFont {
-        let font = mono ? MessageFont.monospacedSystemFont(ofSize: size, weight: bold ? .semibold : .regular)
-            : MessageFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
+    private static func font(size: CGFloat, mono: Bool, weight: MessageFont.Weight, italic: Bool) -> MessageFont {
+        let font = mono ? MessageFont.monospacedSystemFont(ofSize: size, weight: weight)
+            : MessageFont.systemFont(ofSize: size, weight: weight)
         #if os(macOS)
             return italic ? NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask) : font
         #else

@@ -18,7 +18,7 @@ use agent_core::{
 };
 use agent_protocol::file_tree::EntryKind;
 use nsh_core::{
-    element::{ImageSrc, Rgba, rgb, rgba},
+    element::{Rgba, rgb, rgba},
     prelude::*,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -162,7 +162,6 @@ impl Browser {
 
     /// The Host path `source` names, with its position, for an editor or a
     /// menu's action; a target that does not exist yet still resolves.
-    #[cfg(desktop)]
     pub fn resolve(
         self,
         source: String,
@@ -216,7 +215,6 @@ impl Browser {
 }
 
 /// A file a link names, resolved on the Host, and the position it names.
-#[cfg(desktop)]
 #[derive(Clone)]
 pub(crate) struct Reference {
     pub path: String,
@@ -706,7 +704,7 @@ fn tree_row(
                 .child(when(
                     move || !directory(),
                     move || {
-                        svg(move || {
+                        image(move || {
                             file_icon(&row.with(|row| {
                                 row.as_ref()
                                     .map(|(row, _)| row.path.clone())
@@ -755,14 +753,15 @@ const IGNORED: Rgba = rgb(0x4a4a4e);
 include!(concat!(env!("OUT_DIR"), "/file_icons.rs"));
 
 /// A file's glyph from T3 Code's tree icons, its tree variant when it has one.
-fn file_icon(path: &str) -> ImageSrc {
+fn file_icon(path: &str) -> String {
     let name = desktop_file_icon(path);
-    ImageSrc::svg_markup(file_icon_markup(&format!("{name}-tree")).unwrap_or_else(|| glyph(name)))
+    let data = file_icon_data(&format!("{name}-tree")).unwrap_or_else(|| glyph(name));
+    format!("data:image/png;base64,{data}")
 }
 
-/// The markup of the glyph Core names, or the default file's.
+/// The base64 PNG of the glyph Core names, or the default file's.
 pub(crate) fn glyph(name: &str) -> &'static str {
-    file_icon_markup(name)
-        .or_else(|| file_icon_markup("file-tree-builtin-default"))
-        .unwrap_or_default()
+    file_icon_data(name)
+        .or_else(|| file_icon_data("file-tree-builtin-default"))
+        .expect("the file icon catalog contains the default glyph")
 }

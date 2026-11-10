@@ -249,7 +249,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         /// its top left, for the bar of actions over it; or that nothing is.
         private func reportSelection() {
             let range = selectedRange()
-            guard range.length > 0, NSMaxRange(range) <= (textStorage?.length ?? 0),
+            guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length,
                   let manager = layoutManager, let container = textContainer,
                   let content = window?.contentView
             else {
@@ -265,7 +265,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let frame = content.convert(box, from: self)
             let top = content.isFlipped ? frame.minY : content.bounds.height - frame.maxY
             reported = true
-            action?(["action": "selection", "text": (string as NSString).substring(with: range),
+            action?(["action": "selection", "text": MessageAttributes.selectedText(storage, range: range),
                      "target": document.target, "sideChat": document.sideChat,
                      "bounds": [frame.minX, top, frame.width, frame.height]])
         }
@@ -276,8 +276,8 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             }
             guard let menu = super.menu(for: event) else { return nil }
             let range = selectedRange()
-            guard range.length > 0, NSMaxRange(range) <= (textStorage?.length ?? 0) else { return menu }
-            let selected = (string as NSString).substring(with: range)
+            guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length else { return menu }
+            let selected = MessageAttributes.selectedText(storage, range: range)
             let target = document.target
             let quote = NSMenuItem(title: document.menu.quote, action: #selector(quoteSelection(_:)), keyEquivalent: "")
             quote.target = self
@@ -295,6 +295,13 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             }
             menu.insertItem(.separator(), at: document.sideChat ? 2 : 1)
             return menu
+        }
+
+        override func copy(_: Any?) {
+            let range = selectedRange()
+            guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(MessageAttributes.selectedText(storage, range: range), forType: .string)
         }
 
         @objc private func quoteSelection(_ sender: NSMenuItem) {
@@ -493,6 +500,8 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             backgroundColor = .clear
             textContainerInset = .zero
             textContainer.lineFragmentPadding = 0
+            // File chips carry their own link color.
+            linkTextAttributes = [:]
             delegate = self
         }
 
@@ -504,7 +513,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
                       suggestedActions: [UIMenuElement]) -> UIMenu? {
             guard range.length > 0, NSMaxRange(range) <= textView.attributedText.length else { return nil }
-            let selected = (textView.text as NSString).substring(with: range)
+            let selected = MessageAttributes.selectedText(textView.attributedText, range: range)
             let target = document.target
             var actions: [UIMenuElement] = [UIAction(title: document.menu.quote, image: UIImage(systemName: "bubble")) {
                 [weak self] _ in self?.action?(["action": "quote", "text": selected, "target": target])
@@ -520,12 +529,39 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             return UIMenu(children: actions + suggestedActions)
         }
 
+        override func copy(_: Any?) {
+            guard selectedRange.length > 0, NSMaxRange(selectedRange) <= attributedText.length else { return }
+            UIPasteboard.general.string = MessageAttributes.selectedText(attributedText, range: selectedRange)
+        }
+
         func textView(_: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
             guard case let .link(url) = textItem.content else { return defaultAction }
             let target = document.target
             return UIAction { [weak self] _ in
                 self?.action?(["action": "link", "text": url.absoluteString, "target": target])
             }
+        }
+
+        func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem,
+                      defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
+            guard case .link = textItem.content, textItem.range.location < textView.attributedText.length,
+                  let chip = textView.attributedText.attribute(
+                      .messageFile, at: textItem.range.location, effectiveRange: nil
+                  ) as? MessageFileLink else { return UITextItem.MenuConfiguration(menu: defaultMenu) }
+            return UITextItem.MenuConfiguration(menu: fileMenu(chip.file.menu, link: chip.link))
+        }
+
+        func fileMenu(_ items: [MessageMenuItem], link: String, title: String = "") -> UIMenu {
+            let target = document.target
+            return UIMenu(title: title, children: items.compactMap { item -> UIMenuElement? in
+                if let children = item.children {
+                    return fileMenu(children, link: link, title: item.title)
+                }
+                guard let id = item.id else { return nil }
+                return UIAction(title: item.title) { [weak self] _ in
+                    self?.action?(["action": "file", "text": link, "id": id, "target": target])
+                }
+            })
         }
 
         func stringValueForFailure(_ reason: String) {

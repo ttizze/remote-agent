@@ -3,9 +3,71 @@ import XCTest
 #if os(macOS)
     import AppKit
     import CoreText
+#else
+    import UIKit
 #endif
 
 final class MessageTests: XCTestCase {
+    @MainActor func testFileChipKeepsItsIconAccentAndLinkWithoutCodeStyling() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
+        let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))
+        for dark in [true, false] {
+            let content = MessageAttributes.text([block], secondary: false, dark: dark)
+            let label = (content.string as NSString).range(of: "統合前レビュー").location
+            let attachment = try XCTUnwrap(content.attribute(
+                .attachment,
+                at: 0,
+                effectiveRange: nil
+            ) as? NSTextAttachment)
+            XCTAssertNotNil(attachment.image, "the file's PNG is drawn on both Apple platforms")
+            let font = try XCTUnwrap(content.attribute(.font, at: label, effectiveRange: nil) as? MessageFont)
+            #if os(macOS)
+                XCTAssertFalse(font.isFixedPitch)
+            #else
+                XCTAssertFalse(font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace))
+            #endif
+            XCTAssertNil(content.attribute(.backgroundColor, at: label, effectiveRange: nil))
+            XCTAssertNil(content.attribute(.underlineStyle, at: label, effectiveRange: nil))
+            let color = try XCTUnwrap(content.attribute(
+                .foregroundColor,
+                at: label,
+                effectiveRange: nil
+            ) as? MessageColor)
+            let expected = dark ? MessageColor(red: 1, green: 0, blue: 0, alpha: 1)
+                : MessageColor(red: 0, green: 0, blue: 1, alpha: 1)
+            XCTAssertEqual(color, expected)
+            let link = try XCTUnwrap(content.attribute(.link, at: label, effectiveRange: nil) as? URL)
+            XCTAssertEqual(link.relativeString, "/repo/SKILL.md")
+            XCTAssertEqual(MessageAttributes.selectedText(content, range: NSRange(location: 0, length: content.length)),
+                           "統合前レビュー")
+        }
+    }
+
+    #if os(iOS)
+        @MainActor func testFileChipMenuShowsTheSharedActions() throws {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
+            let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))
+            let file = try XCTUnwrap(block.runs.first?.file)
+            let menu = MessageTextView().fileMenu(file.menu, link: "/repo/SKILL.md")
+            XCTAssertEqual(menu.children.compactMap { ($0 as? UIAction)?.title },
+                           ["相対パスをコピー", "フルパスをコピー"])
+        }
+
+        @MainActor func testFileChipFontAndIconFollowThePreferredTextSize() throws {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
+            let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))
+            UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge).performAsCurrent {
+                let content = MessageAttributes.text([block], secondary: false, dark: true)
+                let label = (content.string as NSString).range(of: "統合前レビュー").location
+                let font = content.attribute(.font, at: label, effectiveRange: nil) as? UIFont
+                let expected = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 18, weight: .medium))
+                XCTAssertEqual(font?.pointSize, expected.pointSize)
+                let icon = content.attribute(.attachment, at: 0, effectiveRange: nil) as? NSTextAttachment
+                XCTAssertEqual(icon?.bounds.width, expected.pointSize)
+            }
+        }
+    #endif
+
     #if os(macOS)
         @MainActor func testCoreHighlightByteRangesPreserveUnicodeAndStyles() throws {
             let data = Data(#"{"blocks":[{"header":null,"marker":null,"code":false,"quoted":false,"depth":0,"alignment":"left","runs":[{"text":"😀é ","strong":false,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":4,"end":6,"active":true}]},{"text":"bold","strong":true,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":0,"end":4,"active":false}]}]}],"secondary":false,"role":"assistant","target":"","sideChat":false,"maxWidth":500,"menu":{"quote":"","sideChat":""}}"#
