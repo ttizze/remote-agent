@@ -544,6 +544,7 @@ fn view_parts(
                     })
                 },
                 crate::media::ImageSize::Natural,
+                None,
             )
             .into_element(),
             Part::Link(_) => crate::ui::row_text_button(tr("ファイルを開く"), move || {

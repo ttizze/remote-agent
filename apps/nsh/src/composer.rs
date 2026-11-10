@@ -1054,6 +1054,7 @@ fn attachment(
                     preview,
                     move || file.with(|file| file.path.clone()),
                     crate::media::ImageSize::Box(120.0, 120.0),
+                    None,
                 )
             },
         ))

@@ -1111,7 +1111,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                         move || crate::media::sent_images(
                                             connection,
                                             surroundings.preview,
-                                            move || images.get(),
+                                            images,
                                             message,
                                             move || column_width.try_get().unwrap_or_default() * 0.8,
                                         ),
@@ -1198,6 +1198,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 surroundings.preview,
                                                 move || source.get(),
                                                 crate::media::ImageSize::Natural,
+                                                None,
                                             )
                                         },
                                     ))
