@@ -60,13 +60,13 @@ T3 は最初に手元の fork(`fecdf4497e`、2026-10-07)で読み、引用する
 
 ### 決定 1: 識別子はアプリが持ち、作る側が割り当てる
 
-会話、入力、ターン、項目、要求の識別子はアプリのものとする。会話と入力はクライアントが割り当て、入力の識別子は配送後にそのままユーザー発言の項目の識別子になる。ターンと、それ以外の項目は Host が割り当てる。provider の識別子は、対応を表す Host 内部の値と、項目の属性としてだけ持つ。
+会話、入力、ターン、項目、要求の識別子はアプリのものとする。会話と入力はクライアントが割り当て、入力の識別子は配送後にそのままユーザー発言の項目の識別子になる。ターンと、それ以外の項目は Host が割り当てる。provider の識別子は、Host だけが読む表に持ち、クライアントには送らない。
 
 - **理由**: 識別子が生まれた時点で確定していれば、クライアントと core は付け替えも突き合わせもしない。下書きは最初から会話の識別子で持てる。送った入力はそのままユーザー発言になる。
 - **残る対応付け**: provider との対応付けはなくならない。Host の provider との境界(接続と取り込み)に集める。
-  - 配送した入力と、provider が返すユーザー発言。provider の識別子を項目の属性に記録し、行は増やさない。
-  - provider のターン、項目の識別子と、アプリのターン、項目。接続が試行ごとに対応を持つ。provider がターン識別子を再利用しても、どの試行のイベントかで区別する。
-  - 取り込み。provider の識別子で既存の行を見つけ、二重に作らない。
+  - 配送した入力と、provider が返すユーザー発言。provider の識別子を対応として記録し、行は増やさない。
+  - provider のターン、項目の識別子と、アプリのターン、項目。provider の識別子は発行した範囲の中でしか一意でないので、セッション、試行、識別子の組で対応を持つ(「保存の形」の「provider の識別子の範囲」)。
+  - 取り込み。同じ組で既存の行を見つけ、二重に作らない。
 - **根拠(Bex)**: 上の「識別子の所有者が揃っていない」のうち、クライアントの付け替え(`DraftKey::Local`、`draft_sessions`)と core の突き合わせ(`reconcile_pending`)がなくなる。出現の照合は Host の境界の一か所に移る。
 - **根拠(参照実装)**: 読んだ全実装が同じ答えである。
   - T3 Code: 会話、実行、発言、項目がすべてアプリの識別子で、provider 側は `ProviderThread`、`ProviderTurn` として別に持つ。
@@ -298,8 +298,8 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 - 保存領域の識別子が一致する。
 - C が現在の連番以下である。
-- C より後の削除記録がすべて残っている。
-- C が、その会話の最後の履歴の置き換えより後である。
+- C より後の削除記録がすべて残っている。削除記録を消し終えた連番を P とすると、C ≥ P である。
+- C が、その会話の最後の履歴の置き換えの連番以上である。置き換えの連番で取ったスナップショットのカーソルは、置き換えの後の状態を持っているので有効である。
 
 履歴を置き換えたとき、所有者は購読中のクライアントにスナップショットを送り直す。位置が変わると、クライアントの床が指す内容が変わるためである。
 
@@ -429,14 +429,13 @@ CREATE TABLE items (
     turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     position INTEGER NOT NULL,      -- 会話の中での順
-    native_id TEXT,                 -- provider の項目の識別子
     body BLOB NOT NULL              -- 種類ごとの内容。流れる本文は含まない
 ) STRICT;
 CREATE UNIQUE INDEX items_order ON items (thread_id, position);
 CREATE INDEX items_changed ON items (thread_id, seq);
-CREATE INDEX items_native ON items (thread_id, native_id) WHERE native_id IS NOT NULL;
 
--- 流れる本文。保存のたびに一行を足し、書き直さない。
+-- 流れる本文。項目の一部であり、独立した同期の対象ではない。
+-- 保存のたびに一行を足し、書き直さない。
 CREATE TABLE item_texts (
     item_id TEXT NOT NULL REFERENCES items (id) ON DELETE CASCADE,
     field TEXT NOT NULL,
@@ -473,26 +472,47 @@ CREATE TABLE receipts (
 ) STRICT, WITHOUT ROWID;
 
 -- Host だけが読む表
+
+-- 会話に関わった provider のセッション。今の対応も、作り直す前のものも、取り込み元も含む。
+CREATE TABLE sources (
+    id INTEGER PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    native_id TEXT NOT NULL         -- provider のセッションの識別子
+) STRICT;
+CREATE UNIQUE INDEX sources_native ON sources (provider, native_id);
+
+-- provider ごとに、今使うセッション。
 CREATE TABLE bindings (
     thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
     provider TEXT NOT NULL,
-    native_id TEXT NOT NULL,        -- provider のセッションの識別子
+    source_id INTEGER NOT NULL REFERENCES sources (id),
     covered INTEGER,                -- そのセッションが知っている最後のターンの順序番号
     state TEXT NOT NULL,            -- ready | injecting
     body BLOB NOT NULL,             -- 渡した履歴
     PRIMARY KEY (thread_id, provider)
 ) STRICT;
-CREATE UNIQUE INDEX bindings_native ON bindings (provider, native_id);
 CREATE INDEX bindings_in_flight ON bindings (state) WHERE state = 'injecting';
 
+-- ターンの試行と、それを実行した provider のセッション、provider のターン。
 CREATE TABLE executions (
     turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
     attempt INTEGER NOT NULL,
-    provider TEXT NOT NULL,
+    source_id INTEGER NOT NULL REFERENCES sources (id),
     native_turn_id TEXT,            -- provider のターンの識別子
     PRIMARY KEY (turn_id, attempt)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX executions_native ON executions (provider, native_turn_id) WHERE native_turn_id IS NOT NULL;
+CREATE INDEX executions_native ON executions (source_id, native_turn_id) WHERE native_turn_id IS NOT NULL;
+
+-- 項目と provider の項目の対応。試行の中でだけ一意である。
+CREATE TABLE item_natives (
+    turn_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    native_id TEXT NOT NULL,        -- provider の項目の識別子
+    item_id TEXT NOT NULL REFERENCES items (id) ON DELETE CASCADE,
+    PRIMARY KEY (turn_id, attempt, native_id),
+    FOREIGN KEY (turn_id, attempt) REFERENCES executions (turn_id, attempt) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE jobs (
     id TEXT PRIMARY KEY,
@@ -503,6 +523,26 @@ CREATE TABLE jobs (
 ) STRICT;
 ```
 
+### 書き込みの規則
+
+表の定義だけでは守れない約束を、ここに定める。どれも、書き込みのたびに成り立つ不変条件として試験する。
+
+- 一つのトランザクションは、最初に `store.seq` を一つ進め、そのトランザクションで足した行と変えた行すべての `seq` をその値にする。
+- `item_texts` に行を足すトランザクションは、親の `items.seq` も同じ値に進める。本文の断片は連番を持たない。追いつきは `items.seq` で変わった項目を見つけ、項目の一部として本文を運ぶ。
+- 行を消すトランザクションは、同じ連番の削除記録を書く。ターンを消すときの項目、項目を消すときの本文の断片には、削除記録を書かない。クライアントは親と一緒に消す。
+- 受付記録は、操作の効果と同じトランザクションで書く。
+- 履歴を置き換えるトランザクションは、`threads.history_seq` をその連番にする。
+
+### provider の識別子の範囲
+
+provider の識別子は、それを発行した範囲の中でしか一意でない。同じ会話でも、provider を切り替えたりセッションを作り直したりすると、同じ識別子が別のターンや項目を指し得る。対応付けは次の範囲で定める。
+
+- provider のセッションの識別子は、provider の中で一意である(`sources_native`)。
+- provider のターンの識別子は、セッションの中で引く(`executions_native`)。provider がターンの識別子を使い回すので、一意とはしない。複数の試行に当たったときは、項目の識別子の重なりで選ぶ。これは現状の規則(`turn_index`)を、取り込みの境界の一か所に残すものである。
+- provider の項目の識別子は、試行の中で一意である(`item_natives` の主キー)。
+
+実行中は所有者が現在の試行の対応をメモリに持つので、表を引くのは取り込みと、所有者を作り直した後だけである。
+
 `threads` の本体にある一覧用の要約(状態、最後の発言の抜粋)は、`turns` と `items` から導ける値である。一覧の範囲が連番で同期できるように `threads` に置く。書くのは所有者だけで、元になる行と同じトランザクションで書くので、食い違わない。
 
 `items` は会話の識別子を、ターンを辿れば分かるのに自分でも持つ。会話の中の位置で引く索引に要るためである。変わらない値なので食い違わない。
@@ -511,7 +551,7 @@ CREATE TABLE jobs (
 
 ### 読み書きと索引
 
-契約と経路が必要とする読み取りを挙げ、どの索引で引くかを決めた。上の定義を SQLite に読み込み、スナップショット、範囲の拡張、追いつき、削除記録、起動時の探索、provider からの振り分けの六つについて、実行計画が索引を使うことを確かめた。データを入れた速さは測っていない。
+契約と経路が必要とする読み取りを挙げ、どの索引で引くかを決めた。上の定義を SQLite に読み込み、スナップショット、範囲の拡張、追いつき、削除記録、起動時の探索、provider からの振り分けの六つについて、実行計画が索引を使うことを確かめた。併せて三つの境界例を確かめた。別のセッションの同じ識別子が別の項目として引けること、本文の追記の後に追いつきがその項目を見つけること、履歴の置き換えの連番と等しいカーソルが有効なこと。データを入れた速さは測っていない。
 
 | 読み取り | 使う索引 |
 |---|---|
@@ -521,8 +561,9 @@ CREATE TABLE jobs (
 | 追いつき。会話の中の削除記録 | `removals` の主キー |
 | 一覧の追いつき(段階 6) | `threads_changed` |
 | 起動時に続きが要る行 | `inputs_in_flight`、`turns_in_flight`、`requests_in_flight`、`bindings_in_flight` |
-| provider のイベントを会話へ振り分ける | `bindings_native` |
-| 取り込みで既存の行を見つける | `items_native`、`executions_native` |
+| provider のイベントを会話へ振り分ける | `sources_native` |
+| 取り込みで既存のターンを見つける | `executions_native` |
+| 取り込みで既存の項目を見つける | `item_natives` の主キー |
 | 操作の再送 | `receipts` の主キー |
 | サブエージェントの一覧 | `threads_children` |
 
@@ -539,8 +580,8 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 | `projection_messages`、`projection_nodes`、`projection_plans` | `items` | 決定 3。発言も計画も項目の種類にする |
 | `projection_turn_items`、`turn_item_positions` | `items`、`item_texts` | 位置は列にする。本文は追記できる形に分ける |
 | `projection_runtime_requests` | `requests` | 同じ役割 |
-| `projection_run_attempts`、`projection_provider_turns` | `executions` | クライアントに送らない |
-| `projection_provider_sessions`、`provider_threads`、`provider_session_bindings` | `bindings` | provider のプロセスの状態は保存しない。会話との対応だけを持つ |
+| `projection_run_attempts`、`projection_provider_turns` | `executions`、`item_natives` | クライアントに送らない |
+| `projection_provider_sessions`、`provider_threads`、`provider_session_bindings` | `sources`、`bindings` | provider のプロセスの状態は保存しない。会話に関わったセッションと、今使うセッションだけを持つ |
 | `projection_context_handoffs`、`context_transfers` | `bindings` の状態と本体 | 決定 10 |
 | `projection_subagents` | `threads.parent_id` | 子の会話として持つ |
 | `effect_outbox` | `jobs` と途中の状態の列 | 決定 8、決定 9 |
@@ -558,8 +599,8 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 
 ### 確認が要る点
 
-- `executions` と `bindings` の列は、段階 3 の前に Claude と DeepSeek の接続の内部へ照らして確かめる。
-- 取り込み元の範囲(現状の `Segment`)が要るかは、取り込みの形で決まる。取り込みが本文をすべて行に写すなら要らない。
+- `sources`、`bindings`、`executions`、`item_natives` の列と、provider の識別子が一意である範囲は、段階 3 の前に Codex、Claude、DeepSeek の接続の内部へ照らして確かめる。項目の識別子が試行の中で一意でない provider があれば、`item_natives` の主キーを見直す。
+- 取り込み元の範囲(現状の `Segment`)は、`sources` と `executions` から導ける。どのターンがどのセッションから来たかを `executions` が持つためである。取り込みの経路を書くときに、これで足りることを確かめる。
 - 会話の削除は現状の操作にない。`removals` の `thread` は、足すときのために置く。
 
 ## 経路の対応
