@@ -18,11 +18,14 @@ pub use links::{
     strip_repeated_workspace_prefix,
 };
 
+/// Every block retains its containing list/quote style so clients can keep
+/// code, media, tables and continuations in one standard document hierarchy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum MarkdownBlock {
     Visualization {
         path: String,
+        style: MarkdownStyle,
     },
     Paragraph {
         runs: Vec<MarkdownRun>,
@@ -32,6 +35,7 @@ pub enum MarkdownBlock {
         source: String,
         columns: Vec<MarkdownAlignment>,
         rows: Vec<Vec<MarkdownCell>>,
+        style: MarkdownStyle,
     },
 }
 
@@ -437,6 +441,7 @@ fn block(
                 source: source[position.start.offset..position.end.offset].into(),
                 columns,
                 rows,
+                style,
             });
             return;
         }
@@ -492,7 +497,7 @@ fn block(
         && let Some(path) =
             visualization_reference(&source[position.start.offset..position.end.offset])
     {
-        blocks.push(MarkdownBlock::Visualization { path });
+        blocks.push(MarkdownBlock::Visualization { path, style });
         return;
     }
     if matches!(node, Node::Paragraph(_) | Node::Heading(_) | Node::Html(_)) {
@@ -593,7 +598,8 @@ mod tests {
         assert_eq!(
             blocks[1],
             MarkdownBlock::Visualization {
-                path: "/fixture/icon-options.html".into()
+                path: "/fixture/icon-options.html".into(),
+                style: MarkdownStyle::default(),
             }
         );
         for source in [
@@ -623,9 +629,25 @@ mod tests {
             proptest::prop_assert_eq!(blocks.len(), 3);
             proptest::prop_assert_eq!(
                 &blocks[1],
-                &MarkdownBlock::Visualization { path },
+                &MarkdownBlock::Visualization { path, style: MarkdownStyle::default() },
             );
         }
+    }
+
+    #[test]
+    fn tables_and_visualizations_keep_their_containing_list_style() {
+        let source = "1. Parent\n\n   | A |\n   |---|\n   | B |\n\n   visualize{\"path\":\"x.html\"}\n\n   Continued\n2. Next";
+        let blocks = markdown_blocks(source.into());
+        let MarkdownBlock::Table { style, .. } = &blocks[1] else {
+            panic!("missing nested table")
+        };
+        assert_eq!(style.list_depth, 1);
+        assert!(style.marker.is_none());
+        let MarkdownBlock::Visualization { style, .. } = &blocks[2] else {
+            panic!("missing nested visualization")
+        };
+        assert_eq!(style.list_depth, 1);
+        assert!(style.marker.is_none());
     }
 
     const TABLE: &str = include_str!("../../tests/fixtures/markdown/table.md");

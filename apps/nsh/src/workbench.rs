@@ -457,6 +457,7 @@ fn picker() -> impl IntoElement {
                 KeyOptions {
                     when: nsh_core::keymap::When::NotEditing,
                     repeat: false,
+                    ..Default::default()
                 },
                 move |_| open_tool(&tool.key),
             );

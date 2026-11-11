@@ -1210,7 +1210,6 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             label().map(|text| text.to_string())
                                                         },
                                                         kind,
-                                                        move || row.try_get().flatten().is_some_and(|row| row.streaming),
                                                         move || {
                                                             if user() {
                                                                 (column_width
@@ -1794,7 +1793,6 @@ fn plan_card(
                 surroundings,
                 move || Some(note().to_string()),
                 || Kind::Response,
-                || false,
                 move || (column_width.try_get().unwrap_or_default() - 8.0 - 42.0).max(0.0),
             ))),
     )

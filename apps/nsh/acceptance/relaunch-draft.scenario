@@ -27,7 +27,7 @@ expect "Keep this draft"
 relaunch
 # The app starts with its projects folded; the fixture names its conversations.
 press 検証プロジェクト 30000
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect "シミュレータで完了しました。" 20000
 expect "Keep this draft"
 screenshot restored

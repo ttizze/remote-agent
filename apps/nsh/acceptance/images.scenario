@@ -19,7 +19,7 @@ screenshot images
 press このプロジェクトで新しいチャット
 expect_absent "インライン画像です。" 10000
 press 検証プロジェクト
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect "インライン画像です。" 20000
 expect 画像を拡大
 press 画像を拡大

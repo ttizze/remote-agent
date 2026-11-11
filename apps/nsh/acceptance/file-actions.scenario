@@ -13,7 +13,7 @@ choose $AGENT_STATE_DIR/project/hello.txt
 expect 添付を削除 10000
 relaunch
 press 検証プロジェクト 30000
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect 添付を削除 15000
 type "AI に依頼する" "Read the attached file"
 press 送信

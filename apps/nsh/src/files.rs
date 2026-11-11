@@ -394,6 +394,7 @@ fn tree(owner: String, root: Memo<Option<String>>) -> impl Element {
         let options = KeyOptions {
             when: nsh_core::keymap::When::Always,
             repeat: true,
+            ..Default::default()
         };
         on_key_with(keystroke, options, move |_| {
             if engaged.get_untracked()

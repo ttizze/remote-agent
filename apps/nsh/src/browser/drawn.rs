@@ -245,6 +245,7 @@ fn keyboard(
                         KeyOptions {
                             when: When::Always,
                             repeat: true,
+                            ..Default::default()
                         },
                         move |_| {
                             send(BrowserAction::Key { key });

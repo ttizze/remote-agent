@@ -112,6 +112,7 @@ pub(super) fn decorate(
 
 /// Only the paragraph carrying the selected start needs a new drawn anchor.
 #[cfg(any(
+    test,
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]

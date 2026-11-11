@@ -37,11 +37,11 @@ enum ConversationMarkdownContent {
             switch block {
             case let .paragraph(runs, style):
                 paragraphs.append(contentsOf: blocks(runs, style: style, startingID: paragraphs.count))
-            case let .visualization(path):
+            case let .visualization(path, _):
                 appendParts(paragraphs, to: &result)
                 paragraphs.removeAll(keepingCapacity: true)
                 result.append(Part(id: result.count, blocks: [], tableRows: [], visualizationPath: path))
-            case let .table(source, columns, rows):
+            case let .table(source, columns, rows, _):
                 appendParts(paragraphs, to: &result)
                 paragraphs.removeAll(keepingCapacity: true)
                 let cells = rows.map { cells in

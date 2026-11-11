@@ -832,6 +832,7 @@ mod draw {
                     let options = || KeyOptions {
                         when: nsh_core::keymap::When::Always,
                         repeat: true,
+                        ..Default::default()
                     };
                     for (keystroke, key) in Key::bindings() {
                         let (typing, copy) = (typing.clone(), copy.clone());

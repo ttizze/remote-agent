@@ -15,7 +15,7 @@ press ツールを閉じる
 press 会話を更新
 press 検証プロジェクト
 # The newest row is the side chat's conversation.
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect_absent "シミュレータで完了しました。"
 expect_absent "[immediate] プロジェクトで送信します"
 screenshot empty

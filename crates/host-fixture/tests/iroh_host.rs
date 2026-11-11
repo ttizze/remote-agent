@@ -3348,7 +3348,7 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
                 .filter_map(|item| item_text(item))
                 .flat_map(|text| markdown_blocks(text.to_owned()))
                 .find_map(|block| match block {
-                    MarkdownBlock::Visualization { path } => Some(path),
+                    MarkdownBlock::Visualization { path, .. } => Some(path),
                     _ => None,
                 })
                 .expect("visualization must reach conversation")

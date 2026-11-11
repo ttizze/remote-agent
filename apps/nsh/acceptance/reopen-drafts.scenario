@@ -19,25 +19,25 @@ expect "Simulator conversation" 10000
 # First round: a new chat in the project.
 press このプロジェクトで新しいチャット
 type "AI に依頼する" "New draft 0"
-press "Simulator conversation"
+press "Simulator conversation*"
 expect "シミュレータで完了しました。" 15000
 expect "Keep this conversation draft" after "AI に依頼する"
 press このプロジェクトで新しいチャット
 expect "New draft 0" after "AI に依頼する" 10000
-press "Simulator conversation"
+press "Simulator conversation*"
 expect "Keep this conversation draft" after "AI に依頼する" 15000
 # Second round: a chat outside any project.
 press このプロジェクトで新しいチャット
 press プロジェクトなしで始める
 expect プロジェクトなし
 type "AI に依頼する" "New draft 1"
-press "Simulator conversation"
+press "Simulator conversation*"
 expect "シミュレータで完了しました。" 15000
 expect "Keep this conversation draft" after "AI に依頼する"
 press このプロジェクトで新しいチャット
 expect "New draft 0" after "AI に依頼する" 10000
 press プロジェクトなしで始める
 expect "New draft 1" after "AI に依頼する" 10000
-press "Simulator conversation"
+press "Simulator conversation*"
 expect "Keep this conversation draft" after "AI に依頼する" 15000
 screenshot reopened

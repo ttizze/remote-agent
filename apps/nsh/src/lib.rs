@@ -406,8 +406,13 @@ fn app_content(
     match area {
         #[cfg(desktop)]
         Area::Shell => {
-            use nsh_core::{desktop::TitleBarStyle, element::desktop::set_title_bar};
-            set_title_bar(TitleBarStyle::Hidden, Some(px(ui::HEADER_HEIGHT)));
+            use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
+            let mut bar = TitleBarOptions::default();
+            bar.style = TitleBarStyle::Hidden;
+            bar.height = Some(px(ui::HEADER_HEIGHT));
+            let mut attributes = WindowAttributes::default();
+            attributes.title_bar = Some(bar);
+            nsh_core::element::desktop::current_window().set(attributes);
             // An update's worker replaces the app once its event loop ends.
             effect(move || {
                 if state.with(|state| state.quitting) {

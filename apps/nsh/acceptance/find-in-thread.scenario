@@ -16,7 +16,7 @@ press 新しいチャット
 window 880 740
 type "AI に依頼する" "[find-overflow] [immediate] 表とコードを検索します"
 press 送信
-expect "table-overflow-target" 30000
+expect "wide-column-one" 30000
 key cmd+f
 type "会話内を検索" "table-overflow-target"
 expect "1/1" 5000
