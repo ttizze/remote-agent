@@ -1,5 +1,5 @@
 use crate::application::{ListRequest, ListScope, ListSource};
-use crate::l10n::{tr, tr_format};
+use crate::l10n::{localized, tr, tr_format};
 use crate::shared::Shared;
 use crate::{Connection, native};
 use agent_core::{
@@ -98,12 +98,14 @@ fn thread_row(thread: &ThreadSummary, level: u32, project: Option<&str>, scope: 
     Row {
         level,
         menu: copy_menu(&thread.copy_items),
-        indicators: (activity.is_some() || thread.has_changes == Some(true)).then_some(
-            native::RowIndicators {
-                activity,
-                changes: thread.has_changes == Some(true),
-            },
-        ),
+        indicators: (activity.is_some()
+            || thread.attention.is_some()
+            || thread.has_changes == Some(true))
+        .then_some(native::RowIndicators {
+            activity,
+            attention: thread.attention,
+            changes: thread.has_changes == Some(true),
+        }),
         ..Row::new(
             thread.title.clone(),
             Action::Open {
@@ -479,19 +481,8 @@ fn desktop_rows(
             .py_3()
             .child(each(
                 move || entries.get(),
-                |row: &Row| {
-                    format!(
-                        "{}|{}|{}|{}|{}|{:?}",
-                        row_id(row.scope.as_ref(), &row.action),
-                        row.title,
-                        row.expanded,
-                        row.loading,
-                        row.enabled,
-                        row.indicators.as_ref().map(|i| i.label()),
-                    )
-                },
+                |row: &Row| row_id(row.scope.as_ref(), &row.action),
                 move |row, position| {
-                    let row = row.get_untracked();
                     // Items are 4 pt apart, as the desktop client's; a section's
                     // title sits flush against what it heads.
                     let after_section = move || {
@@ -506,17 +497,20 @@ fn desktop_rows(
                                 })
                             })
                     };
-                    let spaced =
-                        !matches!(row.action, Action::ProjectHeader | Action::Heading(None));
                     view()
                         .mt(move || {
+                            let spaced = row.with(|row| {
+                                !matches!(row.action, Action::ProjectHeader | Action::Heading(None))
+                            });
                             px(if spaced && position.get() > 0 && !after_section() {
                                 4.0
                             } else {
                                 0.0
                             })
                         })
-                        .child(desktop_row(row, sources, selected, activate))
+                        .child(dynamic(move || {
+                            desktop_row(row.get(), sources, selected, activate)
+                        }))
                 },
             ))
             .child(each(
@@ -571,7 +565,7 @@ fn desktop_row(
             .pt_3()
             .pb_1()
             .text_size(px(12.0))
-            .text_color(colors::MUTED)
+            .text_color(colors::muted())
             .into_element(),
         Action::Notice(_) => text(row.title.clone())
             .px_3()
@@ -581,17 +575,20 @@ fn desktop_row(
         Action::Expand(_) => {
             let compose = row.compose.as_ref().map(|action| {
                 let compose_id = row_id(row.scope.as_ref(), action);
-                let connected = sources.with_untracked(|sources| {
-                    sources
-                        .iter()
-                        .any(|source| Some(&source.scope) == row.scope.as_ref() && source.connected)
+                let scope = row.scope.clone();
+                let connected = computed(move || {
+                    sources.with(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| Some(&source.scope) == scope.as_ref() && source.connected)
+                    })
                 });
                 ui::small_icon_button(
                     Icon::NEW_CHAT,
                     tr("このプロジェクトで新しいチャット"),
                     move || activate("compose", &compose_id, None),
                 )
-                .enabled(move || connected)
+                .enabled(move || connected.get())
             });
             let menu = row.menu.clone();
             let toggle = id.clone();
@@ -611,7 +608,7 @@ fn desktop_row(
                         .flex_row()
                         .items_center()
                         .rounded(px(ui::RADIUS))
-                        .text_color(colors::FOREGROUND)
+                        .text_color(colors::foreground())
                         .hover(|s| s.bg(colors::GHOST_HOVER))
                         .active(|s| s.bg(colors::SELECTED))
                         .on_press(move || activate("expand", &toggle, None))
@@ -643,7 +640,7 @@ fn desktop_row(
             let item = menu_row()
                 .style_when(active, |s| {
                     s.bg(colors::SELECTED)
-                        .text_color(colors::FOREGROUND)
+                        .text_color(colors::foreground())
                         .font_weight(FontWeight::MEDIUM)
                 })
                 .child((row.level > 0).then(|| view().w(px(16.0)).h(px(16.0))))
@@ -671,7 +668,7 @@ fn section(title: String) -> View {
         text(title)
             .flex_1()
             .text_size(px(12.0))
-            .text_color(crate::ui::colors::MUTED),
+            .text_color(crate::ui::colors::muted()),
     )
 }
 
@@ -685,7 +682,7 @@ fn menu_row() -> nsh_base::ButtonElement {
         .h(px(28.0))
         .px_2()
         .rounded(px(ui::RADIUS))
-        .text_color(colors::FOREGROUND)
+        .text_color(colors::foreground())
         .hover(|s| s.bg(colors::ROW_HOVER))
         .disabled_style(|s| s.opacity(0.5))
 }
@@ -742,36 +739,63 @@ pub(crate) fn project_icon(
         .into_element()
 }
 
-/// A chat's state after its title: running, waiting, unread, a worktree to merge or merged.
+/// T3 Code's list badge: what the conversation holds for its user.
+fn attention_badge(
+    attention: agent_core::presentation::thread_status::ThreadAttention,
+) -> impl IntoElement {
+    use crate::ui::{self, Icon};
+    use agent_core::presentation::thread_status::ThreadAttention;
+    let (icon, color) = match attention {
+        ThreadAttention::Approval => (Icon::STATUS_APPROVAL, 0xfbbf24),
+        ThreadAttention::Input => (Icon::QUESTION, 0x60a5fa),
+        ThreadAttention::Failed => (Icon::ALERT, 0xf87171),
+    };
+    let title =
+        localized(agent_core::presentation::thread_status::thread_attention_label(attention));
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .text_color(nsh_core::element::rgb(color))
+        .child(ui::icon(icon, 14.0))
+        .child(
+            text(title)
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM),
+        )
+}
+
+/// A chat's state after its title: what it holds for, running, waiting, unread,
+/// a worktree to merge or merged.
 fn indicators(indicators: native::RowIndicators) -> impl IntoElement {
     use crate::ui::{self, Icon};
     use agent_core::presentation::thread_status::ThreadActivity;
     let label = indicators.label();
+    let badged = indicators.attention.is_some();
     view()
         .flex_row()
         .items_center()
         .gap_2()
         .label(label)
+        .child(indicators.attention.map(attention_badge))
         .child(match indicators.activity {
-            Some(ThreadActivity::Running | ThreadActivity::Waiting) => {
-                Some(ui::spinner().into_element())
-            }
-            Some(ThreadActivity::Unread) => Some(
+            // A badge says what a waiting chat waits for.
+            Some(ThreadActivity::Waiting) if badged => None,
+            // T3 Code's Working, Waiting and Done icons, in its status colours.
+            Some(ThreadActivity::Running | ThreadActivity::Waiting) => Some(
                 view()
-                    .w(px(8.0))
-                    .h(px(8.0))
-                    .rounded_full()
-                    .bg(nsh_core::element::rgb(0xffffff))
-                    .into_element(),
+                    .text_color(nsh_core::element::rgb(0x60a5fa))
+                    .child(ui::icon(Icon::STATUS_WORKING, 16.0)),
             ),
-            // As T3 Code's Waiting: grey and still, unlike a running spinner.
             Some(ThreadActivity::Background) => Some(
                 view()
-                    .w(px(8.0))
-                    .h(px(8.0))
-                    .rounded_full()
-                    .bg(crate::ui::colors::MUTED)
-                    .into_element(),
+                    .text_color(crate::ui::colors::muted())
+                    .child(ui::icon(Icon::STATUS_WAITING, 16.0)),
+            ),
+            Some(ThreadActivity::Unread) => Some(
+                view()
+                    .text_color(nsh_core::element::rgb(0x34d399))
+                    .child(ui::icon(Icon::STATUS_DONE, 16.0)),
             ),
             None => None,
         })
@@ -817,6 +841,85 @@ fn row_id(scope: Option<&ListScope>, action: &Action) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ConnectionList;
+
+    impl Component for ConnectionList {
+        type Props = ();
+        type Event = NoEvent;
+
+        fn view(_: (), _: Scope<NoEvent>) -> impl IntoElement {
+            let connected = signal(false);
+            let sources = computed(move || {
+                vec![ListSource {
+                    scope: scope("local", "scope"),
+                    connected: connected.get(),
+                }]
+            });
+            let entries = computed(move || {
+                let mut list = fixture_list();
+                list.projects[0].icon = None;
+                list.projects[0].roots = vec![agent_protocol::models::ProjectRoot {
+                    path: "/project".into(),
+                }];
+                fixture_rows(Some(&list), false, "local", "scope", true, connected.get())
+            });
+            view()
+                .child(
+                    nsh_base::button()
+                        .accessibility_label("Toggle connection")
+                        .on_press(move || connected.update(|value| *value = !*value)),
+                )
+                .child(desktop_rows(
+                    entries,
+                    sources,
+                    computed(Vec::new),
+                    |_, _, _| {},
+                ))
+        }
+    }
+
+    #[test]
+    fn desktop_new_chat_and_add_project_follow_connection_without_reopening_projects() {
+        use nsh_core::{ApproxTextEngine, Core, EventKind, EventPayload, MountItem, element::Root};
+        let mut core = Core::new(
+            ApproxTextEngine,
+            nsh_core::geometry::size(px(900.0), px(700.0)),
+        );
+        core.set_components(nsh_base::registry());
+        core.mount_root(&Root::new::<ConnectionList>(|| ()));
+        let mut buttons = std::collections::BTreeMap::new();
+        for connected in [false, true, false, true] {
+            let batch = core.commit().unwrap();
+            for item in batch.items {
+                match item {
+                    MountItem::ViewProps { id, props } => {
+                        buttons.insert(id, props.accessibility);
+                    }
+                    MountItem::Delete { id } => {
+                        buttons.remove(&id);
+                    }
+                    _ => {}
+                }
+            }
+            for label in [
+                tr("このプロジェクトで新しいチャット"),
+                tr("プロジェクトを追加"),
+            ] {
+                let button = buttons
+                    .values()
+                    .find(|value| value.label.as_deref() == Some(label))
+                    .unwrap();
+                assert_eq!(button.state.disabled, !connected, "{label}");
+            }
+            let toggle = buttons
+                .iter()
+                .find(|(_, value)| value.label.as_deref() == Some("Toggle connection"))
+                .unwrap()
+                .0;
+            assert!(core.component_event(*toggle, EventKind::Press, &EventPayload::None));
+        }
+    }
 
     fn scope(host: &str, storage: &str) -> ListScope {
         ListScope {
@@ -866,6 +969,7 @@ mod tests {
 
     fn fixture_list() -> ThreadList {
         let thread = ThreadSummary {
+            attention: None,
             host_id: "host".into(),
             id: serde_json::from_value(json!({"provider": "codex", "id": "chat"})).unwrap(),
             title: "選択中の会話".into(),
@@ -1068,7 +1172,14 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|item| item["title"] == "フォルダを開く")
+                .find(|item| {
+                    item["title"]
+                        == if cfg!(windows) {
+                            "エクスプローラーで開く"
+                        } else {
+                            "フォルダを開く"
+                        }
+                })
                 .unwrap();
             assert_eq!(folder["enabled"], folder_enabled);
             let more = rendered
@@ -1109,6 +1220,7 @@ mod tests {
     fn conversation_row_preserves_activity_and_changes_independently() {
         use agent_core::presentation::thread_status::ThreadActivity;
         let mut thread = ThreadSummary {
+            attention: None,
             host_id: "host".into(),
             id: serde_json::from_value(json!({"provider": "codex", "id": "chat"})).unwrap(),
             title: "会話".into(),
@@ -1188,6 +1300,7 @@ mod tests {
             cwd: "/project".into(),
         });
         let thread = ThreadSummary {
+            attention: None,
             host_id: "host".into(),
             id: serde_json::from_value(json!({"provider":"codex","id":"chat"})).unwrap(),
             title: "会話 👋".into(),

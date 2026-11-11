@@ -154,6 +154,7 @@ fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
     ] {
         let before = Arc::new(snapshot.clone());
         let _ = snapshot.accept_task_activity(TaskActivityState {
+            attention: Vec::new(),
             revision,
             statuses: vec![(id.clone(), SessionStatus::Running)],
             waiting: if waiting {
@@ -228,6 +229,7 @@ fn waiting_publication_keeps_distinct_state_and_empty_state_comparisons() {
     use agent_protocol::live_activity::{TaskActivityState, TaskActivitySummary};
     let activity = |count| {
         Arc::new(TaskActivityState {
+            attention: Vec::new(),
             revision: 1,
             statuses: vec![],
             waiting: (0..count)

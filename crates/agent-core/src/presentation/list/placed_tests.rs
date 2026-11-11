@@ -106,6 +106,7 @@ fn fixture() -> Snapshot {
     activity.unread.insert(session("missing"));
     snapshot.lists.task_activity =
         Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
+            attention: Vec::new(),
             revision: 1,
             statuses: vec![],
             waiting: vec![session("live")],

@@ -24,13 +24,13 @@ impl RenderedTurn {
             ItemSource::Native(item) => item.status,
             ItemSource::Pending(..) => ItemStatus::Unknown,
         };
-        let last = self.rows.iter().rev().find(|row| {
-            matches!(
-                row.content,
-                ConversationRowContent::User { .. }
-                    | ConversationRowContent::Activity { .. }
-                    | ConversationRowContent::Response { .. }
-            )
+        let last = self.rows.iter().rev().find(|row| match &row.content {
+            ConversationRowContent::User { .. } | ConversationRowContent::Activity { .. } => true,
+            ConversationRowContent::Response { item, .. } => {
+                !matches!(item.data.kind.as_str(), "imageView" | "imageGeneration")
+                    || status(item) == ItemStatus::Running
+            }
+            _ => false,
         });
         match last.map(|row| (&row.content, row)) {
             // As T3 Code, failed work leaves the turn thinking.
@@ -195,6 +195,29 @@ mod tests {
         let items = vec![user("u"), command("c", "running")];
         let requested = status == "running";
         assert_eq!(live(&turn(status, items, requested)), None);
+    }
+
+    #[rstest::rstest]
+    fn screenshots_do_not_hide_work_started_after_them(
+        #[values("completed", "unknown")] image_status: &str,
+    ) {
+        let screenshot = item(
+            "image",
+            image_status,
+            json!({"imageView":{"path":"file:///tmp/blog.png"}}),
+        );
+        let projected = turn(
+            "running",
+            vec![
+                user("u"),
+                text("comment", "completed", "commentary"),
+                command("first", "completed"),
+                screenshot,
+                command("later", "running"),
+            ],
+            false,
+        );
+        assert_eq!(live(&projected).as_deref(), Some("later"));
     }
 
     #[test]

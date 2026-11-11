@@ -67,6 +67,7 @@ mod tests {
 
     fn thread() -> ThreadSummary {
         ThreadSummary {
+            attention: None,
             host_id: String::new(),
             id: crate::session::SessionRef {
                 provider: crate::session::ProviderKind::Codex,

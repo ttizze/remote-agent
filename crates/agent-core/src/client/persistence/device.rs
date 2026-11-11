@@ -18,6 +18,7 @@ pub enum PreferenceKey {
     Editor,
     Language,
     Composer,
+    Contrast,
 }
 
 /// Device-wide locations, independent of a Host or window's state file.
@@ -33,6 +34,8 @@ pub(crate) struct Preferences {
     pub editor: EditorPreferences,
     pub language: UiLanguage,
     pub composer: ComposerPreferences,
+    /// Unset, or unreadable, is the default contrast.
+    pub contrast: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -99,9 +102,13 @@ impl DevicePreferences {
             .ok()
             .flatten()
             .unwrap_or_default();
+        let contrast = read(storage.as_ref(), PreferenceKey::Contrast)
+            .ok()
+            .flatten();
         let mut state = DeviceState {
             current: Arc::new(Preferences {
                 language,
+                contrast,
                 ..Default::default()
             }),
             restored: Ok(()),
@@ -120,22 +127,24 @@ impl DevicePreferences {
     /// Language becomes visible only after this write succeeds. Native mobile
     /// adapters keep their existing non-throwing preferences save contract.
     pub fn select_language(&self, language: UiLanguage) -> Result<(), AgentError> {
-        let writing = self.language_write.lock().unwrap();
-        if let Some(storage) = &self.storage {
-            storage.save(
-                PreferenceKey::Language,
-                serde_json::to_vec(&language).map_err(error)?,
-            )?;
-        }
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.current.language != language {
-                Arc::make_mut(&mut state.current).language = language;
-            }
-        }
-        drop(writing);
-        self.notify();
-        Ok(())
+        self.write_display(PreferenceKey::Language, &language, |preferences| {
+            preferences.language = language;
+        })
+    }
+
+    pub fn contrast(&self) -> u32 {
+        use crate::presentation::appearance::{DEFAULT_CONTRAST, MAX_CONTRAST, MIN_CONTRAST};
+        let contrast = self.state.lock().unwrap().current.contrast;
+        contrast.map_or(DEFAULT_CONTRAST, |contrast| {
+            contrast.clamp(MIN_CONTRAST, MAX_CONTRAST)
+        })
+    }
+
+    /// As the language, the contrast is visible only after its write succeeds.
+    pub fn select_contrast(&self, contrast: u32) -> Result<(), AgentError> {
+        self.write_display(PreferenceKey::Contrast, &contrast, |preferences| {
+            preferences.contrast = Some(contrast);
+        })
     }
 
     pub async fn next_language(&self, previous: UiLanguage) -> Result<UiLanguage, AgentError> {
@@ -151,6 +160,29 @@ impl DevicePreferences {
 }
 
 impl DevicePreferences {
+    fn write_display<T: serde::Serialize>(
+        &self,
+        key: PreferenceKey,
+        value: &T,
+        apply: impl FnOnce(&mut Preferences),
+    ) -> Result<(), AgentError> {
+        let writing = self.language_write.lock().unwrap();
+        if let Some(storage) = &self.storage {
+            storage.save(key, serde_json::to_vec(value).map_err(error)?)?;
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            let mut next = (*state.current).clone();
+            apply(&mut next);
+            if *state.current != next {
+                state.current = Arc::new(next);
+            }
+        }
+        drop(writing);
+        self.notify();
+        Ok(())
+    }
+
     pub(crate) async fn flush(&self) -> Result<(), AgentError> {
         if self.storage.is_none() {
             return Ok(());
@@ -316,6 +348,7 @@ impl DeviceState {
             editor: editor.clone().unwrap_or_default(),
             language: self.current.language,
             composer: composer.unwrap_or_default(),
+            contrast: self.current.contrast,
         });
         self.saved_models = models;
         self.saved_editor = editor;

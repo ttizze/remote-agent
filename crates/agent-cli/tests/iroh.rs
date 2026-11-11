@@ -94,7 +94,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     assert!(!handled);
                     assert_eq!(
                         request["params"],
-                        json!({"threadId":{"provider":"codex","id":"fixture-thread"},"clientUserMessageId":"fixture-message","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"text":{"text":"hello"}}]})
+                        json!({"threadId":{"provider":"codex","id":"fixture-thread"},"clientUserMessageId":"fixture-message","followUp":"queue","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"text":{"text":"hello"}}]})
                     );
                     handled = true;
                     json!({"turnId":"fixture-turn"})

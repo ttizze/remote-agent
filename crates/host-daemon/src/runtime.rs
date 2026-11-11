@@ -114,7 +114,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         .enable_browser(directory.join("browser"))
         .await
         .map_err(anyhow::Error::msg)?;
-    service.start();
+    service.start().map_err(anyhow::Error::msg)?;
     if let Err(error) = service.resume_after_update(&directory).await {
         tracing::error!(target: "agent", operation = "host.update.resume", message = %error);
     }

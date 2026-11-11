@@ -385,6 +385,7 @@ impl AgentStore {
         if let Some(cached) = self.endpoint.lock().await.take() {
             cached.endpoint.close().await;
         }
+        self.trace.close().await;
         result
     }
 }
@@ -577,6 +578,27 @@ mod tests {
         })
         .await
         .expect("automatic recovery did not settle");
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_diagnostics_before_the_hosts_files_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("diagnostics");
+        let store = AgentStore::offline(
+            Vec::new(),
+            Some(directory.to_string_lossy().into_owned()),
+            "test-revision".into(),
+        )
+        .await
+        .unwrap();
+        store.shutdown().await.unwrap();
+        assert!(directory.exists());
+        std::fs::remove_dir_all(&directory).unwrap();
+        // A retained native handle may finish publishing after its Host is gone.
+        store.record_connection_event(ConnectionPhase::AppScene, 1);
+        assert!(store.trace.pending_reports().await.is_empty());
+        drop(store);
+        assert!(!directory.exists());
     }
 
     #[tokio::test]

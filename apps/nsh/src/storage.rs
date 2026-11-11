@@ -104,6 +104,7 @@ impl DeviceStorage {
             PreferenceKey::Editor => "editor-preferences.json",
             PreferenceKey::Composer => "composer-preferences.json",
             PreferenceKey::Language => "language.json",
+            PreferenceKey::Contrast => "contrast.json",
         })
     }
 }

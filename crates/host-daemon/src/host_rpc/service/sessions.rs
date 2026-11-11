@@ -14,7 +14,7 @@ impl HostRpcService {
             .map_err(|error| Failure::new("invalid_params", error))?;
         let stored = self
             .inner
-            .transcripts
+            .store
             .turn(&params.session, &params.turn_id)
             .map_err(transcripts::storage_failure)?
             .and_then(|turn| turn.items);
@@ -241,7 +241,7 @@ impl HostRpcService {
         )?;
         let renamed = agent.rename(&target.id, &params.name).await?;
         self.inner
-            .transcripts
+            .store
             .rename(target, Some(&params.name))
             .map_err(transcripts::storage_failure)?;
         Ok(renamed)
@@ -621,7 +621,7 @@ impl HostRpcService {
             Some(item) => Some(item),
             None => self
                 .inner
-                .transcripts
+                .store
                 .item(target, &params.turn_id, &params.item_id, true)
                 .map_err(transcripts::storage_failure)?
                 .filter(|item| !item.is_deferred()),
@@ -744,7 +744,7 @@ impl HostRpcService {
             Err(error) => Err(Failure::new("worktree_creation_failed", error)),
         }
     }
-    /// New threads browse under a provisional scope until their native ID exists.
+    /// Persist Host ownership before publishing a newly created conversation.
     pub(super) async fn start_thread<F>(
         &self,
         agent: &dyn Agent,
@@ -754,6 +754,14 @@ impl HostRpcService {
         F: std::future::Future<Output = Result<ThreadResponse, Failure>>,
     {
         let response = self.native_thread(agent, start).await?;
+        if let Err(error) = crate::host_rpc::conversations::Conversation::new(&response.thread)
+            .and_then(|row| self.inner.conversations.save(row))
+        {
+            if let Some(id) = &response.thread.id {
+                let _ = agent.unload(&id.id).await;
+            }
+            return Err(error);
+        }
         self.notify_thread(response.thread.clone()).await?;
         Ok(response)
     }
@@ -1098,7 +1106,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while service
                 .inner
-                .transcripts
+                .store
                 .window(&target, None, 1)
                 .unwrap()
                 .is_none()

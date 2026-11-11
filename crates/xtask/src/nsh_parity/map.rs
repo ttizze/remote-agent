@@ -376,7 +376,7 @@ pub fn t3_plan<'a>(
     scale: f64,
     paths: [&str; 3],
 ) -> Value {
-    let [t3_root, codex_fixture, web] = paths;
+    let [t3_app, t3_root, codex_fixture] = paths;
     let states: Vec<Value> = states
         .into_iter()
         .filter(|state| state.reference == Reference::T3)
@@ -391,9 +391,9 @@ pub fn t3_plan<'a>(
         })
         .collect();
     json!({
+        "t3App": t3_app,
         "t3Root": t3_root,
         "codexFixture": codex_fixture,
-        "web": web,
         "viewport": {"width": map.viewport.width, "height": map.viewport.height, "scale": scale},
         "states": states,
     })
@@ -547,7 +547,7 @@ gpui = { x = 20, height = 14, glyph_dy = 0, source = "sidebar.rs:744" }
     #[test]
     fn the_t3_plan_carries_only_t3_states_and_their_selectors() {
         let map = Map::parse(MAP).unwrap();
-        let plan = t3_plan(&map, &map.states, 2.0, ["/t3", "/fixture", "/web"]);
+        let plan = t3_plan(&map, &map.states, 2.0, ["/app", "/t3", "/fixture"]);
         assert_eq!(
             plan["viewport"],
             json!({"width": 1280, "height": 800, "scale": 2.0})

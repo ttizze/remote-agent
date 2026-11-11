@@ -64,9 +64,6 @@ extension ConversationModel {
     }
 }
 
-extension ThreadScreen {
-}
-
 struct ConversationSideChat: View {
     let request: SideChatRequest
     let environment: ConversationEnvironment

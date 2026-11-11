@@ -20,6 +20,8 @@ struct Bridge {
     create: unsafe extern "C" fn(*mut c_void, Callback) -> *mut c_void,
     view: unsafe extern "C" fn(*mut c_void) -> *mut PlatformView,
     input: unsafe extern "C" fn(*mut c_void, bool),
+    #[cfg(target_os = "macos")]
+    menu: unsafe extern "C" fn(*mut c_void, *const u8, isize),
     feed: unsafe extern "C" fn(*mut c_void, *const u8, isize, i32, i32),
     release: unsafe extern "C" fn(*mut c_void),
 }
@@ -34,6 +36,8 @@ impl Bridge {
                 create: super::apple::symbol(b"bex_nsh_terminal_create\0")?,
                 view: super::apple::symbol(b"bex_nsh_terminal_view\0")?,
                 input: super::apple::symbol(b"bex_nsh_terminal_input\0")?,
+                #[cfg(target_os = "macos")]
+                menu: super::apple::symbol(b"bex_nsh_terminal_menu\0")?,
                 feed: super::apple::symbol(b"bex_nsh_terminal_feed\0")?,
                 release: super::apple::symbol(b"bex_nsh_terminal_release\0")?,
             })
@@ -116,6 +120,13 @@ unsafe extern "C" fn event(
         }
         2 => context.emit("resize", json!({"cols": cols, "rows": rows})),
         3 => context.emit("focus", json!(cols != 0)),
+        #[cfg(target_os = "macos")]
+        4 if count > 0 && !bytes.is_null() => {
+            let bytes = unsafe { std::slice::from_raw_parts(bytes, count as usize) };
+            if let Ok(text) = std::str::from_utf8(bytes) {
+                context.emit("quote", json!(text));
+            }
+        }
         _ => {}
     }
 }
@@ -180,6 +191,18 @@ impl NativeComponent for Terminal {
                     serde_json::from_value::<Vec<agent_core::state::TerminalOutput>>(v.clone()).ok()
                 }) {
                     native.output(&chunks);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            "menu" => {
+                if let Some(bytes) = value.and_then(|v| serde_json::to_vec(v).ok()) {
+                    unsafe {
+                        (native.bridge.menu)(
+                            native.handle.as_ptr(),
+                            bytes.as_ptr(),
+                            bytes.len() as isize,
+                        )
+                    };
                 }
             }
             _ => {}

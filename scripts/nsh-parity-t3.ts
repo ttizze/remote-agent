@@ -1,6 +1,8 @@
 // T3 Code's side of `cargo xtask nsh-parity`: renders the conversation states the
-// plan names in T3's real web client, served by T3's real server, in headless
-// Chromium, and writes a screenshot and DOM metrics for each.
+// plan names in the T3 Code the user has installed (`t3App`): its own server and
+// web client, run apart from the user's data, in headless Chromium, and writes a
+// screenshot and DOM metrics for each. A T3 checkout (`t3Root`) only lends
+// Playwright and the Codex protocol's schema.
 //
 // T3's server drives Codex through `codex app-server`; here that is Bex's own
 // Codex fixture (`crates/host-fixture`), the program the NSH side's fixture Host
@@ -19,10 +21,10 @@
 // Usage: node scripts/nsh-parity-t3.ts <plan.json> <output-directory>
 //        node scripts/nsh-parity-t3.ts codex-shim <fixture> <traffic.log> <args...>
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -33,9 +35,9 @@ type Step =
   | { waitMs: number } | { release: true };
 
 export type Plan = {
+  t3App: string;
   t3Root: string;
   codexFixture: string;
-  web: string;
   viewport: { width: number; height: number; scale: number };
   states: { name: string; steps: Step[]; elements: Record<string, string> }[];
 };
@@ -48,7 +50,6 @@ type Locator = {
   first(): Locator;
   getByRole(role: string, options?: object): Locator;
 };
-type Route = { request(): { url(): string; method(): string; resourceType(): string }; fulfill(options: { path: string }): Promise<void>; continue(): Promise<void> };
 type Page = {
   goto(url: string): Promise<unknown>;
   locator(selector: string): Locator;
@@ -62,18 +63,13 @@ type Page = {
   on(event: 'console', listener: (message: { type(): string; text(): string }) => void): void;
 };
 type Context = {
-  route(url: string, handler: (route: Route) => Promise<void>): Promise<void>;
   addInitScript(script: string): Promise<void>;
   newPage(): Promise<Page>;
 };
 type Browser = { newContext(options: object): Promise<Context>; close(): Promise<void> };
 
-/** Chromium's local-network checks block the page's websocket once its document
- * is served from the route below rather than the network. */
-const CHROMIUM_ARGS = ['--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets,PrivateNetworkAccessChecks'];
 /** T3's client settings: onboarding is finished, as for a returning user. */
 const CLIENT_SETTINGS = `localStorage.setItem('t3code:client-settings:v1', ${JSON.stringify(JSON.stringify({ onboardingCompletedAt: '2026-01-01T00:00:00.000Z' }))})`;
-const DISABLED = { enabled: false };
 const STEP_TIMEOUT_MS = 20_000;
 
 /** Measures the elements each selector matches, in the page. */
@@ -139,9 +135,8 @@ if (process.argv[2] === 'codex-shim') {
 }
 
 async function render(plan: Plan, output: string) {
-  buildWeb(plan);
   const { chromium } = (await import(pathToFileURL(playwright(plan.t3Root)).href)) as { chromium: { launch(options: object): Promise<Browser> } };
-  const browser = await chromium.launch({ headless: true, args: CHROMIUM_ARGS });
+  const browser = await chromium.launch({ headless: true });
   const summary: Record<string, string | null> = {};
   try {
     for (const state of plan.states) {
@@ -170,17 +165,6 @@ function playwright(t3Root: string) {
   return join(store, name, 'node_modules/playwright-core/index.mjs');
 }
 
-/** T3's web client, built once with same-origin URLs (no backend port baked in). */
-function buildWeb(plan: Plan) {
-  if (existsSync(join(plan.web, 'index.html'))) return;
-  console.log(`t3: building the web client into ${plan.web}`);
-  execFileSync(join(plan.t3Root, 'apps/web/node_modules/.bin/vp'), ['build', '--outDir', plan.web, '--emptyOutDir'], {
-    cwd: join(plan.t3Root, 'apps/web'),
-    env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}`, T3CODE_SINGLE_ORIGIN_DEV: '1' },
-    stdio: ['ignore', 'ignore', 'inherit'],
-  });
-}
-
 /** A T3 server with its own home, data and project, whose Codex is the fixture. */
 function environment(plan: Plan, log: string) {
   const root = mkdtempSync(join(tmpdir(), 'bex-parity-t3-'));
@@ -199,9 +183,9 @@ function environment(plan: Plan, log: string) {
   execFileSync('git', ['init', '--quiet'], { cwd: project });
   writeFileSync(join(root, 'codex-shim'), `#!/bin/sh\nexec "${process.execPath}" "${fileURLToPath(import.meta.url)}" codex-shim "${join(codex, 'agent-codex-fixture')}" "${log}" "${plan.t3Root}" "$@"\n`, { mode: 0o755 });
   writeFileSync(join(base, 'userdata/settings.json'), JSON.stringify({
-    providers: {
-      codex: { setupMode: 'existing', binaryPath: join(root, 'codex-shim'), homePath: codex },
-      claudeAgent: DISABLED, cursor: DISABLED, grok: DISABLED, pi: DISABLED, opencode: DISABLED, antigravity: DISABLED,
+    providerInstances: {
+      codex: { driver: 'codex', enabled: true, config: { setupMode: 'existing', binaryPath: join(root, 'codex-shim'), homePath: codex } },
+      ...Object.fromEntries(['claudeAgent', 'cursor', 'grok', 'pi', 'opencode', 'antigravity'].map(driver => [driver, { driver, enabled: false }])),
     },
   }));
   return { root, home, base, codex, project };
@@ -212,9 +196,10 @@ async function renderState(plan: Plan, state: Plan['states'][number], browser: B
   const port = 30_000 + Math.floor(Math.random() * 20_000);
   const serverLog = join(directory, 't3-server.log');
   // The user's own Codex, Claude and settings stay out of reach: a home and PATH of its own.
-  const server = spawn(process.execPath, ['apps/server/src/bin.ts', 'serve', '--host', '127.0.0.1', '--port', String(port), '--base-dir', env.base, '--no-browser', env.project], {
-    cwd: plan.t3Root,
-    env: { PATH: `/usr/bin:/bin:/usr/sbin:/sbin:${dirname(process.execPath)}`, HOME: env.home, NO_COLOR: '1', TMPDIR: env.root },
+  // The app's own runtime and server, as it starts them itself; it serves its web client.
+  const server = spawn(join(plan.t3App, 'Contents/MacOS', basename(plan.t3App, '.app')), [join(plan.t3App, 'Contents/Resources/app.asar/apps/server/dist/bin.mjs'), 'serve', '--host', '127.0.0.1', '--port', String(port), '--base-dir', env.base, '--no-browser', env.project], {
+    cwd: env.root,
+    env: { PATH: `/usr/bin:/bin:/usr/sbin:/sbin:${dirname(process.execPath)}`, HOME: env.home, NO_COLOR: '1', TMPDIR: env.root, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   });
@@ -230,7 +215,6 @@ async function renderState(plan: Plan, state: Plan['states'][number], browser: B
       colorScheme: 'dark',
       reducedMotion: 'no-preference',
     });
-    await context.route(`http://127.0.0.1:${port}/**`, route => serveWeb(plan.web, route));
     await context.addInitScript(CLIENT_SETTINGS);
     const page = await context.newPage();
     page.on('console', message => { if (message.type() === 'error') appendFileSync(serverLog, `[console] ${message.text()}\n`); });
@@ -273,6 +257,8 @@ async function addProject(page: Page, project: string) {
   await page.getByRole('textbox', { name: 'Message' }).waitFor({ state: 'visible', timeout: STEP_TIMEOUT_MS });
   // The provider probe finishes after the project opens; sending needs it.
   await page.getByText('Enable a provider', { exact: false }).waitFor({ state: 'hidden', timeout: 60_000 });
+  // Its notice over the conversation until then is the probe's, not the state's.
+  await page.getByText('has not been checked', { exact: false }).waitFor({ state: 'hidden', timeout: 60_000 });
 }
 
 async function take(page: Page, step: Step, codexHome: string) {
@@ -302,18 +288,6 @@ async function take(page: Page, step: Step, codexHome: string) {
     // `wait_for_release` in the fixture's scenarios looks for this file.
     writeFileSync(join(codexHome, 'release-inputs'), '');
   }
-}
-
-/** The page's own documents and assets from the build; the API and websocket from the server. */
-async function serveWeb(web: string, route: Route) {
-  const request = route.request();
-  const url = new URL(request.url());
-  if (request.method() === 'GET' && !url.pathname.startsWith('/api/')) {
-    const file = join(web, decodeURIComponent(url.pathname));
-    if (existsSync(file) && statSync(file).isFile()) return route.fulfill({ path: file });
-    if (request.resourceType() === 'document') return route.fulfill({ path: join(web, 'index.html') });
-  }
-  return route.continue();
 }
 
 async function until<T>(read: () => T | undefined, ms: number, failure: string): Promise<T> {

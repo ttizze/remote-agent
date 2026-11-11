@@ -461,7 +461,7 @@ fn header(
         .flex_shrink_0()
         .px_2()
         .border_b_1()
-        .border_b_color(colors::BORDER)
+        .border_b_color(colors::border())
         .child(
             ui::icon_button(Icon::ARROW_LEFT, tr("前のページ"), move || {
                 send(BrowserAction::Back);
@@ -495,8 +495,8 @@ fn header(
                     address_field(page, controls.open)
                         .label(tr("ブラウザの URL"))
                         .text_size(px(13.0))
-                        .text_color(colors::FOREGROUND)
-                        .placeholder_color(move || nsh_core::element::color(colors::MUTED))
+                        .text_color(colors::foreground())
+                        .placeholder_color(colors::muted())
                         .flex_1()
                         .min_w_0(),
                 )

@@ -19,6 +19,7 @@ struct Bridge {
     view: unsafe extern "C" fn(*mut c_void) -> *mut PlatformView,
     update: unsafe extern "C" fn(*mut c_void, *const u8, isize),
     release: unsafe extern "C" fn(*mut c_void),
+    command: Option<unsafe extern "C" fn(*mut c_void, *const u8, isize)>,
 }
 impl Bridge {
     fn load(prefix: &str) -> Result<Self, String> {
@@ -28,6 +29,7 @@ impl Bridge {
                 view: super::apple::symbol(format!("{prefix}_view\0").as_bytes())?,
                 update: super::apple::symbol(format!("{prefix}_update\0").as_bytes())?,
                 release: super::apple::symbol(format!("{prefix}_release\0").as_bytes())?,
+                command: super::apple::symbol(format!("{prefix}_command\0").as_bytes()).ok(),
             })
         }
     }
@@ -60,12 +62,13 @@ unsafe extern "C" fn event(context: *mut c_void, bytes: *const u8, count: isize)
         }
     }
 }
-struct Hosted {
+pub(super) struct Hosted {
     view: Retained<PlatformView>,
     resource: Option<Resource>,
 }
 impl Hosted {
-    fn new(context: ComponentContext, prefix: &str) -> Self {
+    pub(super) fn new(context: ComponentContext, prefix: &str) -> Self {
+        context.set_size(0., 0.);
         let create = || {
             let bridge = Bridge::load(prefix)?;
             let mut context = Box::new(context);
@@ -118,6 +121,14 @@ impl NativeComponent for Hosted {
                     data.len() as isize,
                 );
             }
+        }
+    }
+    fn command(&mut self, name: &str, args: &JsonValue) {
+        if let Some(resource) = &self.resource
+            && let Some(command) = resource.bridge.command
+            && let Ok(data) = serde_json::to_vec(&serde_json::json!({"name": name, "args": args}))
+        {
+            unsafe { command(resource.handle.as_ptr(), data.as_ptr(), data.len() as isize) };
         }
     }
 }

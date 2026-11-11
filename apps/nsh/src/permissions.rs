@@ -1,5 +1,5 @@
-//! The composer's approval mode beside the attach button, as the desktop client's
-//! menu: Core owns the provider's settings, their loading and the choices.
+//! Approval settings in the model picker's footer. Core owns the provider's
+//! settings, their loading and the choices.
 use crate::Connection;
 use crate::l10n::tr;
 use crate::ui::{self, Icon, colors};
@@ -9,30 +9,13 @@ use agent_core::{
 };
 use agent_protocol::{permissions::PermissionMode, session::ProviderKind};
 use nsh_core::{
-    element::rgb,
+    element::{Rgba, rgb},
     overlay::{Align, Placement},
     prelude::*,
 };
 
-/// Full access reads as a warning wherever it is the mode.
-const FULL_ACCESS: crate::ui::Tone = crate::ui::Tone::same(rgb(0xf58b42));
-/// The trigger's padding at each side, its icon, and the gap before its label.
-const PADDING: f32 = 8.0;
-const ICON: f32 = 16.0;
-const GAP: f32 = 8.0;
-const LABEL_FONT: &str = "14px system-ui";
-/// The trigger as its icon alone, and the "more" control's.
-pub(crate) const ICON_WIDTH: f32 = 2.0 * PADDING + ICON;
-
-/// How the control shows, as the composer's controls fit.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Look {
-    Labelled,
-    Icon,
-    /// T3 Code's "more" control, whose menu holds the modes.
-    More,
-}
-
+/// The selected full-access choice warns in the permissions menu.
+const FULL_ACCESS: Rgba = rgb(0xf58b42);
 /// What the control and its menu show of the current draft's provider.
 #[derive(Clone, PartialEq)]
 struct Permissions {
@@ -85,54 +68,33 @@ impl Permissions {
     }
 }
 
-/// The control, showing as `look` says; it sets `natural` to its width with
-/// its label.
-pub(crate) fn control(natural: Signal<f32>, look: impl Fn() -> Look + Copy + 'static) -> View {
+pub(crate) fn picker_control() -> View {
     let connection = use_context::<Connection>().unwrap();
     let permissions = computed(move || connection.publication.with(|p| Permissions::of(p)));
     let label = move || tr(permissions.with(|p| p.label)).to_owned();
-    effect(move || natural.set(ICON_WIDTH + GAP + measure_text(LABEL_FONT, &label()).0));
-    let more = move || look() == Look::More;
     let open = signal(false);
     let dispatch = move |intent: Option<Intent>| {
         if let Some(intent) = intent {
             connection.dispatch(intent);
         }
     };
-    let full_access = move || permissions.with(|p| p.mode == Some(PermissionMode::FullAccess));
     let trigger = nsh_base::button()
         .accessibility_label(nsh_core::element::Prop::from(
-            (move || {
-                Some(SharedString::from(if more() {
-                    tr("その他")
-                } else {
-                    tr("承認方法を変更")
-                }))
-            })
-            .into_reactive(),
+            (move || Some(SharedString::from(tr("承認方法を変更")))).into_reactive(),
         ))
         .disabled(move || !permissions.with(Permissions::enabled))
-        .h(px(40.0))
-        .px(px(PADDING))
-        .gap(px(GAP))
+        .h(px(28.0))
+        .px_2()
+        .gap(px(6.0))
         .flex_row()
         .items_center()
         .rounded(px(ui::RADIUS))
-        .text_color(move || {
-            if full_access() {
-                FULL_ACCESS
-            } else {
-                colors::FOREGROUND
-            }
-        })
+        .text_color(colors::muted())
         .hover(|s| s.bg(colors::GHOST_HOVER))
         .disabled_style(|s| s.opacity(0.5))
-        .child(when(move || !more(), || ui::icon(Icon::SHIELD, ICON)))
-        .child(when(more, || ui::icon(Icon::ELLIPSIS, ICON)))
-        .child(when(
-            move || look() == Look::Labelled,
-            move || text(label).text_size(px(14.0)).number_of_lines(1),
-        ));
+        .child(ui::icon(Icon::SHIELD, 14.0))
+        .child(text(label).text_size(px(12.0)).number_of_lines(1))
+        .child(ui::icon(Icon::CHEVRON_UP, 12.0));
     view().flex_row().items_center().child(
         nsh_base::popover()
             .open(move || Some(open.get()))
@@ -147,7 +109,7 @@ pub(crate) fn control(natural: Signal<f32>, look: impl Fn() -> Look + Copy + 'st
                 _ => {}
             })
             .placement(Placement::Top)
-            .align(Align::Start)
+            .align(Align::End)
             .offset(px(8.0))
             .popup_class("bg-[#0f0f0f] rounded-[16px] border border-[#303030]")
             .trigger(trigger)
@@ -165,12 +127,12 @@ fn menu(
         .w(px(430.0))
         .p_3()
         .gap_1()
-        .text_color(colors::FOREGROUND)
+        .text_color(colors::foreground())
         .child(
             text(move || tr(permissions.with(|p| p.title)).to_owned())
                 .pb_2()
                 .text_size(px(12.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         );
     PERMISSION_CHOICES
         .into_iter()
@@ -189,7 +151,7 @@ fn menu(
             || {
                 text(tr("読み込み中…"))
                     .text_size(px(12.0))
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
             },
         ))
         .child(when(
@@ -233,7 +195,7 @@ fn choice(
             if mode == PermissionMode::FullAccess && current() {
                 FULL_ACCESS
             } else {
-                colors::FOREGROUND
+                colors::foreground()
             }
         })
         .hover(|s| s.bg(colors::GHOST_HOVER))
@@ -253,7 +215,7 @@ fn choice(
                 .child(
                     text(tr(description))
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED),
+                        .text_color(colors::muted()),
                 ),
         )
         .child(when(current, || ui::icon(Icon::CHECK, 14.0)))

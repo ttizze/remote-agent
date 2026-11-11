@@ -4,22 +4,9 @@ import SwiftUI
 
 /// User-initiated presentations outlive recycled rows. Inline loads remain owned by each image or web view.
 @MainActor @Observable final class ConversationMediaPresentation {
-    struct Visualization: Identifiable {
-        let id = UUID()
-        let html: String
-    }
-
-    struct FileFailure {
-        let path: String
-        let message: String
-    }
-
     var preview: SharedFile?
-    var sharedFile: SharedFile?
-    var visualization: Visualization?
     var imageError: String?
-    private(set) var shareFailure: FileFailure?
-    private(set) var linkFailure: FileFailure?
+    private(set) var linkFailure: String?
     @ObservationIgnored private var pending: Task<Void, Never>?
 
     isolated deinit {
@@ -31,13 +18,6 @@ import SwiftUI
         load { try await writeConversationImage(data) } present: {
             self.preview = $0
         } failed: { self.imageError = $0 }
-    }
-
-    func share(_ path: String, download: @escaping @MainActor (String) async throws -> URL) {
-        shareFailure = nil
-        load { try await download(path) } present: {
-            self.sharedFile = $0
-        } failed: { self.shareFailure = FileFailure(path: path, message: $0) }
     }
 
     func openLink(_ target: String,
@@ -58,7 +38,7 @@ import SwiftUI
             } else {
                 openFile(entry.path, entry.line)
             }
-        } failed: { self.linkFailure = FileFailure(path: target, message: $0) }
+        } failed: { self.linkFailure = $0 }
     }
 
     private func load(_ operation: @escaping @MainActor () async throws -> URL,
@@ -98,10 +78,7 @@ import SwiftUI
     func reset() {
         cancelPending()
         preview = nil
-        sharedFile = nil
-        visualization = nil
         imageError = nil
-        shareFailure = nil
         linkFailure = nil
     }
 }
@@ -113,17 +90,6 @@ struct ConversationMediaPresenter: ViewModifier {
         content
             .fullScreenCover(item: $presentation.preview) { file in
                 ConversationPreview(file: file)
-            }
-            .sheet(item: $presentation.sharedFile) { ShareSheet(file: $0) }
-            .sheet(item: $presentation.visualization) { document in
-                NavigationStack {
-                    VisualizationWebView(html: document.html)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("閉じる") { presentation.visualization = nil }
-                            }
-                        }
-                }
             }
             .alert("画像を開けません", isPresented: Binding(get: { presentation.imageError != nil }, set: {
                 if !$0 {

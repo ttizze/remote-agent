@@ -273,6 +273,7 @@ fn is_conversation(item: &Item) -> bool {
         ItemBody::UserMessage { .. }
             | ItemBody::AssistantText { .. }
             | ItemBody::ImageGeneration { .. }
+            | ItemBody::ImageView { .. }
             | ItemBody::Notification { .. }
     )
 }
@@ -838,6 +839,30 @@ mod tests {
             .unwrap()[0];
         assert_eq!(serde_json::to_value(item.as_ref()).unwrap(), image);
         assert!(!item.is_deferred());
+    }
+
+    #[test]
+    fn viewed_image_paths_stay_inline_without_an_activity_budget() {
+        let image = Arc::new(Item::new(
+            "screenshot".into(),
+            ItemStatus::Completed,
+            ItemBody::ImageView {
+                path: format!("/{} screenshot.png", "directory/".repeat(80)),
+            },
+        ));
+        let mut turns = vec![Arc::new(Turn {
+            items: Some(vec![image.clone()]),
+            ..Default::default()
+        })];
+        defer_item_details(&mut turns, MAX_INLINE_ITEM_BYTES);
+        let sent = turns[0].items.as_ref().unwrap();
+        assert!(!sent[0].is_deferred());
+        assert_eq!(sent[0], image);
+
+        let mut opened = vec![image.clone()];
+        defer_turn_items(&mut opened, MAX_INLINE_ITEM_BYTES, 0);
+        assert!(!opened[0].is_deferred());
+        assert_eq!(opened[0], image);
     }
 }
 

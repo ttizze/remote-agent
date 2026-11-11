@@ -39,7 +39,6 @@ struct ConversationMediaAccess {
     let draft: DraftKey
     let presentation: ConversationMediaPresentation
     let download: @MainActor (String) async throws -> URL
-    let visualization: @MainActor (String) async throws -> String
     let resolve: @MainActor (String) async throws -> ResolvedFile
     let openDirectory: @MainActor (String) -> Void
     let openFile: @MainActor (String, UInt32?) -> Void

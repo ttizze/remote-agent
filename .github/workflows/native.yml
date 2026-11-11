@@ -360,7 +360,6 @@ jobs:
       # The builders validate Swift content/toolchain hashes before reuse.
       AGENT_IOS_SWIFT_CACHE_PATHS: |
         target/qa/ios-derived-data
-        target/qa/ios-markdown
         target/agent-bindings
         target/aarch64-apple-ios-sim/release/libAgentCore.a
         target/aarch64-apple-ios-sim/release/AgentCore.swiftmodule
@@ -420,7 +419,6 @@ jobs:
           else
             nix develop .#ios-build --command bash -euo pipefail <<'CHECKS' 2>&1 | tee -a target/qa/quality.log
           just quality swift
-          just ios-markdown
           just conversation-ui --build-only
           CHECKS
           fi
@@ -488,6 +486,30 @@ jobs:
         env:
           AGENT_CODE_SIGN_IDENTITY: '-'
         run: nix develop .#native --command just build-desktop-macos dev
+      - name: Verify native Find, thread details and composer growth
+        run: |
+          nix develop .#native --command cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+          nix develop .#native --command cargo xtask nsh-acceptance find-in-thread thread-details composer
+      - name: Retain Find, thread details and composer acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: nsh-find-acceptance
+          path: |
+            target/nsh-acceptance/run-*/report.md
+            target/nsh-acceptance/run-*/find-in-thread/*.log
+            target/nsh-acceptance/run-*/find-in-thread/*.json
+            target/nsh-acceptance/run-*/find-in-thread/*.txt
+            target/nsh-acceptance/run-*/find-in-thread/*.png
+            target/nsh-acceptance/run-*/thread-details/*.log
+            target/nsh-acceptance/run-*/thread-details/*.json
+            target/nsh-acceptance/run-*/thread-details/*.txt
+            target/nsh-acceptance/run-*/thread-details/*.png
+            target/nsh-acceptance/run-*/composer/*.log
+            target/nsh-acceptance/run-*/composer/*.json
+            target/nsh-acceptance/run-*/composer/*.txt
+            target/nsh-acceptance/run-*/composer/*.png
+          retention-days: 7
       - name: Build and package the native NSH iPhone app
         run: nix develop .#ios-build --command just nsh-ios
   iphone-tests:

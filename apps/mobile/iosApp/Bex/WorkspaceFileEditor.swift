@@ -325,3 +325,11 @@ private struct FileTextPreview: UIViewRepresentable {
         }
     }
 }
+
+/// Pages stay on the document they were given; links and scripted navigation do not leave it.
+struct InitialDocumentOnly: WebPage.NavigationDeciding {
+    @MainActor func decidePolicy(for action: WebPage.NavigationAction,
+                                 preferences _: inout WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
+        action.request.url?.scheme == "about" && action.navigationType == .other ? .allow : .cancel
+    }
+}

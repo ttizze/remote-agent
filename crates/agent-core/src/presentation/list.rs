@@ -213,6 +213,7 @@ pub struct ThreadSummary {
     /// Waiting on background work that will wake the agent.
     pub background: bool,
     pub unread: bool,
+    pub attention: Option<super::thread_status::ThreadAttention>,
     pub has_changes: Option<bool>,
 }
 #[derive(Clone, PartialEq)]
@@ -479,6 +480,7 @@ impl ListSource<'_> {
             .map_or(TaskMarks::default(), |state| TaskMarks {
                 waiting: &state.waiting,
                 background: &state.background,
+                attention: &state.attention,
             })
     }
     fn list_projection(
@@ -841,6 +843,10 @@ impl ListSource<'_> {
 struct TaskMarks<'a> {
     waiting: &'a [crate::session::SessionRef],
     background: &'a [(crate::session::SessionRef, bool)],
+    attention: &'a [(
+        crate::session::SessionRef,
+        agent_protocol::live_activity::Attention,
+    )],
 }
 
 fn thread_summaries<'a>(
@@ -866,6 +872,10 @@ fn thread_summaries<'a>(
                 task_active(active.get(id).copied(), thread.status) && background.is_none();
             let unread = unread.contains(id);
             let waiting = waiting.contains(id);
+            let attention = marks
+                .attention
+                .iter()
+                .find_map(|(session, attention)| (session == id).then_some((*attention).into()));
             let title = task_title(language, thread.name.as_deref(), thread.preview.as_deref());
             ThreadSummary {
                 host_id: String::new(),
@@ -888,6 +898,7 @@ fn thread_summaries<'a>(
                     .map(str::to_owned),
                 active,
                 waiting,
+                attention,
                 background: background == Some(true),
                 unread,
                 has_changes: thread.has_changes,
@@ -1040,6 +1051,7 @@ mod tests {
         )
         .0;
         let update = |revision, waiting: bool| TaskActivityState {
+            attention: Vec::new(),
             revision,
             display: TaskActivitySummary {
                 waiting: if waiting { 3 } else { 0 },
@@ -1099,6 +1111,7 @@ mod tests {
         let (agents, server, working) = (id("agents"), id("server"), id("working"));
         let mut state = snapshot_list(json!([{"id":agents}, {"id":server}, {"id":working}]));
         let _ = state.accept_task_activity(TaskActivityState {
+            attention: Vec::new(),
             revision: 1,
             display: TaskActivitySummary::default().display(),
             statuses: [&agents, &server, &working]

@@ -752,8 +752,8 @@ impl Agent for Codex {
                         next_cursor: page.next_cursor,
                     });
                 }
-                SessionListScope::Roots => (&["cli", "vscode", "appServer", "unknown"], None),
-                SessionListScope::WithSubagents => (
+                SessionListScope::Roots(_) => (&["cli", "vscode", "appServer", "unknown"], None),
+                SessionListScope::WithSubagents(_) => (
                     &[
                         "cli",
                         "vscode",
@@ -1425,9 +1425,9 @@ rl.on('line', line => {
         let agent = super::Codex::new(Ok(server));
         let _events = super::Agent::event_stream(&agent).unwrap();
         for (scope, expected) in [
-            (super::SessionListScope::Roots, vec!["task"]),
+            (super::SessionListScope::Roots(&[]), vec!["task"]),
             (
-                super::SessionListScope::WithSubagents,
+                super::SessionListScope::WithSubagents(&[]),
                 vec!["task", "helper"],
             ),
             (

@@ -43,6 +43,18 @@ async fn a_saved_openrouter_key_adds_flash_through_openrouter_to_the_catalog() {
                 .map(|model| (model.display_name, model.credential_route))
                 .collect::<Vec<_>>()
         };
+        assert!(
+            models().await.is_empty(),
+            "unconfigured routes are not offered"
+        );
+        local
+            .peer
+            .call(&KeyUpdate {
+                provider: KeyProvider::DeepSeek,
+                key: Some("deepseek-fixture".into()),
+            })
+            .await
+            .unwrap();
         assert_eq!(
             models().await,
             [(

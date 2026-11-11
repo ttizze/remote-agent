@@ -1,6 +1,16 @@
 //! Compact task facts shared by every connection, Live Activities and APNs.
 use super::*;
 
+/// Receipts and task facts stay atomic with one another. Disk waits never hold
+/// the connection/subscription mutex. Lock order is actor -> activity -> state.
+#[derive(Default)]
+pub(super) struct ActivityState {
+    pub(super) apns: Option<Arc<crate::apns::Apns>>,
+    pub(super) tasks: HashMap<SessionRef, Task>,
+    pub(super) reads: read_state::ReadState,
+    pub(super) task_revision: u64,
+}
+
 #[derive(Default)]
 pub(super) struct Task {
     pub(super) facts: Option<TaskState>,
@@ -53,7 +63,13 @@ pub(super) fn task_activity_state(
         .filter_map(|(session, task)| Some((session.clone(), task.facts?.background?)))
         .collect();
     background.sort();
+    let mut attention: Vec<_> = tasks
+        .iter()
+        .filter_map(|(session, task)| Some((session.clone(), task.facts?.attention()?)))
+        .collect();
+    attention.sort_by(|left, right| left.0.cmp(&right.0));
     agent_protocol::live_activity::TaskActivityState {
+        attention,
         revision,
         display: task_display(tasks, &unread),
         statuses: statuses.into_iter().collect(),
@@ -84,18 +100,36 @@ fn background_wait(tasks: &[agent_protocol::execution::BackgroundTask]) -> Optio
     (!tasks.is_empty()).then(|| agent_protocol::execution::background_holds_completion(tasks))
 }
 
+/// Whether a request awaiting its answer passes `kind`.
+fn awaits<K>(
+    requests: &std::collections::BTreeMap<K, std::sync::Arc<agent_protocol::requests::Request>>,
+    kind: impl Fn(&agent_protocol::requests::Request) -> bool,
+) -> bool {
+    requests.values().any(|request| {
+        request.delivery == agent_protocol::session::RequestDelivery::Awaiting && kind(request)
+    })
+}
+
+fn asks_permission(request: &agent_protocol::requests::Request) -> bool {
+    use agent_protocol::requests::RequestBody;
+    matches!(
+        request.body,
+        RequestBody::Approval { .. } | RequestBody::Permission { .. }
+    )
+}
+
 /// Record a conversation's latest execution facts. Unknown facts never replace
-/// a known phase that has not finished. Returns connections that failed delivery.
+/// a known phase that has not finished. Returns the resulting activity update.
 pub(super) fn record_task_facts(
-    state: &mut State,
+    state: &mut ActivityState,
     target: &SessionRef,
     timeline: &agent_protocol::session::Timeline,
     change: &SessionChange,
-) -> Vec<SessionId> {
+) -> Option<agent_protocol::live_activity::TaskActivityState> {
     // Provider events also contain subagents. Only conversations admitted by
     // the normal list (or created by the Host) have system task state.
     let Some(previous) = state.tasks.get(target) else {
-        return Vec::new();
+        return None;
     };
     let previous = previous.facts;
     let task = TaskState {
@@ -106,10 +140,8 @@ pub(super) fn record_task_facts(
         } else {
             previous.map(|task| task.status).unwrap_or_default()
         },
-        waiting: timeline
-            .requests
-            .values()
-            .any(|request| request.delivery == agent_protocol::session::RequestDelivery::Awaiting),
+        waiting: awaits(&timeline.requests, |_| true),
+        approval: awaits(&timeline.requests, asks_permission),
         background: background_wait(&timeline.background),
         latest: timeline
             .turns
@@ -141,20 +173,20 @@ pub(super) fn record_task_facts(
         owned.facts = Some(task);
         owned.facts_revision = revision;
         let activity = task_activity_state(state.task_revision, &state.tasks, state.reads.unread());
-        return publish_task_activity(state.apns.as_deref(), &state.sessions, &activity);
+        return Some(activity);
     }
-    Vec::new()
+    None
 }
 
 impl SessionRouter {
     pub(in crate::host_rpc) fn set_apns(&self, apns: Option<Arc<crate::apns::Apns>>) {
-        lock_state(&self.state).apns = apns;
+        lock_state(&self.activity).apns = apns;
     }
     pub(in crate::host_rpc) fn apns(&self) -> Option<Arc<crate::apns::Apns>> {
-        lock_state(&self.state).apns.clone()
+        lock_state(&self.activity).apns.clone()
     }
     pub(in crate::host_rpc) fn task_activity_revision(&self) -> u64 {
-        lock_state(&self.state).task_revision
+        lock_state(&self.activity).task_revision
     }
     /// Admit normal conversations from the provider's root list or Host creation.
     pub(in crate::host_rpc) fn task_activity(
@@ -178,9 +210,8 @@ impl SessionRouter {
                     let thread = owned.overlay(thread);
                     Some(TaskState {
                         status: thread.status,
-                        waiting: thread.requests.values().any(|request| {
-                            request.delivery == agent_protocol::session::RequestDelivery::Awaiting
-                        }),
+                        waiting: awaits(&thread.requests, |_| true),
+                        approval: awaits(&thread.requests, asks_permission),
                         background: background_wait(&thread.background),
                         latest: thread
                             .turns
@@ -190,11 +221,11 @@ impl SessionRouter {
                     })
                 };
                 drop(owned);
-                self.prune(&target, &actor);
+                prune(&self.state, &target, &actor);
                 Some((target, task))
             })
             .collect();
-        let mut state = lock_state(&self.state);
+        let mut state = lock_state(&self.activity);
         let before = state.task_revision;
         // Provider events received while loading the list take precedence, including completion.
         for (session, task) in tasks {
@@ -227,7 +258,11 @@ impl SessionRouter {
         }
         let result = task_activity_state(state.task_revision, &state.tasks, state.reads.unread());
         let failed = if state.task_revision != before {
-            publish_task_activity(state.apns.as_deref(), &state.sessions, &result)
+            publish_task_activity(
+                state.apns.as_deref(),
+                &lock_state(&self.state).sessions,
+                &result,
+            )
         } else {
             Vec::new()
         };
@@ -240,8 +275,9 @@ impl SessionRouter {
         connection: SessionId,
         params: &agent_protocol::live_activity::RegisterLiveActivity,
     ) -> Result<(), String> {
-        let state = lock_state(&self.state);
-        let principal = state
+        let state = lock_state(&self.activity);
+        let connections = lock_state(&self.state);
+        let principal = connections
             .sessions
             .get(&connection)
             .filter(|output| output.alive.load(Relaxed))

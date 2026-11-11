@@ -1,4 +1,4 @@
-//! The desktop's file chips and file menus, as the desktop client's file links and
+//! File chips and file menus on every NSH platform, as T3 Code's file links and
 //! fileContextMenu: Core decides a chip's glyph, accent and tooltip and the
 //! menus' items; the Host opens editors and file managers.
 use crate::l10n::tr;
@@ -6,14 +6,17 @@ use crate::{
     Connection,
     files::{Browser, Reference},
 };
+#[cfg(any(desktop, test))]
+use agent_core::presentation::files::file_tree_menu;
+#[cfg(desktop)]
+use agent_core::presentation::files::{FileTreeKey, file_tree_mention, file_tree_path};
 use agent_core::{
     presentation::{
         editors::preferred_editor,
         files::{
-            FileAction, FileMenuItem, FileMetadataCache, FilePrimaryAction, FileTreeKey,
-            append_file_mentions, desktop_file_chip_color, desktop_file_primary_action,
-            desktop_metadata_icon, file_reference_menu, file_reference_tooltip, file_tree_mention,
-            file_tree_menu, file_tree_path,
+            FileAction, FileMenuItem, FileMetadataCache, FilePrimaryAction, append_file_mentions,
+            desktop_file_chip_color, desktop_file_primary_action, desktop_metadata_icon,
+            file_reference_menu, file_reference_tooltip,
         },
         markdown::{
             MarkdownFileReference, MarkdownFileSurface, file_host_path, file_path_for_clipboard,
@@ -222,6 +225,7 @@ fn run_reference(connection: Connection, files: Browser, target: LinkTarget, act
 
 /// The menu of a tree row: open it here or in an editor of this PC, reveal
 /// it, and mention it in the chat.
+#[cfg(desktop)]
 pub(crate) fn tree_menu(connection: Connection, key: &FileTreeKey, path: &str) {
     let host = connection.host.get_untracked();
     let (cwd, editors, reveal) = connection.publication.with_untracked(|p| {
@@ -255,6 +259,7 @@ pub(crate) fn tree_menu(connection: Connection, key: &FileTreeKey, path: &str) {
 }
 
 /// The mentions of tree paths under `key`'s root, as dragging them writes.
+#[cfg(desktop)]
 pub(crate) fn tree_mentions(connection: Connection, key: &FileTreeKey, paths: &[String]) -> String {
     let cwd = connection
         .composer
@@ -398,7 +403,16 @@ mod tests {
         let chip = chips.chip(&file);
         assert_eq!(chip["tooltip"], "/repo/src/main.rs:4");
         assert_eq!(chip["folder"], false);
-        assert!(chip["icon"].as_str().unwrap().contains("<svg"));
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(chip["icon"].as_str().unwrap())
+            .unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.len() > 100);
+        assert_eq!(
+            crate::files::glyph("unknown-catalog-token"),
+            crate::files::glyph("file-tree-builtin-default"),
+        );
         let titles: Vec<_> = chip["menu"]
             .as_array()
             .unwrap()

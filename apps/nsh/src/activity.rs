@@ -146,6 +146,13 @@ pub(crate) fn details(
         })
     };
     let live = move || item.with(|item| item.as_ref().is_some_and(|item| item.live));
+    let expandable = computed(move || {
+        item.with(|item| {
+            item.as_ref().is_some_and(|item| {
+                item.source.data.deferred || !item.source.detail_blocks().is_empty()
+            })
+        })
+    });
     // A reused row shows another tool's icon: it is made anew for each kind.
     let icon = move || {
         view().child(each(
@@ -178,7 +185,7 @@ pub(crate) fn details(
                 .min_h(px(24.0))
                 .px(px(2.0))
                 .rounded(px(6.0))
-                .text_color(crate::conversation::look::MUTED)
+                .text_color(crate::conversation::look::muted())
                 .on_press(toggle)
                 .child(when(live, move || {
                     // As T3's `live-tool-shine`, over the label alone.
@@ -189,7 +196,7 @@ pub(crate) fn details(
                     move || {
                         line(
                             view()
-                                .text_color(crate::conversation::look::ICON)
+                                .text_color(crate::conversation::look::icon())
                                 .child(icon()),
                             text(summary)
                                 .flex_1()
@@ -199,7 +206,27 @@ pub(crate) fn details(
                                 .line_height(px(crate::conversation::look::LINE)),
                         )
                     },
-                )),
+                ))
+                // T3 Code's chevron, held in place on a row that has nothing to open.
+                .child(
+                    view()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .text_color(crate::conversation::look::icon())
+                        .opacity(move || if expandable.get() { 0.7_f32 } else { 0.0 })
+                        .child(dynamic(move || {
+                            use crate::ui::Icon;
+                            let chevron = if open() {
+                                Icon::CHEVRON_DOWN
+                            } else {
+                                Icon::CHEVRON_RIGHT
+                            };
+                            crate::ui::icon(chevron, 12.0).into_element()
+                        })),
+                ),
         )
         .child(when(open, move || {
             view()

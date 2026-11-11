@@ -43,6 +43,7 @@ struct TaskRow: Decodable, Identifiable {
 
     struct Indicators: Decodable {
         let activity: String?
+        let attention: String?
         let changes: Bool
     }
 
@@ -217,7 +218,14 @@ private struct TaskStatus: View {
 
     var body: some View {
         Group {
-            switch indicators?.activity {
+            // T3 Code's badge says what a waiting chat waits for.
+            switch indicators?.attention {
+            case "approval": Image(systemName: "shield").foregroundStyle(.yellow)
+            case "input": Image(systemName: "questionmark.bubble").foregroundStyle(.blue)
+            case "failed": Image(systemName: "exclamationmark.circle").foregroundStyle(.red)
+            default: EmptyView()
+            }
+            switch indicators?.attention == nil ? indicators?.activity : nil {
             case "waiting": Image(systemName: "person.crop.circle.badge.questionmark").foregroundStyle(.orange)
             case "running": ProgressView().controlSize(.small)
             case "unread": Image(systemName: "circle.fill").resizable().frame(width: 8, height: 8)

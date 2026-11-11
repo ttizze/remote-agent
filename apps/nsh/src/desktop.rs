@@ -55,6 +55,9 @@ pub fn run() -> std::process::ExitCode {
         // Closing hides the window; the Dock reopens it, and Quit stops the app.
         #[cfg(target_os = "macos")]
         keep_alive_on_close: true,
+        // The app is drawn dark: the frame and menus Windows draws follow it.
+        #[cfg(windows)]
+        appearance: platform::Appearance::Dark,
         menu_labels: menu_labels(),
         ..Default::default()
     };

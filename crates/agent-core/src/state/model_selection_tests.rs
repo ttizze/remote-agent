@@ -33,9 +33,10 @@ fn restart(snapshot: &Snapshot) -> Snapshot {
         fn load(&self, key: PreferenceKey) -> Result<Vec<u8>, crate::client::AgentError> {
             Ok(match key {
                 PreferenceKey::Models => self.models.clone(),
-                PreferenceKey::Editor | PreferenceKey::Language | PreferenceKey::Composer => {
-                    Vec::new()
-                }
+                PreferenceKey::Editor
+                | PreferenceKey::Language
+                | PreferenceKey::Composer
+                | PreferenceKey::Contrast => Vec::new(),
             })
         }
         fn save(&self, _: PreferenceKey, _: Vec<u8>) -> Result<(), crate::client::AgentError> {

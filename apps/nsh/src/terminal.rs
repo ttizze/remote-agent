@@ -12,6 +12,8 @@ pub(crate) fn screen(surface: PanelSurface, host: String) -> impl IntoElement {
     let workspace = use_context::<Workbench>().unwrap();
     let host = stored(host);
     let cwd = stored(surface.path.unwrap_or_default());
+    #[cfg(target_os = "macos")]
+    let id = surface.id;
     let handle = stored(workspace.terminal_handle(surface.id));
     // The view's owner releases its stored values before its cleanup runs, so
     // what the cleanup reads lives outside them.
@@ -109,8 +111,8 @@ pub(crate) fn screen(surface: PanelSurface, host: String) -> impl IntoElement {
                 .flex_shrink_0()
                 .px_3()
                 .border_b_1()
-                .border_b_color(colors::BORDER)
-                .text_color(colors::MUTED)
+                .border_b_color(colors::border())
+                .text_color(colors::muted())
                 .child(ui::icon(Icon::TERMINAL, 14.0))
                 .child(
                     text(move || cwd.get())
@@ -210,6 +212,30 @@ pub(crate) fn screen(surface: PanelSurface, host: String) -> impl IntoElement {
                             focus.set(now);
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    Report::Quote(text) => {
+                        let Some(scope) = connection
+                            .state
+                            .with_untracked(|state| state.panels.scope(id))
+                        else {
+                            return;
+                        };
+                        let visible = workspace.scope.get_untracked() == scope;
+                        connection.client.with(|client| {
+                            client.dispatch(
+                                &scope.host,
+                                None,
+                                Intent::QuoteSelection {
+                                    storage_scope: scope.storage,
+                                    thread_id: scope.draft,
+                                    text,
+                                },
+                            )
+                        });
+                        if visible {
+                            after_answer(move || connection.composer_ref.focus());
+                        }
+                    }
                 }
             },
         ))
@@ -222,6 +248,8 @@ pub(crate) enum Report {
     Ack(u64),
     /// The grid took or gave up the keyboard.
     Focus(bool),
+    #[cfg(target_os = "macos")]
+    Quote(String),
 }
 
 /// Whether a terminal holds the keyboard, for shortcuts that T3 Code binds
@@ -258,46 +286,62 @@ fn grid(
 ) -> impl IntoElement {
     use agent_core::presentation::terminals::terminal_grid;
     use serde_json::json;
-    native("bex.terminal")
+    let grid = native("bex.terminal")
         .prop("input", move || json!(input()))
-        .prop("output", move || json!(output()))
-        .on_native_event(move |event: &NativeEvent| {
-            let data = &event.data;
-            match &*event.name {
-                "resize" => {
-                    if let Some(size) = data["cols"]
-                        .as_i64()
-                        .and_then(|cols| i32::try_from(cols).ok())
-                        .zip(
-                            data["rows"]
-                                .as_i64()
-                                .and_then(|rows| i32::try_from(rows).ok()),
-                        )
-                        .and_then(|(cols, rows)| terminal_grid(cols, rows))
-                    {
-                        report(Report::Resize(size));
-                    }
-                }
-                "input" => {
-                    if let Ok(bytes) = serde_json::from_value::<Vec<u8>>(data.clone()) {
-                        report(Report::Input(bytes));
-                    }
-                }
-                "ack" => {
-                    if let Some(sequence) = data.as_u64() {
-                        report(Report::Ack(sequence));
-                    }
-                }
-                "focus" => {
-                    if let Some(focused) = data.as_bool() {
-                        report(Report::Focus(focused));
-                    }
-                }
-                _ => {}
-            }
+        .prop("output", move || json!(output()));
+    #[cfg(target_os = "macos")]
+    let grid = grid.prop("menu", move || {
+        json!({
+            "quote": tr("チャットに追加"),
+            "copy": tr("コピー"),
+            "paste": tr("貼り付け"),
+            "selectAll": tr("すべて選択"),
+            "bottom": tr("最新の出力に移動"),
         })
-        .flex_1()
-        .min_h_0()
+    });
+    grid.on_native_event(move |event: &NativeEvent| {
+        let data = &event.data;
+        match &*event.name {
+            "resize" => {
+                if let Some(size) = data["cols"]
+                    .as_i64()
+                    .and_then(|cols| i32::try_from(cols).ok())
+                    .zip(
+                        data["rows"]
+                            .as_i64()
+                            .and_then(|rows| i32::try_from(rows).ok()),
+                    )
+                    .and_then(|(cols, rows)| terminal_grid(cols, rows))
+                {
+                    report(Report::Resize(size));
+                }
+            }
+            "input" => {
+                if let Ok(bytes) = serde_json::from_value::<Vec<u8>>(data.clone()) {
+                    report(Report::Input(bytes));
+                }
+            }
+            "ack" => {
+                if let Some(sequence) = data.as_u64() {
+                    report(Report::Ack(sequence));
+                }
+            }
+            "focus" => {
+                if let Some(focused) = data.as_bool() {
+                    report(Report::Focus(focused));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            "quote" => {
+                if let Some(text) = data.as_str().filter(|text| !text.is_empty()) {
+                    report(Report::Quote(text.to_owned()));
+                }
+            }
+            _ => {}
+        }
+    })
+    .flex_1()
+    .min_h_0()
 }
 
 /// The terminal's grid elsewhere: the screen NSH draws from the same bytes.

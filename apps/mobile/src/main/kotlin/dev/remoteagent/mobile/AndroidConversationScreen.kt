@@ -216,12 +216,19 @@ private fun ConversationContent(
                 }
             }
         is ConversationRowContent.Error -> TurnErrorCard(content.error)
-        is ConversationRowContent.InProgress ->
-            Button(
-                onClick = { if (threadId != null) perform(Intent.Interrupt(Interrupt(threadId, content.turnId))) {} }
-            ) {
-                Text(language.text("停止"))
-            }
+        is ConversationRowContent.InProgress -> TurnStopButton(threadId, content.turnId, perform)
+    }
+}
+
+@Composable
+private fun TurnStopButton(
+    threadId: dev.remoteagent.core.SessionRef?,
+    turnId: dev.remoteagent.core.TurnId,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+) {
+    val language = LocalUiLanguage.current
+    Button(onClick = { if (threadId != null) perform(Intent.Interrupt(Interrupt(threadId, turnId))) {} }) {
+        Text(language.text("停止"))
     }
 }
 

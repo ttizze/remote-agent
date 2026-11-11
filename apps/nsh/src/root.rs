@@ -4,7 +4,12 @@ use nsh_core::{
     element::{AnyValue, PropError, PropSpec, TsTypes},
     prelude::*,
 };
-use nsh_engine::Root;
+#[cfg(target_os = "ios")]
+use nsh_platform_ios::Root;
+#[cfg(target_os = "macos")]
+use nsh_platform_macos::Root;
+#[cfg(windows)]
+use nsh_platform_windows::Root;
 use std::sync::Arc;
 
 type Actions = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
@@ -56,8 +61,7 @@ impl Component for ViewRoot {
     type Event = NoEvent;
     fn view(props: ViewProps, _: Scope<NoEvent>) -> impl IntoElement {
         if let Some(actions) = props.actions {
-            let send: Box<dyn Fn(serde_json::Value)> = Box::new(move |event| actions(event));
-            provide_context(crate::native::ExternalActions(stored(send)));
+            provide_context(crate::native::ExternalActions(stored(actions)));
         }
         crate::app_view(
             props.application.expect("native root has an application").0,

@@ -16,11 +16,6 @@ extension ConversationModel {
             download: { [self] path in
                 return try await download(path)
             },
-            visualization: { [self] path in
-                let result = try await outcome(for: .loadVisualization(LoadVisualization(path: path, cwd: cwd)))
-                guard case let .visualization(html) = result else { throw URLError(.badServerResponse) }
-                return html
-            },
             resolve: { [self, home = hostHomeDirectory] source in
                 try await resolveConversationFile(source, cwd: cwd, home: home)
             },

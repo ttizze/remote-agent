@@ -201,6 +201,20 @@ pub struct ModelSpeedChoice {
     pub description: Option<String>,
     pub selected: bool,
 }
+
+/// Human-readable reasoning levels; unfamiliar provider values stay verbatim.
+pub fn reasoning_effort_label(language: UiLanguage, effort: &str) -> String {
+    let source = match effort {
+        "none" => "なし",
+        "minimal" => "最小",
+        "low" => "低",
+        "medium" => "中",
+        "high" => "高",
+        "xhigh" => "最高",
+        _ => return effort.into(),
+    };
+    language.text(source).into()
+}
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     pub fn models_loading(&self, provider: Option<ProviderKind>) -> bool {
@@ -353,6 +367,22 @@ fn quick_controls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_levels_read_as_labels_and_unknown_provider_values_stay_verbatim() {
+        for (id, japanese, english) in [
+            ("none", "なし", "None"),
+            ("minimal", "最小", "Minimum"),
+            ("low", "低", "Low"),
+            ("medium", "中", "Medium"),
+            ("high", "高", "High"),
+            ("xhigh", "最高", "Highest"),
+            ("provider-level", "provider-level", "provider-level"),
+        ] {
+            assert_eq!(reasoning_effort_label(UiLanguage::Japanese, id), japanese);
+            assert_eq!(reasoning_effort_label(UiLanguage::English, id), english);
+        }
+    }
     use crate::state::Draft;
     use std::sync::Arc;
 

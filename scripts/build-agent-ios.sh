@@ -3,10 +3,11 @@
 set -euo pipefail
 cd -P "$(dirname "$0")/.."
 case "${1:-simulator}" in
-    simulator) rust_target=aarch64-apple-ios-sim; sdk=iphonesimulator; swift_target=arm64-apple-ios26.0-simulator ;;
-    device) rust_target=aarch64-apple-ios; sdk=iphoneos; swift_target=arm64-apple-ios26.0 ;;
+    simulator) rust_target=aarch64-apple-ios-sim; sdk=iphonesimulator; swift_target=arm64-apple-ios26.0-simulator; native_platform=ios-simulator ;;
+    device) rust_target=aarch64-apple-ios; sdk=iphoneos; swift_target=arm64-apple-ios26.0; native_platform=ios ;;
     *) echo "usage: $0 [simulator|device]" >&2; exit 2 ;;
 esac
+bash apps/nsh/build-native.sh "$native_platform" release
 target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
 CC=/usr/bin/clang CXX=/usr/bin/clang++ \
 CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=/usr/bin/clang \

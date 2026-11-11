@@ -121,7 +121,7 @@ pub(crate) fn section() -> View {
                         .child(
                             text(tr("このPCへアクセスできる端末を管理します。"))
                                 .text_size(px(13.0))
-                                .text_color(colors::MUTED),
+                                .text_color(colors::muted()),
                         ),
                 )
                 .child(
@@ -133,7 +133,7 @@ pub(crate) fn section() -> View {
             view()
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(colors::BORDER)
+                .border_color(colors::border())
                 .bg(colors::SURFACE)
                 .child(when(
                     move || devices.with(|devices| devices.as_ref().is_none_or(Vec::is_empty)),
@@ -148,7 +148,7 @@ pub(crate) fn section() -> View {
                         .px_5()
                         .py_4()
                         .text_size(px(13.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                     },
                 ))
                 .child(each(
@@ -176,7 +176,7 @@ pub(crate) fn section() -> View {
                         )
                         .style_when(
                             move || index.get() > 0,
-                            |s| s.border_t_1().border_t_color(colors::BORDER),
+                            |s| s.border_t_1().border_t_color(colors::border()),
                         )
                     },
                 )),
@@ -193,7 +193,7 @@ fn invitation(shown: Signal<Option<Shown>>) -> View {
         .p_5()
         .rounded(px(12.0))
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::border())
         .child(
             svg(move || {
                 shown.with(|value| {
@@ -216,7 +216,7 @@ fn invitation(shown: Signal<Option<Shown>>) -> View {
                 .child(
                     text(tr("1回限りの招待です。QRを読み取るか、招待をコピーして相手の端末に貼り付けてください。"))
                         .text_size(px(13.0))
-                        .text_color(colors::MUTED),
+                        .text_color(colors::muted()),
                 )
                 .child(view().flex_row().child(ui::text_button(tr("招待をコピー"), move || {
                     set_clipboard(shown.with_untracked(|value| {

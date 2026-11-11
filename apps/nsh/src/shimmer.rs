@@ -104,6 +104,17 @@ fn centers(label: &str, size: f32) -> (Vec<f32>, f32) {
     (centers, x)
 }
 
+/// `from` with `opacity` of `to` over it.
+fn blend(from: Rgba, to: Rgba, opacity: f32) -> Rgba {
+    let mix = |a: f32, b: f32| a + (b - a) * opacity;
+    Rgba {
+        r: mix(from.r, to.r),
+        g: mix(from.g, to.g),
+        b: mix(from.b, to.b),
+        a: 1.0,
+    }
+}
+
 /// `label` on one line of T3 Code's work log after `icon`, swept by `sweep`:
 /// the muted label and icon take the foreground under the band.
 pub(crate) fn line<I: IntoElement>(
@@ -143,9 +154,13 @@ pub(crate) fn line<I: IntoElement>(
     let slice = BAND / SLICES as f32;
     let spans = (0..SLICES + 2).fold(text(""), |line, part| {
         let color = match part {
-            0 => look::MUTED,
-            part if part == SLICES + 1 => look::MUTED,
-            part => look::MUTED.blend(look::FOREGROUND, sweep.opacity((part as f32 - 0.5) * slice)),
+            0 => look::muted(),
+            part if part == SLICES + 1 => look::muted(),
+            part => blend(
+                look::muted(),
+                look::foreground(),
+                sweep.opacity((part as f32 - 0.5) * slice),
+            ),
         };
         line.child(
             text(move || SharedString::from(split.with(|split| split[part].clone())))
@@ -168,9 +183,10 @@ pub(crate) fn line<I: IntoElement>(
                 // T3 Code's `live-tool-shine` sweeps the label alone; its
                 // focus overlay takes the icon too.
                 .text_color(move || match sweep {
-                    Sweep::Shine => look::ICON,
-                    Sweep::Focus => look::ICON.blend(
-                        look::FOREGROUND,
+                    Sweep::Shine => look::icon(),
+                    Sweep::Focus => blend(
+                        look::icon(),
+                        look::foreground(),
                         sweep.opacity(look::ICON_BOX / 2.0 - left.get()),
                     ),
                 })
@@ -248,7 +264,10 @@ mod tests {
 
     #[test]
     fn blending_runs_from_the_muted_color_to_the_foreground() {
-        assert_eq!(look::MUTED.blend(look::FOREGROUND, 0.0), look::MUTED);
-        assert_eq!(look::MUTED.blend(look::FOREGROUND, 1.0), look::FOREGROUND);
+        assert_eq!(blend(look::muted(), look::foreground(), 0.0), look::muted());
+        assert_eq!(
+            blend(look::muted(), look::foreground(), 1.0),
+            look::foreground()
+        );
     }
 }

@@ -122,7 +122,7 @@ pub(crate) fn overlay(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                 .max_h(px(960.0))
                 .rounded(px(16.0))
                 .border_1()
-                .border_color(colors::BORDER)
+                .border_color(colors::border())
                 .overflow_hidden()
                 .bg(colors::BACKGROUND)
                 .child(navigation(page))
@@ -175,12 +175,12 @@ fn navigation(page: Signal<Page>) -> View {
         .gap_1()
         .bg(colors::SIDEBAR)
         .border_r_1()
-        .border_r_color(colors::BORDER)
+        .border_r_color(colors::border())
         .child(ui::search(query, tr("設定を検索")).h(px(32.0)).mb_2())
         .child(
             text(tr("設定"))
                 .text_size(px(12.0))
-                .text_color(colors::MUTED)
+                .text_color(colors::muted())
                 .px_2()
                 .py_1(),
         )
@@ -196,7 +196,7 @@ fn navigation(page: Signal<Page>) -> View {
                     .h(px(32.0))
                     .px_2()
                     .rounded(px(ui::RADIUS))
-                    .text_color(colors::FOREGROUND)
+                    .text_color(colors::foreground())
                     .hover(|s| s.bg(colors::ROW_HOVER))
                     .style_when(move || page.get() == item, |s| s.bg(colors::SELECTED))
                     .on_press(move || page.set(item))
@@ -216,13 +216,13 @@ fn header(page: Signal<Page>, close: impl Fn() + 'static) -> View {
         .flex_shrink_0()
         .px_5()
         .border_b_1()
-        .border_b_color(colors::BORDER)
+        .border_b_color(colors::border())
         .child(
             text(tr("設定"))
                 .text_size(px(14.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
-        .child(text("/").text_size(px(14.0)).text_color(colors::MUTED))
+        .child(text("/").text_size(px(14.0)).text_color(colors::muted()))
         .child(
             text(move || page.get().title())
                 .flex_1()
@@ -242,7 +242,7 @@ fn heading(page: Signal<Page>) -> View {
         .child(
             text(move || page.get().description())
                 .text_size(px(14.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
 }
 
@@ -263,6 +263,11 @@ fn general(connection: Connection) -> View {
             tr("表示言語"),
             || tr("アプリで使用する言語を選択します。").to_owned(),
             language(connection),
+        ),
+        ui::setting(
+            tr("コントラスト"),
+            || tr("インターフェース全体の色と境界線のコントラストを調整します。").to_owned(),
+            contrast(connection),
         ),
         ui::setting(
             tr("送信ショートカット"),
@@ -466,6 +471,59 @@ fn update_channel(connection: Connection) -> View {
     )
 }
 
+/// T3 Code's Contrast slider. Applying it makes the whole window again, so
+/// it applies once the drag ends.
+fn contrast(connection: Connection) -> impl IntoElement {
+    use agent_core::presentation::appearance::{
+        CONTRAST_STEP, DEFAULT_CONTRAST, MAX_CONTRAST, MIN_CONTRAST,
+    };
+    use nsh_base::SliderValue;
+    let shown = signal(colors::contrast());
+    let single = |value: &SliderValue| match value {
+        SliderValue::Single(value) => *value as u32,
+        SliderValue::Range(_, end) => *end as u32,
+    };
+    let apply = move |contrast: u32| {
+        connection
+            .application
+            .with(|app| app.select_contrast(contrast));
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .child(when(
+            || colors::contrast() != DEFAULT_CONTRAST,
+            move || {
+                ui::icon_button(
+                    Icon::REFRESH,
+                    tr("コントラストをリセット"),
+                    move || apply(DEFAULT_CONTRAST),
+                )
+            },
+        ))
+        .child(
+            text(move || format!("{}%", shown.get()))
+                .text_size(px(12.0))
+                .text_color(colors::muted()),
+        )
+        .child(
+            nsh_base::slider()
+                .w(px(160.0))
+                .min(f64::from(MIN_CONTRAST))
+                .max(f64::from(MAX_CONTRAST))
+                .step(f64::from(CONTRAST_STEP))
+                .default_value(SliderValue::Single(f64::from(colors::contrast())))
+                .accessibility_label(Some(SharedString::from(tr("コントラスト"))))
+                .track_style(|s| s.h(px(20.0)).justify_center())
+                .indicator_style(|s| s.h(px(4.0)).rounded_full().bg(colors::border()))
+                .range_style(|s| s.rounded_full().bg(colors::ACCENT))
+                .thumb_style(|s| s.w(px(14.0)).h(px(14.0)).rounded_full().bg(rgb(0xffffff)))
+                .on_change(move |value: &SliderValue| shown.set(single(value)))
+                .on_change_end(move |value: &SliderValue| apply(single(value))),
+        )
+}
+
 /// The UI language. Choosing one makes the whole window again in it.
 pub(crate) fn language(connection: Connection) -> ui::Control {
     const LANGUAGES: [(UiLanguage, &str); 2] = [
@@ -543,7 +601,7 @@ fn providers(connection: Connection) -> View {
                         .flex_shrink_0()
                         .rounded(px(12.0))
                         .border_1()
-                        .border_color(colors::BORDER)
+                        .border_color(colors::border())
                         .bg(colors::SURFACE)
                         .overflow_hidden()
                         .child(each(
@@ -561,7 +619,7 @@ fn providers(connection: Connection) -> View {
         .child(
             text(environment::providers_note())
                 .text_size(px(12.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
 }
 
@@ -578,7 +636,7 @@ fn provider_row(
         .gap_2()
         .p_3()
         .border_b_1()
-        .border_b_color(colors::BORDER)
+        .border_b_color(colors::border())
         .style_when(
             move || selected.get() == provider,
             |s| s.bg(colors::SELECTED),
@@ -619,7 +677,7 @@ fn provider_row(
                                 })
                             })
                             .text_size(px(12.0))
-                            .text_color(colors::MUTED),
+                            .text_color(colors::muted()),
                         ),
                 ),
         )

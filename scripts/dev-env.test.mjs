@@ -23,7 +23,7 @@ function fixture(t, builder = '') {
   if (builder) git('config', 'bex.remoteBuilder', builder);
   for (const path of [
     'flake.nix', 'flake.lock', 'tools/github-release-binary.nix', 'tools/cccc/package.nix',
-    'tools/cargo/package.nix', 'tools/node-runtime/package.nix',
+    'tools/cargo/package.nix', 'tools/cargo/shared-unit-locks.patch', 'tools/node-runtime/package.nix',
   ]) put(root, path, '');
   copyFileSync('justfile', join(root, 'justfile'));
   put(root, 'scripts/remote-run.sh', '#!/usr/bin/env bash\nprintf "%s\\n" "$@"\nexit "${DEV_ENV_REMOTE_STATUS:-0}"\n');

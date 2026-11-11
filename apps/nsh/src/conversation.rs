@@ -3,8 +3,9 @@ use crate::ui::Enabled;
 use crate::{Connection, shared::Shared};
 use agent_core::{
     presentation::conversation::{
-        ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedConversation,
-        RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding, turn_rows,
+        ActivityPresentation, ConversationRow, ConversationRowContent, ItemSource, LANE_WIDTH,
+        RenderedConversation, RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress,
+        lane_padding, turn_rows,
     },
     state::{Intent, operations as op},
 };
@@ -12,35 +13,78 @@ use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-/// T3 Code's timeline colors, in its light and dark themes.
+#[cfg(any(all(target_os = "macos", debug_assertions), test))]
+pub(crate) mod native;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Renderer {
+    Hybrid,
+    Native,
+    Nsh,
+    Standard,
+}
+
+impl Renderer {
+    fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("native") => Self::Native,
+            Some("nsh") => Self::Nsh,
+            Some("standard") => Self::Standard,
+            _ => Self::Hybrid,
+        }
+    }
+}
+
+pub(crate) fn renderer() -> Renderer {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    return Renderer::named(std::env::var("BEX_CONVERSATION_RENDERER").ok().as_deref());
+    #[cfg(not(all(target_os = "macos", debug_assertions)))]
+    Renderer::named(None)
+}
+
+/// T3 Code's timeline as its dark theme draws it.
 pub(crate) mod look {
-    use crate::ui::Tone;
-    use nsh_core::element::rgb;
+    use crate::ui::colors;
+    use nsh_core::element::{Rgba, rgb};
 
     /// `--muted-foreground` and `--secondary-label`: work rows, headers, times.
-    pub(crate) const MUTED: Tone = Tone::new(rgb(0x71717a), rgb(0x888888));
+    pub(crate) fn muted() -> Rgba {
+        colors::text(0xaaaaaa)
+    }
     /// `--icon-muted`: a tool's icon.
-    pub(crate) const ICON: Tone = Tone::new(rgb(0xa1a1aa), rgb(0x6a6a6a));
+    pub(crate) fn icon() -> Rgba {
+        colors::text(0x7e7e7e)
+    }
     /// `--foreground`: the shimmer's band, a hovered header.
-    pub(crate) const FOREGROUND: Tone = Tone::new(rgb(0x18181b), rgb(0xe6e6e6));
+    pub(crate) fn foreground() -> Rgba {
+        colors::text(0xe6e6e6)
+    }
+    /// `max-h-44`: a long message's folded height.
+    pub(crate) const FOLDED_MESSAGE: f32 = 176.0;
     /// `bg-message`: the user's bubble.
-    pub(crate) const BUBBLE: Tone = Tone::new(rgb(0xebebed), rgb(0x141414));
+    pub(crate) const BUBBLE: Rgba = rgb(0x141414);
     /// `border-border/60`: the rule under a turn's header.
-    pub(crate) const RULE: Tone = Tone::new(rgb(0xeeeef0), rgb(0x161616));
+    pub(crate) fn rule() -> Rgba {
+        colors::line(0x161616)
+    }
     /// `text-foreground/80`: an error's message.
-    pub(crate) const MESSAGE: Tone = Tone::new(rgb(0x454548), rgb(0xc4c4c4));
+    pub(crate) fn message() -> Rgba {
+        colors::text(0xc4c4c4)
+    }
     /// `bg-input/32`: a code block.
-    pub(crate) const CODE: Tone = Tone::new(rgb(0xefeff1), rgb(0x111111));
+    pub(crate) const CODE: Rgba = rgb(0x111111);
     /// `--destructive`.
-    pub(crate) const DESTRUCTIVE: Tone = Tone::new(rgb(0xfb2c36), rgb(0xfb414a));
+    pub(crate) const DESTRUCTIVE: Rgba = rgb(0xfb414a);
     /// `border-border/80` around a card (a proposed plan) and an avatar.
-    pub(crate) const CARD_BORDER: Tone = Tone::new(rgb(0xe9e9ec), rgb(0x1b1b1b));
+    pub(crate) fn card_border() -> Rgba {
+        colors::line(0x1b1b1b)
+    }
     /// `--secondary` and an outlined control's fill: a badge, a menu button.
-    pub(crate) const CONTROL: Tone = Tone::new(rgb(0xfafafa), rgb(0x161616));
+    pub(crate) const CONTROL: Rgba = rgb(0x161616);
     /// A subagent's avatar.
-    pub(crate) const AVATAR: Tone = Tone::new(rgb(0xf4f4f5), rgb(0x121212));
+    pub(crate) const AVATAR: Rgba = rgb(0x121212);
     /// `--success`: a subagent that finished.
-    pub(crate) const SUCCESS: Tone = Tone::new(rgb(0x00bc7d), rgb(0x01b276));
+    pub(crate) const SUCCESS: Rgba = rgb(0x01b276);
     /// `text-sm leading-relaxed`, in rows that are not Markdown.
     pub(crate) const TEXT: f32 = 14.0;
     pub(crate) const LINE: f32 = 22.75;
@@ -110,6 +154,7 @@ impl Shape {
 struct Row {
     id: String,
     body: SharedString,
+    streaming: bool,
     kind: Kind,
     shape: Shape,
     /// A group's work, which its icon names (`Icon::work`).
@@ -149,6 +194,7 @@ impl Row {
         Self {
             id,
             body: body.into(),
+            streaming: false,
             kind,
             shape,
             group_kind: String::new(),
@@ -257,6 +303,15 @@ fn gap(kind: Kind, shape: Shape, actions: bool, next: Option<Shape>) -> f32 {
 /// A row of a turn on T3 Code's timeline.
 fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
     use crate::activity::{Item, Status};
+    let streaming = match &row {
+        TurnRow::Row(ConversationRow {
+            content: ConversationRowContent::Response { item, .. },
+            ..
+        })
+        | TurnRow::Commentary(item) => matches!(&item.source, ItemSource::Native(native)
+            if native.status == agent_protocol::models::ItemStatus::Running),
+        _ => false,
+    };
     let activity_item =
         |row: &agent_core::presentation::conversation::ConversationRow, live, label| {
             let ConversationRowContent::Activity { item, turn_id } = &row.content else {
@@ -274,7 +329,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
         row.status = Some(status);
         row
     };
-    Some(match row {
+    let mut shown = match row {
         TurnRow::Row(row) => source_row(row)?,
         TurnRow::Fold { activity, open } => {
             let mut row = Row::new(
@@ -373,7 +428,10 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             Shape::Interrupted,
             tr("実行を中断しました"),
         ),
-    })
+    };
+    shown.streaming =
+        streaming && turn.source.status == agent_protocol::models::TurnStatus::Running;
+    Some(shown)
 }
 
 /// A row of the conversation's projection as it is.
@@ -484,7 +542,7 @@ fn notification_row(row: Memo<Option<Row>>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_2()
-        .text_color(colors::MUTED)
+        .text_color(colors::muted())
         .child(icon.map(|icon| ui::icon(icon, 14.0).into_element()))
         .child(
             text(move || {
@@ -515,9 +573,70 @@ pub(crate) struct Timeline {
     /// The composer's current height positions the latest-message button and
     /// starts the next conversation's scroll reservation.
     covered: Signal<f32>,
+    position: Stored<Option<agent_core::presentation::conversation::ScrollPosition>>,
 }
 
 impl Timeline {
+    fn set_activity(
+        self,
+        activity: ActivityPresentation,
+        opening: bool,
+    ) -> Option<op::LoadTurnItems> {
+        self.expanded.update(|all| {
+            if opening {
+                all.insert(activity.id.clone(), activity.status);
+            } else {
+                all.remove(&activity.id);
+            }
+        });
+        opening.then_some(activity.load_items).flatten()
+    }
+
+    fn toggle_group(self, id: String) {
+        self.groups.update(|all| {
+            if !all.remove(&id) {
+                all.insert(id);
+            }
+        });
+    }
+
+    /// The loaded messages' texts, each with its row's place in the list.
+    pub(crate) fn message_texts(self) -> Vec<(usize, String, String)> {
+        self.rows.with(|rows| {
+            rows.iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    matches!(row.kind, Kind::User | Kind::Response)
+                        && matches!(row.shape, Shape::Message | Shape::Commentary)
+                })
+                .map(|(index, row)| (index, row.id.to_string(), row.body.to_string()))
+                .collect()
+        })
+    }
+
+    /// Brings a row into view.
+    pub(crate) fn reveal(self, row: usize) {
+        self.following.set(false);
+        if renderer() == Renderer::Native {
+            self.list.command("reveal", serde_json::json!({"row": row}));
+            return;
+        }
+        reveal_row(self.list, row as u32);
+    }
+
+    pub(crate) async fn reveal_text(self, page_y: f32) {
+        if let Some(bounds) = self.list.measure().await {
+            let offset = self
+                .position
+                .with(|position| position.map_or(0.0, |position| position.offset));
+            self.following.set(false);
+            self.list.scroll_to_offset(
+                px((offset + page_y - bounds.page.y.0 - 40.0).max(0.0)),
+                false,
+            );
+        }
+    }
+
     pub(crate) fn new(following: Signal<bool>) -> Self {
         let connection = use_context::<Connection>().unwrap();
         let expanded = signal(HashMap::<String, String>::new());
@@ -548,6 +667,7 @@ impl Timeline {
             width: signal(0.0),
             inset: signal(0.0),
             covered: signal(0.0),
+            position: stored(None),
         }
     }
 
@@ -567,14 +687,21 @@ impl Timeline {
         (self.width.get() - 2.0 * lane_padding(window().width.0)).clamp(0.0, LANE_WIDTH)
     }
 
-    pub(crate) fn list(self) -> impl IntoElement {
-        list(self)
+    pub(crate) fn list(self) -> AnyElement {
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if renderer() == Renderer::Native {
+            return native::view(self).into_element();
+        }
+        list(self).into_element()
     }
 
     /// T3 Code's minimap at the leading edge of the conversation, beside its
     /// timeline and composer, on a canvas `canvas` points wide.
     pub(crate) fn minimap(self, canvas: impl Fn() -> f32 + Copy + 'static) -> impl IntoElement {
-        when(is_desktop, move || minimap(self, canvas))
+        when(
+            move || is_desktop() && renderer() != Renderer::Native,
+            move || minimap(self, canvas),
+        )
     }
 }
 
@@ -589,15 +716,18 @@ fn list(timeline: Timeline) -> impl IntoElement {
         width,
         inset,
         covered,
+        position,
     } = timeline;
     let surroundings = crate::rich_text::Surroundings::current();
     let connection = surroundings.connection;
     let saver = crate::plans::Saver::new();
     let expanded_items = signal(HashSet::<String>::new());
+    // Long messages the reader unfolded, as T3 Code's per-row Show full message.
+    let unfolded = signal(HashSet::<String>::new());
     // Where the list was last scrolled to, for Core's follow rule.
-    let scrolled = stored(None::<agent_core::presentation::conversation::ScrollPosition>);
-    // Further from the end than following reaches, as T3 Code offers the way
-    // back.
+    let scrolled = position;
+    let scroll_pending = stored(false);
+    // Far enough from the end to offer T3 Code's way back.
     let away_from_end = signal(false);
     let clock = signal(std::time::SystemTime::now());
     let padding = move || lane_padding(window().width.0);
@@ -651,8 +781,29 @@ fn list(timeline: Timeline) -> impl IntoElement {
         expanded.set(HashMap::new());
         groups.set(HashSet::new());
         expanded_items.set(HashSet::new());
+        unfolded.set(HashSet::new());
+        surroundings.find.reset_position();
         // A reservation held for another conversation's draft is not this one's.
         inset.set(covered.get_untracked());
+    });
+    // A conversation opening or changing rows goes to its end while it
+    // follows. A reader who scrolls back to the end is there already.
+    effect(move || {
+        target.get();
+        if column_width.get() > 0.0
+            && rows.with(|rows| !rows.is_empty())
+            && following.get_untracked()
+            && !scroll_pending.get()
+        {
+            scroll_pending.replace(true);
+            // Row keys must reach the list before its end can be targeted.
+            after_answer(move || {
+                scroll_pending.replace(false);
+                if following.get_untracked() {
+                    list.scroll_to_end(false);
+                }
+            });
+        }
     });
     // T3 Code's thread error banner over the timeline's top.
     let banner = computed(move || connection.context.with(|p| p.thread_error().is_some()));
@@ -779,6 +930,26 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             move || row.with(|r| r.as_ref().is_some_and(|r| r.kind == Kind::User));
                         let kind =
                             move || row.with(|r| r.as_ref().map_or(Kind::Response, |r| r.kind));
+                        let images = computed(move || row.with(|row| row.as_ref().map(|row| row.images.clone()).unwrap_or_default()));
+                        let sent_media = move || user() && images.with(|images| !images.is_empty());
+                        let collapsible = computed(move || {
+                            row.with(|r| {
+                                r.as_ref().is_some_and(|r| {
+                                    r.kind == Kind::User
+                                        && agent_core::presentation::conversation::should_collapse_user_message(&r.body)
+                                })
+                            })
+                        });
+                        // As T3 Code's, finding opens what it searches.
+                        let folded = move || {
+                            collapsible.get()
+                                && surroundings.find.highlighted().is_empty()
+                                && row.with(|r| {
+                                    r.as_ref().is_some_and(|r| {
+                                        !unfolded.with(|all| all.contains(r.id.as_str()))
+                                    })
+                                })
+                        };
                         let detail = computed(move || {
                             row.with(|r| r.as_ref().and_then(|r| r.detail.clone()))
                         });
@@ -818,6 +989,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                     matches!(row.shape, Shape::Message | Shape::Commentary)
                                         && row.status.is_none()
                                         && row.notification.is_none()
+                                        && (row.kind != Kind::User
+                                            || agent_core::presentation::conversation::shows_user_message_bubble(&row.body, !row.images.is_empty()))
                                 })
                             })
                         };
@@ -903,20 +1076,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             // where they were: at the end if
                                                             // they followed it.
                                                             let opening = !untracked(open);
-                                                            expanded.update(|all| {
-                                                                if opening {
-                                                                    all.insert(
-                                                                        activity.id.clone(),
-                                                                        activity.status,
-                                                                    );
-                                                                } else {
-                                                                    all.remove(&activity.id);
-                                                                }
-                                                            });
-                                                            if opening
-                                                                && let Some(load) =
-                                                                    activity.load_items
-                                                            {
+                                                            if let Some(load) = timeline.set_activity(activity, opening) {
                                                                 connection.dispatch(
                                                                     Intent::LoadTurnItems(load),
                                                                 );
@@ -944,11 +1104,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 }) else {
                                                     return;
                                                 };
-                                                groups.update(|groups| {
-                                                    if !groups.remove(&id) {
-                                                        groups.insert(id);
-                                                    }
-                                                });
+                                                timeline.toggle_group(id);
                                             })
                                         },
                                     ))
@@ -1010,6 +1166,16 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                         move || error.with(Option::is_some),
                                         move || error_row(error, time),
                                     ))
+                                    .child(when(
+                                        sent_media,
+                                        move || crate::media::sent_images(
+                                            connection,
+                                            surroundings.preview,
+                                            images,
+                                            message,
+                                            move || column_width.try_get().unwrap_or_default() * 0.8,
+                                        ),
+                                    ))
                                     .child(when(message, move || {
                                         // As T3 Code's: the user's message in its
                                         // bubble, other text in the lane, inset.
@@ -1019,37 +1185,72 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 s.max_w(relative(0.8))
                                                     .p(px(12.0))
                                                     .rounded(px(18.0))
+                                                    .style_when(
+                                                        sent_media,
+                                                        |s| s.rounded_tr(px(6.0)),
+                                                    )
                                                     .bg(look::BUBBLE)
                                             })
                                             .style_when(
                                                 move || !user(),
                                                 |s| s.w_full().px(px(4.0)).py(px(2.0)),
                                             )
-                                            .child(crate::rich_text::message(
-                                                surroundings,
-                                                move || label().map(|text| text.to_string()),
-                                                kind,
+                                            .child(
+                                                view()
+                                                    .style_when(folded, |s| {
+                                                        s.max_h(px(look::FOLDED_MESSAGE))
+                                                            .overflow_hidden()
+                                                    })
+                                                    .child(crate::rich_text::message(
+                                                        crate::rich_text::Surroundings {
+                                                            find_row: Some(computed(move || row.with(|row| row.as_ref().map(|row| row.id.to_string()).unwrap_or_default()))),
+                                                            ..surroundings
+                                                        },
+                                                        move || {
+                                                            label().map(|text| text.to_string())
+                                                        },
+                                                        kind,
+                                                        move || row.try_get().flatten().is_some_and(|row| row.streaming),
+                                                        move || {
+                                                            if user() {
+                                                                (column_width
+                                                                    .try_get()
+                                                                    .unwrap_or_default()
+                                                                    * 0.8
+                                                                    - 24.0)
+                                                                    .max(0.0)
+                                                            } else {
+                                                                (column_width
+                                                                    .try_get()
+                                                                    .unwrap_or_default()
+                                                                    - 8.0)
+                                                                    .max(0.0)
+                                                            }
+                                                        },
+                                                    ))
+                                                    .child(when(folded, message_fade)),
+                                            )
+                                            .child(when(
+                                                move || collapsible.get(),
                                                 move || {
-                                                    if user() {
-                                                        (column_width.try_get().unwrap_or_default()
-                                                            * 0.8
-                                                            - 24.0)
-                                                            .max(0.0)
-                                                    } else {
-                                                        (column_width.try_get().unwrap_or_default()
-                                                            - 8.0)
-                                                            .max(0.0)
-                                                    }
+                                                    fold_toggle(folded, move || {
+                                                        let Some(id) = row.with_untracked(|row| {
+                                                            row.as_ref().map(|row| row.id.to_string())
+                                                        }) else {
+                                                            return;
+                                                        };
+                                                        unfolded.update(|all| {
+                                                            if !all.remove(&id) {
+                                                                all.insert(id);
+                                                            }
+                                                        });
+                                                    })
                                                 },
                                             ))
                                     }))
                                     .child(each(
                                         move || {
-                                            row.with(|row| {
-                                                row.as_ref()
-                                                    .map(|row| row.images.clone())
-                                                    .unwrap_or_default()
-                                            })
+                                            if user() { Vec::new() } else { images.get() }
                                         },
                                         |source: &String| source.clone(),
                                         move |source, _| {
@@ -1057,11 +1258,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 connection,
                                                 surroundings.preview,
                                                 move || source.get(),
-                                                if untracked(user) {
-                                                    crate::media::ImageSize::Box(320.0, 240.0)
-                                                } else {
-                                                    crate::media::ImageSize::Natural
-                                                },
+                                                crate::media::ImageSize::Natural,
+                                                None,
                                             )
                                         },
                                     ))
@@ -1109,9 +1307,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             ))
                     },
                 )
-                // Open at the end in the first layout. Jumping after the first
-                // commit shows older rows at placeholder heights on the way.
-                .initial_scroll_at_end()
+                // Start with the latest row in the first layout. Creating an empty
+                // list and jumping after its first commit first mounts older cells
+                // at placeholder heights and measures content the reader never sees.
+                .initial_scroll_index(rows.with_untracked(|rows| rows.len().saturating_sub(1)))
                 .keys(move || {
                     rows.with(|rows| rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
                 })
@@ -1167,7 +1366,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                     .justify_center()
                     .rounded_full()
                     .glass_effect(nsh_core::GlassEffect::Regular)
-                    .text_color(look::FOREGROUND)
+                    .text_color(look::foreground())
                     .on_press(move || {
                         following.set(true);
                         list.scroll_to_end(true);
@@ -1328,12 +1527,12 @@ fn strip(
                         .bg(move || {
                             if marker.with(|m| m.in_view) {
                                 // `bg-foreground/90`.
-                                look::FOREGROUND.alpha(0.9)
+                                look::foreground().alpha(0.9)
                             } else if hovered() {
                                 // `bg-muted-foreground/75`.
-                                look::MUTED.alpha(0.75)
+                                look::muted().alpha(0.75)
                             } else {
-                                look::MUTED.alpha(0.35)
+                                look::muted().alpha(0.35)
                             }
                         }),
                 ),
@@ -1350,7 +1549,7 @@ fn strip(
                 .rounded(px(12.0))
                 .bg(colors::RAISED)
                 .border_1()
-                .border_color(colors::BORDER)
+                .border_color(colors::border())
                 .child(
                     text(user)
                         .text_size(px(look::TEXT))
@@ -1360,7 +1559,7 @@ fn strip(
                 .child(
                     text(answer.unwrap_or_default())
                         .text_size(px(look::TEXT))
-                        .text_color(look::MUTED)
+                        .text_color(look::muted())
                         .number_of_lines(3),
                 )
         }))
@@ -1385,7 +1584,7 @@ fn fold_row(
         .pb_2()
         .pr(px(2.0))
         .border_b_1()
-        .border_b_color(look::RULE)
+        .border_b_color(look::rule())
         .child(
             nsh_base::button()
                 .flex_row()
@@ -1393,8 +1592,8 @@ fn fold_row(
                 .gap_1()
                 .px_1()
                 .rounded(px(6.0))
-                .text_color(look::MUTED)
-                .hover(|s| s.text_color(look::FOREGROUND))
+                .text_color(look::muted())
+                .hover(|s| s.text_color(look::foreground()))
                 .on_press(toggle)
                 .child(
                     text(label)
@@ -1415,13 +1614,13 @@ fn working_row(label: impl Fn() -> String + 'static) -> View {
         .pt_1()
         .pb_2()
         .border_b_1()
-        .border_b_color(look::RULE)
+        .border_b_color(look::rule())
         .child(
             view().h(px(24.0)).px_1().flex_row().items_center().child(
                 text(label)
                     .text_size(px(look::TEXT))
                     .line_height(px(look::LINE))
-                    .text_color(look::MUTED),
+                    .text_color(look::muted()),
             ),
         )
 }
@@ -1460,7 +1659,7 @@ fn group_row(
         .rounded(px(6.0))
         .on_press(toggle)
         .child(crate::activity::line(
-            view().text_color(look::ICON).child(each(
+            view().text_color(look::icon()).child(each(
                 kind,
                 |kind: &String| kind.clone(),
                 |kind, _| {
@@ -1476,27 +1675,52 @@ fn group_row(
                 .number_of_lines(1)
                 .text_size(px(look::TEXT))
                 .line_height(px(look::LINE))
-                .text_color(look::MUTED),
+                .text_color(look::muted()),
         ))
         .child(hover_time(time))
 }
 
 /// A row's time, shown while the pointer is over the row (T3 Code's
 /// `TimelineRowTimestamp`).
-/// A row's controls: shown while the pointer is over the row, as T3 Code's,
-/// or always (`shown`); a touch screen, with no pointer to rest, always shows
-/// them (`pointer-coarse:opacity-100`).
-fn revealed(view: View, shown: bool) -> View {
-    view.opacity(if shown || !is_desktop() { 1.0 } else { 0.0 })
-        .group_hover(|s| s.opacity(1.0))
-}
-
 fn hover_time(time: impl Fn() -> String + 'static) -> View {
-    revealed(view(), false).child(text(time).text_size(px(12.0)).text_color(look::MUTED))
+    view()
+        .opacity(0.0)
+        .group_hover(|s| s.opacity(1.0))
+        .child(text(time).text_size(px(12.0)).text_color(look::muted()))
 }
 
-/// T3 Code's divider for an interrupted run: its mark and label in the
-/// destructive color between rules.
+/// The foot of a folded message, faded into its bubble as T3 Code's mask.
+fn message_fade() -> View {
+    view()
+        .absolute()
+        .left(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
+        .h(px(28.0))
+        .pointer_events(PointerEvents::None)
+        .bg_linear_to_b()
+        .gradient_to(look::BUBBLE)
+}
+
+/// T3 Code's Show full message and Show less under a long message.
+fn fold_toggle(folded: impl Fn() -> bool + Copy + 'static, toggle: impl Fn() + 'static) -> View {
+    let title = move || {
+        if folded() {
+            tr("全文を表示")
+        } else {
+            tr("折りたたむ")
+        }
+    };
+    view().mt(px(6.0)).flex_row().justify_end().child(
+        crate::ui::bare_button(move || SharedString::from(title()), toggle)
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .text_color(look::muted())
+            .child(text(title).text_size(px(12.0))),
+    )
+}
+
 /// A proposed plan, as T3 Code's plan card: the Plan badge and its title over
 /// its Markdown, its actions behind the menu at the end.
 fn plan_card(
@@ -1521,7 +1745,7 @@ fn plan_card(
             .w_full()
             .rounded(px(24.0))
             .border_1()
-            .border_color(look::CARD_BORDER)
+            .border_color(look::card_border())
             .bg(colors::SURFACE)
             .p(px(20.0))
             .child(
@@ -1544,20 +1768,20 @@ fn plan_card(
                                     .justify_center()
                                     .rounded(px(4.0))
                                     .border_1()
-                                    .border_color(look::CARD_BORDER)
+                                    .border_color(look::card_border())
                                     .bg(look::CONTROL)
                                     .child(
                                         text(tr("計画"))
                                             .text_size(px(12.0))
                                             .font_weight(FontWeight::MEDIUM)
-                                            .text_color(look::FOREGROUND),
+                                            .text_color(look::foreground()),
                                     ),
                             )
                             .child(
                                 text(read(|row| row.body.clone()))
                                     .text_size(px(look::TEXT))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(look::FOREGROUND),
+                                    .text_color(look::foreground()),
                             ),
                     )
                     .child(crate::plans::actions(
@@ -1570,6 +1794,7 @@ fn plan_card(
                 surroundings,
                 move || Some(note().to_string()),
                 || Kind::Response,
+                || false,
                 move || (column_width.try_get().unwrap_or_default() - 8.0 - 42.0).max(0.0),
             ))),
     )
@@ -1654,9 +1879,9 @@ fn subagent_row(
                 .justify_center()
                 .rounded_full()
                 .border_1()
-                .border_color(look::CARD_BORDER)
+                .border_color(look::card_border())
                 .bg(look::AVATAR)
-                .text_color(look::MUTED)
+                .text_color(look::muted())
                 .child(crate::ui::icon(Icon::BOT, 14.0))
                 .child(
                     view()
@@ -1672,7 +1897,7 @@ fn subagent_row(
                             Some(agent_protocol::models::TurnStatus::Completed) => look::SUCCESS,
                             Some(agent_protocol::models::TurnStatus::Running) => colors::ACCENT,
                             Some(agent_protocol::models::TurnStatus::Failed) => look::DESTRUCTIVE,
-                            _ => look::MUTED,
+                            _ => look::muted(),
                         }),
                 ),
         )
@@ -1686,33 +1911,33 @@ fn subagent_row(
                         .text_size(px(12.0))
                         .line_height(px(16.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(look::FOREGROUND),
+                        .text_color(look::foreground()),
                 )
                 .child(
                     text(move || agent().map(|agent| agent.message).unwrap_or_default())
                         .text_size(px(11.0))
                         .line_height(px(18.0))
-                        .text_color(look::MUTED),
+                        .text_color(look::muted()),
                 ),
         )
         .child(
             text(elapsed)
                 .text_size(px(11.0))
-                .text_color(look::MUTED)
+                .text_color(look::muted())
                 .flex_shrink_0(),
         )
 }
 
 /// A divider across the work, as T3 Code's context compaction.
 fn divider_row(label: impl Fn() -> String + 'static) -> View {
-    let rule = || view().flex_1().h(px(1.0)).bg(look::RULE);
+    let rule = || view().flex_1().h(px(1.0)).bg(look::rule());
     view()
         .w_full()
         .flex_row()
         .items_center()
         .gap_3()
         .py_1()
-        .text_color(look::MUTED)
+        .text_color(look::muted())
         .child(rule())
         .child(
             view()
@@ -1725,8 +1950,10 @@ fn divider_row(label: impl Fn() -> String + 'static) -> View {
         .child(rule())
 }
 
+/// T3 Code's divider for an interrupted run (`V2LifecycleRow`): its stop mark
+/// and label, muted, between rules.
 fn interrupted_row(label: impl Fn() -> String + 'static) -> View {
-    let rule = || view().flex_1().h(px(1.0)).bg(look::RULE);
+    let rule = || view().flex_1().h(px(1.0)).bg(look::rule());
     view()
         .w_full()
         .flex_row()
@@ -1741,8 +1968,8 @@ fn interrupted_row(label: impl Fn() -> String + 'static) -> View {
                 .gap(px(6.0))
                 .px_2()
                 .py_1()
-                .text_color(look::DESTRUCTIVE)
-                .child(crate::ui::icon(crate::ui::Icon::CLOSE, 12.0))
+                .text_color(look::muted())
+                .child(crate::ui::icon(crate::ui::Icon::CIRCLE_STOP, 12.0))
                 .child(
                     text(label)
                         .text_size(px(11.0))
@@ -1826,7 +2053,7 @@ fn opening(connection: Connection) -> View {
                     .items_center()
                     .gap_2()
                     .py_8()
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
                     .child(ui::spinner())
                     .child(text(tr("会話を読み込み中…")).text_size(px(14.0)))
             },
@@ -1869,7 +2096,7 @@ fn error_row(
     };
     let tone = move || {
         if error.with(|error| error.as_ref().is_some_and(|e| e.is_usage_limit)) {
-            crate::ui::Tone::same(rgb(0xe5b567))
+            rgb(0xe5b567)
         } else {
             look::DESTRUCTIVE
         }
@@ -1897,27 +2124,29 @@ fn error_row(
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(tone),
                 ))
-                .child(revealed(view(), false).child(ui::icon_button_sized(
-                    Icon::COPY,
-                    tr("エラーの詳細をコピー"),
-                    24.0,
-                    12.0,
-                    move || {
-                        if let Some(error) = error.get_untracked() {
-                            set_clipboard(format!(
-                                "{}\n{}\n{}",
-                                error.title,
-                                error.message,
-                                error.details.unwrap_or_default()
-                            ));
-                        }
-                    },
-                )))
+                .child(view().opacity(0.0).group_hover(|s| s.opacity(1.0)).child(
+                    ui::icon_button_sized(
+                        Icon::COPY,
+                        tr("エラーの詳細をコピー"),
+                        24.0,
+                        12.0,
+                        move || {
+                            if let Some(error) = error.get_untracked() {
+                                set_clipboard(format!(
+                                    "{}\n{}\n{}",
+                                    error.title,
+                                    error.message,
+                                    error.details.unwrap_or_default()
+                                ));
+                            }
+                        },
+                    ),
+                ))
                 .child(
                     text(time)
                         .ml_2()
                         .text_size(px(12.0))
-                        .text_color(look::MUTED),
+                        .text_color(look::muted()),
                 ),
         )
         .child(
@@ -1927,7 +2156,7 @@ fn error_row(
                 .py_1()
                 .text_size(px(look::TEXT))
                 .line_height(px(look::LINE))
-                .text_color(look::MESSAGE),
+                .text_color(look::message()),
         )
         .child(when(
             move || !details().is_empty(),
@@ -1937,7 +2166,7 @@ fn error_row(
                     .ml(px(28.0))
                     .number_of_lines(3)
                     .text_size(px(12.0))
-                    .text_color(look::MUTED)
+                    .text_color(look::muted())
             },
         ))
 }
@@ -1949,7 +2178,7 @@ fn queued_marker() -> View {
     view()
         .mr_1()
         .mb_1()
-        .text_color(colors::MUTED)
+        .text_color(colors::muted())
         .label(tr("実行中の作業の後に送信しました"))
         .child(text(tr("キューから送信")).text_size(px(12.0)))
 }
@@ -1963,7 +2192,7 @@ fn steer_marker() -> View {
         .gap_1()
         .mr_1()
         .mb_1()
-        .text_color(colors::MUTED)
+        .text_color(colors::muted())
         .label(tr("実行中の作業に追加で指示しました"))
         .child(ui::icon(Icon::STEER, 12.0))
         .child(text(tr("追加の指示")).text_size(px(12.0)))
@@ -1976,7 +2205,7 @@ fn action(
     press: impl Fn() + 'static,
 ) -> nsh_base::ButtonElement {
     // `ghost-muted`: the muted color, not the foreground.
-    crate::ui::icon_button_sized(icon, tr(label), 24.0, 12.0, press).text_color(look::MUTED)
+    crate::ui::icon_button_sized(icon, tr(label), 24.0, 12.0, press).text_color(look::muted())
 }
 
 /// An answer's actions, as T3 Code's meta row under it while the pointer is
@@ -2001,7 +2230,12 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
             .and_then(|turn| connection.context.with(|context| context.fork_error(turn)))
             .map(|error| error.to_string())
     };
-    let actions = revealed(view().flex_row().items_center().gap_2(), trailing)
+    let actions = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .opacity(if trailing { 1.0 } else { 0.0 })
+        .group_hover(|s| s.opacity(1.0))
         .child(when(
             move || fork().is_some(),
             move || {
@@ -2026,7 +2260,7 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
         .child(when(forking, || {
             text(tr("分岐を作成中…"))
                 .text_size(px(12.0))
-                .text_color(look::MUTED)
+                .text_color(look::muted())
         }))
         .child(time(row));
     view()
@@ -2050,40 +2284,44 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
 fn user_actions(connection: Connection, row: Memo<Option<Row>>) -> View {
     use crate::ui::{Enabled, Icon};
     let edit_turn = move || row.with(|row| row.as_ref().and_then(|row| row.edit_turn.clone()));
-    revealed(
-        view().mt_1().pr_1().flex_row().items_center().gap_2(),
-        false,
-    )
-    .child(time(row))
-    .child(
-        view()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .child(when(
-                move || edit_turn().is_some(),
-                move || {
-                    action(Icon::PENCIL, "ここから編集", move || {
-                        if let Some(turn) = untracked(edit_turn) {
-                            edit_from_here(connection, turn);
-                        }
-                    })
-                    .enabled(move || {
-                        connection
-                            .composer
-                            .with(|c| c.controls.running_turn.is_none())
-                            && !connection.context.with(|context| context.rewinding())
-                    })
-                },
-            ))
-            .child(action(Icon::COPY, "発言をコピー", move || {
-                if let Some(text) =
-                    row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
-                {
-                    set_clipboard(text);
-                }
-            })),
-    )
+    view()
+        .mt_1()
+        .pr_1()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .opacity(0.0)
+        .group_hover(|s| s.opacity(1.0))
+        .child(time(row))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(when(
+                    move || edit_turn().is_some(),
+                    move || {
+                        action(Icon::PENCIL, "ここから編集", move || {
+                            if let Some(turn) = untracked(edit_turn) {
+                                edit_from_here(connection, turn);
+                            }
+                        })
+                        .enabled(move || {
+                            connection
+                                .composer
+                                .with(|c| c.controls.running_turn.is_none())
+                                && !connection.context.with(|context| context.rewinding())
+                        })
+                    },
+                ))
+                .child(action(Icon::COPY, "発言をコピー", move || {
+                    if let Some(text) =
+                        row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
+                    {
+                        set_clipboard(text);
+                    }
+                })),
+        )
 }
 
 /// T3 Code's confirmation before a conversation is rewound. Bex keeps no
@@ -2152,7 +2390,7 @@ fn time(row: Memo<Option<Row>>) -> Text {
         })
     })
     .text_size(px(12.0))
-    .text_color(look::MUTED)
+    .text_color(look::muted())
 }
 
 #[cfg(test)]
@@ -2250,5 +2488,33 @@ mod tests {
             rows.last().and_then(|row| row.status),
             Some(crate::activity::Status::Thinking)
         );
+    }
+
+    #[test]
+    fn only_the_live_response_of_a_running_turn_uses_streaming_markdown() {
+        let mut live = text("live", "unknown");
+        live["status"] = serde_json::json!("running");
+        let items = serde_json::json!([text("finished", "unknown"), command("pwd"), live]);
+        let running = conversation("running", items.clone());
+        let rows = project(&running, &HashMap::new(), &HashSet::new());
+        assert!(rows.iter().any(|row| row.body.as_ref() == "finished"));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.streaming)
+                .map(|row| row.body.as_ref())
+                .collect::<Vec<_>>(),
+            ["live"]
+        );
+        for status in ["completed", "interrupted"] {
+            assert!(
+                project(
+                    &conversation(status, items.clone()),
+                    &HashMap::new(),
+                    &HashSet::new()
+                )
+                .iter()
+                .all(|row| !row.streaming)
+            );
+        }
     }
 }

@@ -72,6 +72,7 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
         "",
         Event::Notification(agent_protocol::protocol::Notification::TaskActivity {
             state: agent_protocol::live_activity::TaskActivityState {
+                attention: Vec::new(),
                 waiting: Vec::new(),
                 revision: previous
                     .lists

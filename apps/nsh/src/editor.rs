@@ -117,11 +117,11 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                 .h(px(40.0))
                 .px_3()
                 .border_b_1()
-                .border_b_color(colors::BORDER)
+                .border_b_color(colors::border())
                 .child(
                     text(move || path.get())
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                         .truncate()
                         .selectable(true)
                         .flex_1()

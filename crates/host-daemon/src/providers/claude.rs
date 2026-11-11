@@ -13,7 +13,7 @@ mod usage;
 
 use anyhow::Context;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -330,7 +330,7 @@ impl Claude {
         &self,
         search: &str,
         cursor: Option<String>,
-        include_print_mode: bool,
+        owned: Option<HashSet<String>>,
         limit: u32,
     ) -> anyhow::Result<SessionPage> {
         let home = self.native_home.clone();
@@ -351,7 +351,7 @@ impl Claude {
                 running,
                 &search,
                 cursor.as_deref(),
-                include_print_mode,
+                owned.as_ref(),
                 limit,
             )
         })
@@ -2112,37 +2112,46 @@ impl Agent for Claude {
         scope: SessionListScope<'_>,
         limit: u32,
     ) -> Result<SessionPage, Failure> {
-        if matches!(scope, SessionListScope::Descendants(_)) {
-            return Ok(SessionPage {
-                data: vec![],
-                next_cursor: None,
-            });
-        }
-        if matches!(scope, SessionListScope::Loaded) {
-            let limit = limit.max(1) as usize;
-            let mut threads = self.loaded_threads().await;
-            threads.sort_by(|a, b| a.id.cmp(&b.id));
-            let mut data: Vec<_> = threads
-                .into_iter()
-                .filter(|thread| {
-                    cursor
-                        .as_ref()
-                        .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
-                })
-                .take(limit + 1)
-                .map(|thread| SessionSummary {
-                    thread,
-                    branch: None,
-                })
-                .collect();
-            let next_cursor = (data.len() > limit).then(|| {
-                data.truncate(limit);
-                data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
-            });
-            return Ok(SessionPage { data, next_cursor });
-        }
-        let include_print_mode = matches!(scope, SessionListScope::All);
-        Claude::list(self, search, cursor, include_print_mode, limit)
+        let owned = match scope {
+            SessionListScope::Descendants(_) => {
+                return Ok(SessionPage {
+                    data: vec![],
+                    next_cursor: None,
+                });
+            }
+            SessionListScope::Loaded => {
+                let limit = limit.max(1) as usize;
+                let mut threads = self.loaded_threads().await;
+                threads.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut data: Vec<_> = threads
+                    .into_iter()
+                    .filter(|thread| {
+                        cursor
+                            .as_ref()
+                            .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
+                    })
+                    .take(limit + 1)
+                    .map(|thread| SessionSummary {
+                        thread,
+                        branch: None,
+                    })
+                    .collect();
+                let next_cursor = (data.len() > limit).then(|| {
+                    data.truncate(limit);
+                    data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
+                });
+                return Ok(SessionPage { data, next_cursor });
+            }
+            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
+                owned
+                    .iter()
+                    .filter(|id| id.provider == ProviderKind::Claude)
+                    .map(|id| id.id.clone())
+                    .collect(),
+            ),
+            SessionListScope::All => None,
+        };
+        Claude::list(self, search, cursor, owned, limit)
             .await
             .map_err(|e| Failure::new("session_list_failed", e))
     }
@@ -2727,7 +2736,7 @@ mod execution_tests {
         .await
         .unwrap();
         assert!(page.data.is_empty() && page.next_cursor.is_none());
-        let recent = Agent::list(&claude, "", None, SessionListScope::Roots, 30)
+        let recent = Agent::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
             .await
             .unwrap();
         assert_eq!(
@@ -2740,12 +2749,12 @@ mod execution_tests {
     }
 
     #[tokio::test]
-    async fn only_complete_listings_include_print_mode_runs() {
+    async fn task_listings_include_only_owned_sdk_runs() {
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("native/projects/p");
         std::fs::create_dir_all(&project).unwrap();
-        for (index, entrypoint) in [(1u128, "sdk-ts"), (2, "sdk-cli")] {
+        for (index, entrypoint) in [(1u128, "sdk-ts"), (2, "sdk-cli"), (3, "sdk-py"), (4, "cli")] {
             let id = Uuid::from_u128(index).to_string();
             let row = serde_json::json!({"type":"user","sessionId":id,"cwd":"/fixture","entrypoint":entrypoint,"message":{"content":entrypoint}});
             std::fs::write(project.join(format!("{id}.jsonl")), format!("{row}\n")).unwrap();
@@ -2757,12 +2766,29 @@ mod execution_tests {
         )
         .await
         .unwrap();
+        let owned = [
+            SessionRef {
+                provider: ProviderKind::Claude,
+                id: Uuid::from_u128(1).to_string(),
+            },
+            SessionRef {
+                provider: ProviderKind::Codex,
+                id: Uuid::from_u128(2).to_string(),
+            },
+        ];
         for (scope, expected) in [
-            (SessionListScope::Roots, vec!["sdk-ts"]),
-            (SessionListScope::WithSubagents, vec!["sdk-ts"]),
-            (SessionListScope::All, vec!["sdk-cli", "sdk-ts"]),
+            (SessionListScope::Roots(&[]), vec!["cli"]),
+            (SessionListScope::Roots(&owned), vec!["cli", "sdk-ts"]),
+            (
+                SessionListScope::WithSubagents(&owned),
+                vec!["cli", "sdk-ts"],
+            ),
+            (
+                SessionListScope::All,
+                vec!["cli", "sdk-cli", "sdk-py", "sdk-ts"],
+            ),
         ] {
-            let mut listed: Vec<_> = Agent::list(&claude, "sdk", None, scope, 10)
+            let mut listed: Vec<_> = Agent::list(&claude, "", None, scope, 10)
                 .await
                 .unwrap()
                 .data
@@ -3115,7 +3141,23 @@ for await (const line of createInterface({input: process.stdin})) {
                 process.read().await.unwrap(),
                 Some(SdkEvent::Ready { .. })
             ));
-            let (router, session, mut worker) = routed_worker();
+            let (_, _, mut worker) = routed_worker();
+            // Observe the emitted history as a client does. The router is a
+            // live cache and can prune a settled turn before a polling read.
+            let (events, mut emitted) = mpsc::channel::<AgentEvent>(256);
+            let (history, mut observed) = watch::channel(agent_protocol::models::Thread::default());
+            worker.events = events;
+            tokio::spawn(async move {
+                while let Some(event) = emitted.recv().await {
+                    if let AgentChange::Session { change, .. } = event.change {
+                        let next = change.apply(&history.borrow()).unwrap();
+                        history.send_replace(next);
+                    }
+                    if let Some(applied) = event.applied {
+                        let _ = applied.send(Ok(()));
+                    }
+                }
+            });
             let (input, receiver) = mpsc::channel(2);
             worker.input = input.clone();
             worker.record.lock().await.running.as_mut().unwrap().input = input.clone();
@@ -3160,26 +3202,34 @@ for await (const line of createInterface({input: process.stdin})) {
                     "{mode}"
                 );
             }
-            let assigned = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                loop {
-                        if router.current_turn(&session, "next").is_some_and(|turn| {
-                            ids.iter().all(|id| turn.items.iter().flatten().any(|item| item.id.as_str() == *id))
-                                && (!matches!(mode, "stamped" | "batched") || turn.items.iter().flatten().any(|item| {
+            let assigned = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                observed.wait_for(|thread| {
+                    thread
+                        .turns
+                        .iter()
+                        .flatten()
+                        .find(|turn| turn.id.as_str() == "next")
+                        .is_some_and(|turn| {
+                            ids.iter().all(|id| {
+                                turn.items.iter().flatten().any(|item| item.id.as_str() == *id)
+                            }) && (!matches!(mode, "stamped" | "batched")
+                                || turn.items.iter().flatten().any(|item| {
                                     matches!(item.body(), ItemBody::AssistantText {text, ..} if text == "answer")
                                 }))
-                        }) {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
-            })
-            .await;
+                        })
+                }),
+            )
+            .await
+            .map(|result| result.map(|_| ()));
             stop.cancel();
             tokio::time::timeout(std::time::Duration::from_secs(5), run)
                 .await
                 .unwrap()
                 .unwrap();
-            assigned.unwrap();
+            assigned
+                .unwrap_or_else(|error| panic!("{mode}: {error}"))
+                .unwrap();
         }
     }
 

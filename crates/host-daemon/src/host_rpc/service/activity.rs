@@ -128,6 +128,19 @@ impl HostRpcService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_reports_invalid_storage() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("bex-conversations.json"), b"invalid").unwrap();
+        let service = HostRpcService::new([], ProjectStore::new(root.path().join("projects.json")));
+        assert!(
+            service
+                .start()
+                .unwrap_err()
+                .contains("bex-conversations.json")
+        );
+    }
     use crate::host_rpc::routing::HostSession;
     use agent_protocol::live_activity::{MarkSessionRead, ReadTaskActivity, TaskActivityState};
     use agent_protocol::session::SessionRef;
@@ -151,19 +164,19 @@ mod tests {
     async fn activity_uses_only_normal_conversations_even_with_saved_subagent_completions() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("bex-read-state.json");
+        let path = directory.path().join("bex-transcripts.sqlite");
         let session = |id: &str| SessionRef::new(ProviderKind::Codex, id.into()).unwrap();
         let root = session("public-root");
         let child = session("child");
         let grandchild = session("grandchild");
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&[&root, &child, &grandchild].map(|session| {
-                serde_json::json!({"session":session,"turn_id":"completed","unread":true})
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        crate::host_rpc::store::ConversationStore::open(&path)
+            .save_state(
+                "reads",
+                &[&root, &child, &grandchild].map(|session| {
+                    serde_json::json!({"session":session,"turn_id":"completed","unread":true})
+                }),
+            )
+            .unwrap();
         let program = directory.path().join("codex-fixture");
         std::fs::write(&program, r##"#!/usr/bin/env node
 const rl = require('node:readline').createInterface({input:process.stdin});
@@ -211,7 +224,7 @@ rl.on('line', line => {
         .unwrap();
         conversation.id = root.clone();
         service.inner.conversations.save(conversation).unwrap();
-        service.start();
+        service.start().unwrap();
 
         let bootstrap = service.read_task_activity(false).await.unwrap();
         assert!(bootstrap.unread.is_empty());

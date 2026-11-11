@@ -98,6 +98,7 @@ pub(crate) fn item_details(
                             crate::models::ItemBody::UserMessage { .. }
                                 | crate::models::ItemBody::AssistantText { .. }
                                 | crate::models::ItemBody::ImageGeneration { .. }
+                                | crate::models::ItemBody::ImageView { .. }
                         )
                 })
                 .map(|item| {
@@ -229,6 +230,8 @@ pub struct ReadThread {
     // UniFFI defaults must be literals; keep this equal to HISTORY_WINDOW_TURNS.
     #[cfg_attr(feature = "bindings", uniffi(default = 10))]
     pub limit: u32,
+    #[cfg_attr(feature = "bindings", uniffi(default = false))]
+    pub replace_history: bool,
 }
 /// Turns an opened conversation shows first, and each older page adds.
 pub const HISTORY_WINDOW_TURNS: u32 = 10;
@@ -238,11 +241,18 @@ impl ReadThread {
             thread_id,
             open: false,
             limit: HISTORY_WINDOW_TURNS,
+            replace_history: false,
         }
     }
     pub fn open(thread_id: crate::session::SessionRef) -> Self {
         Self {
             open: true,
+            ..Self::new(thread_id)
+        }
+    }
+    fn replacement(thread_id: crate::session::SessionRef) -> Self {
+        Self {
+            replace_history: true,
             ..Self::new(thread_id)
         }
     }
@@ -310,6 +320,9 @@ impl Operation for ReadThread {
     /// A held window's version, when it has the requested size.
     type Input = Option<u64>;
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
+        if self.replace_history {
+            return Ok(None);
+        }
         Ok(snapshot
             .sessions
             .conversations
@@ -352,6 +365,9 @@ impl Operation for ReadThread {
         pane_id: &str,
         mut output: Self::Output,
     ) -> Vec<Effect> {
+        if self.replace_history {
+            Arc::make_mut(&mut snapshot.sessions.conversations).remove(&self.thread_id);
+        }
         held_window(snapshot, &self.thread_id, &mut output);
         if output
             .response
@@ -413,6 +429,14 @@ impl Operation for ReadThread {
         pane_id: &str,
         mut output: Self::Output,
     ) -> Vec<Effect> {
+        if snapshot
+            .sessions
+            .conversations
+            .get(&self.thread_id)
+            .is_some_and(|held| held.transcript_version > output.response.thread.transcript_version)
+        {
+            return Vec::new();
+        }
         held_window(snapshot, &self.thread_id, &mut output);
         // A late navigation result can warm the cache, but must never replace
         // an already subscribed, more recent view or change the selected draft.
@@ -546,7 +570,7 @@ pub(super) fn open_thread(
     review_workspace(snapshot, pane_id).into_iter().collect()
 }
 
-pub(super) fn refresh_thread(snapshot: &mut Snapshot, pane_id: &str, incoming: Thread) {
+pub(crate) fn refresh_thread(snapshot: &mut Snapshot, pane_id: &str, incoming: Thread) {
     let Some(id) = incoming.id.clone().filter(|id| id.validate().is_ok()) else {
         if let Some(pane) = snapshot.panes.get_mut(pane_id) {
             Arc::make_mut(pane).error = Some("thread ID is missing".into());
@@ -656,17 +680,11 @@ pub use agent_protocol::operations::RewindSession;
 
 /// What the user sent in `turn`: its text and the files that can be attached again.
 fn sent_input(
-    snapshot: &Snapshot,
-    session: &crate::session::SessionRef,
+    turns: &[Arc<crate::models::Turn>],
     turn: &agent_protocol::ids::TurnId,
 ) -> Option<(String, Vec<Attachment>)> {
     use agent_protocol::items::{ItemBody, MessagePart};
-    let thread = snapshot.sessions.conversations.get(session)?;
-    let turn = thread
-        .turns
-        .iter()
-        .flatten()
-        .find(|candidate| candidate.id == *turn)?;
+    let turn = turns.iter().find(|candidate| candidate.id == *turn)?;
     let (text, content) = turn
         .items
         .iter()
@@ -680,7 +698,9 @@ fn sent_input(
     for part in content {
         match part {
             MessagePart::Text { text } => texts.push(text.as_str()),
-            MessagePart::Image { source } if source.starts_with('/') => {
+            MessagePart::Image { source }
+                if agent_protocol::paths::is_absolute_host_path(source) =>
+            {
                 attachments.push(Attachment {
                     name: file_name(source),
                     path: source.clone(),
@@ -702,7 +722,57 @@ fn sent_input(
 }
 
 fn file_name(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_owned()
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
+}
+
+/// A committed replacement must also refresh its subscription: global notices
+/// and live updates travel on different streams. The fresh read replaces the
+/// window so an older stream cannot merge removed turns back into it.
+pub(crate) fn replace_history(
+    snapshot: &mut Snapshot,
+    pane: &str,
+    incoming: Thread,
+    force_read: bool,
+) -> Vec<Effect> {
+    let Some(id) = incoming.id.clone() else {
+        return Vec::new();
+    };
+    let subscribed = snapshot.sessions.subscriptions.contains_key(&id);
+    let key = OperationKey::History {
+        session: id.clone(),
+    };
+    let reading = snapshot.operations.contains_key(&key);
+    let already_current = incoming.transcript_version.is_some_and(|version| {
+        snapshot
+            .sessions
+            .conversations
+            .get(&id)
+            .is_some_and(|held| held.transcript_version.is_some_and(|held| held >= version))
+    });
+    let reload = if already_current {
+        force_read && !subscribed && !reading
+    } else {
+        force_read || subscribed || reading
+    };
+    if !already_current {
+        Arc::make_mut(&mut snapshot.operations).retain(|key, _| match key {
+            OperationKey::History { session } | OperationKey::TurnItems { session, .. } => {
+                session != &id
+            }
+            OperationKey::Item { item } => item.thread_id != id,
+            _ => true,
+        });
+        let cached = Arc::make_mut(&mut snapshot.sessions.conversations)
+            .remove(&id)
+            .is_some();
+        if cached || reload {
+            refresh_thread(snapshot, pane, incoming);
+        }
+    }
+    reload
+        .then(|| Effect::execute(ReadThread::replacement(id)))
+        .into_iter()
+        .collect()
 }
 
 impl Operation for RewindSession {
@@ -711,13 +781,42 @@ impl Operation for RewindSession {
             session: self.thread_id.clone(),
         })
     }
-    rpc_operation!();
+    type Input = (String, Option<(String, Vec<Attachment>)>);
+    type Output = (Self::Input, crate::models::ThreadResponse);
+    fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
+        let turns = snapshot
+            .sessions
+            .conversations
+            .get(&self.thread_id)
+            .and_then(|thread| thread.turns.as_deref())
+            .unwrap_or_default();
+        Ok((
+            snapshot.connection.storage_scope.clone(),
+            sent_input(turns, &self.turn_id),
+        ))
+    }
+    async fn run(
+        &self,
+        input: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        Ok((input, context.call(self).await?))
+    }
     fn invalidates(&self) -> bool {
         true
     }
-    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
+    fn complete(
+        self,
+        snapshot: &mut Snapshot,
+        pane_id: &str,
+        ((scope, original), output): Self::Output,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        if scope != snapshot.connection.storage_scope {
+            return Ok(Vec::new());
+        }
         let id = self.thread_id;
-        if let Some((text, attachments)) = sent_input(snapshot, &id, &self.turn_id) {
+        if let Some((text, attachments)) = original {
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
             let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
             draft.text = text;
@@ -727,23 +826,26 @@ impl Operation for RewindSession {
                 }
             }
         }
-        // The held turns continue past the rewound end and would be kept.
-        Arc::make_mut(&mut snapshot.sessions.conversations).remove(&id);
-        let mut effects = open_thread(
-            snapshot,
-            pane_id,
-            output.thread,
-            output.model,
-            output.effort,
-            output.service_tier,
-        );
-        effects.push(Effect::execute(ReadThread::new(id)));
-        effects
-    }
-    fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.sessions.conversations).remove(&self.thread_id);
-        refresh_thread(snapshot, pane_id, output.thread);
-        Vec::new()
+        let superseded = snapshot
+            .sessions
+            .conversations
+            .get(&id)
+            .is_some_and(|held| held.transcript_version > output.thread.transcript_version);
+        let mut effects = replace_history(snapshot, pane_id, output.thread, current);
+        if current
+            && !superseded
+            && let Some(thread) = snapshot.sessions.conversations.get(&id).cloned()
+        {
+            effects.extend(open_thread(
+                snapshot,
+                pane_id,
+                (*thread).clone(),
+                output.model,
+                output.effort,
+                output.service_tier,
+            ));
+        }
+        Ok(effects)
     }
 }
 
@@ -896,6 +998,56 @@ mod tests {
         assert_eq!(thread.turns.as_ref().unwrap()[0].id, "turn".into());
         assert_eq!(thread.history_cursor.as_deref(), Some("t3"));
         assert_eq!(thread.history_has_more, Some(true));
+    }
+
+    #[test]
+    fn replacement_read_removes_late_live_turns_and_replaces_the_subscription() {
+        let id = SessionRef::new(ProviderKind::Codex, "rewound".into()).unwrap();
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+            id.clone(),
+            Arc::new(Thread {
+                id: Some(id.clone()),
+                transcript_version: Some(9),
+                history_limit: Some(u64::from(HISTORY_WINDOW_TURNS)),
+                turns: Some(vec![Arc::new(crate::models::Turn {
+                    id: "removed-late-event".into(),
+                    ..Default::default()
+                })]),
+                ..Default::default()
+            }),
+        );
+        Arc::make_mut(&mut snapshot.sessions.subscriptions)
+            .insert(id.clone(), uuid::Uuid::new_v4());
+        let read = ReadThread::replacement(id.clone());
+        assert_eq!(
+            read.capture(&snapshot, "").unwrap(),
+            None,
+            "the replacement must fetch an authoritative window"
+        );
+        let subscription = uuid::Uuid::new_v4();
+        read.apply(
+            &mut snapshot,
+            "",
+            crate::session::OpenedSession {
+                session: id.clone(),
+                subscription_id: subscription,
+                unchanged: false,
+                response: crate::models::ThreadResponse {
+                    thread: Thread {
+                        id: Some(id.clone()),
+                        transcript_version: Some(10),
+                        turns: Some(Vec::new()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        let held = &snapshot.sessions.conversations[&id];
+        assert!(held.turns.as_ref().unwrap().is_empty());
+        assert_eq!(held.transcript_version, Some(10));
+        assert_eq!(snapshot.sessions.subscriptions[&id], subscription);
     }
 
     #[rstest::rstest]

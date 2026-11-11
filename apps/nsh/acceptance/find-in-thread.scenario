@@ -1,0 +1,50 @@
+# ⌘F counts what the conversation says and closes with Escape.
+expect "検証プロジェクト" 30000
+press このプロジェクトで新しいチャット
+type "AI に依頼する" "[immediate] 検索の確認です"
+press 送信
+expect "シミュレータで完了しました。" 30000
+key cmd+f
+type "会話内を検索" "確認"
+expect "1/1" 5000
+screenshot found
+key escape
+expect_absent "前の一致" 5000
+
+# Both a hidden table column and unwrapped code must paint their selected glyphs.
+press 新しいチャット
+window 880 740
+type "AI に依頼する" "[find-overflow] [immediate] 表とコードを検索します"
+press 送信
+expect "table-overflow-target" 30000
+key cmd+f
+type "会話内を検索" "table-overflow-target"
+expect "1/1" 5000
+paint "table-overflow-target" 1000
+screenshot found-table-column
+# A sole result is re-revealed after the reader scrolls away horizontally.
+scroll "table-overflow-target" -20
+press 次の一致
+paint "table-overflow-target" 1000
+key escape
+press 折り返し解除
+key cmd+f
+type "会話内を検索" "code-overflow-target"
+expect "1/1" 5000
+paint "code-overflow-target" 1000
+screenshot found-unwrapped-code
+key escape
+
+# A diagram's searchable source is opened for the selected occurrence.
+press 新しいチャット
+type "AI に依頼する" "[mermaid] [immediate] 図を検索します"
+press 送信
+expect ソース 30000
+key cmd+f
+type "会話内を検索" "flowchart"
+expect "1/1" 5000
+paint "flowchart LR" 1000
+expect 図を表示
+key escape
+press 図を表示
+expect ソース

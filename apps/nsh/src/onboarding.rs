@@ -48,7 +48,7 @@ fn frame(
                     .max_w(px(768.0))
                     .rounded(px(18.0))
                     .border_1()
-                    .border_color(colors::BORDER)
+                    .border_color(colors::border())
                     .bg(colors::RAISED)
                     .child(
                         view()
@@ -63,7 +63,7 @@ fn frame(
                                     .text_size(px(23.0))
                                     .font_weight(FontWeight::SEMIBOLD),
                             )
-                            .child(text(step).flex_1().text_color(colors::MUTED))
+                            .child(text(step).flex_1().text_color(colors::muted()))
                             .child(ui::icon_button(Icon::REFRESH, label, press).enabled(enabled)),
                     )
                     .child(body.p_6().gap_5())
@@ -75,7 +75,7 @@ fn frame(
                             .px_6()
                             .py_4()
                             .border_t_1()
-                            .border_t_color(colors::BORDER),
+                            .border_t_color(colors::border()),
                     ),
             ),
         ),
@@ -129,7 +129,7 @@ fn environment_step(connection: Connection, hosts: Memo<Vec<Host>>) -> View {
                     text(tr(
                         "手元のPCでも、クラウドでも。いつもの環境でAIを使えます。",
                     ))
-                    .text_color(colors::MUTED),
+                    .text_color(colors::muted()),
                 ),
         )
         .child(each(
@@ -150,8 +150,8 @@ fn environment_step(connection: Connection, hosts: Memo<Vec<Host>>) -> View {
                 .p_4()
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(colors::BORDER)
-                .text_color(colors::MUTED)
+                .border_color(colors::border())
+                .text_color(colors::muted())
                 .child(ui::icon(Icon::NETWORK, 16.0))
                 .child(text(tr("Bexの実行環境")).flex_1())
                 .child(text(tr("今後対応")).text_size(px(12.0))),
@@ -162,7 +162,7 @@ fn environment_step(connection: Connection, hosts: Memo<Vec<Host>>) -> View {
                 .flex_1()
                 .min_w_0()
                 .text_size(px(12.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
         .child(when(
             move || skippable.get(),
@@ -207,7 +207,7 @@ fn choice(connection: Connection, host: Host) -> View {
         .p_4()
         .rounded(px(12.0))
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::border())
         .style_when(move || chosen.get(), |s| s.border_color(colors::ACCENT))
         .bg(colors::SURFACE)
         .child(
@@ -226,7 +226,7 @@ fn choice(connection: Connection, host: Host) -> View {
                     move || {
                         connection
                             .application
-                            .with(|app| app.select_host(id.clone(), false))
+                            .with(|app| app.select_host(id.clone()))
                     },
                 ))
                 .child(view().flex_1())
@@ -235,7 +235,7 @@ fn choice(connection: Connection, host: Host) -> View {
                     move || {
                         text(move || environment::connection_status(connection))
                             .text_size(px(12.0))
-                            .text_color(colors::MUTED)
+                            .text_color(colors::muted())
                     },
                 )),
         )
@@ -248,11 +248,11 @@ fn agents(connection: Connection) -> View {
         .gap_2()
         .pt_3()
         .border_t_1()
-        .border_t_color(colors::BORDER)
+        .border_t_color(colors::border())
         .child(
             text(tr("この環境で使えるAI"))
                 .text_size(px(12.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
         .child(each(
             move || environment::agents(connection),
@@ -279,7 +279,7 @@ fn agents(connection: Connection) -> View {
                             .child(
                                 text(move || agent.with(|a| a.label.clone()))
                                     .text_size(px(13.0))
-                                    .text_color(colors::MUTED),
+                                    .text_color(colors::muted()),
                             )
                             .child(when(needs_login, move || {
                                 ui::text_button(tr("ログイン"), move || {
@@ -295,7 +295,7 @@ fn agents(connection: Connection) -> View {
                     .child(
                         text(move || agent.with(environment::agent_error))
                             .text_size(px(12.0))
-                            .text_color(colors::MUTED)
+                            .text_color(colors::muted())
                             .selectable(true),
                     )
             },
@@ -329,14 +329,14 @@ fn import_step(connection: Connection, page: Memo<Option<OnboardingPage>>) -> Vi
                         "CodexとClaude Codeの履歴から選べます。元の会話をそのまま再開できます。",
                     ))
                     .text_size(px(13.0))
-                    .text_color(colors::MUTED),
+                    .text_color(colors::muted()),
                 )
                 .child(
                     text(tr(
                         "最近30日以内に使い、会話が3件以上あるGitリポジトリを初期選択しています。",
                     ))
                     .text_size(px(13.0))
-                    .text_color(colors::MUTED),
+                    .text_color(colors::muted()),
                 ),
         )
         .child(when(
@@ -466,7 +466,7 @@ fn project(connection: Connection, candidate: ReadSignal<ImportCandidate>) -> Vi
         .p_3()
         .rounded(px(6.0))
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::border())
         .child(
             ui::switch(
                 move || candidate.with(|c| c.name.clone()),
@@ -489,7 +489,7 @@ fn project(connection: Connection, candidate: ReadSignal<ImportCandidate>) -> Vi
                 .child(
                     text(move || candidate.with(|c| c.path.clone()))
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED),
+                        .text_color(colors::muted()),
                 ),
         )
         .child(
@@ -503,6 +503,6 @@ fn project(connection: Connection, candidate: ReadSignal<ImportCandidate>) -> Vi
                 })
             })
             .text_size(px(12.0))
-            .text_color(colors::MUTED),
+            .text_color(colors::muted()),
         )
 }

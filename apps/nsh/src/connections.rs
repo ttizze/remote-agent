@@ -6,31 +6,29 @@ use serde_json::json;
 pub(crate) fn selector(
     hosts: Memo<Vec<Host>>,
     selected: Memo<String>,
-    list_scope: bool,
 ) -> nsh_core::element::NativeView {
     let connection = use_context::<Connection>().unwrap();
     native::menu(
         "desktopcomputer",
         tr("接続先"),
         move || {
-            let all = list_scope && connection.state.with(|state| state.all_hosts);
-            let mut entries = Vec::new();
-            if list_scope {
-                entries.push(json!({"id":"", "title":tr("すべての接続先"), "symbol":"square.stack", "selected":all}));
-                entries.push(json!({"separator":true}));
-            }
+            let all = connection.state.with(|state| state.all_hosts);
+            let mut entries = vec![
+                json!({"id":"", "title":tr("すべての接続先"), "symbol":"square.stack", "selected":all}),
+                json!({"separator":true}),
+            ];
             entries.extend(hosts.with(|hosts| hosts.iter().map(|host| json!({"id":host.id,"title":host.label(),"selected":!all && host.id == selected.get()})).collect::<Vec<_>>()));
             json!(entries)
         },
         move |name| {
             connection.application.with(|application| {
-                if list_scope && name.is_empty() { application.select_all_hosts(); }
-                else { application.select_host(name.to_owned(), !list_scope); }
+                if name.is_empty() { application.select_all_hosts(); }
+                else { application.select_host(name.to_owned()); }
             });
         },
     )
     .prop("title", move || {
-        if list_scope && connection.state.with(|state| state.all_hosts) { return json!(tr("すべての接続先")); }
+        if connection.state.with(|state| state.all_hosts) { return json!(tr("すべての接続先")); }
         json!(hosts.with(|hosts| {
             hosts
                 .iter()
@@ -45,54 +43,8 @@ pub(crate) fn selector(
                 .unwrap_or_else(|| tr("接続先").into())
         }))
     })
-    .prop("identifier", json!(if list_scope { "connections.list" } else { "connections.destination" }))
+    .prop("identifier", json!("connections.list"))
     .min_h(px(if is_desktop() { 28.0 } else { 44.0 }))
-}
-
-/// The composer's destination: the Host the next chat runs on.
-pub(crate) fn destination(hosts: Memo<Vec<Host>>, selected: Memo<String>) -> impl IntoElement {
-    #[cfg(not(target_os = "macos"))]
-    use crate::ui::{self, Icon};
-    let connection = use_context::<Connection>().unwrap();
-    let name = move || {
-        hosts.with(|hosts| {
-            hosts
-                .iter()
-                .find(|host| host.id == selected.get())
-                .map(|host| {
-                    if host.id == "local" {
-                        "Local".into()
-                    } else {
-                        host.name.clone()
-                    }
-                })
-                .unwrap_or_else(|| "Local".into())
-        })
-    };
-    let items = move || {
-        json!(hosts.with(|hosts| hosts
-            .iter()
-            .map(|host| json!({"id": host.id, "title": host.label(), "selected": host.id == selected.get()}))
-            .collect::<Vec<_>>()))
-    };
-    let select = move |id: &str| {
-        connection
-            .application
-            .with(|application| application.select_host(id.to_owned(), true))
-    };
-    #[cfg(target_os = "macos")]
-    {
-        native::menu("desktopcomputer", tr("接続先"), items, select)
-            .prop("title", move || json!(name()))
-            .prop("appearance", json!("plain"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        ui::labeled_button(Icon::MONITOR, name, name, move || {
-            ui::popup(&untracked(items), select)
-        })
-        .child(ui::icon(Icon::CHEVRON_DOWN, 14.0))
-    }
 }
 
 /// The Hosts this device can work on, and pairing another PC.
@@ -107,7 +59,7 @@ pub(crate) fn screen(hosts: Memo<Vec<Host>>) -> impl IntoElement {
             view()
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(colors::BORDER)
+                .border_color(colors::border())
                 .bg(colors::SURFACE)
                 .child(each(
                     move || hosts.get(),
@@ -122,9 +74,9 @@ pub(crate) fn screen(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                                 .items_center()
                                 .gap_2()
                                 .child(ui::text_button(tr("接続"), move || {
-                                    connection.application.with(|application| {
-                                        application.select_host(id.clone(), false)
-                                    });
+                                    connection
+                                        .application
+                                        .with(|application| application.select_host(id.clone()));
                                 }));
                         ui::setting(
                             host.label(),
@@ -147,7 +99,7 @@ pub(crate) fn screen(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                         )
                         .style_when(
                             move || index.get() > 0,
-                            |s| s.border_t_1().border_t_color(colors::BORDER),
+                            |s| s.border_t_1().border_t_color(colors::border()),
                         )
                     },
                 )),
@@ -180,7 +132,7 @@ pub(crate) fn hero() -> impl IntoElement {
                                 "手元のPCでも、クラウドでも。いつもの環境でAIを使えます。",
                             ))
                             .text_size(px(14.0))
-                            .text_color(colors::MUTED),
+                            .text_color(colors::muted()),
                         ),
                 )
                 .child(pairing()),
@@ -212,7 +164,7 @@ pub(crate) fn pairing() -> impl IntoElement {
             .child(
                 text(tr("PCのBexで発行した接続情報を貼り付けてください。"))
                     .text_size(px(13.0))
-                    .text_color(colors::MUTED),
+                    .text_color(colors::muted()),
             )
             .child(
                 ui::field()
@@ -262,7 +214,7 @@ pub(crate) fn pairing() -> impl IntoElement {
                     tr_format("AI処理：{0}", [&recipients])
                 })))
                 .child(text(confirmed(|value| value.transcription_recipient.as_ref().map(|recipient| tr_format("音声入力：{0}（文字起こし）", [recipient])).unwrap_or_default())))
-                .child(text(tr("共有PCでは、管理者などが内容を閲覧できる場合があります。")).text_size(px(13.0)).text_color(colors::MUTED))
+                .child(text(tr("共有PCでは、管理者などが内容を閲覧できる場合があります。")).text_size(px(13.0)).text_color(colors::muted()))
                 .child(view().flex_row().justify_end().gap_2()
                     .child(ui::text_button(tr("変更"), move || {
                         confirmation.set(None); invitation.set(String::new());
@@ -348,7 +300,7 @@ fn ssh_or_paste(
                             "SSHの鍵で接続でき、Bexのホストを起動済みのサーバーにつなぎます。",
                         ))
                         .text_size(px(13.0))
-                        .text_color(colors::MUTED),
+                        .text_color(colors::muted()),
                     )
                     .child(text(tr("SSH接続先")).text_size(px(13.0)))
                     .child(

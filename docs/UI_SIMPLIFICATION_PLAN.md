@@ -46,16 +46,14 @@
 
 ## 段階 7: iOS の会話ペインと Host 一覧の更新経路を整理する
 
-対象: `AppViewModel.swift`、`AppViewConnection.swift`、`ConversationModel.swift`、`ConversationPresentation.swift`、`WorkspaceScreen.swift`、`ConversationSideChat.swift` と core の `client/session` API。段階 2 の行投影を利用し、Host 一覧と会話のそれぞれが必要な表示だけを更新する。
+対象: `AppViewModel.swift`、`AppViewConnection.swift`、`ConversationModel.swift`、`NshConversationView.swift`、`WorkspaceScreen.swift`、`ConversationSideChat.swift` と core の `client/session` API。段階 2 の行投影を利用し、Host 一覧と会話のそれぞれが必要な表示だけを更新する。
 
 1. 主会話は `ClientSession` が持つ、ready 前の Intent の順序付き受付と、受け付けた操作を待つ `flush` の境界を保持する。サイドチャットは作成済みの pane の寿命を所有する。この違いのために必要な session / pane の経路を、重複という理由だけで削除しない。API を揃える場合も主会話の受付は ClientSession の既存の queue / operations 追跡を通す。主会話の画面を閉じても Host 一覧の ClientSession を終了せず、サイドチャットの終了ではその pane だけを retire する。
 2. `AppViewModel` は Host 一覧・接続表示・アプリのナビゲーション、`ConversationModel` は会話ペインの表示と入力を所有する。不変 Snapshot / Presentation の参照や、別の表示に必要な設定・接続情報を読むことまで重複状態と扱わない。同じ `changes(previous:)` を何回呼ぶかは製品要件にせず、独立した書き手・重い重複投影・不要な再配信を取り除く。
 3. pane の購読、Host 一覧の購読、操作受付直後と receipt 後の読み直しを用途別に確認する。core の受付状態、操作中の無効化、画面遷移、質問回答などが必要な時点で反映されることを確認してから、同じ状態を再配信するだけの経路を削除する。`BufferedTextInput` があることだけを根拠にすべての即時反映を削除しない。
-4. 段階 2 の共通行投影を利用し、置き換わった iOS の行フィルター・内容比較を削除する。`ConversationMarkdownContent.Part` への分割、native レイアウト、主スレッドを塞がない処理と再表示時のキャッシュは別の役割として扱う。`recentConversations`、detached 投影、`ProjectionInput` の鍵照合は、それぞれの役割が置き換わり、長い会話の表示・復帰と古い結果の拒否が保たれることを確認した場合だけ削除する。単に core に表示行ができたことを削除理由にしない。
-5. ワークベンチの状態と browser / terminal / side-chat の native 資源はペインが所有する。draft → session の付け替えは既存の `Snapshot.submittedSession` と `Panels.rekey` を使う。desktop / iOS に残る共通判断があれば、必要な値だけを受け取る core の純粋な処理にまとめ、置き換えられた判断を両方から削除する。共通の規則があることを理由に native 資源や Panels の全状態を Store へ移さない。
-6. `notice` は段階 1 と同じ発生元・scope の通知モデルに揃える。プロファイル / 端末設定の保存失敗はアプリ単位、接続 / Host 固有状態の保存失敗は Host 単位、会話操作は pane 単位とする。ClientSession の永続化失敗は Host 一覧の所有者が一度だけ観測して通知し、会話モデルで重ねて取り込まない。`threadLoadState` は一覧の読み込みと失敗を表す値から導き、無関係なローカル通知によって一覧の状態を変えない。接続前、Host 切替後、永続化失敗時にも通知を保持・dismiss できる所有者を明示する。
-7. 保存する Host プロファイルと実行中の `ClientSessions` の map は別の事実として保持する。未接続の登録先を失わず、ticket の保存は現在のプラットフォームの保存契約を維持する。iOS / Android の接続処理は、既存の core が所有する再試行・接続有効化・active 状態の API を使う。共通判断が実際に重複している部分だけ core に移し、フォアグラウンド / ネットワークの OS 通知と UI の Task の寿命まで一律に移さない。
-8. `ConversationTextDiagnostics` は native レイアウトと UI テストで使用される観測として扱う。Dev 専用であることだけを理由に削除しない。変更した範囲で利用者がなくなった定義だけを削除する。
+4. ワークベンチの状態と browser / terminal / side-chat の native 資源はペインが所有する。draft → session の付け替えは既存の `Snapshot.submittedSession` と `Panels.rekey` を使う。desktop / iOS に残る共通判断があれば、必要な値だけを受け取る core の純粋な処理にまとめ、置き換えられた判断を両方から削除する。共通の規則があることを理由に native 資源や Panels の全状態を Store へ移さない。
+5. `notice` は段階 1 と同じ発生元・scope の通知モデルに揃える。プロファイル / 端末設定の保存失敗はアプリ単位、接続 / Host 固有状態の保存失敗は Host 単位、会話操作は pane 単位とする。ClientSession の永続化失敗は Host 一覧の所有者が一度だけ観測して通知し、会話モデルで重ねて取り込まない。`threadLoadState` は一覧の読み込みと失敗を表す値から導き、無関係なローカル通知によって一覧の状態を変えない。接続前、Host 切替後、永続化失敗時にも通知を保持・dismiss できる所有者を明示する。
+6. 保存する Host プロファイルと実行中の `ClientSessions` の map は別の事実として保持する。未接続の登録先を失わず、ticket の保存は現在のプラットフォームの保存契約を維持する。iOS / Android の接続処理は、既存の core が所有する再試行・接続有効化・active 状態の API を使う。共通判断が実際に重複している部分だけ core に移し、フォアグラウンド / ネットワークの OS 通知と UI の Task の寿命まで一律に移さない。
 
 受け入れ:
 
@@ -63,13 +61,13 @@
 - 変更した pane の寿命と、移した接続判断は core のユニットテストで境界・失敗・復旧を検証する。
 - 既存の Synchronization / History / Navigation / Pagination の XCUITest が Native clients CI で通る。`items=` の元データ件数、履歴の読書位置と仮想化を保つ。
 - 会話を開く・戻る・サイドチャット・フォアグラウンド復帰・再接続で、入力中の draft と質問回答が保持される。主会話を閉じても一覧の接続・永続化が続き、サイドチャットの閉鎖は他の pane に影響しない。
-- 長い会話への再表示で不要な本文の再処理・主スレッドの停止を増やさず、古い detached 処理の結果が別の会話を上書きしない。
+- 長い会話への再表示で不要な本文の再処理・主スレッドの停止を増やさず、古い非同期処理の結果が別の会話を上書きしない。
 - 非選択 Host の一覧更新が、選択中の会話の重い投影や描画を不要に更新しない。操作の受付・完了と core の購読だけで必要な表示が欠けないことを確認する。
 - 共通の接続判断を core に移した場合は Android の同じ利用側も同じ変更で切り替え、pairing のキャンセル、接続失敗からの再試行、背景移行後の復帰、未接続プロファイルの保持を検証する。
 
 ## この計画に含めないもの
 
-- iOS の `TaskLiveActivities` の token 管理と ActivityKit 連携、`ConversationList` の UIKit 仮想化、`ConversationTextLayout` のテキスト計測は OS 連携なので native に残す。
+- iOS の `TaskLiveActivities` の token 管理と ActivityKit 連携は OS 連携なので native に残す。
 
 - `account_request` の `AccountCommand` / `AccountReply` は provider の業務境界なので維持する。RPC の Call / Body を provider に渡して変換数だけを減らさない。
 - protocol の optional uniffi feature は追加しない。ネイティブバインディングに依存しない現行の規則を維持する。

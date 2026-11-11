@@ -204,11 +204,10 @@ pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
     document(&source, None)
 }
 
-/// The desktop's document: the desktop client's file chips in place of file links and of code
-/// spans its desktop grammar reads as paths. A chip's run names the file, resolved
-/// against `cwd` and the Host's `home`, with a parent where another chip shares
-/// its basename; an authored caption stays as text before it.
-pub fn desktop_markdown_blocks(
+/// File links and code paths as workspace chips. A chip's
+/// run names the file, resolved against `cwd` and the Host's `home`, with a parent
+/// where another chip shares its basename; an authored caption stays as text before it.
+pub fn workspace_markdown_blocks(
     source: String,
     cwd: String,
     home: Option<String>,

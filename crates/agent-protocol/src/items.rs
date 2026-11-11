@@ -228,6 +228,25 @@ pub enum AttachmentKind {
 }
 
 impl Item {
+    /// Keep image-producing items in history. Deferred tools must be retained
+    /// until their result can be read and its image content is known.
+    pub fn is_image_output(&self) -> bool {
+        match self.body() {
+            ItemBody::ImageGeneration { .. } | ItemBody::ImageView { .. } => true,
+            ItemBody::ToolCall {
+                result, content, ..
+            } => self.is_deferred()
+                || content.iter().any(
+                    |part| matches!(part, ToolContent::Image { data_url } if !data_url.is_empty()),
+                )
+                || result.as_ref().is_some_and(|result| {
+                    crate::tool_output::blocks(result)
+                        .iter()
+                        .any(|block| crate::tool_output::image_data(block).is_some())
+                }),
+            _ => false,
+        }
+    }
     pub fn new(id: ItemId, status: ItemStatus, body: ItemBody) -> Self {
         Self {
             id,

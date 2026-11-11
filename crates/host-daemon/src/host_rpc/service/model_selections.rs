@@ -1,12 +1,13 @@
 //! Native reads do not expose every selected option (notably Codex speed).
 //! Retain accepted turn settings on the Host so every client can reopen them.
+use crate::host_rpc::store::ConversationStore;
 use crate::providers::Failure;
 use agent_protocol::{models::ModelRef, session::SessionRef};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Mutex};
+use std::sync::{Arc, Mutex};
 
 #[derive(Serialize, Deserialize)]
-struct Selection {
+pub(in crate::host_rpc) struct Selection {
     session: SessionRef,
     #[serde(flatten)]
     options: SelectedOptions,
@@ -20,7 +21,7 @@ pub(super) struct SelectedOptions {
 }
 
 pub(super) struct ModelSelections {
-    path: PathBuf,
+    store: Arc<ConversationStore>,
     state: Mutex<Result<Selections, String>>,
 }
 
@@ -30,14 +31,10 @@ struct Selections {
 }
 
 impl ModelSelections {
-    pub fn new(path: PathBuf) -> Self {
-        let selections = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.to_string()),
-        };
+    pub fn new(store: Arc<ConversationStore>) -> Self {
+        let selections = store.load_state("models");
         Self {
-            path,
+            store,
             state: Mutex::new(selections.map(|entries| Selections {
                 entries,
                 dirty: false,
@@ -116,7 +113,7 @@ impl ModelSelections {
         }
         // Submission is already accepted. Keep the live fact and never invite a
         // duplicate send by reporting a storage failure as a submission failure.
-        match agent_local_host::save_private_json(&self.path, &state.entries) {
+        match self.store.save_state("models", &state.entries) {
             Ok(()) => state.dirty = false,
             Err(error) => {
                 tracing::warn!(target: "agent", operation = "host.model_selection.record", message = %error);
@@ -135,19 +132,24 @@ mod tests {
         for native_model in [None, Some("saved"), Some("external")] {
             for native_effort in [None, Some("low")] {
                 let directory = tempfile::tempdir().unwrap();
-                let path = directory.path().join("models.json");
+                let path = directory.path().join("state.sqlite");
                 let session = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
                 let model = |id: &str| ModelRef {
                     provider: session.provider,
                     id: id.into(),
                 };
-                ModelSelections::new(path.clone()).record(
+                ModelSelections::new(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                    &path,
+                )))
+                .record(
                     &session,
                     Some(&model("saved")),
                     Some("high"),
                     Some("priority"),
                 );
-                let store = ModelSelections::new(path);
+                let store = ModelSelections::new(Arc::new(
+                    crate::host_rpc::store::ConversationStore::open(&path),
+                ));
                 let resolved = store
                     .resolve(
                         &session,
@@ -179,14 +181,16 @@ mod tests {
     fn failed_writes_keep_accepted_settings_live_and_later_writes_recover() {
         for (effort, tier) in [("high", "priority"), ("low", "default")] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("models.json");
-            let store = ModelSelections::new(path.clone());
+            let path = directory.path().join("state.sqlite");
+            let store = ModelSelections::new(Arc::new(
+                crate::host_rpc::store::ConversationStore::open(&path),
+            ));
             let session = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
             let model = ModelRef {
                 provider: session.provider,
                 id: "saved".into(),
             };
-            std::fs::create_dir(&path).unwrap();
+            store.store.reject_state_writes(true);
             store.record(&session, Some(&model), Some("high"), Some("priority"));
             assert_eq!(
                 store
@@ -196,24 +200,31 @@ mod tests {
                     .as_deref(),
                 Some("high")
             );
-            std::fs::remove_dir(&path).unwrap();
+            store.store.reject_state_writes(false);
             store.record(&session, Some(&model), Some(effort), Some(tier));
-            let recovered = ModelSelections::new(path.clone())
-                .resolve(&session, None, None, None)
-                .unwrap();
+            let recovered = ModelSelections::new(Arc::new(
+                crate::host_rpc::store::ConversationStore::open(&path),
+            ))
+            .resolve(&session, None, None, None)
+            .unwrap();
             assert_eq!(recovered.effort.as_deref(), Some(effort));
             assert_eq!(recovered.service_tier.as_deref(), Some(tier));
             store.record(&session, Some(&model), Some("low"), Some("default"));
-            let resolved = ModelSelections::new(path.clone())
-                .resolve(&session, None, None, None)
-                .unwrap();
+            let resolved = ModelSelections::new(Arc::new(
+                crate::host_rpc::store::ConversationStore::open(&path),
+            ))
+            .resolve(&session, None, None, None)
+            .unwrap();
             assert_eq!(resolved.effort.as_deref(), Some("low"));
             assert_eq!(resolved.service_tier.as_deref(), Some("default"));
+            drop(store);
             std::fs::write(&path, "broken").unwrap();
             assert!(
-                ModelSelections::new(path)
-                    .resolve(&session, None, None, None)
-                    .is_err()
+                ModelSelections::new(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                    &path
+                )))
+                .resolve(&session, None, None, None)
+                .is_err()
             );
         }
     }
@@ -221,25 +232,34 @@ mod tests {
     #[test]
     fn unchanged_accepted_settings_do_not_rewrite_storage_including_after_restart() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("models.json");
-        let store = ModelSelections::new(path.clone());
+        let path = directory.path().join("state.sqlite");
+        let store = ModelSelections::new(Arc::new(
+            crate::host_rpc::store::ConversationStore::open(&path),
+        ));
         let session = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
         let model = ModelRef {
             provider: session.provider,
             id: "saved".into(),
         };
         store.record(&session, Some(&model), Some("high"), Some("priority"));
-        let reopened = ModelSelections::new(path.clone());
-        let file = std::fs::File::options().write(true).open(&path).unwrap();
-        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        let reopened = ModelSelections::new(Arc::new(
+            crate::host_rpc::store::ConversationStore::open(&path),
+        ));
+        // Observe actual writes rather than the store's dirty flag.
+        let audit = rusqlite::Connection::open(&path).unwrap();
+        audit
+            .execute_batch(
+                "CREATE TABLE writes (id INTEGER);
+            CREATE TRIGGER observe_models AFTER UPDATE ON host_state
+            WHEN NEW.name = 'models' BEGIN INSERT INTO writes VALUES (1); END;",
+            )
             .unwrap();
-        let modified = file.metadata().unwrap().modified().unwrap();
         for store in [&store, &reopened] {
             store.record(&session, Some(&model), Some("high"), Some("priority"));
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().modified().unwrap(),
-                modified
-            );
         }
+        let count: i64 = audit
+            .query_row("SELECT count(*) FROM writes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

@@ -26,7 +26,7 @@ pub(crate) fn sidebar(hosts: Memo<Vec<Host>>, compose: impl Fn() + 'static) -> i
         .size_full()
         .bg(colors::SIDEBAR)
         .border_r_1()
-        .border_r_color(colors::BORDER)
+        .border_r_color(colors::border())
         .child(header(true, move || {
             navigate(Navigation::ToggleSidebar(window().width.0))
         }))
@@ -119,10 +119,7 @@ pub(crate) fn sheet(
                 .left(width)
                 .right(px(0.0))
                 .bottom(px(0.0))
-                .bg(ui::Tone::new(
-                    nsh_core::element::rgba(0xfcfcfc99),
-                    nsh_core::element::rgba(0x08080899),
-                ))
+                .bg(rgba(0x08080899))
                 .backdrop_blur(px(4.0))
                 .role(AccessibilityRole::Button)
                 .label(SharedString::from(tr("サイドバーを閉じる")))
@@ -205,8 +202,7 @@ pub(crate) fn conversation_header(
         .child(toggles)
 }
 
-/// T3 Code's panel layout controls: the thread details beside the timeline
-/// (while there is room for them), then the terminal and the right panel,
+/// T3 Code's panel layout controls: the thread details card, then the terminal and the right panel,
 /// which the panel's own top-right controls replace while it is open.
 pub(crate) fn panel_toggles(
     details: Signal<bool>,
@@ -220,14 +216,7 @@ pub(crate) fn panel_toggles(
         .items_center()
         .gap_1()
         .window_drag(false)
-        .child(when(details_inline, move || {
-            ui::toggle(
-                Icon::DETAILS,
-                tr("スレッド詳細を切り替え"),
-                move || details.get(),
-                move || details.update(|open| *open = !*open),
-            )
-        }))
+        .child(crate::desktop_workspace::toggle(details, details_inline))
         .child(when(
             move || !panel_open(),
             move || {
@@ -284,8 +273,8 @@ pub(crate) fn breadcrumb(
                     )
                     .min_w_0()
                     .gap(px(6.0))
-                    .text_color(ui::colors::T3_MUTED)
-                    .hover(|s| s.text_color(ui::colors::T3_FOREGROUND))
+                    .text_color(ui::colors::t3_muted())
+                    .hover(|s| s.text_color(ui::colors::t3_foreground()))
                     .child(dynamic(move || {
                         project.with(|project| {
                             project.as_ref().map(|project| {
@@ -308,14 +297,14 @@ pub(crate) fn breadcrumb(
                 view()
                     .flex_shrink_0()
                     .accessibility_elements_hidden(true)
-                    .child(crumb(text("/")).text_color(ui::colors::T3_MUTED))
+                    .child(crumb(text("/")).text_color(ui::colors::t3_muted()))
             },
         ))
         .child(
             crumb(text(move || title.get()))
                 .flex_1()
                 .min_w_0()
-                .text_color(ui::colors::T3_FOREGROUND),
+                .text_color(ui::colors::t3_foreground()),
         )
 }
 
@@ -359,7 +348,7 @@ fn connection_menu(hosts: Memo<Vec<Host>>) -> impl IntoElement {
         .h(px(32.0))
         .px_3()
         .rounded(px(ui::RADIUS))
-        .text_color(colors::FOREGROUND)
+        .text_color(colors::foreground())
         .role(AccessibilityRole::Button)
         .label(tr("接続先"))
         .hover(|s| s.bg(colors::GHOST_HOVER))
@@ -370,7 +359,7 @@ fn connection_menu(hosts: Memo<Vec<Host>>) -> impl IntoElement {
                     if id.is_empty() {
                         application.select_all_hosts();
                     } else {
-                        application.select_host(id.to_owned(), false);
+                        application.select_host(id.to_owned());
                     }
                 })
             })

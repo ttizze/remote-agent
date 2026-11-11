@@ -110,7 +110,7 @@ final class ConversationModel {
         let changes = value.changes(previous: publication)
         let next = value.snapshot()
         guard changes.changed, let nextFiles = next.files(paneId: value.paneId()) else { return }
-        migrateWorkbench(to: next)
+        migrateWorkbench(to: next, draft: value.conversationContext().navigation().draftKey)
         publication = value
         if changes.settings {
             settings = value.settings()

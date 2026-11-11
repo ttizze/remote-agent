@@ -18,7 +18,7 @@ use agent_core::{
 };
 use agent_protocol::file_tree::EntryKind;
 use nsh_core::{
-    element::{ImageSrc, rgb, rgba},
+    element::{Rgba, rgb, rgba},
     prelude::*,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -162,7 +162,6 @@ impl Browser {
 
     /// The Host path `source` names, with its position, for an editor or a
     /// menu's action; a target that does not exist yet still resolves.
-    #[cfg(desktop)]
     pub fn resolve(
         self,
         source: String,
@@ -216,7 +215,6 @@ impl Browser {
 }
 
 /// A file a link names, resolved on the Host, and the position it names.
-#[cfg(desktop)]
 #[derive(Clone)]
 pub(crate) struct Reference {
     pub path: String,
@@ -396,7 +394,6 @@ fn tree(owner: String, root: Memo<Option<String>>) -> impl Element {
         let options = KeyOptions {
             when: nsh_core::keymap::When::Always,
             repeat: true,
-            ..Default::default()
         };
         on_key_with(keystroke, options, move |_| {
             if engaged.get_untracked()
@@ -463,11 +460,11 @@ fn tree(owner: String, root: Memo<Option<String>>) -> impl Element {
                 .h(px(40.0))
                 .px_3()
                 .border_b_1()
-                .border_b_color(colors::BORDER)
+                .border_b_color(colors::border())
                 .child(
                     text(move || key.with(|key| key.root.clone()))
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                         .truncate()
                         .selectable(true)
                         .flex_1()
@@ -626,7 +623,7 @@ pub(crate) fn notice(message: impl IntoReactive<SharedString>) -> impl IntoEleme
         .px_3()
         .py_1()
         .text_size(px(12.0))
-        .text_color(colors::MUTED)
+        .text_color(colors::muted())
 }
 
 /// A row of the tree, as the desktop client's: a folder's chevron (a spinner while
@@ -689,7 +686,7 @@ fn tree_row(
                 .justify_center()
                 .text_color(move || {
                     if selected() {
-                        colors::FOREGROUND
+                        colors::foreground()
                     } else {
                         GLYPH
                     }
@@ -707,7 +704,7 @@ fn tree_row(
                 .child(when(
                     move || !directory(),
                     move || {
-                        svg(move || {
+                        image(move || {
                             file_icon(&row.with(|row| {
                                 row.as_ref()
                                     .map(|(row, _)| row.path.clone())
@@ -729,7 +726,7 @@ fn tree_row(
                     if ignored() {
                         IGNORED
                     } else {
-                        colors::FOREGROUND
+                        colors::foreground()
                     }
                 })
                 .style_when(
@@ -748,22 +745,23 @@ fn tree_row(
 
 // The desktop client's tree inks: a row under the pointer and a selected row
 // (the foreground at 7% and 12%), glyphs, and ignored entries.
-const ROW_HOVER: ui::Tone = ui::Tone::new(rgba(0x18181b12), rgba(0xe6e6e612));
-const ROW_SELECTED: ui::Tone = ui::Tone::new(rgba(0x18181b1f), rgba(0xe6e6e61f));
-const GLYPH: ui::Tone = ui::Tone::new(rgb(0x71717a), rgb(0x84848a));
-const IGNORED: ui::Tone = ui::Tone::new(rgb(0xa1a1aa), rgb(0x4a4a4e));
+const ROW_HOVER: Rgba = rgba(0xe6e6e612);
+const ROW_SELECTED: Rgba = rgba(0xe6e6e61f);
+const GLYPH: Rgba = rgb(0x84848a);
+const IGNORED: Rgba = rgb(0x4a4a4e);
 
 include!(concat!(env!("OUT_DIR"), "/file_icons.rs"));
 
 /// A file's glyph from T3 Code's tree icons, its tree variant when it has one.
-fn file_icon(path: &str) -> ImageSrc {
+fn file_icon(path: &str) -> String {
     let name = desktop_file_icon(path);
-    ImageSrc::svg_markup(file_icon_markup(&format!("{name}-tree")).unwrap_or_else(|| glyph(name)))
+    let data = file_icon_data(&format!("{name}-tree")).unwrap_or_else(|| glyph(name));
+    format!("data:image/png;base64,{data}")
 }
 
-/// The markup of the glyph Core names, or the default file's.
+/// The base64 PNG of the glyph Core names, or the default file's.
 pub(crate) fn glyph(name: &str) -> &'static str {
-    file_icon_markup(name)
-        .or_else(|| file_icon_markup("file-tree-builtin-default"))
-        .unwrap_or_default()
+    file_icon_data(name)
+        .or_else(|| file_icon_data("file-tree-builtin-default"))
+        .expect("the file icon catalog contains the default glyph")
 }

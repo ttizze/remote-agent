@@ -171,14 +171,14 @@ pub(super) fn drag_label(dragged: Signal<Option<Dragged>>) -> impl IntoElement {
                     .rounded(px(ui::RADIUS))
                     .bg(colors::RAISED)
                     .border_1()
-                    .border_color(colors::BORDER)
+                    .border_color(colors::border())
                     .child(
                         text(move || {
                             dragged
                                 .with(|d| d.as_ref().map(|d| d.label.clone()).unwrap_or_default())
                         })
                         .text_size(px(12.0))
-                        .text_color(colors::FOREGROUND)
+                        .text_color(colors::foreground())
                         .number_of_lines(1),
                     ),
             )

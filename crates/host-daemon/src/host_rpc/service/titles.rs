@@ -151,7 +151,7 @@ impl HostRpcService {
         if search.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let targets = self.inner.conversations.search_targets(search)?;
+        let targets = self.inner.conversations.active_sessions(search)?;
         let found = futures_util::future::join_all(targets.into_iter().map(|target| async move {
             let response = tokio::time::timeout_at(deadline, async {
                 self.inner
@@ -180,10 +180,11 @@ impl HostRpcService {
         let agents = self.inner.providers.all();
         let first_page_size = title_first_page_size(query);
         let started = std::time::Instant::now();
+        let owned = self.inner.conversations.active_sessions("")?;
         let scope = if search.trim().is_empty() {
-            SessionListScope::Roots
+            SessionListScope::Roots(&owned)
         } else {
-            SessionListScope::WithSubagents
+            SessionListScope::WithSubagents(&owned)
         };
         let ((snapshot, projects_elapsed), (mut first_pages, first_pages_elapsed)) = tokio::join!(
             async { (self.project_snapshot().await, started.elapsed()) },
@@ -660,6 +661,120 @@ mod tests {
                 Some(negative_nan)
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
+        use super::*;
+        use crate::host_rpc::conversations::{Binding, Conversation};
+        use crate::host_rpc::service::conversations::tests::call;
+        use agent_protocol::session::SessionRef;
+        let root = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(root.path()).unwrap();
+        let native = root.path().join("native");
+        let transcripts = native.join("projects/shared");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let session = |id| SessionRef {
+            provider: ProviderKind::Claude,
+            id: uuid::Uuid::from_u128(id).to_string(),
+        };
+        let public = session(10);
+        let active = session(1);
+        for (id, entrypoint, title) in [
+            (1, "sdk-ts", "NSH user conversation"),
+            (2, "sdk-ts", "NSH message text sizing"),
+            (3, "sdk-py", "NSH automated analysis"),
+            (4, "sdk-cli", "NSH CLI review"),
+            (5, "cli", "NSH terminal conversation"),
+        ] {
+            let id = session(id).id;
+            let rows = [
+                serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":"sdk","message":{"content":title}}),
+                serde_json::json!({"type":"ai-title","sessionId":id,"aiTitle":title}),
+            ].map(|row| row.to_string() + "\n").concat();
+            std::fs::write(transcripts.join(format!("{id}.jsonl")), rows).unwrap();
+        }
+        let mut side_chat = None;
+        for restarting in [false, true] {
+            let agent = crate::providers::Claude::load(
+                root.path().join("missing-cli"),
+                root.path().join("state"),
+                Some(native.clone()),
+            )
+            .await
+            .unwrap();
+            let projects = ProjectStore::new(root.path().join("bex-projects.json"));
+            projects.register(&cwd).await.unwrap();
+            let service = HostRpcService::new([agent.into()], projects);
+            if !restarting {
+                service
+                    .inner
+                    .conversations
+                    .save(Conversation {
+                        id: public.clone(),
+                        active: active.clone(),
+                        cwd: cwd.to_string_lossy().into_owned(),
+                        name: None,
+                        preview: None,
+                        bindings: vec![Binding {
+                            session: active.clone(),
+                            covered: None,
+                        }],
+                        segments: vec![],
+                        handoffs: vec![],
+                        startup: None,
+                    })
+                    .unwrap();
+                let client = service.open_session();
+                let created: agent_protocol::session::OpenedSession = call(
+                    &service,
+                    client.id(),
+                    Call::CreateSession(op::CreateSession {
+                        provider: ProviderKind::Claude,
+                        cwd: Some(cwd.to_string_lossy().into_owned()),
+                        model: None,
+                        initial_input: None,
+                    }),
+                )
+                .await
+                .unwrap();
+                let id = created.session;
+                // A completed SDK turn must stay visible even without a loaded worker.
+                let rows = [
+                    serde_json::json!({"type":"user","uuid":"question","sessionId":id.id,"cwd":cwd,"entrypoint":"sdk-ts","message":{"content":"NSH side chat"}}),
+                    serde_json::json!({"type":"assistant","uuid":"answer","parentUuid":"question","sessionId":id.id,"entrypoint":"sdk-ts","message":{"id":"reply","content":[{"type":"text","text":"Done"}]}}),
+                ].map(|row| row.to_string() + "\n").concat();
+                std::fs::write(transcripts.join(format!("{}.jsonl", id.id)), rows).unwrap();
+                side_chat = Some(id);
+            }
+            let snapshot = service.project_snapshot().await.unwrap();
+            for search in ["", "NSH", "NSH message text sizing"] {
+                let page = service
+                    .host_title_list(
+                        search,
+                        crate::projects::titles::TitleQuery::Project {
+                            id: &snapshot.projects[0].id,
+                            limit: 10,
+                            searching: !search.is_empty(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let ids: std::collections::HashSet<_> = page
+                    .data
+                    .into_iter()
+                    .map(|thread| thread.id.unwrap())
+                    .collect();
+                let expected = if search == "NSH message text sizing" {
+                    std::collections::HashSet::new()
+                } else {
+                    [public.clone(), session(5), side_chat.clone().unwrap()]
+                        .into_iter()
+                        .collect()
+                };
+                assert_eq!(ids, expected, "search={search}, restarting={restarting}");
+            }
+        }
     }
 
     #[tokio::test]

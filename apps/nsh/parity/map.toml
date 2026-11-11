@@ -28,7 +28,7 @@ description = "A new chat in the project before anything is sent: the hero and t
 nsh = ["press \"New chat in this project\"", "expect \"Ask AI\""]
 t3 = []
 column = "composer"
-elements = ["window", "header", "header-project", "header-new-chat", "composer", "composer-placeholder", "composer-send", "composer-attach", "composer-model", "composer-mode", "composer-dictation", "composer-context-strip", "draft-hero", "draft-hero-project", "draft-without-project"]
+elements = ["window", "header", "header-project", "header-new-chat", "composer", "composer-placeholder", "composer-send", "composer-attach", "composer-model", "composer-dictation", "draft-hero", "draft-hero-project", "draft-without-project"]
 
 [[state]]
 name = "composer-draft"
@@ -43,10 +43,10 @@ elements = ["composer", "composer-overlay", "composer-text", "composer-send"]
 name = "model-picker"
 screen = "Conversation"
 description = "The composer's model picker open."
-nsh = ["press \"New chat in this project\"", "press \"Fixture Model\"", "wait 800"]
+nsh = ["press \"New chat in this project\"", "press \"Fixture Model\"", "press \"Change approval mode\"", "press \"Full access\"", "wait 800"]
 t3 = [{ click = "[data-chat-provider-model-picker]" }, { waitMs = 800 }]
 column = "composer"
-elements = ["composer", "composer-overlay", "composer-model", "model-menu", "model-menu-row"]
+elements = ["composer", "composer-overlay", "composer-model", "model-menu", "model-menu-row", "model-effort", "model-permissions"]
 
 [[state]]
 name = "turn-thinking"
@@ -132,9 +132,9 @@ elements = ["composer", "composer-overlay", "working-header", "retry-notice"]
 [[state]]
 name = "approval"
 screen = "Conversation"
-description = "A command waiting for approval: the request above the composer."
+description = "A command waiting for approval: T3 Code asks in the work row, Bex above the composer."
 nsh = ["send [approval] 承認を確認します", "expect \"結合テストの承認確認\" 20000"]
-t3 = [{ send = "[approval] 承認を確認します" }, { waitText = "Command approval" }]
+t3 = [{ send = "[approval] 承認を確認します" }, { waitText = "Waiting for approval" }]
 column = "composer"
 elements = ["composer", "composer-overlay", "approval-panel", "approval-title", "approval-command", "approval-accept", "approval-decline", "working-header", "approval-live-row"]
 
@@ -192,6 +192,24 @@ t3 = [{ send = "[immediate] 一つ目を確認します" }, { waitText = "シミ
 column = "composer"
 elements = ["composer", "composer-overlay", "minimap", "minimap-strip", "user-bubble", "timeline-gutter-text"]
 
+# ── Thread details ────────────────────────────────────────────────────────
+
+[[state]]
+name = "details-inline"
+screen = "Thread details"
+description = "The details card beside a conversation: its surface, editor and changes row."
+nsh = ["send [immediate] 詳細を確認します", "expect \"シミュレータで完了しました。\" 30000"]
+t3 = [{ send = "[immediate] 詳細を確認します" }, { waitText = "シミュレータで完了しました。" }]
+elements = ["details-card", "details-editor", "details-changes"]
+
+[[state]]
+name = "details-popover"
+screen = "Thread details"
+description = "The same details card opened from the header while the right panel occupies its space."
+nsh = ["send [immediate] 詳細を確認します", "expect \"シミュレータで完了しました。\" 30000", "press \"Toggle right panel\"", "press \"Toggle thread details\"", "expect Sources"]
+t3 = [{ send = "[immediate] 詳細を確認します" }, { waitText = "シミュレータで完了しました。" }, { click = "button[aria-label='Toggle right panel']" }, { click = "button[aria-label='Toggle thread details panel']" }, { waitFor = "[data-thread-details-panel=popover]" }]
+elements = ["details-card", "details-editor", "details-changes"]
+
 # ── Sidebar (compared with the GPUI client) ─────────────────────────────────
 
 [[state]]
@@ -211,9 +229,8 @@ what = "Composer surface"
 kind = "box"
 group = "composer"
 t3 = "[data-chat-composer-surface]"
-# The surface filled behind the field and its footer, whose access mode control
-# every state shows (a question takes the attach button away).
-nsh = { text = "Change approval mode", up = "background" }
+# The input surface stays present when its model picker opens.
+nsh = { text = "Message", role = "AXGroup" }
 
 [[element]]
 id = "composer-overlay"
@@ -222,7 +239,7 @@ kind = "box"
 group = "composer"
 t3 = "[data-chat-composer-overlay=true]"
 # The view over the timeline holding the composer and what stands on it.
-nsh = { text = "Change approval mode", up = 8 }
+nsh = { text = "Message", role = "AXGroup", up = 2 }
 
 [[element]]
 id = "composer-placeholder"
@@ -284,41 +301,45 @@ what = "Model picker"
 kind = "text"
 group = "composer"
 t3 = "[data-chat-provider-model-picker]"
-nsh = { text = "Fixture Model", class = "NSButton" }
+nsh = { text = "Fixture Model", role = "AXButton" }
 anchor = "composer"
-
-[[element]]
-id = "composer-mode"
-what = "Access mode picker"
-kind = "text"
-group = "composer"
-t3 = "button[aria-label='Runtime mode']"
-nsh = { text = "Change approval mode" }
-anchor = "composer"
-
-[[element]]
-id = "composer-context-strip"
-what = "Project and destination strip"
-kind = "text"
-group = "composer"
-t3 = "[data-slot=composer-context-strip]"
-nsh = { text = "Destination", up = 2 }
 
 [[element]]
 id = "model-menu"
 what = "Model picker popup"
 kind = "box"
-group = "composer"
+group = "model-picker"
 t3 = "[data-slot=popover-popup]"
 nsh = { text = "Search models", up = "background" }
+anchor = "composer-model"
+from_end = true
 
 [[element]]
 id = "model-menu-row"
 what = "Model picker: the model's row"
 kind = "text"
-group = "composer"
-t3 = "[data-slot=popover-popup] [role=option], [data-slot=popover-popup] button"
-nsh = { text = "Fixture Model", role = "AXButton" }
+group = "model-picker"
+t3 = "[data-model-picker-content] [role=option] .truncate.text-sm"
+nsh = { text = "Fixture Model", role = "AXStaticText", nth = 1 }
+anchor = "model-menu"
+
+[[element]]
+id = "model-effort"
+what = "The model picker's reasoning levels"
+kind = "box"
+group = "model-picker"
+t3 = "[data-model-picker-effort]"
+nsh = { text = "Reasoning depth", up = 2 }
+anchor = "model-menu"
+
+[[element]]
+id = "model-permissions"
+what = "Permissions in the model picker's footer"
+kind = "text"
+group = "model-picker"
+t3 = "[data-slot=popover-popup] [data-composer-permissions-trigger]"
+nsh = { text = "Change approval mode", role = "AXButton" }
+anchor = "model-menu"
 
 [[element]]
 id = "draft-hero"
@@ -648,7 +669,7 @@ nsh = { contains = "Retrying provider" }
 id = "approval-panel"
 what = "Approval request panel"
 kind = "box"
-t3 = "[data-slot=composer-banner]"
+t3 = "[data-v2-item-type=approval_request]"
 nsh = { text = "Command approval", up = 3 }
 # The banners attach to the composer's top edge: measured from it.
 anchor = "composer"
@@ -657,7 +678,7 @@ anchor = "composer"
 id = "approval-title"
 what = "Approval: title"
 kind = "text"
-t3 = "[data-slot=composer-banner] .text-warning"
+t3 = "[data-v2-item-type=approval_request] .text-warning"
 nsh = { text = "Command approval" }
 anchor = "composer"
 
@@ -674,7 +695,7 @@ anchor = "composer"
 id = "approval-accept"
 what = "Approval: approve button"
 kind = "text"
-t3 = "[data-slot=composer-banner] button:has(span.max-w-40)"
+t3 = "[data-v2-item-type=approval_request] button:has(span.whitespace-normal)"
 nsh = { text = "Approve", role = "AXButton" }
 t3_nth = 1
 anchor = "composer"
@@ -683,7 +704,7 @@ anchor = "composer"
 id = "approval-decline"
 what = "Approval: decline button"
 kind = "text"
-t3 = "[data-slot=composer-banner] button:has(span.max-w-40)"
+t3 = "[data-v2-item-type=approval_request] button:has(span.whitespace-normal)"
 nsh = { text = "Decline", role = "AXButton" }
 anchor = "composer"
 
@@ -835,6 +856,29 @@ what = "Answer text's left edge (the timeline's side gutter)"
 kind = "box"
 t3 = "[data-message-role=assistant] .chat-markdown"
 nsh = { text = "シミュレータで完了しました。" }
+
+[[element]]
+id = "details-card"
+what = "Thread details card"
+kind = "box"
+t3 = "[data-thread-details-card]"
+nsh = { text = "thread-details-card" }
+
+[[element]]
+id = "details-editor"
+what = "Thread details: open in editor"
+kind = "text"
+t3 = "[data-thread-details-card] [role=group][aria-label='Open in editor'] > button:first-child"
+nsh = { text = "thread-details-editor" }
+anchor = "details-card"
+
+[[element]]
+id = "details-changes"
+what = "Thread details: changes"
+kind = "text"
+t3 = "[data-thread-details-card] button:has(> svg.lucide-file-diff)"
+nsh = { text = "thread-details-changes" }
+anchor = "details-card"
 
 # Sidebar elements, against GPUI's source at b539d6069^ (apps/desktop) and
 # gpui-component 0.9.0, the version it used.
@@ -1080,39 +1124,11 @@ approved = "2026-11-09"
 by = "the map (a fixture artefact)"
 
 [[approved]]
-element = "approval-panel"
-metrics = ["size"]
-reason = "as wide as the composer less T3's inset on each side; the composer's width keeps Bex's design (the heights match)"
-approved = "2026-11-09"
-by = "the map (follows the user's composer decision)"
-
-[[approved]]
 element = "question-panel"
 metrics = ["size"]
 reason = "as wide as the composer less T3's inset on each side; the composer's width keeps Bex's design (the heights match)"
 approved = "2026-11-09"
 by = "the map (follows the user's composer decision)"
-
-[[approved]]
-element = "approval-accept"
-metrics = ["text position (drawn)"]
-reason = "the decisions end the banner, as wide as the composer, whose width keeps Bex's design (the heights match)"
-approved = "2026-11-09"
-by = "the map (follows the user's composer decision)"
-
-[[approved]]
-element = "approval-decline"
-metrics = ["text position (drawn)"]
-reason = "the decisions end the banner, as wide as the composer, whose width keeps Bex's design (the heights match)"
-approved = "2026-11-09"
-by = "the map (follows the user's composer decision)"
-
-[[approved]]
-element = "approval-accept"
-metrics = ["text extent (drawn)", "text line height (drawn)"]
-reason = "T3's side measures the filled button's fill (60 by 20 of its 64 by 24) as its text"
-approved = "2026-11-09"
-by = "the map (a measurement artefact)"
 
 [[approved]]
 element = "question-text"

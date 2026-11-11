@@ -1,5 +1,4 @@
 use crate::l10n::{localized, tr, tr_format};
-use crate::ui::Tone;
 use crate::{
     Connection,
     shared::Shared,
@@ -117,11 +116,11 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
     });
     let projected = signal(None::<Result<Shared<Vec<WorkspaceDiffFile>>, String>>);
     effect(move || {
-        let review = review.get();
-        projected.set(None);
-        if let Some(review) = review {
+        if let Some(review) = review.get() {
             // Parsing large diffs does not block the UI. The effect's task is
             // cancelled when a newer review or a different surface replaces it.
+            // Keep the mounted list until its replacement is ready, including
+            // while the workspace review is being fetched.
             spawn(async move {
                 projected.set(Some(
                     blocking(move || Shared(Arc::new(diff_files(&review))))
@@ -129,6 +128,8 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                         .map_err(|reason| reason.to_string()),
                 ));
             });
+        } else {
+            projected.set(None);
         }
     });
     let load = move || {
@@ -140,9 +141,7 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
             )
         })
     };
-    effect(move || {
-        load();
-    });
+    effect(load);
     let pending = computed(move || {
         connection.publication.with(|p| {
             p.snapshot
@@ -171,9 +170,6 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
     let body = computed(move || {
         if failed.get() {
             return DiffBody::Hidden;
-        }
-        if pending.get() {
-            return DiffBody::Loading;
         }
         projected.with(|result| match result {
             None => DiffBody::Loading,
@@ -219,11 +215,11 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                 .h(px(40.0))
                 .px_3()
                 .border_b_1()
-                .border_b_color(colors::BORDER)
+                .border_b_color(colors::border())
                 .child(
                     text(move || cwd.get())
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                         .truncate()
                         .selectable(true)
                         .flex_1()
@@ -271,7 +267,11 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                     .justify_center()
                     .px_5()
                     .child(when(move || body.get() == DiffBody::Loading, ui::spinner))
-                    .child(text(message).text_size(px(12.0)).text_color(colors::MUTED))
+                    .child(
+                        text(message)
+                            .text_size(px(12.0))
+                            .text_color(colors::muted()),
+                    )
             },
         ))
         .child(when(
@@ -323,7 +323,8 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
 }
 
 /// What the Diff panel shows under its header: nothing on a workspace error (its
-/// notice tells), a spinner while the diff loads, why there are no files, or them.
+/// notice tells), a spinner before the first diff loads, why there are no files,
+/// or the last parsed files while their replacement loads.
 #[derive(Clone, PartialEq)]
 enum DiffBody {
     Hidden,
@@ -391,7 +392,7 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
             view()
                 .border_l_1()
                 .border_r_1()
-                .border_color(colors::BORDER)
+                .border_color(colors::border())
                 .bg(colors::SURFACE)
                 .overflow_hidden()
                 .style_when(header, |s| s.border_t_1().rounded_t(px(ui::RADIUS)))
@@ -413,7 +414,7 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
                         .hover(|s| s.bg(colors::SELECTED))
                         .child(
                             view()
-                                .text_color(colors::MUTED)
+                                .text_color(colors::muted())
                                 .child(when(collapsed, || ui::icon(Icon::CHEVRON_RIGHT, 14.0)))
                                 .child(when(
                                     move || !collapsed(),
@@ -450,7 +451,7 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
                             }
                         })
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                         .p_3()
                     },
                 ))
@@ -466,19 +467,10 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
 fn diff_line(line: Memo<Option<DiffRow>>) -> View {
     let tint = move || {
         line.with(|line| match line.as_ref().map(|line| line.kind.as_str()) {
-            Some("+") => (
-                Tone::new(rgb(0xdcfce7), rgb(0x14291d)),
-                Tone::new(rgb(0x166534), rgb(0x9be9a8)),
-            ),
-            Some("-") => (
-                Tone::new(rgb(0xfee2e2), rgb(0x321c20)),
-                Tone::new(rgb(0x991b1b), rgb(0xffa2a2)),
-            ),
-            Some("@") => (
-                Tone::new(rgb(0xdbeafe), rgb(0x232b38)),
-                Tone::new(rgb(0x1e40af), rgb(0x9cc7f5)),
-            ),
-            _ => (colors::SURFACE, Tone::new(rgb(0x3f3f46), rgb(0xd0d0d0))),
+            Some("+") => (rgb(0x14291d), rgb(0x9be9a8)),
+            Some("-") => (rgb(0x321c20), rgb(0xffa2a2)),
+            Some("@") => (rgb(0x232b38), rgb(0x9cc7f5)),
+            _ => (colors::SURFACE, rgb(0xd0d0d0)),
         })
     };
     let code = |content: Text| {
@@ -567,7 +559,7 @@ fn agents_panel(agents: Memo<Shared<Vec<AgentSummary>>>) -> impl IntoElement {
                         tr_format("{0} 件が実行中", [&working])
                     })
                     .text_size(px(13.0))
-                    .text_color(colors::MUTED),
+                    .text_color(colors::muted()),
                 ),
         )
         .child(when(
@@ -575,7 +567,7 @@ fn agents_panel(agents: Memo<Shared<Vec<AgentSummary>>>) -> impl IntoElement {
             || {
                 text(tr("サブエージェントが起動するとここに表示されます。"))
                     .text_size(px(13.0))
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
             },
         ))
         .child(scroll().flex_1().min_h_0().child(view().gap_2().child(each(
@@ -597,7 +589,7 @@ fn agent_row(agent: ReadSignal<AgentSummary>) -> impl IntoElement {
         .p_3()
         .rounded(px(8.0))
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::border())
         .bg(colors::RAISED)
         .child(
             view()
@@ -620,30 +612,33 @@ fn agent_row(agent: ReadSignal<AgentSummary>) -> impl IntoElement {
                             .w(px(6.0))
                             .h(px(6.0))
                             .rounded(px(3.0))
-                            .bg(colors::FOREGROUND)
+                            .bg(colors::foreground())
                     },
                 ))
                 .child(
                     text(move || agent.with(|a| a.status.clone()))
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED),
+                        .text_color(colors::muted()),
                 ),
         )
         .child(
             text(field(|a| a.detail.clone().map(localized)))
                 .h(px(20.0))
                 .text_size(px(13.0))
-                .text_color(colors::MUTED)
+                .text_color(colors::muted())
                 .number_of_lines(1),
         )
         .child(
             text(field(|a| a.model.clone()))
                 .h(px(16.0))
                 .text_size(px(12.0))
-                .text_color(colors::MUTED)
+                .text_color(colors::muted())
                 .number_of_lines(1),
         )
 }
+
+#[cfg(test)]
+mod refresh_tests;
 
 #[cfg(test)]
 mod tests {

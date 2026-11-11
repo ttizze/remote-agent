@@ -67,9 +67,14 @@ struct ThreadScreen: View {
             if let notice = model.notice, errorText(language: locale.appLanguage, error: notice) != history?.error {
                 AppNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
+            if let error = mediaPresentation.linkFailure {
+                AppNotice(text: error).padding(.horizontal).padding(.top, 8)
+            }
             if model.hasConversation {
                 NshConversationView(host: model.host, session: model.session, pane: model.pane,
                                     perform: messageAction)
+                    .id(ObjectIdentifier(model))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("task.detail")
             } else if model.isNewThread {
                 ScrollView {
@@ -121,6 +126,8 @@ extension ThreadScreen {
     /// about in a side chat, or a link opened.
     func messageAction(_ action: String, _ text: String) {
         switch action {
+        case "error":
+            model.notice = text
         case "quote":
             model.addSelectionToChat(text)
         case "sideChat", "explain":

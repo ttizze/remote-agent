@@ -16,6 +16,8 @@ function fixture(t) {
   for (const script of ['build-agent-bindings.sh', 'build-agent-ios.sh']) {
     copyFileSync(`scripts/${script}`, join(root, 'scripts', script));
   }
+  mkdirSync(join(root, 'apps/nsh'), { recursive: true });
+  writeFileSync(join(root, 'apps/nsh/build-native.sh'), 'exec native-build "$@"\n');
   mkdirSync(join(root, 'crates/agent-core'), { recursive: true });
   copyFileSync('crates/agent-core/uniffi.toml', join(root, 'crates/agent-core/uniffi.toml'));
   const command = join(bin, 'command');
@@ -27,6 +29,7 @@ const args = process.argv.slice(2);
 const target = process.env.BINDINGS_TARGET;
 fs.appendFileSync(process.env.BINDINGS_LOG, JSON.stringify({ name, args }) + '\\n');
 const write = (file, content = '') => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); };
+if (name === 'native-build' && process.env.BINDINGS_NATIVE_FAIL) process.exit(22);
 if (name === 'cargo') {
   if (args[0] === 'metadata') console.log(JSON.stringify({ target_directory: target }));
   if (args[0] === 'build' || args[0] === 'rustc') {
@@ -55,7 +58,7 @@ if (name === 'xcrun') {
 }
 `);
   chmodSync(command, 0o755);
-  for (const name of ['cargo', 'xcrun']) symlinkSync(command, join(bin, name));
+  for (const name of ['cargo', 'xcrun', 'native-build']) symlinkSync(command, join(bin, name));
   return {
     root, target,
     run(script = 'scripts/build-agent-ios.sh', args = ['device'], overrides = {}) {
@@ -78,6 +81,8 @@ test('iOS uses its target archive and reuses Swift outputs across invocation pat
       const output = join(build.target, triple, 'release');
       const first = build.run('scripts/build-agent-ios.sh', [platform]);
       assert.equal(first.status, 0, first.stderr);
+      assert.deepEqual(first.commands.find(command => command.name === 'native-build').args,
+        [platform === 'device' ? 'ios' : 'ios-simulator', 'release']);
       const builds = first.commands.filter(command => command.name === 'cargo' && ['build', 'rustc'].includes(command.args[0]));
       assert.equal(builds.length, 1);
       assert.ok(builds[0].args.includes(triple));
@@ -98,6 +103,14 @@ test('iOS uses its target archive and reuses Swift outputs across invocation pat
       assert.ok(!existsSync(retired));
     });
   }
+});
+
+test('a failed native framework build stops before replacing the Rust archive or bindings', (t) => {
+  const build = fixture(t);
+  const result = build.run('scripts/build-agent-ios.sh', ['device'], { BINDINGS_NATIVE_FAIL: '1' });
+  assert.equal(result.status, 22);
+  assert.deepEqual(result.commands.map(command => command.name), ['native-build']);
+  assert.ok(!existsSync(join(build.target, 'aarch64-apple-ios/release/libagent_ffi.a')));
 });
 
 test('standalone generation reads Core metadata without an FFI link and retains bindings after failure', (t) => {

@@ -23,9 +23,9 @@ mod editor;
 #[cfg(target_os = "ios")]
 pub mod embedded_ios;
 mod environment;
-#[cfg(desktop)]
 mod file_actions;
 mod files;
+mod find;
 mod invocations;
 mod l10n;
 mod media;
@@ -41,6 +41,7 @@ mod projects;
 mod queue;
 mod requests;
 mod rich_text;
+#[cfg(any(desktop, target_os = "ios"))]
 mod root;
 #[cfg(desktop)]
 mod selection_bar;
@@ -195,7 +196,6 @@ pub fn App() -> impl IntoElement {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Area {
     Mobile,
-    /// The conversation alone, inside the iPhone app's own screen.
     #[cfg(target_os = "ios")]
     Conversation {
         pane: Option<u64>,
@@ -204,7 +204,7 @@ pub(crate) enum Area {
     Shell,
 }
 
-/// The application's views, made again in each language it selects.
+/// The application's views, made again in each language and contrast it selects.
 fn app_view(service: Arc<application::Application>, area: Area) -> AnyElement {
     let mut updates = service.subscribe();
     let state = signal(Shared(updates.borrow_and_update().clone()));
@@ -220,12 +220,12 @@ fn app_view(service: Arc<application::Application>, area: Area) -> AnyElement {
         language.get();
         nsh_core::element::desktop::set_menu_labels(desktop::menu_labels());
     });
+    let contrast = computed(move || state.with(|state| state.contrast));
     let content = each(
-        move || vec![language.get()],
-        |language| language.code(),
+        move || vec![(language.get(), contrast.get())],
+        |(language, contrast)| (language.code(), *contrast),
         move |_, _| app_content(service.clone(), state.read_only(), area),
     );
-    // Both native entry points need a full-height parent for their flex children.
     view()
         .flex_1()
         .text_color(move || nsh_base::theme().foreground)
@@ -272,6 +272,7 @@ fn app_content(
     let files = files::Browser::new(preview);
     provide_context(files);
     provide_context(terminal::Focus::new());
+    provide_context(find::Find::new());
     #[cfg(target_os = "ios")]
     if matches!(area, Area::Conversation { .. }) {
         let timeline = conversation::Timeline::new(signal(true));
@@ -395,6 +396,10 @@ fn app_content(
                 move || !welcome.get(),
                 move || timeline.minimap(canvas),
             ))
+            .child(when(
+                move || is_desktop() && !welcome.get(),
+                move || find::bar(use_context::<find::Find>().unwrap(), timeline),
+            ))
             .child(
                 view()
                     .style_when(
@@ -430,13 +435,8 @@ fn app_content(
     match area {
         #[cfg(desktop)]
         Area::Shell => {
-            use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
-            let mut title_bar = TitleBarOptions::default();
-            title_bar.style = TitleBarStyle::Hidden;
-            title_bar.height = Some(px(ui::HEADER_HEIGHT));
-            let mut attributes = WindowAttributes::default();
-            attributes.title_bar = Some(title_bar);
-            nsh_core::element::desktop::current_window().set(attributes);
+            use nsh_core::{desktop::TitleBarStyle, element::desktop::set_title_bar};
+            set_title_bar(TitleBarStyle::Hidden, Some(px(ui::HEADER_HEIGHT)));
             // An update's worker replaces the app once its event loop ends.
             effect(move || {
                 if state.with(|state| state.quitting) {
@@ -455,7 +455,12 @@ fn app_content(
             let maximized = move || tools() && workspace.state.with(|s| s.maximized);
             let tool_width = signal(540.0_f32);
             let details = signal(true);
-            let details_inline = move || window().width.0 >= 1080.0 && !tools();
+            let details_inline = move || {
+                agent_core::presentation::conversation::details_card_inline(
+                    canvas() - if tools() { tool_width.get() } else { 0.0 },
+                    window().height.0 - ui::HEADER_HEIGHT,
+                )
+            };
             let main = move || {
                 nsh_base::h_resizable()
                     .handle_class("bg-border group-hover:bg-primary group-active:bg-primary")
@@ -502,12 +507,23 @@ fn app_content(
                                             .flex_1()
                                             .min_h_0()
                                             .flex_row()
-                                            .child(content())
+                                            .child(
+                                                view()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(content())
+                                                    .child(notices::thread_error()),
+                                            )
                                             .child(when(
                                                 move || details.get() && details_inline(),
-                                                desktop_workspace::card,
-                                            ))
-                                            .child(notices::thread_error()),
+                                                move || {
+                                                    use agent_core::presentation::conversation::DETAILS_CARD_GAP;
+                                                    view()
+                                                        .p(px(DETAILS_CARD_GAP))
+                                                        .pl_0()
+                                                        .child(desktop_workspace::card())
+                                                },
+                                            )),
                                     ),
                             ),
                     )
@@ -539,7 +555,7 @@ fn app_content(
                 .flex_1()
                 .flex_row()
                 .bg(ui::colors::BACKGROUND)
-                .text_color(ui::colors::FOREGROUND)
+                .text_color(ui::colors::foreground())
                 .child(media::preview())
                 .child(browser::host())
                 .child(
@@ -612,7 +628,7 @@ fn app_content(
         }
         Area::Mobile => {}
         #[cfg(target_os = "ios")]
-        Area::Conversation { .. } => {}
+        Area::Conversation { .. } => unreachable!("embedded conversation returned above"),
     }
     let navigation = nsh_base::nav_stack().flex_1().child(each(
         move || {
@@ -704,7 +720,7 @@ fn app_content(
                         move || {
                             view()
                                 .flex_1()
-                                .child(connections::selector(hosts, host, true))
+                                .child(connections::selector(hosts, host))
                                 .child(when(
                                     move || searching.get(),
                                     move || {

@@ -140,6 +140,60 @@ async fn saturated_dictation_preparations_leave_complete_recording_transcription
 }
 
 #[tokio::test]
+async fn opening_a_deferred_screenshot_loads_its_image_without_expanding_work() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let id = SessionRef::new(ProviderKind::Codex, "screenshots".into()).unwrap();
+    let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())));
+    let request = read_after_status(&mut reader, &writer).await;
+    assert_eq!(request["method"], "host/session/open");
+    writer.reply(&request, json!({"result":{
+        "session":id,"subscriptionId":uuid::Uuid::new_v4(),
+        "response":{"thread":{"id":id,"turns":[{"id":"turn","status":"completed","items":[{
+            "id":"screenshot","status":"completed","body":{"deferred":{"summary":{"imageView":{"path":"file:///tmp/blog.png"}}}}
+        }]}]}}
+    }})).await.unwrap();
+    let request = read_after_status(&mut reader, &writer).await;
+    assert_eq!(request["method"], "host/session/item/read");
+    assert_eq!(request["params"]["itemId"], "screenshot");
+    writer.reply(&request, json!({"result":{"item":{
+        "id":"screenshot","status":"completed","body":{"inline":{"body":{"imageView":{"path":"file:///tmp/blog.png"}}}}
+    }}})).await.unwrap();
+    opening.await.unwrap();
+    let mut updates = store.subscribe();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let loaded = {
+                let snapshot = updates.borrow_and_update();
+                !snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]
+                    .items
+                    .as_ref()
+                    .unwrap()[0]
+                    .is_deferred()
+            };
+            if loaded {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = store.snapshot();
+    let projected = agent_core::presentation::conversation::project_conversation(
+        agent_core::localization::UiLanguage::Japanese,
+        &snapshot.panes.primary().navigation.draft_key,
+        &snapshot.sessions.pending_submissions,
+        snapshot.sessions.conversations[&id].clone(),
+        &None,
+    );
+    assert!(projected.turns[0].rows.iter().any(|row| matches!(&row.content,
+        agent_core::presentation::conversation::ConversationRowContent::Response { item, .. }
+            if item.data.image_sources == ["file:///tmp/blog.png"]
+    )));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navigation() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
@@ -3022,8 +3076,17 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
     }
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer() {
+async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer(
+    #[values(false, true)] navigate: bool,
+    #[values(
+        "/fixture/shot.png",
+        r"C:\fixture\shot.png",
+        r"\\server\share\shot.png"
+    )]
+    image: &str,
+) {
     let source = SessionRef {
         provider: ProviderKind::Codex,
         id: "thread".into(),
@@ -3036,7 +3099,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         "turns":[kept.clone(),
             {"id":"edit","status":"completed","items":[user("b",json!([
                 {"text":{"text":"send this again"}},
-                {"image":{"source":"/fixture/shot.png"}},
+                {"image":{"source":image}},
                 {"image":{"source":"data:image/png;base64,AAAA"}},
                 {"attachment":{"name":"notes.md","path":"/fixture/notes.md"}}
             ]))]},
@@ -3058,11 +3121,47 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/session/rewind");
     assert_eq!(request["params"]["turnId"], "edit");
+    if navigate {
+        let navigation = store.dispatch(Intent::NewChat {
+            cwd: "/else".into(),
+        });
+        let review_request = read(&mut reader).await;
+        assert_eq!(review_request["method"], "host/workspace/review");
+        writer
+            .reply(&review_request, json!({"result":review()}))
+            .await
+            .unwrap();
+        navigation.await.unwrap();
+    }
+    // The global notification precedes the RPC response on the requesting
+    // connection too. Its original edited message must remain available.
+    writer
+        .notify(
+            json!({"method":"host/session/historyReplaced","params":{"thread":{
+                "id":{"provider":"codex","id":"thread"},"cwd":"/fixture","turns":[kept.clone()]
+            }}}),
+        )
+        .await
+        .unwrap();
     writer
         .reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","turns":[kept]}}}))
         .await
         .unwrap();
     rewind.await.unwrap();
+    if !navigate {
+        let refresh = loop {
+            let request = read(&mut reader).await;
+            if request["method"] == "host/session/open" {
+                break request;
+            }
+            assert_eq!(request["method"], "host/workspace/review");
+            writer
+                .reply(&request, json!({"result":review()}))
+                .await
+                .unwrap();
+        };
+        writer.reply(&refresh, json!({"result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":"00000000-0000-0000-0000-000000000001","unchanged":false,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","turns":[kept]}}}})).await.unwrap();
+    }
     let snapshot = store.snapshot();
     let turns = snapshot.sessions.conversations[&source]
         .turns
@@ -3075,6 +3174,10 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             .collect::<Vec<_>>(),
         ["kept"]
     );
+    if navigate {
+        assert_eq!(snapshot.panes.primary().navigation.cwd, "/else");
+        assert_eq!(snapshot.panes.primary().navigation.thread_id, None);
+    }
     let draft = &snapshot.input.drafts[&DraftKey::from(source)];
     assert_eq!(draft.text, "send this again");
     assert_eq!(
@@ -3084,7 +3187,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             .map(|file| (file.name.as_str(), file.path.as_str(), file.is_image))
             .collect::<Vec<_>>(),
         [
-            ("shot.png", "/fixture/shot.png", true),
+            ("shot.png", image, true),
             ("notes.md", "/fixture/notes.md", false)
         ]
     );

@@ -48,9 +48,9 @@ pub(crate) fn strip() -> impl IntoElement {
                 .py_2()
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(colors::BORDER)
+                .border_color(colors::border())
                 .bg(colors::RAISED)
-                .text_color(colors::FOREGROUND)
+                .text_color(colors::foreground())
                 .child(
                     // A dev server can run for hours after the agent is done,
                     // so only work that will wake the agent pulses.
@@ -58,7 +58,7 @@ pub(crate) fn strip() -> impl IntoElement {
                         .w(px(6.0))
                         .h(px(6.0))
                         .rounded_full()
-                        .bg(colors::FOREGROUND)
+                        .bg(colors::foreground())
                         .style_when(waiting, |s| s.animate_pulse()),
                 )
                 .child(
@@ -72,7 +72,7 @@ pub(crate) fn strip() -> impl IntoElement {
                             move || {
                                 text(move || description.get().unwrap_or_default())
                                     .text_size(px(12.0))
-                                    .text_color(colors::MUTED)
+                                    .text_color(colors::muted())
                                     .number_of_lines(2)
                             },
                         )),

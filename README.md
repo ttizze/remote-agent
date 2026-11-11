@@ -39,6 +39,8 @@ scripts/dev-env.sh just complexity
 
 On macOS, `scripts/dev-env.sh just dev` builds and opens the development app with a separate Host, the background process that runs the agents. It shares your existing agent accounts and conversation history.
 
+To update a source checkout, pull `main`, then build and restart the app or Host as usual. On its first startup, the new Host backs up existing conversation storage in a `before-storage-unification-*` directory beside the database and upgrades it automatically. Large histories can take longer on this first startup. No separate conversion tool is needed.
+
 Development and integration rules are in [AGENTS.md](AGENTS.md); build and test commands are in the [justfile](justfile).
 
 ## More

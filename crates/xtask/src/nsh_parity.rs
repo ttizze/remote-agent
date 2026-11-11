@@ -6,9 +6,11 @@
 //! - NSH: each state is an acceptance scenario ([`map::nsh_scenario`]) against a
 //!   fresh fixture Host, ending in the driver's `capture` (screenshot and every
 //!   view's frame, accessibility texts and layer).
-//! - T3: `scripts/nsh-parity-t3.ts` runs T3's server and web client from the
-//!   checkout `T3_CODE_ROOT` names, with Bex's Codex fixture as its Codex, in
-//!   headless Chromium at the same size and scale.
+//! - T3: `scripts/nsh-parity-t3.ts` runs the installed T3 Code's own server and
+//!   web client (`T3_CODE_APP`, the Nightly by default), apart from the user's
+//!   data, with Bex's Codex fixture as its Codex, in headless Chromium at the
+//!   same size and scale. The checkout `T3_CODE_ROOT` lends it Playwright and
+//!   the Codex schema.
 //! - The sidebar keeps the GPUI client's design: its states compare with the
 //!   layout GPUI's source sets, recorded in the map.
 //!
@@ -16,6 +18,7 @@
 //! map) without running either client; `--t3 RUN` renders T3's side of it again
 //! first (after editing T3 steps or selectors).
 mod compare;
+mod inventory;
 mod map;
 mod pixels;
 mod report;
@@ -37,6 +40,7 @@ use std::{
 
 const MAP: &str = "apps/nsh/parity/map.toml";
 const T3_SCRIPT: &str = "scripts/nsh-parity-t3.ts";
+const T3_APP: &str = "/Applications/T3 Code (Nightly).app";
 const DIFFERS: Rgb = [255, 64, 64];
 const MATCHES: Rgb = [64, 200, 120];
 
@@ -57,15 +61,7 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     let records = match existing {
         Some(records) => {
             if flag == "--t3" {
-                render_t3(
-                    &cwd,
-                    &target,
-                    &map,
-                    &states,
-                    &Tools::locate(&target)?,
-                    &records,
-                )
-                .await?;
+                render_t3(&cwd, &map, &states, &Tools::locate(&target)?, &records).await?;
             }
             records
         }
@@ -83,7 +79,8 @@ pub async fn run(arguments: &[String]) -> Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let path = records.join("report.md");
-    fs::write(&path, report::render(&name, &map, &outcomes))?;
+    let report = report::render(&name, &map, &outcomes) + &inventory::render(&records, &states);
+    fs::write(&path, report)?;
     let differences = outcomes
         .iter()
         .filter_map(|outcome| outcome.result.as_ref().ok())
@@ -158,14 +155,13 @@ async fn capture(cwd: &Path, target: &Path, map: &Map, states: &[&State]) -> Res
         }
     }
     if states.iter().any(|state| state.reference == Reference::T3) {
-        render_t3(cwd, target, map, states, &tools, &records).await?;
+        render_t3(cwd, map, states, &tools, &records).await?;
     }
     Ok(records)
 }
 
 async fn render_t3(
     cwd: &Path,
-    target: &Path,
     map: &Map,
     states: &[&State],
     tools: &Tools,
@@ -179,19 +175,12 @@ async fn render_t3(
         .find_map(|state| fs::read(records.join(&state.name).join("nsh.png")).ok())
         .and_then(|bytes| Image::decode(&bytes, map.viewport.width.into()).ok())
         .map_or(2.0, |image| image.scale);
-    let revision = std::process::Command::new("git")
-        .args(["-C", &root, "rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unknown".into());
-    let web = target.join("nsh-parity").join(format!("t3-web-{revision}"));
+    let app = std::env::var("T3_CODE_APP").unwrap_or_else(|_| T3_APP.into());
     let plan = map::t3_plan(
         map,
         states.iter().copied(),
         scale,
-        [&root, &path(&tools.codex), &path(&web)],
+        [&app, &root, &path(&tools.codex)],
     );
     let plan_path = records.join("t3-plan.json");
     fs::write(&plan_path, serde_json::to_vec_pretty(&plan)?)?;

@@ -1,21 +1,20 @@
 # As the window narrows, T3 Code's layout steps in. Below 768 points the
 # sidebar leaves the content's side and opens as a sheet over it, which closes
 # on its own toggle, Escape, or a chosen conversation. The composer's controls
-# then step aside as T3's footer does: the approval control shows only its
-# icon, then moves into the "more" control's menu while the model's name
-# shortens, and last the controls hide. Attaching, dictation and sending stay,
-# and nothing is cut off.
+# shorten the model name between the fast icon and reasoning meter, then
+# hide that group when it cannot fit. Permissions live in the model picker.
+# Attaching, dictation and sending stay, and nothing is cut off.
 fixture /long-conversation/composer-narrow
 expect "検証プロジェクト" 30000
 press 検証プロジェクト
 press "Long conversation" 20000
 expect "Review section 14, input 0." 20000
-expect "カスタム・未設定"
+expect_absent 承認方法を変更
 expect 会話を検索
 # The sidebar becomes a sheet, closed until opened.
 window 760 760
 expect_absent 会話を検索
-expect "カスタム・未設定"
+expect "Fixture Model"
 press サイドバーを開く
 expect 会話を検索
 expect_inside 会話を検索
@@ -34,45 +33,37 @@ press サイドバーを開く
 press "Long conversation"
 expect_absent 会話を検索
 expect "Review section 14, input 0."
-# About 400 points: the approval control is its icon, the review its icon.
+# The interrupted fixture otherwise offers Resume instead of Send.
+type "AI に依頼する" "幅を変えても保持する下書き"
+# About 400 points: the model controls fit, the review is its icon.
 window 400 760
 expect_absent "カスタム・未設定"
 expect_inside 送信
 expect_inside ファイルを添付
-expect_inside 承認方法を変更
+expect_absent 承認方法を変更
+expect_inside Fast：オフ
 expect_inside "Fixture Model"
 expect_inside 音声をCodexで文字起こし
 expect_inside "AI に依頼する"
 expect_inside "2件のファイル"
-screenshot icon
-press 承認方法を変更
-expect "承認を求める"
-key escape
-expect_absent "承認を求める"
+screenshot controls
 press サイドバーを開く
 expect_inside 会話を検索
 press サイドバーを閉じる
 expect_absent 会話を検索
-# Narrower: the approval control moves into the "more" menu; the name shortens.
-window 280 760
-expect その他
+# Narrower: the name shortens between the quick controls and the microphone.
+window 320 760
 expect_absent 承認方法を変更
 expect_inside 送信
 expect_inside ファイルを添付
-expect_inside その他
+expect_inside Fast：オフ
 expect_inside "Fixture Model"
 expect_inside 音声をCodexで文字起こし
 expect_apart "Fixture Model" 音声をCodexで文字起こし
-expect_apart "Fixture Model" その他
-screenshot more
-press その他
-expect "承認を求める"
-expect "フルアクセス"
-key escape
-expect_absent "承認を求める"
+screenshot shortened
 # Last, the controls hide.
 window 230 760
-expect_absent その他
+expect_absent Fast：オフ
 expect_absent "Fixture Model"
 expect_inside 送信
 expect_inside ファイルを添付
@@ -80,7 +71,8 @@ expect_inside 音声をCodexで文字起こし
 screenshot hidden
 # Wide again, everything comes back with its label, the sidebar beside.
 window 1200 760
-expect "カスタム・未設定"
+expect_absent 承認方法を変更
+expect_inside Fast：オフ
 expect "Fixture Model"
 expect 会話を検索
 screenshot wide

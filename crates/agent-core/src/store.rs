@@ -424,6 +424,7 @@ impl Store {
                     preferred: snapshot.files.preferred_editor,
                 },
                 language: snapshot.catalog.ui_language,
+                contrast: None,
                 composer: snapshot.input.composer_preferences,
             })
         });
@@ -2927,6 +2928,7 @@ mod tests {
             ("task_activity", |snapshot| {
                 snapshot.lists.task_activity =
                     Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
+                        attention: Vec::new(),
                         waiting: Vec::new(),
                         background: Vec::new(),
                         unread: Vec::new(),

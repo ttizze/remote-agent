@@ -125,7 +125,11 @@ impl Client {
                 client.attach_pane(borrowed.host.clone(), pane.clone());
             }
             client.spawn(async move {
-                if let Err(reason) = borrowed.session.clone().ready().await {
+                let ready = tokio::select! {
+                    _ = owner.closing.cancelled() => return,
+                    ready = borrowed.session.clone().ready() => ready,
+                };
+                if let Err(reason) = ready {
                     return owner.report(reason);
                 }
                 owner.observe_surface(borrowed.host, borrowed.session, borrowed.pane);
@@ -211,7 +215,16 @@ impl Client {
                         owner.resume(session, host).await;
                     }
                 }
-                Err(reason) => owner.report(reason),
+                Err(reason) => {
+                    // Removing or replacing this Host cancels restoration too.
+                    if owner
+                        .sessions
+                        .session(host.id)
+                        .is_some_and(|current| Arc::ptr_eq(&current, &session))
+                    {
+                        owner.report(reason);
+                    }
+                }
             }
         });
     }
@@ -405,9 +418,13 @@ impl Client {
             self.report(reason);
         }
         let (send, receive) = async_channel::bounded(1);
+        let closing = self.closing.clone();
         self.spawn(async move {
             let result = match receipt {
-                Ok(receipt) => receipt.wait().await,
+                Ok(receipt) => tokio::select! {
+                    _ = closing.cancelled() => return,
+                    result = receipt.wait() => result,
+                },
                 Err(reason) => Err(reason),
             };
             let _ = send.send(result).await;
@@ -785,6 +802,165 @@ mod tests {
     }
 
     #[test]
+    fn embedded_conversations_share_updates_and_leave_the_native_owners_sessions_open() {
+        for side_chat in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let host = saved_host(directory.path());
+            let (owner_runtime, owner, incoming) =
+                Client::new(directory.path().into(), None).unwrap();
+            owner_runtime.block_on(publication(&incoming, ""));
+            let session = owner.sessions.session(host.id.clone()).unwrap();
+            let pane = side_chat.then(|| {
+                owner_runtime
+                    .block_on(session.store().unwrap().open_pane("/borrowed".into()))
+                    .unwrap()
+            });
+            let (runtime, embedded, incoming) = Client::start(
+                directory.path().into(),
+                None,
+                Some(BorrowedSession {
+                    host: host.id.clone(),
+                    session: session.clone(),
+                    pane: pane.clone(),
+                }),
+            )
+            .unwrap();
+            runtime.block_on(async {
+                let initial = publication(&incoming, "").await;
+                embedded.dispatch(
+                    &host.id,
+                    side_chat.then_some(1),
+                    Intent::SetDraftText {
+                        thread_id: initial.composer.controls.navigation.draft_key.clone(),
+                        text: "shared native input".into(),
+                    },
+                );
+                publication(&incoming, "shared native input").await;
+                tokio::time::timeout(Duration::from_secs(5), embedded.shutdown())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                session.clone().ready().await.unwrap();
+                let retained = match &pane {
+                    Some(pane) => pane.presentation().unwrap(),
+                    None => session.presentation(),
+                };
+                assert_eq!(retained.composer.draft.text, "shared native input");
+            });
+            let view_directory = tempfile::tempdir().unwrap();
+            let selection = view_directory.path().join("connection-selection.json");
+            std::fs::write(&selection, b"standalone selection remains untouched").unwrap();
+            let (view_runtime, application) = crate::application::Application::embedded(
+                view_directory.path().into(),
+                BorrowedSession {
+                    host: host.id.clone(),
+                    session: session.clone(),
+                    pane: pane.clone(),
+                },
+            )
+            .unwrap();
+            view_runtime.block_on(application.shutdown()).unwrap();
+            assert_eq!(
+                std::fs::read(selection).unwrap(),
+                b"standalone selection remains untouched"
+            );
+            if let Some(pane) = pane {
+                pane.retire();
+            }
+            owner_runtime.block_on(owner.shutdown()).unwrap();
+        }
+    }
+
+    #[test]
+    fn closing_an_embedded_view_does_not_wait_for_native_startup_or_pending_receipts() {
+        struct BlockedPlatform {
+            entered: std::sync::mpsc::SyncSender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl agent_core::client::session::ClientPlatform for BlockedPlatform {
+            fn identity(&self) -> Result<Vec<u8>, AgentError> {
+                Ok(vec![1; 32])
+            }
+            fn diagnostics_directory(&self) -> Result<Option<String>, AgentError> {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                Ok(None)
+            }
+            fn conversation_directory(&self) -> Result<Option<String>, AgentError> {
+                Ok(None)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let host = saved_host(directory.path());
+        let storage = Arc::new(Storage {
+            root: directory.path().into(),
+            host: host.clone(),
+            handed: Default::default(),
+        });
+        let sessions = ClientSessions::new(
+            false,
+            ClientBuild {
+                number: 1,
+                revision: "test".into(),
+            },
+            "native".into(),
+            DevicePreferences::new(Arc::new(crate::storage::DeviceStorage {
+                root: directory.path().into(),
+            })),
+        );
+        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+        let (release, blocked) = std::sync::mpsc::channel();
+        let session = sessions.open(
+            host.id.clone(),
+            storage,
+            Arc::new(BlockedPlatform {
+                entered,
+                release: std::sync::Mutex::new(blocked),
+            }),
+        );
+        let owner_runtime = tokio::runtime::Runtime::new().unwrap();
+        let startup = owner_runtime.spawn(session.clone().ready());
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (runtime, embedded, _) = Client::start(
+            directory.path().into(),
+            None,
+            Some(BorrowedSession {
+                host: host.id.clone(),
+                session: session.clone(),
+                pane: None,
+            }),
+        )
+        .unwrap();
+        let pending = embedded.request(
+            &host.id,
+            None,
+            Intent::SetDraftText {
+                thread_id: session
+                    .presentation()
+                    .composer
+                    .controls
+                    .navigation
+                    .draft_key
+                    .clone(),
+                text: "native queued input".into(),
+            },
+        );
+        let closed = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), embedded.shutdown()).await
+        });
+        // Unblock the owner's worker even if the bounded shutdown assertion fails.
+        release.send(()).unwrap();
+        closed.unwrap().unwrap();
+        assert!(runtime.block_on(pending.recv()).is_err());
+        let store = owner_runtime.block_on(startup).unwrap().unwrap();
+        assert_eq!(
+            store.presentation().composer.draft.text,
+            "native queued input"
+        );
+        owner_runtime.block_on(sessions.shutdown()).unwrap();
+    }
+
+    #[test]
     fn local_host_facts_are_explicit_and_saved_profiles_cannot_replace_them() {
         let directory = tempfile::tempdir().unwrap();
         let remote = saved_host(directory.path());
@@ -834,6 +1010,63 @@ mod tests {
             };
             assert_eq!(hosts.len(), 1);
             assert!(hosts[0] == remote);
+            client.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn removing_a_host_before_its_store_starts_does_not_report_startup_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, client, incoming) = Client::new(directory.path().into(), None).unwrap();
+        runtime.block_on(async {
+            assert!(
+                matches!(incoming.recv().await.unwrap(), Update::Hosts(hosts) if hosts.is_empty())
+            );
+        });
+        client.jobs.close();
+        runtime.block_on(client.jobs.wait());
+        client.jobs.reopen();
+
+        // Park every worker so restore can register a Host while its startup
+        // remains queued. Dropping a release sender also unblocks it on panic.
+        let workers = runtime.metrics().num_workers();
+        let (entered, parked) = std::sync::mpsc::channel();
+        let mut releases = Vec::new();
+        for _ in 0..workers {
+            let (release, wait) = std::sync::mpsc::channel();
+            releases.push(release);
+            let entered = entered.clone();
+            drop(runtime.spawn(async move {
+                let _ = entered.send(());
+                let _ = wait.recv();
+            }));
+        }
+        for _ in 0..workers {
+            parked.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let remote = saved_host(directory.path());
+        runtime.block_on(async {
+            client.restore().await.unwrap();
+            assert!(client.snapshot(&remote.id).is_some());
+            client.remove_host(remote.id.clone()).await.unwrap();
+        });
+        for release in releases {
+            let _ = release.send(());
+        }
+        client.jobs.close();
+        runtime.block_on(async {
+            client.jobs.wait().await;
+            let mut hosts = None;
+            while let Ok(update) = incoming.try_recv() {
+                match update {
+                    Update::Hosts(next) => hosts = Some(next),
+                    Update::Error(reason) => panic!("retired startup reported an error: {reason}"),
+                    Update::Presentation { .. } => panic!("retired startup published its UI"),
+                    _ => {}
+                }
+            }
+            assert!(hosts.unwrap().is_empty());
+            assert!(client.snapshot(&remote.id).is_none());
             client.shutdown().await.unwrap();
         });
     }

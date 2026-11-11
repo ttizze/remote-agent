@@ -5,6 +5,7 @@ use crate::{
     state::Draft,
 };
 use std::{borrow::Cow, fmt::Write};
+mod tool_output;
 
 pub struct ItemBody {
     pub text: Option<String>,
@@ -46,6 +47,7 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
         WireBody::Reasoning { .. } => Some(language.text("詳細を表示").into()),
         WireBody::ImageGeneration { .. } => (item.status == ItemStatus::Failed)
             .then(|| language.text("画像を生成できませんでした").into()),
+        WireBody::ImageView { .. } => None,
         _ => Some(
             match item.status {
                 ItemStatus::Unknown => language.text("詳細を表示"),
@@ -69,6 +71,10 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
                     .filter(|data| !data.is_empty())
                     .map(|data| crate::presentation::media::encoded_image_source(data))
             })
+            .into_iter()
+            .collect(),
+        WireBody::ImageView { path } => (!path.is_empty())
+            .then(|| path.clone())
             .into_iter()
             .collect(),
         WireBody::UserMessage { content, .. } => content
@@ -321,11 +327,7 @@ pub(super) fn detail_blocks(
                 ));
             }
             if let Some(result) = result {
-                blocks.push(code(
-                    &serde_json::to_string_pretty(result).expect("result serializes"),
-                    Some("json"),
-                    "結果",
-                ));
+                blocks.extend(tool_output::result_blocks(language, result));
             }
             if let Some(error) = error {
                 blocks.push(code(
@@ -340,14 +342,7 @@ pub(super) fn detail_blocks(
                         blocks.extend(markdown_blocks(text.clone()))
                     }
                     agent_protocol::requests::ToolContent::Image { data_url } => {
-                        blocks.push(super::markdown::MarkdownBlock::Paragraph {
-                            runs: vec![super::markdown::MarkdownRun {
-                                text: language.text("ツールの画像").into(),
-                                image: Some(data_url.clone()),
-                                ..Default::default()
-                            }],
-                            style: Default::default(),
-                        })
+                        blocks.push(tool_output::image_block(language, data_url.clone()));
                     }
                 }
             }

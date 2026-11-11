@@ -9,6 +9,7 @@
 //! and identities instead of independently guessing finality or grouping.
 
 pub mod agents;
+pub mod appearance;
 pub mod background_work;
 pub mod connection_list;
 pub mod connections;
@@ -16,7 +17,6 @@ pub mod diff;
 pub mod editors;
 pub mod error;
 pub mod files;
-pub mod folder_menu;
 pub mod host_management;
 pub mod media;
 pub mod model_settings;
@@ -86,7 +86,10 @@ impl<'a> From<&'a Item> for ItemMetadata<'a> {
                 ItemBody::AssistantText { .. } => GroupKind::Assistant,
                 ItemBody::CommandExecution { .. } => GroupKind::Command,
                 ItemBody::FileChange { .. } => GroupKind::FileChange,
-                ItemBody::ImageGeneration { .. } => GroupKind::Image,
+                ItemBody::ImageView { path } if path.is_empty() || item.is_deferred() => {
+                    GroupKind::Hidden
+                }
+                ItemBody::ImageGeneration { .. } | ItemBody::ImageView { .. } => GroupKind::Image,
                 ItemBody::Reasoning { content, summary }
                     if body::reasoning_parts(content, summary).is_some() =>
                 {
@@ -493,6 +496,7 @@ pub fn item_presentation(
             true,
         ),
         ItemBody::ImageGeneration { .. } => ("imageGeneration", None, false),
+        ItemBody::ImageView { .. } => ("imageView", None, false),
         ItemBody::Notification { reports } => (
             "notification",
             Some(background_work::notification_text(
@@ -507,6 +511,7 @@ pub fn item_presentation(
             Some(language.text("コンテキストを圧縮中…").into()),
             true,
         ),
+        ItemBody::WebSearch { .. } => ("webSearch", Some(tool_title(language, item.body())), true),
         _ => ("unknown", Some(tool_title(language, item.body())), true),
     };
     ItemPresentation {
@@ -576,17 +581,6 @@ fn tool_title(language: UiLanguage, body: &ItemBody) -> String {
                     language,
                     "Webを検索: {0}".into(),
                     vec![compact_title(query)],
-                )
-            }
-        }
-        ItemBody::ImageView { path } => {
-            if path.is_empty() {
-                language.text("画像を確認しました").into()
-            } else {
-                localized_ui_format(
-                    language,
-                    "画像を確認: {0}".into(),
-                    vec![compact_title(path)],
                 )
             }
         }

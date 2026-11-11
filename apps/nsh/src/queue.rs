@@ -45,13 +45,13 @@ pub(crate) fn queued(connection: Connection) -> View {
         .child(
             text(tr("キューのメッセージ"))
                 .text_size(px(13.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
         .child(view().flex_1())
         .child(
             text(move || count().to_string())
                 .text_size(px(12.0))
-                .text_color(colors::MUTED),
+                .text_color(colors::muted()),
         )
         .child(dynamic(move || {
             ui::icon(
@@ -69,7 +69,7 @@ pub(crate) fn queued(connection: Connection) -> View {
         .gap_1()
         .rounded(px(12.0))
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::border())
         .bg(colors::SURFACE)
         .label(move || tr_format("キューのメッセージ {0}件", [&count()]))
         .child(header)
@@ -123,7 +123,7 @@ fn grip(
         .items_center()
         .justify_center()
         .rounded(px(ui::RADIUS))
-        .text_color(colors::MUTED)
+        .text_color(colors::muted())
         .hover(|s| s.bg(colors::GHOST_HOVER))
         .role(AccessibilityRole::Button)
         .label(tr(
@@ -220,7 +220,7 @@ fn row(
             .top(px(edge))
             .h(px(2.0))
             .rounded_full()
-            .bg(crate::ui::Tone::new(rgba(0x18181bb3), rgba(0xe6e6e6b3)))
+            .bg(rgba(0xe6e6e6b3))
     };
     view()
         .flex_row()
@@ -237,7 +237,7 @@ fn row(
             if editing() {
                 colors::SELECTED
             } else {
-                crate::ui::Tone::same(rgba(0x00000000))
+                rgba(0x00000000)
             }
         })
         .on_mouse_move(over)
@@ -258,7 +258,7 @@ fn row(
             || {
                 view()
                     .label(tr("キューへ保存中"))
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
                     .child(ui::icon(Icon::SAVING, 12.0))
             },
         ))

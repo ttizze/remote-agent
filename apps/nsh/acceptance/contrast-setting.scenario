@@ -1,0 +1,13 @@
+# The settings offer T3 Code's interface contrast; a drag applies it once it
+# ends, remaking the window, with the settings still open.
+expect "何に取り組みますか？" 30000
+press 設定を開く
+expect "コントラスト" 10000
+expect "100%"
+screenshot default
+drag_by コントラスト 40 after "100%"
+expect_absent "100%" 5000
+expect "コントラスト" 5000
+screenshot raised
+press コントラストをリセット
+expect "100%" 5000

@@ -1,7 +1,6 @@
-//! Host-owned transcripts. Native provider history is read once to import a
-//! conversation; afterwards the Host records each turn as it finishes and
-//! never returns to native storage for reads. Rows keep every item inline;
-//! readers summarize or defer bodies for transfer.
+//! Host-owned conversation storage: transcripts, bindings, receipts and options.
+//! Native history is imported once; afterwards the Host records completed turns.
+//! Stored items keep their bodies inline; readers summarize or defer them for transfer.
 use agent_protocol::{
     execution::TurnStatus,
     ids::{ItemId, TurnId},
@@ -11,12 +10,15 @@ use agent_protocol::{
     session::SessionRef,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::HashMap, path::Path, sync::Mutex};
 
 /// A window stops growing past this many encoded bytes, keeping at least one turn.
 const WINDOW_BYTES: usize = 1 << 20;
 
-pub(crate) struct Transcripts {
+mod upgrade;
+
+pub(crate) struct ConversationStore {
     // A store that failed to open stays failed; reads must not fall back to
     // an empty transcript that would look like a conversation without turns.
     state: Mutex<Result<Connection, String>>,
@@ -44,21 +46,43 @@ fn decode_turn(body: &[u8]) -> Result<Turn, String> {
     protocol::decode(body).map_err(failure)
 }
 
-impl Transcripts {
+impl ConversationStore {
     pub(crate) fn open(path: &Path) -> Self {
         let state = (|| {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(failure)?;
             }
-            let connection = Connection::open(path).map_err(failure)?;
+            let mut connection = Connection::open(path).map_err(failure)?;
             // A restarting Host can briefly overlap its predecessor.
             connection
                 .busy_timeout(std::time::Duration::from_secs(10))
                 .map_err(failure)?;
+            let version: u32 = connection
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .map_err(failure)?;
+            if version > 1 {
+                return Err(format!(
+                    "unsupported conversation database version: {version}"
+                ));
+            }
+            let previous = if version == 0 {
+                upgrade::prepare(&connection, path)?
+            } else {
+                None
+            };
+            // A successful receipt or rewind must survive a Host restart.
             connection
+                .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")
+                .map_err(failure)?;
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            transaction
                 .execute_batch(
-                    "PRAGMA journal_mode = WAL;
-                     PRAGMA synchronous = NORMAL;
+                    "CREATE TABLE IF NOT EXISTS host_state (
+                         name TEXT PRIMARY KEY,
+                         body BLOB NOT NULL
+                     ) WITHOUT ROWID;
                      CREATE TABLE IF NOT EXISTS conversations (
                          provider TEXT NOT NULL,
                          id TEXT NOT NULL,
@@ -93,11 +117,25 @@ impl Transcripts {
                      ) WITHOUT ROWID;",
                 )
                 .map_err(failure)?;
+            let backup = previous
+                .map(|previous| previous.write(&transaction))
+                .transpose()?;
+            transaction
+                .pragma_update(None, "user_version", 1)
+                .map_err(failure)?;
+            transaction.commit().map_err(failure)?;
+            if let Some(backup) = backup {
+                let _ = backup.keep();
+            }
             Ok(connection)
         })();
         Self {
             state: Mutex::new(state),
         }
+    }
+
+    pub(crate) fn check_ready(&self) -> Result<(), String> {
+        self.with(|_| Ok(()))
     }
 
     fn with<T>(
@@ -117,94 +155,79 @@ impl Transcripts {
         })
     }
 
+    pub(super) fn load_state<T: DeserializeOwned + Default>(
+        &self,
+        name: &str,
+    ) -> Result<T, String> {
+        self.with(|connection| {
+            let bytes: Option<Vec<u8>> = connection
+                .query_row(
+                    "SELECT body FROM host_state WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            bytes
+                .map(|bytes| serde_json::from_slice(&bytes).map_err(failure))
+                .unwrap_or_else(|| Ok(T::default()))
+        })
+    }
+
+    pub(super) fn save_state(&self, name: &str, value: &impl Serialize) -> Result<(), String> {
+        let bytes = serde_json::to_vec(value).map_err(failure)?;
+        self.write(|transaction| write_state(transaction, name, &bytes))
+    }
+
+    pub(super) fn replace_with_bindings(
+        &self,
+        conversation: &SessionRef,
+        response: ThreadResponse,
+        bindings: &[super::conversations::Conversation],
+    ) -> Result<u64, String> {
+        let bytes = serde_json::to_vec(bindings).map_err(failure)?;
+        self.write(|transaction| {
+            let version = store(transaction, conversation, response, false)?;
+            write_state(transaction, "bindings", &bytes)?;
+            Ok(version)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn reject_state_writes(&self, reject: bool) {
+        self.with(|connection| {
+            connection
+                .execute_batch(if reject {
+                    "CREATE TEMP TRIGGER reject_state BEFORE INSERT ON host_state
+             BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;"
+                } else {
+                    "DROP TRIGGER reject_state;"
+                })
+                .map_err(failure)
+        })
+        .unwrap();
+    }
+
     /// Native history fills in what the Host did not run. A turn the Host
     /// recorded keeps its recorded items, which an import does not copy in
     /// full; recorded turns missing from native history follow it in order.
     pub(crate) fn import(
         &self,
         conversation: &SessionRef,
+        expected_version: Option<u64>,
         response: ThreadResponse,
     ) -> Result<(), String> {
-        self.store(conversation, response, true)
-    }
-
-    /// Replace everything held for `conversation`, recorded turns included.
-    pub(crate) fn replace(
-        &self,
-        conversation: &SessionRef,
-        response: ThreadResponse,
-    ) -> Result<(), String> {
-        self.store(conversation, response, false)
-    }
-
-    fn store(
-        &self,
-        conversation: &SessionRef,
-        mut response: ThreadResponse,
-        keep_recorded: bool,
-    ) -> Result<(), String> {
-        let native = response.thread.turns.take().unwrap_or_default();
-        // Live execution supplies status; a stored observation would go stale.
-        response.thread.status = SessionStatus::Unknown;
-        response.thread.history_cursor = None;
-        response.thread.history_has_more = None;
-        response.thread.history_read_state = None;
-        let metadata = protocol::encode(&response).map_err(failure)?;
-        let key = params![conversation.provider.key(), conversation.id];
         self.write(|transaction| {
-            let mut recorded = Vec::new();
-            if keep_recorded {
-                let mut rows = transaction
-                    .prepare("SELECT body FROM turns WHERE provider = ?1 AND id = ?2 ORDER BY position")
-                    .map_err(failure)?;
-                let mut rows = rows.query(key).map_err(failure)?;
-                while let Some(row) = rows.next().map_err(failure)? {
-                    recorded.push(decode_turn(&row.get::<_, Vec<u8>>(0).map_err(failure)?)?);
-                }
+            if transcript_version(transaction, conversation)? != expected_version {
+                return Ok(());
             }
-            // A turn recorded before its conversation was saved lacks the
-            // provider attribution native reads add.
-            let recorded_by_id = turns_by_id(recorded.iter());
-            let native_by_id = turns_by_id(native.iter().map(AsRef::as_ref));
-            let turns: Vec<std::borrow::Cow<Turn>> = native
-                .iter()
-                .map(|native| {
-                    let stored = recorded_by_id.get(&native.id).into_iter().flatten().copied()
-                        .find(|turn| native.matches_occurrence(turn));
-                    match stored {
-                        Some(turn) => std::borrow::Cow::Owned(Turn {
-                            provider: turn.provider.or(native.provider),
-                            supports_fork: turn.supports_fork.or(native.supports_fork),
-                            ..turn.clone()
-                        }),
-                        None => std::borrow::Cow::Borrowed(native.as_ref()),
-                    }
-                })
-                .chain(
-                    recorded
-                        .iter()
-                        .filter(|turn| {
-                            !native_by_id.get(&turn.id).into_iter().flatten()
-                                .any(|native| native.matches_occurrence(turn))
-                        })
-                        .map(std::borrow::Cow::Borrowed),
-                )
-                .collect();
-            transaction
-                .execute("DELETE FROM turns WHERE provider = ?1 AND id = ?2", key)
-                .map_err(failure)?;
-            for (position, turn) in turns.iter().enumerate() {
-                write_turn(transaction, conversation, position as i64, turn)?;
-            }
-            transaction
-                .execute(
-                    "INSERT INTO conversations (provider, id, cwd, metadata) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT (provider, id) DO UPDATE SET cwd = excluded.cwd, metadata = excluded.metadata",
-                    params![conversation.provider.key(), conversation.id, response.thread.cwd, metadata],
-                )
-                .map_err(failure)?;
-            advance(transaction, conversation.provider.key(), &conversation.id)
+            store(transaction, conversation, response, true).map(|_| ())
         })
+    }
+
+    /// Capture before reading native history; import checks it in its transaction.
+    pub(crate) fn version(&self, conversation: &SessionRef) -> Result<Option<u64>, String> {
+        self.with(|connection| transcript_version(connection, conversation))
     }
 
     /// Replace the stored occurrence of a live turn, or append it. Conversations
@@ -407,15 +430,7 @@ impl Transcripts {
             let mut response: ThreadResponse = protocol::decode(&metadata).map_err(failure)?;
             let start = end - turns.len();
             response.thread.turns = Some(turns);
-            response.thread.transcript_version = connection
-                .query_row(
-                    "SELECT version FROM versions WHERE provider = ?1 AND id = ?2",
-                    key,
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(failure)?
-                .map(|version| version as u64);
+            response.thread.transcript_version = transcript_version(connection, conversation)?;
             Ok(Some(Window { response, start }))
         })
     }
@@ -557,6 +572,17 @@ impl Transcripts {
     }
 }
 
+fn write_state(transaction: &Transaction, name: &str, bytes: &[u8]) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO host_state(name, body) VALUES (?1, ?2)
+        ON CONFLICT(name) DO UPDATE SET body = excluded.body",
+            params![name, bytes],
+        )
+        .map_err(failure)?;
+    Ok(())
+}
+
 fn find_turn<T>(
     connection: &Connection,
     conversation: &SessionRef,
@@ -588,6 +614,83 @@ fn find_turn<T>(
     Ok(None)
 }
 
+fn store(
+    transaction: &Transaction,
+    conversation: &SessionRef,
+    mut response: ThreadResponse,
+    keep_recorded: bool,
+) -> Result<u64, String> {
+    let native = response.thread.turns.take().unwrap_or_default();
+    // Live execution supplies status; a stored observation would go stale.
+    response.thread.status = SessionStatus::Unknown;
+    response.thread.history_cursor = None;
+    response.thread.history_has_more = None;
+    response.thread.history_read_state = None;
+    let metadata = protocol::encode(&response).map_err(failure)?;
+    let key = params![conversation.provider.key(), conversation.id];
+    let mut recorded = Vec::new();
+    if keep_recorded {
+        let mut rows = transaction
+            .prepare("SELECT body FROM turns WHERE provider = ?1 AND id = ?2 ORDER BY position")
+            .map_err(failure)?;
+        let mut rows = rows.query(key).map_err(failure)?;
+        while let Some(row) = rows.next().map_err(failure)? {
+            recorded.push(decode_turn(&row.get::<_, Vec<u8>>(0).map_err(failure)?)?);
+        }
+    }
+    // A turn recorded before its conversation was saved lacks the
+    // provider attribution native reads add.
+    let recorded_by_id = turns_by_id(recorded.iter());
+    let native_by_id = turns_by_id(native.iter().map(AsRef::as_ref));
+    let turns: Vec<std::borrow::Cow<Turn>> = native
+        .iter()
+        .map(|native| {
+            let stored = recorded_by_id
+                .get(&native.id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .find(|turn| native.matches_occurrence(turn));
+            match stored {
+                Some(turn) => std::borrow::Cow::Owned(Turn {
+                    provider: turn.provider.or(native.provider),
+                    supports_fork: turn.supports_fork.or(native.supports_fork),
+                    ..turn.clone()
+                }),
+                None => std::borrow::Cow::Borrowed(native.as_ref()),
+            }
+        })
+        .chain(
+            recorded
+                .iter()
+                .filter(|turn| {
+                    !native_by_id
+                        .get(&turn.id)
+                        .into_iter()
+                        .flatten()
+                        .any(|native| native.matches_occurrence(turn))
+                })
+                .map(std::borrow::Cow::Borrowed),
+        )
+        .collect();
+    transaction
+        .execute("DELETE FROM turns WHERE provider = ?1 AND id = ?2", key)
+        .map_err(failure)?;
+    for (position, turn) in turns.iter().enumerate() {
+        write_turn(transaction, conversation, position as i64, turn)?;
+    }
+    transaction
+                .execute(
+                    "INSERT INTO conversations (provider, id, cwd, metadata) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (provider, id) DO UPDATE SET cwd = excluded.cwd, metadata = excluded.metadata",
+                    params![conversation.provider.key(), conversation.id, response.thread.cwd, metadata],
+                )
+                .map_err(failure)?;
+    advance(transaction, conversation.provider.key(), &conversation.id)?;
+    transcript_version(transaction, conversation)?
+        .ok_or_else(|| "stored transcript has no version".into())
+}
+
 /// Imports enumerate positions, and live writes only replace or append. The
 /// final indexed position therefore gives the count without scanning the history.
 fn turn_count(connection: &Connection, provider: &str, id: &str) -> Result<i64, String> {
@@ -598,6 +701,21 @@ fn turn_count(connection: &Connection, provider: &str, id: &str) -> Result<i64, 
         .map_err(failure)?
         .query_row(params![provider, id], |row| row.get(0))
         .map_err(failure)
+}
+
+fn transcript_version(
+    connection: &Connection,
+    conversation: &SessionRef,
+) -> Result<Option<u64>, String> {
+    connection
+        .query_row(
+            "SELECT version FROM versions WHERE provider = ?1 AND id = ?2",
+            params![conversation.provider.key(), conversation.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(failure)
+        .map(|version| version.map(|version| version as u64))
 }
 
 /// Give the conversation the next Host-wide version, using the version index.
@@ -692,10 +810,479 @@ mod tests {
         }
     }
 
-    fn store() -> (tempfile::TempDir, Transcripts) {
+    fn store() -> (tempfile::TempDir, ConversationStore) {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(&root.path().join("state/transcripts.sqlite"));
+        let store = ConversationStore::open(&root.path().join("state/transcripts.sqlite"));
         (root, store)
+    }
+
+    #[test]
+    fn future_databases_are_rejected_without_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE saved (body TEXT); INSERT INTO saved VALUES ('keep'); PRAGMA user_version = 2;"
+        ).unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let store = ConversationStore::open(&path);
+        assert!(store.check_ready().is_err());
+        assert!(store.load_state::<Vec<String>>("bindings").is_err());
+        assert!(store.save_state("bindings", &Vec::<String>::new()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_new_database_can_reopen_with_its_saved_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let store = ConversationStore::open(&path);
+        assert!(
+            !std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .any(|entry| entry.file_type().unwrap().is_dir())
+        );
+        store.save_state("models", &vec!["selected"]).unwrap();
+        drop(store);
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(
+            store.load_state::<Vec<String>>("models").unwrap(),
+            ["selected"]
+        );
+    }
+
+    // A fixed version-0 fixture, independent of current schema initialization.
+    // Keep the connection open so committed transcript and queue rows stay in WAL.
+    fn old_storage(path: &Path) -> Connection {
+        let connection = Connection::open(path).unwrap();
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE conversations (provider TEXT NOT NULL, id TEXT NOT NULL, cwd TEXT, metadata BLOB, PRIMARY KEY(provider,id)) WITHOUT ROWID;
+            CREATE TABLE turns (provider TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, turn_id TEXT NOT NULL, running INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(provider,id,position)) WITHOUT ROWID;
+            CREATE TABLE versions (provider TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(provider,id)) WITHOUT ROWID;
+            CREATE TABLE queues (provider TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(provider,id)) WITHOUT ROWID;").unwrap();
+        let session = conversation();
+        connection
+            .execute(
+                "INSERT INTO conversations VALUES (?1, ?2, NULL, ?3)",
+                params![
+                    session.provider.key(),
+                    session.id,
+                    protocol::encode(&history(vec![])).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO turns VALUES (?1, ?2, 0, 't', 0, ?3)",
+                params![
+                    session.provider.key(),
+                    session.id,
+                    protocol::encode(&turn("t", &["i"], TurnStatus::Completed)).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO versions VALUES (?1, ?2, 7)",
+                params![session.provider.key(), session.id],
+            )
+            .unwrap();
+        let queue = InputQueue {
+            inputs: vec![agent_protocol::operations::Submission {
+                thread_id: session.clone(),
+                client_user_message_id: "waiting".into(),
+                input: vec![],
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+            }],
+            held: true,
+        };
+        connection
+            .execute(
+                "INSERT INTO queues VALUES (?1, ?2, ?3)",
+                params![
+                    session.provider.key(),
+                    session.id,
+                    protocol::encode(&queue).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn startup_upgrades_old_storage_once_and_preserves_a_consistent_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let old = old_storage(&path);
+        let session = conversation();
+        let binding = super::super::conversations::Conversation::new(&Thread {
+            cwd: Some("/workspace".into()),
+            ..history(vec![]).thread
+        })
+        .unwrap();
+        for (file, data) in [
+            ("bex-conversations.json", serde_json::to_vec(&vec![binding]).unwrap()),
+            ("bex-read-state.json", serde_json::to_vec(&serde_json::json!([{"session":session,"turn_id":"t","unread":true}])).unwrap()),
+            ("bex-model-selections.json", serde_json::to_vec(&serde_json::json!([{"session":session,"model":null,"effort":"high","service_tier":"fast"}])).unwrap()),
+        ] {
+            std::fs::write(root.path().join(file), data).unwrap();
+        }
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(store.version(&session).unwrap(), Some(7));
+        assert_eq!(
+            texts(&store.window(&session, None, 10).unwrap().unwrap()),
+            ["t/i"]
+        );
+        assert_eq!(
+            store.queues().unwrap()[0].1.inputs[0]
+                .client_user_message_id
+                .as_str(),
+            "waiting"
+        );
+        assert_eq!(
+            store
+                .load_state::<Vec<serde_json::Value>>("bindings")
+                .unwrap()[0]["id"],
+            serde_json::to_value(&session).unwrap()
+        );
+        assert_eq!(
+            store.load_state::<Vec<serde_json::Value>>("reads").unwrap()[0]["unread"],
+            true
+        );
+        assert_eq!(
+            store
+                .load_state::<Vec<serde_json::Value>>("models")
+                .unwrap()[0]["service_tier"],
+            "fast"
+        );
+        let backups: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("before-storage-unification-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open(backups[0].path().join("bex-transcripts.sqlite")).unwrap();
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT count(*) FROM turns", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(backups[0].path().join("bex-read-state.json")).unwrap(),
+            std::fs::read(root.path().join("bex-read-state.json")).unwrap()
+        );
+        store.save_state("models", &vec!["new selection"]).unwrap();
+        drop(store);
+        drop(old);
+        // Stale (even corrupted) JSON cannot overwrite the committed upgrade.
+        std::fs::write(root.path().join("bex-model-selections.json"), b"invalid").unwrap();
+        let reopened = ConversationStore::open(&path);
+        assert_eq!(
+            reopened.load_state::<Vec<String>>("models").unwrap(),
+            ["new selection"]
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("before-storage-unification-"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn metadata_only_storage_upgrades_on_first_start() {
+        let root = tempfile::tempdir().unwrap();
+        let session = conversation();
+        std::fs::write(
+            root.path().join("bex-read-state.json"),
+            serde_json::to_vec(
+                &serde_json::json!([{"session":session,"turn_id":"t","unread":true}]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ConversationStore::open(&root.path().join("bex-transcripts.sqlite"));
+        store.check_ready().unwrap();
+        assert_eq!(
+            store
+                .load_state::<Vec<serde_json::Value>>("reads")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .load_state::<Vec<serde_json::Value>>("bindings")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transcript_only_storage_upgrades_without_metadata_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let old = old_storage(&path);
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(store.version(&conversation()).unwrap(), Some(7));
+        assert_eq!(
+            texts(&store.window(&conversation(), None, 10).unwrap().unwrap()),
+            ["t/i"]
+        );
+        assert!(store.queues().unwrap()[0].1.held);
+        assert_eq!(
+            old.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_dir())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_upgrade_keeps_old_storage_and_can_retry_after_repair() {
+        for invalid in [b"invalid".as_slice(), b"{}", b"[{}]"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("bex-transcripts.sqlite");
+            let connection = old_storage(&path);
+            std::fs::write(root.path().join("bex-read-state.json"), invalid).unwrap();
+            let failed = ConversationStore::open(&path);
+            assert!(failed.check_ready().is_err());
+            assert!(failed.save_state("reads", &Vec::<String>::new()).is_err());
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                0
+            );
+            std::fs::write(root.path().join("bex-read-state.json"), b"[]").unwrap();
+            let repaired = ConversationStore::open(&path);
+            repaired.check_ready().unwrap();
+            assert_eq!(
+                texts(&repaired.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["t/i"]
+            );
+        }
+    }
+
+    #[test]
+    fn failed_rewind_upgrade_rolls_back_schema_and_history_together() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let old = old_storage(&path);
+        old.execute_batch("CREATE TRIGGER reject_restore BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'injected upgrade failure'); END;").unwrap();
+        std::fs::write(root.path().join("bex-conversations.rewind"), serde_json::to_vec(&serde_json::json!({"previous":null,"history":history(vec![turn("restored", &["before"], TurnStatus::Completed)])})).unwrap()).unwrap();
+        assert!(ConversationStore::open(&path).check_ready().is_err());
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_dir())
+                .count(),
+            0
+        );
+        assert_eq!(
+            old.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            old.query_row("SELECT turn_id FROM turns", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "t"
+        );
+        assert_eq!(
+            old.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='host_state'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+            0
+        );
+        old.execute_batch("DROP TRIGGER reject_restore").unwrap();
+        let repaired = ConversationStore::open(&path);
+        assert_eq!(
+            texts(&repaired.window(&conversation(), None, 10).unwrap().unwrap()),
+            ["restored/before"]
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_dir())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn upgrade_rejects_invalid_bindings_including_rewind_results_and_retries() {
+        for rewind in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("bex-transcripts.sqlite");
+            let old = old_storage(&path);
+            let mut binding = super::super::conversations::Conversation::new(&Thread {
+                cwd: Some("/workspace".into()),
+                ..history(vec![]).thread
+            })
+            .unwrap();
+            binding.cwd.clear();
+            let file = if rewind {
+                "bex-conversations.rewind"
+            } else {
+                "bex-conversations.json"
+            };
+            let value = if rewind {
+                serde_json::json!({"previous":binding,"history":history(vec![])})
+            } else {
+                serde_json::json!([binding])
+            };
+            std::fs::write(root.path().join(file), serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(ConversationStore::open(&path).check_ready().is_err());
+            assert_eq!(
+                old.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                0
+            );
+            std::fs::remove_file(root.path().join(file)).unwrap();
+            let repaired = ConversationStore::open(&path);
+            repaired.check_ready().unwrap();
+            assert_eq!(
+                texts(&repaired.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["t/i"]
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_restores_an_interrupted_rewind_before_serving_history() {
+        for managed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("bex-transcripts.sqlite");
+            let old = old_storage(&path);
+            let binding = super::super::conversations::Conversation::new(&Thread {
+                cwd: Some("/workspace".into()),
+                ..history(vec![]).thread
+            })
+            .unwrap();
+            let previous = managed.then_some(binding.clone());
+            std::fs::write(
+                root.path().join("bex-conversations.json"),
+                serde_json::to_vec(&vec![binding]).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(root.path().join("bex-conversations.rewind"), serde_json::to_vec(&serde_json::json!({"previous":previous,"history":history(vec![turn("restored", &["before"], TurnStatus::Completed)])})).unwrap()).unwrap();
+            let store = ConversationStore::open(&path);
+            store.check_ready().unwrap();
+            assert_eq!(
+                texts(&store.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["restored/before"]
+            );
+            assert_eq!(
+                store
+                    .load_state::<Vec<serde_json::Value>>("bindings")
+                    .unwrap()
+                    .len(),
+                usize::from(managed)
+            );
+            drop(store);
+            drop(old);
+            let reopened = ConversationStore::open(&path);
+            assert_eq!(
+                texts(&reopened.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["restored/before"]
+            );
+        }
+    }
+
+    #[test]
+    fn version_one_metadata_only_storage_accepts_history_without_another_upgrade() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        // An already-upgraded metadata-only store may not have transcript
+        // tables yet; startup initializes them without replacing saved state.
+        connection
+            .execute_batch(
+                "CREATE TABLE host_state (name TEXT PRIMARY KEY, body BLOB NOT NULL) WITHOUT ROWID;
+             PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO host_state VALUES ('bindings', ?)",
+                [br#"["retained"]"#.as_slice()],
+            )
+            .unwrap();
+        drop(connection);
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(
+            store.load_state::<Vec<String>>("bindings").unwrap(),
+            ["retained"]
+        );
+        store
+            .import(
+                &conversation(),
+                None,
+                history(vec![turn("t", &["i"], TurnStatus::Completed)]),
+            )
+            .unwrap();
+        assert_eq!(
+            texts(&store.window(&conversation(), None, 10).unwrap().unwrap()),
+            ["t/i"]
+        );
+    }
+
+    #[test]
+    fn successful_commits_are_durable() {
+        let (_root, store) = store();
+        store
+            .with(|connection| {
+                let mode: String = connection
+                    .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                    .map_err(failure)?;
+                let synchronous: u32 = connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                    .map_err(failure)?;
+                assert_eq!(mode, "wal");
+                assert_eq!(synchronous, 2); // PRAGMA synchronous=FULL
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn texts(window: &Window) -> Vec<String> {
@@ -720,6 +1307,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![
                     turn("reused", &["a"], TurnStatus::Completed),
                     turn("reused", &["b"], TurnStatus::Failed),
@@ -733,6 +1321,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![
                     shared,
                     turn("reused", &["new"], TurnStatus::Completed),
@@ -770,6 +1359,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![turn("reused", &[], TurnStatus::Running)]),
             )
             .unwrap();
@@ -829,6 +1419,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![turn("first", &["a"], TurnStatus::Completed), native]),
             )
             .unwrap();
@@ -848,6 +1439,7 @@ mod tests {
         store
             .import(
                 &running,
+                store.version(&running).unwrap(),
                 history(vec![turn("racing", &["start"], TurnStatus::Running)]),
             )
             .unwrap();
@@ -866,7 +1458,9 @@ mod tests {
     fn failed_cached_writes_roll_back_and_recover_without_gaps_after_reopening() {
         let (root, store) = store();
         let target = conversation();
-        store.import(&target, history(vec![])).unwrap();
+        store
+            .import(&target, store.version(&target).unwrap(), history(vec![]))
+            .unwrap();
         assert_eq!(store.window(&target, None, 10).unwrap().unwrap().start, 0);
         store
             .record(&target, &turn("first", &["a"], TurnStatus::Completed), None)
@@ -926,7 +1520,7 @@ mod tests {
             )
             .unwrap();
         drop(store);
-        let store = Transcripts::open(&root.path().join("state/transcripts.sqlite"));
+        let store = ConversationStore::open(&root.path().join("state/transcripts.sqlite"));
         let latest = store.window(&target, None, 1).unwrap().unwrap();
         assert_eq!(latest.start, 1);
         assert_eq!(texts(&latest), ["second/b"]);
@@ -965,7 +1559,9 @@ mod tests {
         let turns = (0..12)
             .map(|index| turn(&index.to_string(), &["x"], TurnStatus::Completed))
             .collect();
-        store.import(&target, history(turns)).unwrap();
+        store
+            .import(&target, store.version(&target).unwrap(), history(turns))
+            .unwrap();
         let newest = store.window(&target, None, 10).unwrap().unwrap();
         assert_eq!(
             (
@@ -994,7 +1590,11 @@ mod tests {
         };
         let target = SessionRef::new(ProviderKind::Codex, "large".into()).unwrap();
         store
-            .import(&target, history(vec![large("a"), large("b")]))
+            .import(
+                &target,
+                store.version(&target).unwrap(),
+                history(vec![large("a"), large("b")]),
+            )
             .unwrap();
         let window = store.window(&target, None, 10).unwrap().unwrap();
         assert_eq!(
@@ -1010,6 +1610,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![turn("repeated", &["old"], TurnStatus::Completed)]),
             )
             .unwrap();
@@ -1077,6 +1678,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![
                     turn("repeated", &["old"], TurnStatus::Completed),
                     turn("repeated", &[], TurnStatus::Completed),
@@ -1105,6 +1707,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![turn("repeat", &["old"], TurnStatus::Completed)]),
             )
             .unwrap();
@@ -1134,6 +1737,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![turn("running", &["partial"], TurnStatus::Running)]),
             )
             .unwrap();
@@ -1154,6 +1758,7 @@ mod tests {
         store
             .import(
                 &target,
+                store.version(&target).unwrap(),
                 history(vec![turn("done", &["answer"], TurnStatus::Completed)]),
             )
             .unwrap();
@@ -1200,8 +1805,12 @@ mod tests {
                 .transcript_version
                 .unwrap()
         };
-        store.import(&target, history(vec![])).unwrap();
-        store.import(&other, history(vec![])).unwrap();
+        store
+            .import(&target, store.version(&target).unwrap(), history(vec![]))
+            .unwrap();
+        store
+            .import(&other, store.version(&other).unwrap(), history(vec![]))
+            .unwrap();
         let imported = version(&target);
         assert!(version(&other) > imported);
         store
@@ -1220,7 +1829,7 @@ mod tests {
     #[test]
     fn complete_history_requires_an_import_and_is_not_limited_to_a_display_window() {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(&root.path().join("transcripts.sqlite"));
+        let store = ConversationStore::open(&root.path().join("transcripts.sqlite"));
         let target = conversation();
         let mut first = turn("first", &["large"], TurnStatus::Completed);
         Arc::make_mut(&mut first.items.as_mut().unwrap()[0]).body =
@@ -1233,7 +1842,13 @@ mod tests {
         store.record(&target, &first, None).unwrap();
         assert!(store.history(&target).unwrap().is_none());
         let second = turn("second", &["last"], TurnStatus::Completed);
-        store.import(&target, history(vec![first, second])).unwrap();
+        store
+            .import(
+                &target,
+                store.version(&target).unwrap(),
+                history(vec![first, second]),
+            )
+            .unwrap();
         assert!(store.window(&target, None, 10).unwrap().unwrap().start > 0);
         let complete = store.history(&target).unwrap().unwrap();
         assert_eq!(
@@ -1251,7 +1866,7 @@ mod tests {
     #[test]
     fn an_unopened_store_fails_instead_of_reporting_empty_transcripts() {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(root.path());
+        let store = ConversationStore::open(root.path());
         assert!(store.window(&conversation(), None, 10).is_err());
         assert!(
             store

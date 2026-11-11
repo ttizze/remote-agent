@@ -43,13 +43,12 @@ jobs:
         with:
           path: |
             target/qa/ios-derived-data
-            target/qa/ios-markdown
             target/agent-bindings
             target/aarch64-apple-ios-sim/release/libAgentCore.a
             target/aarch64-apple-ios-sim/release/AgentCore.swiftmodule
             target/aarch64-apple-ios-sim/release/AgentCore.swiftdoc
             target/aarch64-apple-ios-sim/release/agent-core-swift.sha256
-          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/xtask/src/ios_markdown.rs', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
+          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
           restore-keys: ios-swift-xcode-26.6-
       - name: Prepare the pinned Maestro CLI and validate the flow
         if: inputs.driver != 'xctest'

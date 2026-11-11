@@ -329,17 +329,18 @@ impl ScenarioTurn {
             // the thread it started (which the fixture serves), and the
             // subagent's activity that thread.
             let child = subagent_thread(suffix);
+            let pixels = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=";
             for item in [
                 json!({"id":format!("fixture-plan-{suffix}"),"type":"plan","text":"確認計画"}),
-                json!({"id":format!("fixture-mcp-{suffix}"),"type":"mcpToolCall","server":"fixture","tool":"lookup","status":"completed","result":{"content":[{"type":"text","text":"Fixture lookup result"}]}}),
-                json!({"id":format!("fixture-dynamic-{suffix}"),"type":"dynamicToolCall","tool":"fixture","status":"completed","success":true}),
+                json!({"id":format!("fixture-mcp-{suffix}"),"type":"mcpToolCall","server":"fixture","tool":"lookup","status":"completed","result":{"content":[{"type":"text","text":"Fixture lookup result"},{"type":"image","mimeType":"image/png","data":pixels}]}}),
+                json!({"id":format!("fixture-dynamic-{suffix}"),"type":"dynamicToolCall","tool":"fixture","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":format!("data:image/png;base64,{pixels}")}]}),
                 json!({"id":format!("fixture-collab-{suffix}"),"type":"collabAgentToolCall","tool":"spawnAgent","status":"completed",
                     "prompt":"Review the change","senderThreadId":thread_id,"receiverThreadIds":[child],
                     "agentsStates":{child.clone():{"status":"completed","message":"Reviewed."}}}),
                 json!({"id":format!("fixture-subagent-{suffix}"),"type":"subAgentActivity","status":"completed",
                     "kind":"started","agentThreadId":child,"agentPath":"reviewer"}),
                 json!({"id":format!("fixture-web-{suffix}"),"type":"webSearch","query":"Codex"}),
-                json!({"id":format!("fixture-image-{suffix}"),"type":"imageView","path":"/tmp/fixture.png"}),
+                json!({"id":format!("fixture-image-{suffix}"),"type":"imageView","path":context.home.join("fixture image.png")}),
                 json!({"id":format!("fixture-sleep-{suffix}"),"type":"sleep"}),
                 json!({"id":format!("fixture-review-in-{suffix}"),"type":"enteredReviewMode"}),
                 json!({"id":format!("fixture-review-out-{suffix}"),"type":"exitedReviewMode"}),
@@ -617,7 +618,10 @@ async fn render_stream(
 }
 
 fn prepare_scenario_image(home: &Path, prompt: &str) -> Result<Option<(PathBuf, String)>> {
-    if !prompt.contains("[images]") && !prompt.contains("[generated-images]") {
+    if !prompt.contains("[images]")
+        && !prompt.contains("[generated-images]")
+        && !prompt.contains("[items]")
+    {
         return Ok(None);
     }
     let path = home.join("fixture image.png");
@@ -652,6 +656,11 @@ fn response_content<'a>(
         let path = home.join(format!("icon-options-{suffix}.html"));
         visualization = Some(path.clone());
         format!("visualize{}", json!({"path": path}))
+    } else if prompt.contains("[find-overflow]") {
+        format!(
+            "| One | Two | Three | Four | Five | Six | Seven | Last |\n|---|---|---|---|---|---|---|---|\n| wide-column-one | wide-column-two | wide-column-three | wide-column-four | wide-column-five | wide-column-six | wide-column-seven | table-overflow-target |\n\n```text\n{}code-overflow-target\n```",
+            "0123456789".repeat(60)
+        )
     } else if prompt.contains("[markdown-table]") {
         include_str!("../../../agent-core/tests/fixtures/markdown/table.md").to_owned()
     } else if prompt.contains("[markdown-document]") {
@@ -669,7 +678,9 @@ fn response_content<'a>(
     } else {
         "シミュレータで完了しました。".to_owned()
     };
-    if let Some((path, url)) = image {
+    if let Some((path, url)) =
+        image.filter(|_| prompt.contains("[images]") || generated_images.is_some())
+    {
         response_text = format!(
             "Hostの画像です。\n\n![Hostから読み込んだ画像](<{}>)\n\nインライン画像です。\n\n![インライン画像]({url})",
             path.display()
@@ -749,6 +760,19 @@ fn gallery(home: &Path, thread: &SharedThread) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn viewed_screenshots_keep_the_items_scenarios_answer() {
+        let home = tempfile::tempdir().unwrap();
+        let prompt = "[items] [immediate] 項目を確認します";
+        let image = prepare_scenario_image(home.path(), prompt)
+            .unwrap()
+            .unwrap();
+        assert!(image.0.is_file());
+        let content = response_content(home.path(), prompt, "items", "1", Some(&image));
+        assert_eq!(content.text, "シミュレータで完了しました。");
+        assert!(content.generated_images.is_none());
+    }
+
     #[test]
     fn a_web_link_answer_names_the_prompts_address() {
         let prompt = "[web-link] [immediate] http://127.0.0.1:9/browser-page を開きます";

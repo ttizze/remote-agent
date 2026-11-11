@@ -18,14 +18,12 @@ fn image_path_key(path: &str) -> String {
     }
 }
 
-/// A visible inline image takes over its earlier generation preview. Only
+/// A visible inline image takes over its earlier standalone preview. Only
 /// responses in the same user exchange count; collapsed work cannot replace it.
-pub(super) fn without_repeated_generated_images(
-    mut rows: Vec<ConversationRow>,
-) -> Vec<ConversationRow> {
+pub(super) fn without_repeated_images(mut rows: Vec<ConversationRow>) -> Vec<ConversationRow> {
     if !rows.iter().any(|row| {
         matches!(&row.content,
-            ConversationRowContent::Response { item, .. } if item.data.kind == "imageGeneration"
+            ConversationRowContent::Response { item, .. } if !item.data.image_sources.is_empty()
         )
     }) {
         return rows;
@@ -38,21 +36,26 @@ pub(super) fn without_repeated_generated_images(
             ConversationRowContent::Activity { item, .. } if item.data.kind == "user" => {
                 inline_images.clear()
             }
-            ConversationRowContent::Response { item, .. } if item.data.kind == "agent" => {
+            ConversationRowContent::Response { item, .. }
+                if matches!(item.data.kind.as_str(), "agent" | "commentary") =>
+            {
                 if let Some(text) = &item.data.body {
                     inline_images
                         .extend(markdown_images(text).iter().map(|source| image_key(source)));
                 }
             }
-            // Grouping exposes only assistant text and generated images as responses.
+            // Grouping exposes assistant text and images as responses.
             ConversationRowContent::Response { item, .. } => {
                 return item.data.body.is_some()
                     || item.data.image_sources.is_empty()
-                    || !item
-                        .data
-                        .image_sources
-                        .iter()
-                        .all(|source| inline_images.contains(&image_path_key(source)));
+                    || !item.data.image_sources.iter().all(|source| {
+                        let key = if item.data.kind == "imageView" && source.starts_with("file:") {
+                            image_key(source)
+                        } else {
+                            image_path_key(source)
+                        };
+                        inline_images.contains(&key)
+                    });
             }
             _ => {}
         }
@@ -89,6 +92,14 @@ mod tests {
         )
     }
 
+    fn viewed_image(id: &str, path: &str) -> Arc<models::Item> {
+        Arc::new(models::Item::new(
+            id.into(),
+            models::ItemStatus::Completed,
+            models::ItemBody::ImageView { path: path.into() },
+        ))
+    }
+
     fn thread(items: Vec<Arc<models::Item>>, status: models::TurnStatus) -> Arc<models::Thread> {
         Arc::new(models::Thread {
             turns: Some(vec![Arc::new(models::Turn {
@@ -110,6 +121,149 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn viewed_screenshots_stay_visible_outside_collapsed_work_live_and_reopened() {
+        for status in [models::TurnStatus::Running, models::TurnStatus::Completed] {
+            let source = thread(
+                vec![
+                    answer("Checking the screenshots", "commentary"),
+                    Arc::new(models::Item::new(
+                        "command".into(),
+                        models::ItemStatus::Completed,
+                        models::ItemBody::CommandExecution {
+                            command: "capture screenshots".into(),
+                            cwd: None,
+                            output: String::new(),
+                            exit_code: Some(0),
+                        },
+                    )),
+                    viewed_image("desktop", "file:///tmp/blog-desktop.png"),
+                    viewed_image("phone", "/tmp/blog-phone.png"),
+                    answer("The screenshots are above", "final"),
+                ],
+                status,
+            );
+            let snapshot = Snapshot::default();
+            let mut previous = None;
+            for _ in 0..2 {
+                let projected = project_conversation(
+                    crate::localization::UiLanguage::Japanese,
+                    &snapshot.panes.primary().navigation.draft_key,
+                    &snapshot.sessions.pending_submissions,
+                    source.clone(),
+                    &previous,
+                );
+                let visible = turn_rows(
+                    &projected.turns[0],
+                    &Default::default(),
+                    &Default::default(),
+                );
+                let screenshots: Vec<_> = visible
+                    .iter()
+                    .filter_map(|row| match row {
+                        TurnRow::Row(ConversationRow {
+                            content: ConversationRowContent::Response { item, .. },
+                            ..
+                        }) if item.data.kind == "imageView" => Some(item),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(screenshots.len(), 2);
+                for (item, path) in screenshots
+                    .iter()
+                    .zip(["file:///tmp/blog-desktop.png", "/tmp/blog-phone.png"])
+                {
+                    assert_eq!(item.data.image_sources, [path]);
+                    assert_eq!(item.data.body, None);
+                    assert_eq!(item.data.title, None);
+                    assert!(!item.data.collapsible);
+                    assert!(!item.data.image_placeholder);
+                }
+                previous = Some(projected);
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::path("/tmp/blog.png", "![blog](/tmp/blog.png)", false)]
+    #[case::uri("file:///tmp/blog.png", "![blog](/tmp/blog.png)", false)]
+    #[case::encoded_uri(
+        "file:///tmp/blog%20screen.png",
+        "![blog](/tmp/blog%20screen.png)",
+        false
+    )]
+    #[case::literal_percent("/tmp/blog%20screen.png", "![blog](/tmp/blog%2520screen.png)", false)]
+    #[case::different_file("/tmp/blog.png", "![blog](/tmp/other.png)", true)]
+    fn markdown_takes_over_viewed_screenshots(
+        #[case] path: &str,
+        #[case] text: &str,
+        #[case] standalone: bool,
+        #[values(models::TurnStatus::Running, models::TurnStatus::Completed)]
+        status: models::TurnStatus,
+        #[values("commentary", "final")] phase: &str,
+    ) {
+        let snapshot = Snapshot::default();
+        let projected = project_conversation(
+            crate::localization::UiLanguage::Japanese,
+            &snapshot.panes.primary().navigation.draft_key,
+            &snapshot.sessions.pending_submissions,
+            thread(
+                vec![viewed_image("screenshot", path), answer(text, phase)],
+                status,
+            ),
+            &None,
+        );
+        assert_eq!(response_ids(&projected).contains(&"screenshot"), standalone);
+        assert_eq!(response_ids(&projected).last(), Some(&"answer"));
+    }
+
+    #[rstest::rstest]
+    fn missing_and_deferred_viewed_images_do_not_show_empty_rows(
+        #[values(false, true)] deferred: bool,
+    ) {
+        let mut image = viewed_image("screenshot", if deferred { "/tmp/blog.png" } else { "" });
+        if deferred {
+            Arc::make_mut(&mut image).defer();
+        }
+        let snapshot = Snapshot::default();
+        let projected = project_conversation(
+            crate::localization::UiLanguage::Japanese,
+            &snapshot.panes.primary().navigation.draft_key,
+            &snapshot.sessions.pending_submissions,
+            thread(vec![image], models::TurnStatus::Completed),
+            &None,
+        );
+        assert_eq!(projected.turns[0].items().count(), 0);
+    }
+
+    #[rstest::rstest]
+    fn screenshots_keep_the_last_comments_actions(
+        #[values(
+            models::TurnStatus::Completed,
+            models::TurnStatus::Failed,
+            models::TurnStatus::Interrupted
+        )]
+        status: models::TurnStatus,
+    ) {
+        let snapshot = Snapshot::default();
+        let projected = project_conversation(
+            crate::localization::UiLanguage::Japanese,
+            &snapshot.panes.primary().navigation.draft_key,
+            &snapshot.sessions.pending_submissions,
+            thread(
+                vec![
+                    answer("Copy this", "commentary"),
+                    viewed_image("screenshot", "/tmp/blog.png"),
+                ],
+                status,
+            ),
+            &None,
+        );
+        assert!(projected.turns[0].rows.iter().any(|row| matches!(&row.content,
+            ConversationRowContent::Response { item, show_actions: true, .. } if item.data.body.as_deref() == Some("Copy this")
+        )));
     }
 
     #[rstest::rstest]

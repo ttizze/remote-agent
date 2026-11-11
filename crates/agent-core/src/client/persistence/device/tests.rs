@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
 struct Disk {
-    bytes: Mutex<[Vec<u8>; 4]>,
+    bytes: Mutex<[Vec<u8>; 5]>,
     fail: AtomicUsize,
     writes: Mutex<Vec<usize>>,
 }
@@ -18,6 +18,7 @@ fn index(key: PreferenceKey) -> usize {
         PreferenceKey::Editor => 1,
         PreferenceKey::Language => 2,
         PreferenceKey::Composer => 3,
+        PreferenceKey::Contrast => 4,
     }
 }
 impl PreferenceStorage for Disk {
@@ -323,4 +324,18 @@ async fn preference_notifications_allow_synchronous_store_reads() {
         .unwrap();
     assert!(Arc::ptr_eq(&before, &store.snapshot()));
     store.close().await.unwrap();
+}
+
+#[test]
+fn contrast_defaults_saves_and_stays_in_range() {
+    use crate::presentation::appearance::{DEFAULT_CONTRAST, MAX_CONTRAST};
+    let disk = Arc::new(Disk::default());
+    let device = DevicePreferences::new(disk.clone());
+    assert_eq!(device.contrast(), DEFAULT_CONTRAST);
+    device.select_contrast(135).unwrap();
+    assert_eq!(device.contrast(), 135);
+    assert_eq!(DevicePreferences::new(disk.clone()).contrast(), 135);
+    // A value edited out of range is read at its limit.
+    disk.bytes.lock().unwrap()[4] = b"900".to_vec();
+    assert_eq!(DevicePreferences::new(disk).contrast(), MAX_CONTRAST);
 }

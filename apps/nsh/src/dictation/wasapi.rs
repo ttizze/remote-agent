@@ -54,6 +54,16 @@ impl Capture {
         let samples = std::mem::take(&mut *self.samples.lock().unwrap());
         agent_core::recording::transcription_pcm(samples, self.rate)
     }
+
+    pub(super) fn level(&self) -> f32 {
+        let samples = self.samples.lock().unwrap();
+        let recent = &samples[samples.len().saturating_sub((self.rate / 20) as usize)..];
+        if recent.is_empty() {
+            0.0
+        } else {
+            (recent.iter().map(|sample| sample * sample).sum::<f32>() / recent.len() as f32).sqrt()
+        }
+    }
 }
 
 /// A stream that averages each frame of `T` samples into `samples`.

@@ -4,10 +4,14 @@ use crate::l10n::tr;
 use crate::{Connection, workbench::Workbench};
 use agent_core::{
     panels::PanelKind,
+    presentation::conversation::{DETAILS_CARD_GAP, DETAILS_CARD_WIDTH},
     state::{Intent, operations as op},
 };
 use agent_protocol::editors::EditorId;
-use nsh_core::prelude::*;
+use nsh_core::{
+    overlay::{Align, Placement},
+    prelude::*,
+};
 use serde_json::json;
 
 /// Starts a new conversation in a folder the user picks: in a WSL distro's
@@ -53,6 +57,49 @@ pub(crate) fn choose_folder(connection: Connection) {
             Err(reason) => crate::native::message(tr("フォルダー"), reason),
         }
     });
+}
+
+/// The same details card stays available as a popover when the chat lane
+/// cannot leave room for it. The inline visibility belongs to the shell;
+/// dismissing a popover does not change that preference.
+pub(crate) fn toggle(
+    visible: Signal<bool>,
+    inline: impl Fn() -> bool + Copy + 'static,
+) -> impl IntoElement {
+    use crate::ui::{self, Icon};
+    view()
+        .child(when(inline, move || {
+            ui::toggle(
+                Icon::DETAILS,
+                tr("スレッド詳細を切り替え"),
+                move || visible.get(),
+                move || visible.update(|visible| *visible = !*visible),
+            )
+        }))
+        .child(when(
+            move || !inline(),
+            move || {
+                let open = signal(false);
+                nsh_base::popover()
+                    .open(move || Some(open.get()))
+                    .on_open_change(move |event: &nsh_base::PopoverEvent| {
+                        if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                            open.set(*next);
+                        }
+                    })
+                    .placement(Placement::Bottom)
+                    .align(Align::End)
+                    .offset(px(DETAILS_CARD_GAP))
+                    .margin(px(DETAILS_CARD_GAP))
+                    .trigger(ui::toggle(
+                        Icon::DETAILS,
+                        tr("スレッド詳細を切り替え"),
+                        move || open.get(),
+                        || {},
+                    ))
+                    .child(when(move || open.get(), card))
+            },
+        ))
 }
 
 pub(crate) fn card() -> impl IntoElement {
@@ -131,13 +178,26 @@ pub(crate) fn card() -> impl IntoElement {
             Action::OpenEditor(_) => {}
         }
     };
-    // The desktop client keeps its (empty) notice list above the card.
     view()
-        .w(px(300.0))
-        .h_full()
-        .p_4()
-        .pt(px(32.0))
-        .child(summary_card(summary, act))
+        .w(px(DETAILS_CARD_WIDTH))
+        .min_h_0()
+        .rounded(px(16.0))
+        .border_1()
+        .border_color(crate::ui::colors::line(0x292929))
+        .bg(nsh_core::element::rgb(0x111111))
+        .overflow_hidden()
+        .test_id("thread-details-card")
+        .label(tr("ワークスペース"))
+        .child(
+            scroll()
+                .max_h(move || {
+                    px(
+                        (window().height.0 - crate::ui::HEADER_HEIGHT - DETAILS_CARD_GAP * 2.0)
+                            .max(0.0),
+                    )
+                })
+                .child(summary_card(summary, act)),
+        )
 }
 
 enum Action {
@@ -150,8 +210,9 @@ enum Action {
     PreferEditor(EditorId),
 }
 
-/// The desktop client's workspace card: the folder, its editor, branch and
-/// changes, and the conversation's sources.
+/// T3's details sections: 8 pt outer padding and 32 pt controls, with a
+/// separator between the workspace and version control. Sources retain the
+/// conversation's existing attachment actions.
 fn summary_card(
     summary: Memo<WorkspaceSummary>,
     act: impl Fn(Action) + Copy + 'static,
@@ -159,31 +220,13 @@ fn summary_card(
     use crate::ui::{self, Enabled, Icon, colors};
     let enabled = move || summary.with(|s| s.enabled);
     let has_directory = move || summary.with(|s| s.has_directory);
-    let heading = move |title: &'static str, control: nsh_base::ButtonElement| {
-        view()
-            .flex_row()
-            .items_center()
-            .child(
-                text(title)
-                    .flex_1()
-                    .text_size(px(14.0))
-                    .text_color(colors::MUTED),
-            )
-            .child(control)
-    };
     view()
-        .gap_2()
-        .p_4()
-        .rounded(px(18.0))
-        .bg(colors::RAISED)
-        .text_color(colors::FOREGROUND)
-        .child(heading(
-            tr("ワークスペース"),
-            ui::icon_button(Icon::REFRESH, tr("変更を更新"), move || act(Action::Refresh))
-                .enabled(move || enabled() && has_directory()),
-        ))
+        .py_2()
+        .text_color(colors::t3_foreground().opacity(0.8))
         .child(
-            row(Icon::FOLDER_OPEN, move || summary.with(|s| s.directory.clone()))
+            row(Icon::FOLDER_OPEN, text(move || summary.with(|s| s.directory.clone())))
+                .mx_2()
+                .text_color(colors::t3_muted())
                 .on_press(move || act(Action::Files))
                 .disabled(move || !enabled()),
         )
@@ -191,12 +234,15 @@ fn summary_card(
             move || summary.with(|s| !s.editors.is_empty()),
             move || {
                 view()
+                    .mx_2()
                     .flex_row()
                     .items_center()
                     .child(
-                        row(Icon::EXTERNAL_LINK, move || {
-                            summary.with(|s| s.editor_label.clone())
-                        })
+                        row(
+                            Icon::EXTERNAL_LINK,
+                            text(move || summary.with(|s| s.editor_label.clone()))
+                                .test_id("thread-details-editor"),
+                        )
                         .flex_1()
                         .on_press(move || {
                             if let Some(editor) = summary.with_untracked(|s| s.editor) {
@@ -221,48 +267,90 @@ fn summary_card(
                                 }
                             })
                         })
+                        .w(px(32.0))
+                        .h(px(32.0))
                         .enabled(has_directory),
                     )
             },
         ))
+        .child(separator())
         .child(when(
             move || summary.with(|s| !s.branch.is_empty()),
             move || {
-                text(move || summary.with(|s| s.branch.clone()))
-                    .pl_2()
-                    .text_size(px(14.0))
-                    .text_color(colors::MUTED)
+                view()
+                    .mx_2()
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .gap(px(10.0))
+                    .flex_row()
+                    .items_center()
+                    .text_color(colors::t3_muted())
+                    .child(ui::icon(Icon::GIT_BRANCH, 16.0))
+                    .child(
+                        text(move || summary.with(|s| s.branch.clone()))
+                            .flex_1()
+                            .min_w_0()
+                            .number_of_lines(1)
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM),
+                    )
             },
         ))
         .child(
-            row(Icon::REPLACE, || tr("変更").to_owned())
-                .on_press(move || act(Action::Diff))
-                .disabled(move || !enabled() || !has_directory())
+            view()
+                .mx_2()
+                .flex_row()
+                .items_center()
                 .child(
-                    text(move || format!("+{}", summary.with(|s| s.additions)))
-                        .text_size(px(14.0))
-                        .text_color(nsh_core::element::rgb(0x22c55e)),
+                    row(Icon::DIFF, text(tr("変更")).test_id("thread-details-changes"))
+                        .flex_1()
+                        .on_press(move || act(Action::Diff))
+                        .disabled(move || !enabled() || !has_directory())
+                        .child(
+                            text(move || format!("+{}", summary.with(|s| s.additions)))
+                                .text_size(px(12.0))
+                                .text_color(nsh_core::element::rgb(0x22c55e)),
+                        )
+                        .child(
+                            text(move || format!("−{}", summary.with(|s| s.deletions)))
+                                .text_size(px(12.0))
+                                .text_color(nsh_core::element::rgb(0xef4444)),
+                        ),
                 )
                 .child(
-                    text(move || format!("−{}", summary.with(|s| s.deletions)))
-                        .text_size(px(14.0))
-                        .text_color(nsh_core::element::rgb(0xef4444)),
+                    ui::icon_button(Icon::REFRESH, tr("変更を更新"), move || act(Action::Refresh))
+                        .w(px(32.0))
+                        .h(px(32.0))
+                        .enabled(move || enabled() && has_directory()),
                 ),
         )
-        .child(view().h(px(1.0)).my_2().bg(colors::BORDER))
-        .child(heading(
-            tr("ソース"),
-            ui::icon_button(Icon::PLUS, tr("ソースを追加"), move || act(Action::Attach))
-                .enabled(enabled),
-        ))
+        .child(separator())
+        .child(
+            view()
+                .mx_2()
+                .flex_row()
+                .items_center()
+                .child(
+                    text(tr("ソース"))
+                        .flex_1()
+                        .pl(px(10.0))
+                        .text_size(px(12.0))
+                        .text_color(colors::t3_muted()),
+                )
+                .child(
+                    ui::icon_button(Icon::PLUS, tr("ソースを追加"), move || act(Action::Attach))
+                        .enabled(enabled),
+                ),
+        )
         .child(when(
             move || summary.with(|s| s.sources.is_empty()),
             || {
                 text(tr("添付ファイルがここに表示されます"))
                     .py_2()
-                    .text_size(px(14.0))
+                    .px(px(18.0))
+                    .text_size(px(13.0))
                     .line_height(px(20.0))
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
             },
         ))
         .child(each(
@@ -270,35 +358,49 @@ fn summary_card(
             |(path, _): &(String, String)| path.clone(),
             move |source, _| {
                 let (path, title) = source.get_untracked();
-                row(Icon::FILE_TEXT, move || title.clone())
+                row(Icon::FILE_TEXT, text(move || title.clone()))
+                    .mx_2()
                     .on_press(move || act(Action::Source(path.clone())))
             },
         ))
         .child(
-            row(Icon::FOLDER, || tr("すべてのファイル").to_owned())
+            row(Icon::FOLDER, text(tr("すべてのファイル")))
+                .mx_2()
                 .on_press(move || act(Action::Files))
                 .disabled(move || !enabled()),
         )
 }
 
-/// A row of the card: an icon and a label, 24 pt, a fill under the pointer.
-fn row(glyph: crate::ui::Icon, title: impl Fn() -> String + 'static) -> nsh_base::ButtonElement {
+fn separator() -> View {
+    view()
+        .h(px(1.0))
+        .my_2()
+        .bg(crate::ui::colors::line(0x232323))
+}
+
+/// T3's details row: 32 pt, 13 pt medium text, a 16 pt muted icon.
+fn row(glyph: crate::ui::Icon, title: Text) -> nsh_base::ButtonElement {
     use crate::ui::{self, colors};
     nsh_base::button()
-        .h(px(24.0))
-        .px_2()
-        .gap_2()
+        .h(px(32.0))
+        .px(px(10.0))
+        .gap(px(10.0))
         .flex_row()
         .items_center()
-        .rounded(px(ui::RADIUS))
-        .hover(|s| s.bg(colors::GHOST_HOVER))
-        .disabled_style(|s| s.opacity(0.5))
-        .child(ui::icon(glyph, 14.0))
+        .rounded(px(8.0))
+        .hover(|s| s.bg(nsh_core::element::rgba(0xffffff14)))
+        .disabled_style(|s| s.opacity(0.64))
         .child(
-            text(title)
+            view()
+                .text_color(colors::t3_muted())
+                .child(ui::icon(glyph, 16.0)),
+        )
+        .child(
+            title
                 .flex_1()
                 .min_w_0()
-                .text_size(px(14.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM)
                 .number_of_lines(1),
         )
 }
@@ -365,7 +467,7 @@ pub(crate) fn draft_hero() -> View {
             .text_size(px(30.0))
             .line_height(px(36.0))
             .letter_spacing(px(-0.75))
-            .text_color(colors::T3_FOREGROUND)
+            .text_color(colors::t3_foreground())
     };
     view()
         .w_full()
@@ -383,7 +485,7 @@ pub(crate) fn draft_hero() -> View {
                     .justify_center()
                     .max_w(relative(1.0))
                     .child(heading(before.into()))
-                    .child(project_menu(project, 30.0, colors::T3_FOREGROUND, choose))
+                    .child(project_menu(project, 30.0, colors::t3_foreground(), choose))
                     .child(heading(after.into()))
             },
         ))
@@ -393,8 +495,8 @@ pub(crate) fn draft_hero() -> View {
                 view().mt_2().h(px(24.0)).justify_center().child(
                     // T3 Code's `muted` inline button.
                     nsh_base::button()
-                        .text_color(colors::T3_MUTED)
-                        .hover(|s| s.text_color(colors::T3_FOREGROUND))
+                        .text_color(colors::t3_muted())
+                        .hover(|s| s.text_color(colors::t3_foreground()))
                         .on_press(move || {
                             connection.dispatch(Intent::NewChat { cwd: String::new() })
                         })
@@ -413,7 +515,7 @@ pub(crate) fn draft_hero() -> View {
             project_menu(
                 || tr("プロジェクトなし").to_owned(),
                 14.0,
-                colors::T3_MUTED,
+                colors::t3_muted(),
                 choose,
             )
         }))
@@ -424,7 +526,7 @@ pub(crate) fn draft_hero() -> View {
 fn project_menu(
     label: impl Fn() -> String + Copy + 'static,
     size: f32,
-    color: crate::ui::Tone,
+    color: Rgba,
     choose: impl Fn() + 'static,
 ) -> nsh_base::ButtonElement {
     nsh_base::button()

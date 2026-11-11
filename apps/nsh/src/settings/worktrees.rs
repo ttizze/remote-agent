@@ -112,7 +112,7 @@ pub(super) fn page(connection: Connection) -> View {
         .child(when(busy, || {
             text(tr("設定を通信中…"))
                 .text_size(px(13.0))
-                .text_color(colors::MUTED)
+                .text_color(colors::muted())
         }))
         .child(when(
             move || !connected.get(),
@@ -132,7 +132,9 @@ fn heading(title: &'static str) -> Text {
 }
 
 fn note(content: &'static str) -> Text {
-    text(content).text_size(px(12.0)).text_color(colors::MUTED)
+    text(content)
+        .text_size(px(12.0))
+        .text_color(colors::muted())
 }
 
 /// Which Host and project the settings apply to; only cleanup varies by project.
@@ -250,14 +252,14 @@ fn field(
         .value(value)
         .readonly(move || !enabled())
         .on_change(move |value: &str| change(value))
-        .text_color(colors::FOREGROUND)
+        .text_color(colors::foreground())
         .w_full()
         .min_h(px(36.0))
         .px_3()
         .py_2()
         .rounded(px(ui::RADIUS))
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::border())
 }
 
 /// The settings every project shares: creation, copying and cleanup.
@@ -629,7 +631,7 @@ fn worktree(
             .child(
                 text(move || row.with(|row| row.path.clone()))
                     .text_size(px(12.0))
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
                     .selectable(true),
             )
             .child(each(
@@ -659,7 +661,7 @@ fn worktree(
                 move || {
                     text(move || reason().unwrap_or_default())
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                 },
             )),
     ])

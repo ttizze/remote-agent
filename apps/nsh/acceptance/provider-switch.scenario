@@ -9,6 +9,7 @@ expect "最初の確認が終わりました。次のコマンドを確認しま
 press "Fixture Model"
 press "Claude Code" 10000
 press Sonnet
+key escape
 type "AI に依頼する" "切り替えて送ります"
 expect "AIを切り替えて送信するには" 10000
 expect_disabled メッセージをキューに追加

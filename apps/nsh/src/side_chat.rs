@@ -52,7 +52,7 @@ pub(crate) fn screen(id: u64, host: String) -> impl IntoElement {
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .text_color(colors::MUTED)
+                    .text_color(colors::muted())
                     .child(ui::spinner())
                     .child(text(tr("サイドチャットを準備中…")).text_size(px(13.0)))
             },

@@ -130,6 +130,60 @@ test('one worktree owns the snapshot and returned outputs until the download com
   for (const name of ['first', 'second']) assert.equal(readFileSync(join(build.work, 'target', name), 'utf8'), name);
 });
 
+// Runs the script the client sends, on a builder whose tools are the given stubs.
+async function builderRun(t, tools, edit = script => script, stdin = 'pipe') {
+  const build = fixture(t);
+  const task = build.start('remote');
+  assert.equal(await task.done, 0, task.stderr());
+  const home = mkdtempSync(join(tmpdir(), 'remote-run-builder-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, '.cache/agent-remote-builds'), { recursive: true });
+  const bin = join(home, 'bin');
+  mkdirSync(bin);
+  for (const [tool, body] of Object.entries({ nix: '', ...tools })) {
+    writeFileSync(join(bin, tool), `#!/usr/bin/env bash\n${body}`);
+    chmodSync(join(bin, tool), 0o755);
+  }
+  const locker = join(home, 'locker');
+  const client = spawn('bash', ['-c', edit(build.command('remote'))], {
+    cwd: home,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_LOCKER: locker },
+    stdio: [stdin, 'pipe', 'pipe'],
+  });
+  client.stdout.resume();
+  client.stderr.resume();
+  t.after(() => client.kill('SIGKILL'));
+  return { client, locker, done: new Promise(resolve => client.on('close', code => resolve(code))) };
+}
+
+test('a failed checkout ends the session while the client is still connected', async t => {
+  // Node closes a child's own stdin when it exits; SSH keeps it open until output ends.
+  const heartbeats = spawn('sleep', ['60'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(() => heartbeats.kill('SIGKILL'));
+  const { done } = await builderRun(t, { flock: 'exit 0\n', git: 'exit 1\n' }, undefined, heartbeats.stdout);
+  assert.equal(await done, 1);
+});
+
+for (const [name, leave, edit] of [
+  ['closes its connection', client => client.stdin.end(), undefined],
+  ['stops sending heartbeats', () => {}, script => script.replace('read -r -t 120', 'read -r -t 1')],
+]) {
+  test(`a run queued for the worktree lock stops when its client ${name}`, { timeout: 30_000 }, async t => {
+    const { client, locker, done } = await builderRun(
+      t,
+      { flock: '[[ $1 == -n ]] && exit 1\necho $$ > "$FIXTURE_LOCKER"\nexec sleep 60\n' },
+      edit,
+    );
+    await until(() => existsSync(locker) && readFileSync(locker, 'utf8').trim());
+    leave(client);
+    assert.equal(await done, 1);
+    const pid = Number(readFileSync(locker, 'utf8'));
+    await until(() => {
+      try { process.kill(pid, 0); return false; } catch { return true; }
+    });
+  });
+}
+
 test('snapshots include same-size edits with racy index timestamps without modifying staging', async t => {
   const build = fixture(t);
   const git = args => execFileSync('git', args, { cwd: build.work, encoding: 'utf8' });

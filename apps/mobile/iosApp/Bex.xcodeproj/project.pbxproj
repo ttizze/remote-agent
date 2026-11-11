@@ -23,7 +23,6 @@
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
         C30000000000000000000003 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000004; };
-		123AEE37BEE0000000000001 /* ConversationVisualization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 123AEE37BEE0000000000002 /* ConversationVisualization.swift */; };
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* Assets.xcassets */; };
 		A10000000000000000000001 /* IOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* IOSApp.swift */; };
 		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
@@ -101,7 +100,6 @@
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
         C30000000000000000000004 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
-		123AEE37BEE0000000000002 /* ConversationVisualization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationVisualization.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000010 /* bex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = bex.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* IOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSApp.swift; sourceTree = "<group>"; };
@@ -258,7 +256,6 @@
 				63950266A2798560BC414B70 /* ConversationMedia.swift */,
 				F11E00000000000000000004 /* FileIcon.swift */,
 				C0DE00000000000000000006 /* ConversationSideChat.swift */,
-				123AEE37BEE0000000000002 /* ConversationVisualization.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
 				1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */,
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
@@ -464,7 +461,6 @@
 				2DCDAABCD1000D782FF1BE5B /* ConversationMedia.swift in Sources */,
 				F11E00000000000000000003 /* FileIcon.swift in Sources */,
 				C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */,
-				123AEE37BEE0000000000001 /* ConversationVisualization.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */,
 				A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */,

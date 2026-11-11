@@ -3,7 +3,7 @@
 mod activity;
 mod capacity;
 mod conversations;
-mod model_selections;
+pub(super) mod model_selections;
 mod preparation;
 mod project_import;
 mod queue;
@@ -55,7 +55,7 @@ struct ServiceInner {
     terminals: crate::terminals::Terminals,
     dictation: crate::dictation::Dictation,
     conversations: super::conversations::Conversations,
-    transcripts: Arc<super::transcripts::Transcripts>,
+    store: Arc<super::store::ConversationStore>,
     imports: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, transcripts::Import>>,
     model_selections: model_selections::ModelSelections,
     capacity: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, capacity::Run>>,
@@ -68,26 +68,21 @@ impl HostRpcService {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
-        let transcripts = Arc::new(super::transcripts::Transcripts::open(
+        let store = Arc::new(super::store::ConversationStore::open(
             &projects.path().with_file_name("bex-transcripts.sqlite"),
         ));
-        let router = SessionRouter::new()
-            .with_read_state(projects.path().with_file_name("bex-read-state.json"))
-            .with_transcripts(transcripts.clone());
+        let conversations = super::conversations::Conversations::new(store.clone());
+        let router = SessionRouter::new().with_store(store.clone());
         let (providers, dictation) = crate::providers::Registry::new(backends);
         Self {
             inner: Arc::new(ServiceInner {
                 history_scope: OnceLock::new(),
                 updating: std::sync::atomic::AtomicBool::new(false),
-                conversations: super::conversations::Conversations::new(
-                    projects.path().with_file_name("bex-conversations.json"),
-                ),
-                transcripts,
+                conversations,
+                store: store.clone(),
                 imports: Default::default(),
                 capacity: Default::default(),
-                model_selections: model_selections::ModelSelections::new(
-                    projects.path().with_file_name("bex-model-selections.json"),
-                ),
+                model_selections: model_selections::ModelSelections::new(store),
                 browser: OnceLock::new(),
                 provider_settings: crate::providers::Settings::new(
                     projects.path().with_file_name("bex-providers.json"),
@@ -205,8 +200,10 @@ impl HostRpcService {
         self.inner.providers.errors()
     }
 
-    pub fn start(&self) {
+    pub fn start(&self) -> Result<(), String> {
+        self.inner.store.check_ready()?;
         self.start_event_pumps();
+        Ok(())
     }
 
     /// Dispatch a classified message from an authenticated session.
@@ -253,13 +250,7 @@ impl HostRpcService {
             let (target, input_id) = session_target(message);
             let target = target.cloned();
             let submission = target.as_ref().zip(input_id);
-            // Keep the execution alive and serialize decisions through the
-            // provider acknowledgement, including concurrent client inputs.
-            let _read = submission
-                .map(|(target, _)| self.inner.router.retain_execution(target.clone()))
-                .transpose()
-                .map_err(|error| Failure::new("invalid_params", error))?;
-            let _serial = if let Some(target) = target.as_ref().filter(|_| {
+            let serialized = target.as_ref().filter(|_| {
                 matches!(
                     message,
                     Call::Submit(_)
@@ -269,7 +260,14 @@ impl HostRpcService {
                         | Call::RewindSession(_)
                         | Call::RetryPreparation(_)
                 )
-            }) {
+            });
+            // Retain the actor before locking: idle reads must not prune it
+            // and let a concurrent operation acquire a different mutex.
+            let _execution = serialized
+                .map(|target| self.inner.router.retain_execution(target.clone()))
+                .transpose()
+                .map_err(|error| Failure::new("invalid_params", error))?;
+            let _serial = if let Some(target) = serialized {
                 Some(self.inner.router.submission_lock(target).lock_owned().await)
             } else {
                 None
@@ -711,7 +709,7 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
-            if let Err(message) = self.inner.transcripts.interrupt_running() {
+            if let Err(message) = self.inner.store.interrupt_running() {
                 tracing::error!(target: "agent", operation = "host.transcript.write", message);
             }
             self.restore_queues();

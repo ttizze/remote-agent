@@ -13,8 +13,8 @@ use std::{rc::Rc, sync::Arc};
 #[derive(Clone, Copy)]
 pub(crate) struct Preview {
     state: Signal<PreviewState>,
-    /// The generated images of the conversation whose image the desktop
-    /// viewer shows, beside it.
+    /// The sent message's images or the conversation's generated images,
+    /// beside the image the desktop viewer shows.
     #[cfg(desktop)]
     gallery: Signal<Option<Gallery>>,
     owner: Owner,
@@ -35,7 +35,7 @@ struct Gallery {
     cwd: String,
     /// The source of the image the viewer shows.
     shown: String,
-    /// The conversation's generated images, `None` while they load.
+    /// The gallery's images, `None` while they load.
     sources: Option<Result<Vec<String>, String>>,
 }
 
@@ -101,10 +101,16 @@ impl Preview {
         })
     }
 
-    /// Shows a conversation's image, `file` loaded from `source`, beside the
-    /// conversation's generated images, as the desktop client's gallery did.
+    /// Shows `file` from `source` beside its sent message's `sources`, or
+    /// the conversation's generated images when no message gallery is given.
     #[cfg(desktop)]
-    fn open_image(self, connection: Connection, source: String, file: Shared<LocalFile>) {
+    fn open_image(
+        self,
+        connection: Connection,
+        source: String,
+        file: Shared<LocalFile>,
+        sources: Option<Vec<String>>,
+    ) {
         use agent_core::{
             presentation::media::gallery_sources,
             state::{Intent, operations as op},
@@ -112,9 +118,13 @@ impl Preview {
         };
         self.show(file);
         let host = connection.host.get_untracked();
-        let thread = connection
-            .context
-            .with_untracked(|c| c.navigation().thread_id.clone());
+        let thread = if sources.is_some() {
+            None
+        } else {
+            connection
+                .context
+                .with_untracked(|c| c.navigation().thread_id.clone())
+        };
         let request = uuid::Uuid::new_v4();
         self.gallery.set(Some(Gallery {
             request,
@@ -123,7 +133,9 @@ impl Preview {
                 .composer
                 .with_untracked(|c| c.controls.navigation.cwd.clone()),
             shown: source,
-            sources: thread.is_none().then(|| Ok(Vec::new())),
+            sources: sources
+                .map(Ok)
+                .or_else(|| thread.is_none().then(|| Ok(Vec::new()))),
         }));
         let Some(thread_id) = thread else {
             return;
@@ -244,7 +256,7 @@ fn opened_file(preview: Preview) -> View {
                 .px_3()
                 .py_2()
                 .border_b_1()
-                .border_b_color(colors::BORDER)
+                .border_b_color(colors::border())
                 .child(
                     text(move || {
                         file.with(|file| {
@@ -265,7 +277,7 @@ fn opened_file(preview: Preview) -> View {
 
 /// The desktop's image viewer over the window, as the desktop client's: the
 /// image, magnified by steps and scrolled, saved where the user chooses, and
-/// beside it the conversation's generated images, each shown when pressed.
+/// beside it its gallery's images, each shown when pressed.
 #[cfg(desktop)]
 fn viewer(preview: Preview) -> impl Element {
     use crate::ui::{self, Enabled, Icon, colors};
@@ -343,7 +355,7 @@ fn viewer(preview: Preview) -> impl Element {
         .pt(px(top))
         .gap_3()
         .bg(rgba(0x000000e6))
-        .text_color(colors::FOREGROUND)
+        .text_color(colors::foreground())
         .child(
             view()
                 .flex_row()
@@ -354,7 +366,7 @@ fn viewer(preview: Preview) -> impl Element {
                 .child(when(loading, || {
                     text(tr("画像一覧を読み込み中…"))
                         .text_size(px(12.0))
-                        .text_color(colors::MUTED)
+                        .text_color(colors::muted())
                 }))
                 .child(
                     ui::icon_button(
@@ -480,7 +492,7 @@ fn gallery_thumbnails(preview: Preview, sources: Memo<Vec<String>>) -> impl Elem
         .h_full()
         .child(view().gap_2().child(each(
             move || sources.get().into_iter().enumerate().collect::<Vec<_>>(),
-            |(_, source): &(usize, String)| source.clone(),
+            |entry: &(usize, String)| entry.clone(),
             move |entry, _| {
                 let (index, source) = entry.get_untracked();
                 let (host, cwd) = place();
@@ -607,6 +619,104 @@ pub(crate) enum ImageSize {
     /// As T3 Code's answer images: a point per pixel, at most 30rem tall and
     /// as wide as there is room, its corners rounded.
     Natural,
+    /// As T3 Code's lone sent image: 12rem tall and as wide as its picture,
+    /// from 6rem, cropped where there is less room.
+    Sent,
+    /// Filling its cell of a sent message's collage, cropped.
+    Cell,
+}
+
+/// T3 Code's ring around sent media and its collage's hairlines: white at 12%.
+const MEDIA_EDGE: u32 = 0xffffff1f;
+
+/// The images a sent message carries, above its bubble as T3 Code's: one
+/// keeps its own shape, several share one rounded shape split by hairlines.
+pub(crate) fn sent_images(
+    connection: Connection,
+    preview: Preview,
+    sources: Memo<Vec<String>>,
+    above_bubble: impl Fn() -> bool + 'static,
+    max_width: impl Fn() -> f32 + 'static,
+) -> impl Element {
+    let count = move || sources.with(Vec::len);
+    let collage = move || count() > 1;
+    view()
+        .max_w(move || px(max_width()))
+        .rounded(px(16.0))
+        // The corner by the bubble tightens, as the bubble's does.
+        .style_when(above_bubble, |s| s.mb(px(4.0)).rounded_br(px(6.0)))
+        .overflow_hidden()
+        // An inset shadow sits below native image children. The outline
+        // draws above them, inside the frame, without changing its size.
+        .outline(px(1.0))
+        .outline_offset(px(-1.0))
+        .outline_color(nsh_core::element::rgba(MEDIA_EDGE))
+        .style_when(collage, move |s| {
+            // T3 Code's collage: two side by side 12rem tall, three with the
+            // first beside the other two, more in pairs 6rem tall with an odd
+            // last one across.
+            s.w(px(320.0))
+                .grid()
+                .gap(px(1.0))
+                .bg(nsh_core::element::rgba(MEDIA_EDGE))
+                .grid_template_columns(move || {
+                    if count() == 3 {
+                        "3fr 2fr"
+                    } else {
+                        "repeat(2, minmax(0, 1fr))"
+                    }
+                })
+                .grid_template_rows(move || {
+                    SharedString::from(match count() {
+                        2 => "192px".to_owned(),
+                        3 => "95.5px 95.5px".to_owned(),
+                        count => vec!["96px"; count.div_ceil(2)].join(" "),
+                    })
+                })
+        })
+        .child(each(
+            move || {
+                sources
+                    .get()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, source)| (index, source, collage()))
+                    .collect::<Vec<_>>()
+            },
+            // A single image becoming a collage must recreate its image frame.
+            |item: &(usize, String, bool)| item.clone(),
+            move |item, _| {
+                let index = item.get_untracked().0;
+                let source = move || item.get().1;
+                view()
+                    .overflow_hidden()
+                    .style_when(collage, move |s| {
+                        s.bg(crate::ui::colors::BACKGROUND)
+                            .row_span(move || -> u16 {
+                                if count() == 3 && index == 0 { 2 } else { 1 }
+                            })
+                            .col_span(move || -> u16 {
+                                let count = count();
+                                if count > 3 && count % 2 == 1 && index + 1 == count {
+                                    2
+                                } else {
+                                    1
+                                }
+                            })
+                    })
+                    .child(image_view(
+                        connection,
+                        preview,
+                        source,
+                        if item.get_untracked().2 {
+                            ImageSize::Cell
+                        } else {
+                            ImageSize::Sent
+                        },
+                        Some(sources),
+                    ))
+            },
+        ))
 }
 
 /// A conversation's or the composer's image, which opens in the viewer and,
@@ -616,6 +726,7 @@ pub(crate) fn image_view(
     preview: Preview,
     source: impl Fn() -> String + 'static,
     size: ImageSize,
+    gallery: Option<Memo<Vec<String>>>,
 ) -> impl Element {
     let source = computed(source);
     let key = computed(move || {
@@ -634,9 +745,17 @@ pub(crate) fn image_view(
         tr("画像を拡大"),
         move |file| {
             #[cfg(desktop)]
-            preview.open_image(connection, source.get_untracked(), file);
+            preview.open_image(
+                connection,
+                source.get_untracked(),
+                file,
+                gallery.map(|sources| sources.get_untracked()),
+            );
             #[cfg(not(desktop))]
-            preview.show(file);
+            {
+                let _ = gallery;
+                preview.show(file);
+            }
         },
         true,
     )
@@ -657,6 +776,7 @@ fn loaded_image(
     // Its pixels once it loaded, and the points it shows in.
     let pixels = signal(None::<(f32, f32)>);
     let natural = size == ImageSize::Natural;
+    let cell = size == ImageSize::Cell;
     let shown = move || match size {
         ImageSize::Box(width, height) => (width, height),
         // `max-height: 30rem`; until it loads, T3 Code's 16:9 slot.
@@ -664,6 +784,15 @@ fn loaded_image(
             let scale = (480.0 / height).min(1.0);
             (width * scale, height * scale)
         }),
+        // `h-48 w-auto min-w-24`; until it loads, its `w-64` placeholder.
+        ImageSize::Sent => pixels.get().map_or((256.0, 192.0), |(width, height)| {
+            ((width * 192.0 / height.max(1.0)).max(96.0), 192.0)
+        }),
+        ImageSize::Cell => (0.0, 0.0),
+    };
+    let fit = match size {
+        ImageSize::Box(..) | ImageSize::Natural => ResizeMode::Contain,
+        ImageSize::Sent | ImageSize::Cell => ResizeMode::Cover,
     };
     let loaded = resource(
         move || Some(key.get()),
@@ -677,13 +806,20 @@ fn loaded_image(
     let press = Rc::new(press);
     // TextView's image wrapper has intrinsic width; a percentage alone collapses it.
     // A failed image keeps only its message's height, not the image's.
-    view()
-        .w(move || px(shown().0))
-        .style_when(move || !failed(), move |s| s.min_h(move || px(shown().1)))
+    let frame = if cell {
+        view().w_full().h_full()
+    } else {
+        view()
+            .w(move || px(shown().0))
+            .style_when(move || !failed(), move |s| s.min_h(move || px(shown().1)))
+    };
+    frame
         .max_w(relative(1.0))
         .gap_2()
         .child(when(
-            move || loaded.get().is_some(),
+            // Refetch retains its old value. Do not decode the same broken
+            // cached file again before the replacement finishes loading.
+            move || loaded.get().is_some() && !loaded.loading() && decode_error.get().is_none(),
             move || {
                 let press = press.clone();
                 let image = image(move || {
@@ -693,8 +829,7 @@ fn loaded_image(
                     })
                 })
                 .w_full()
-                .h(move || px(shown().1))
-                .object_fit(ResizeMode::Contain)
+                .object_fit(fit)
                 .style_when(move || natural, |s| s.rounded(px(10.0)).overflow_hidden())
                 .on_load(move |loaded: &Size<DevicePixels>| {
                     pixels.set(Some((loaded.width.0 as f32, loaded.height.0 as f32)))
@@ -707,6 +842,11 @@ fn loaded_image(
                         press(file);
                     }
                 });
+                let image = if cell {
+                    image.h_full()
+                } else {
+                    image.h(move || px(shown().1))
+                };
                 #[cfg(desktop)]
                 let image = image.on_context_menu(move |_: &ContextMenuEvent| {
                     if let Some(file) = loaded.get().filter(|_| menu) {
@@ -727,7 +867,7 @@ fn loaded_image(
         ))
         .child(when(failed, move || {
             use crate::conversation::look;
-            view()
+            let failure = view()
                 .gap_2()
                 .items_start()
                 // In its slot, as T3 Code's media frame.
@@ -750,9 +890,9 @@ fn loaded_image(
                         .py_1()
                         .rounded(px(6.0))
                         .border_1()
-                        .border_color(look::RULE)
+                        .border_color(look::rule())
                         .bg(look::CODE)
-                        .text_color(look::MUTED)
+                        .text_color(look::muted())
                         .child(crate::ui::icon(crate::ui::Icon::WARNING, 14.0))
                         // T3 Code's title, then the Host's reason in place
                         // of its alt text.
@@ -775,6 +915,147 @@ fn loaded_image(
                         decode_error.set(None);
                         loaded.refetch()
                     },
-                )))
+                )));
+            // A small collage cell must keep its reason and Retry reachable,
+            // even when the Host's error is taller than the cropped image.
+            if cell {
+                scroll().w_full().h_full().child(failure).into_element()
+            } else {
+                failure.into_element()
+            }
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{ApproxTextEngine, Core, EventKind, EventPayload, MountItem, element::Root};
+
+    struct CellImage;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct CellImageProps {
+        directory: String,
+    }
+
+    impl Component for CellImage {
+        type Props = CellImageProps;
+        type Event = NoEvent;
+
+        fn view(props: Self::Props, _: Scope<NoEvent>) -> impl IntoElement {
+            let (runtime, client, _incoming) = Client::new(props.directory.into(), None).unwrap();
+            let service = client.clone();
+            cleanup(move || runtime.block_on(service.shutdown()).unwrap());
+            view().w(px(160.0)).h(px(96.0)).child(loaded_image(
+                stored(client),
+                computed(|| {
+                    (
+                        String::new(),
+                        String::new(),
+                        "data:image/png;base64,AA==".into(),
+                    )
+                }),
+                ImageSize::Cell,
+                "Test image",
+                |_| {},
+                false,
+            ))
+        }
+    }
+
+    #[test]
+    fn a_collage_decode_failure_replaces_the_image_with_retry_and_can_recover() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut core = Core::new(
+            ApproxTextEngine,
+            nsh_core::geometry::size(px(320.0), px(200.0)),
+        );
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        let image_directory = directory.path().to_string_lossy().into_owned();
+        core.mount_root(&Root::new::<CellImage>(move || CellImageProps {
+            directory: image_directory.clone(),
+        }));
+        let mut nodes = std::collections::BTreeMap::new();
+        let mut sources = std::collections::BTreeMap::new();
+        let mut until = |core: &mut Core<ApproxTextEngine>, label: &str, image_visible: bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                core.run_component_tasks();
+                if let Some(batch) = core.commit() {
+                    for item in batch.items {
+                        match item {
+                            MountItem::ViewProps { id, props } => {
+                                if let Some(label) = props.accessibility.label {
+                                    nodes.insert(id, label.to_string());
+                                }
+                            }
+                            #[cfg(target_os = "macos")]
+                            MountItem::ComponentProps { id, props } => {
+                                for (name, value) in props {
+                                    if &*name == "label"
+                                        && let Some(label) =
+                                            value.and_then(|v| v.as_str().map(str::to_owned))
+                                    {
+                                        nodes.insert(id, label);
+                                    }
+                                }
+                            }
+                            MountItem::Delete { id } => {
+                                nodes.remove(&id);
+                                sources.remove(&id);
+                            }
+                            MountItem::Image { id, source, .. } => {
+                                sources.insert(id, source);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if nodes.values().any(|label| label == "Test image") == image_visible
+                    && let Some((id, _)) = nodes.iter().find(|(_, shown)| shown.as_str() == label)
+                {
+                    return (*id, sources.get(id).cloned().flatten());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            panic!("image did not reach {label}, image_visible={image_visible}");
+        };
+        let (image, initial) = until(&mut core, "Test image", true);
+        let initial = initial.expect("a ready image must have its cached file");
+        assert!(!initial.uri.is_empty());
+        assert!(core.component_event(
+            image,
+            EventKind::Error,
+            &EventPayload::Error {
+                message: "Invalid image".into()
+            }
+        ));
+        let (retry, _) = until(&mut core, tr("再試行"), false);
+        let (event, payload) = if cfg!(target_os = "macos") {
+            (
+                EventKind::NativeEvent,
+                EventPayload::Native {
+                    name: "press".into(),
+                    data: serde_json::Value::Null,
+                },
+            )
+        } else {
+            (EventKind::Press, EventPayload::None)
+        };
+        assert!(core.component_event(retry, event, &payload));
+        let (_, recovered) = until(&mut core, "Test image", true);
+        let recovered = recovered.expect("Retry must finish caching its image");
+        assert!(!recovered.uri.is_empty());
+        assert_ne!(
+            recovered.uri, initial.uri,
+            "Retry must decode the fresh cached file"
+        );
+        drop(core);
+    }
 }

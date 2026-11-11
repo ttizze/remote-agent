@@ -68,7 +68,7 @@ pub(crate) fn suggestions(focus: impl Fn() + Copy + 'static) -> impl IntoElement
                         })
                     })
                     .text_size(px(12.0))
-                    .text_color(colors::MUTED),
+                    .text_color(colors::muted()),
                 )
                 .child(when(
                     move || {
@@ -88,7 +88,6 @@ pub(crate) fn suggestions(focus: impl Fn() + Copy + 'static) -> impl IntoElement
                                     KeyOptions {
                                         when: nsh_core::keymap::When::Always,
                                         repeat,
-                                        ..Default::default()
                                     },
                                     move |_| {
                                         let listed = candidates();
@@ -155,12 +154,12 @@ fn row(
         .h(px(40.0))
         .px_2()
         .rounded(px(ui::RADIUS))
-        .text_color(colors::FOREGROUND)
+        .text_color(colors::foreground())
         .hover(|s| s.bg(colors::GHOST_HOVER))
         .on_press(move || insert(invocation.clone()))
         .child(
             view()
-                .text_color(colors::MUTED)
+                .text_color(colors::muted())
                 .child(ui::icon(glyph, 16.0)),
         )
         .child(
@@ -172,7 +171,7 @@ fn row(
         .child(
             text(candidate_label(&description))
                 .text_size(px(13.0))
-                .text_color(colors::MUTED)
+                .text_color(colors::muted())
                 .number_of_lines(1)
                 .flex_1()
                 .min_w_0(),

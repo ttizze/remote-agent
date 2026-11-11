@@ -11,9 +11,29 @@ use crate::{
 use agent_protocol::{ids::ClientInputId, operations::FollowUp};
 use std::sync::{Arc, OnceLock};
 
+/// What T3 Code's Resume sends to continue an interrupted run.
+pub const RESUME_PROMPT: &str = "Continue where you left off.";
+
 pub mod footer;
 #[cfg(test)]
 mod tests;
+
+/// T3 Code's `deriveResumableRunId`: the latest turn was interrupted or failed
+/// on the provider's usage limit.
+fn resumable(thread: &crate::models::Thread) -> bool {
+    use agent_protocol::execution::{ErrorCategory, TurnStatus};
+    let Some(turn) = thread.turns.as_ref().and_then(|turns| turns.last()) else {
+        return false;
+    };
+    match turn.status {
+        TurnStatus::Interrupted => true,
+        TurnStatus::Failed => turn
+            .error
+            .as_ref()
+            .is_some_and(|error| error.category == ErrorCategory::UsageLimit),
+        _ => false,
+    }
+}
 
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -56,6 +76,8 @@ pub struct FollowUpControls {
     pub queue: Vec<QueuedMessage>,
     /// A stop or failure holds the queue until it is resumed.
     pub held: bool,
+    /// The latest turn stopped short, so an empty send picks it up again.
+    pub resumable: bool,
     /// Waiting messages can steer the running turn instead.
     pub can_steer: bool,
     /// The waiting message the composer edits; sending saves it.
@@ -96,6 +118,7 @@ fn follow_up_controls(
             alternate_action: follow_up::requested(preferences.follow_up, true),
             queue: Vec::new(),
             held: false,
+            resumable: false,
             can_steer: false,
             editing: None,
             busy: false,
@@ -144,6 +167,7 @@ fn follow_up_controls(
             }))
             .collect(),
         held: thread.queue.held,
+        resumable: resumable(thread),
         can_steer: thread.active_turn_id().is_some() && follow_up::steers(thread),
         editing: session.and_then(|session| {
             snapshot

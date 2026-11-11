@@ -1,6 +1,7 @@
-# The approval mode menu beside the composer lists the three modes and, as
-# T3 Code's menu, closes once a mode is chosen, which the composer shows.
+# The model picker's approval mode menu lists the three modes and closes
+# once a mode is chosen, which the picker footer shows.
 expect "何に取り組みますか？" 30000
+press モデル
 press 承認方法を変更
 expect "承認を求める"
 expect "代わりに承認"

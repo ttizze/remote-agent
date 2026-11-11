@@ -29,13 +29,25 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         do { try view.update(JSONDecoder().decode(MessageDocument.self, from: data)) }
         catch {
             // Keep decoder failures visible rather than silently dropping a message.
-            view.text.stringValueForFailure(error.localizedDescription)
+            let width = view.text.document.maxWidth > 0 ? view.text.document.maxWidth : view.bounds.width
+            view.update(MessageDocument(
+                blocks: [MessageParagraph(
+                    header: nil, marker: nil, code: false, quoted: false, depth: 0, alignment: "left",
+                    runs: [MessageRun(text: error.localizedDescription, strong: false, emphasis: false,
+                                      strikethrough: false, code: false, link: nil, darkColor: nil, lightColor: nil)]
+                )],
+                secondary: false, role: "assistant", target: "", sideChat: false,
+                maxWidth: width > 0 ? width : 1_000_000, menu: MessageMenuTitles(quote: "", sideChat: "")
+            ))
         }
     }
 }
 
 #if os(macOS)
     final class MessageTextView: NSTextView, NSTextViewDelegate {
+        /// The native conversation viewport uses AppKit's clipping geometry.
+        /// Only a TextKit leaf inside an NSH-scrolled row needs layer observers.
+        var nativeScrolling = false
         var action: (([String: Any]) -> Void)?
         var document = MessageDocument.empty
         /// The modifier keys of the click being handled: a link opens from
@@ -50,6 +62,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         func watchScrollingGeometry() {
             geometryObservers.removeAll()
             lastVisibleRect = .zero
+            guard !nativeScrolling else { return }
             guard window != nil else { return }
             let redraw: @Sendable () -> Void = { [weak self] in
                 MainActor.assumeIsolated {
@@ -124,6 +137,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         /// and suppresses glyphs until the trailing scroll commit. Convert the
         /// actual layer clips instead, keeping TextKit on the displayed frame.
         override var visibleRect: NSRect {
+            if nativeScrolling { return super.visibleRect }
             guard let own = layer, let root = window?.contentView?.layer else { return super.visibleRect }
             var rect = bounds.intersection(own.convert(root.bounds, from: root))
             var ancestor = own.superlayer
@@ -188,9 +202,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let container = NSTextContainer(size: .zero)
             storage.addLayoutManager(manager)
             manager.addTextContainer(container)
-            // Lines are as tall as T3 Code's (`MessageAttributes`): a
-            // fallback font's leading would grow a line holding its glyph.
-            manager.usesFontLeading = false
             super.init(frame: .zero, textContainer: container)
             wantsLayer = true
             isEditable = false
@@ -252,7 +263,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         /// its top left, for the bar of actions over it; or that nothing is.
         private func reportSelection() {
             let range = selectedRange()
-            guard range.length > 0, NSMaxRange(range) <= (textStorage?.length ?? 0),
+            guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length,
                   let manager = layoutManager, let container = textContainer,
                   let content = window?.contentView
             else {
@@ -268,7 +279,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let frame = content.convert(box, from: self)
             let top = content.isFlipped ? frame.minY : content.bounds.height - frame.maxY
             reported = true
-            action?(["action": "selection", "text": (string as NSString).substring(with: range),
+            action?(["action": "selection", "text": MessageAttributes.selectedText(storage, range: range),
                      "target": document.target, "sideChat": document.sideChat,
                      "bounds": [frame.minX, top, frame.width, frame.height]])
         }
@@ -279,8 +290,8 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             }
             guard let menu = super.menu(for: event) else { return nil }
             let range = selectedRange()
-            guard range.length > 0, NSMaxRange(range) <= (textStorage?.length ?? 0) else { return menu }
-            let selected = (string as NSString).substring(with: range)
+            guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length else { return menu }
+            let selected = MessageAttributes.selectedText(storage, range: range)
             let target = document.target
             let quote = NSMenuItem(title: document.menu.quote, action: #selector(quoteSelection(_:)), keyEquivalent: "")
             quote.target = self
@@ -298,6 +309,13 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             }
             menu.insertItem(.separator(), at: document.sideChat ? 2 : 1)
             return menu
+        }
+
+        override func copy(_: Any?) {
+            let range = selectedRange()
+            guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(MessageAttributes.selectedText(storage, range: range), forType: .string)
         }
 
         @objc private func quoteSelection(_ sender: NSMenuItem) {
@@ -346,16 +364,13 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                      "command": clickModifiers.contains(.command)])
             return true
         }
-
-        func stringValueForFailure(_ reason: String) {
-            string = reason
-        }
     }
 
     final class MessageTextContainer: NSView {
         let text = MessageTextView()
         var send: (([String: Any]) -> Void)?
         private var measuredSize = CGSize(width: -1, height: -1)
+        private var revealedFind: String?
         override var isFlipped: Bool {
             true
         }
@@ -382,6 +397,9 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
 
         func update(_ document: MessageDocument) {
             guard text.document != document else { return }
+            if text.document.findKey != document.findKey {
+                revealedFind = nil
+            }
             #if DEBUG
                 RenderProbe.record("update.begin", text)
             #endif
@@ -414,12 +432,10 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let content = MessageAttributes.text(document.blocks, secondary: document.secondary,
                                                  dark: effectiveAppearance
                                                      .bestMatch(from: [.darkAqua, .aqua]) == .darkAqua,
-                                                 answer: document.role == "assistant", cell: document.cell)
+                                                 answer: document.role == "assistant", cell: document.cell,
+                                                 foreground: document.foreground)
             let range = text.selectedRange()
-            let keep = range.length > 0 && NSMaxRange(range) <= content.length && NSMaxRange(range) <= text.string.utf16
-                .count
-                && (text.string as NSString).substring(with: range) == (content.string as NSString)
-                .substring(with: range)
+            let retained = MessageAttributes.retainedSelection(range, previous: text.string, next: content.string)
             #if DEBUG
                 if RenderProbe.enabled {
                     text.preparePaints(for: content.string)
@@ -437,7 +453,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 manager.ensureLayout(for: container)
                 reportSize(CGSize(width: ceil(size.width), height: ceil(manager.usedRect(for: container).height)))
             }
-            text.setSelectedRange(keep ? range : NSRange(location: 0, length: 0))
+            text.setSelectedRange(retained)
             needsLayout = true
         }
 
@@ -453,9 +469,29 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let height = ceil(manager.usedRect(for: container).maxY)
             text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
             reportSize(CGSize(width: max(0, measuredSize.width), height: height))
+            revealFind(manager, container: container)
             #if DEBUG
                 RenderProbe.record("layout", text)
             #endif
+        }
+
+        private func revealFind(_ manager: NSLayoutManager, container: NSTextContainer) {
+            guard let key = text.document.findKey, key != revealedFind,
+                  let storage = text.textStorage else { return }
+            var selected: NSRange?
+            storage.enumerateAttribute(.messageFindActive, in: NSRange(
+                location: 0,
+                length: storage.length
+            )) { value, range, stop in
+                if value as? Bool == true {
+                    selected = range; stop.pointee = true
+                }
+            }
+            guard let selected else { return }
+            let glyphs = manager.glyphRange(forCharacterRange: selected, actualCharacterRange: nil)
+            let bounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            revealedFind = key
+            send?(["findBounds": [bounds.minX, bounds.minY, bounds.width, bounds.height], "findKey": key])
         }
     }
 #else
@@ -464,20 +500,15 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         var document = MessageDocument.empty
 
         init() {
-            let container = NSTextContainer(size: .zero)
-            let manager = NSLayoutManager()
-            let storage = NSTextStorage()
-            storage.addLayoutManager(manager)
-            manager.addTextContainer(container)
-            super.init(frame: .zero, textContainer: container)
-            container.widthTracksTextView = false
-            container.heightTracksTextView = false
+            super.init(frame: .zero, textContainer: nil)
             isEditable = false
             isSelectable = true
             isScrollEnabled = false
             backgroundColor = .clear
             textContainerInset = .zero
             textContainer.lineFragmentPadding = 0
+            // File chips carry their own link color.
+            linkTextAttributes = [:]
             delegate = self
         }
 
@@ -489,7 +520,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
                       suggestedActions: [UIMenuElement]) -> UIMenu? {
             guard range.length > 0, NSMaxRange(range) <= textView.attributedText.length else { return nil }
-            let selected = (textView.text as NSString).substring(with: range)
+            let selected = MessageAttributes.selectedText(textView.attributedText, range: range)
             let target = document.target
             var actions: [UIMenuElement] = [UIAction(title: document.menu.quote, image: UIImage(systemName: "bubble")) {
                 [weak self] _ in self?.action?(["action": "quote", "text": selected, "target": target])
@@ -505,6 +536,11 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             return UIMenu(children: actions + suggestedActions)
         }
 
+        override func copy(_: Any?) {
+            guard selectedRange.length > 0, NSMaxRange(selectedRange) <= attributedText.length else { return }
+            UIPasteboard.general.string = MessageAttributes.selectedText(attributedText, range: selectedRange)
+        }
+
         func textView(_: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
             guard case let .link(url) = textItem.content else { return defaultAction }
             let target = document.target
@@ -513,8 +549,26 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             }
         }
 
-        func stringValueForFailure(_ reason: String) {
-            text = reason
+        func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem,
+                      defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
+            guard case .link = textItem.content, textItem.range.location < textView.attributedText.length,
+                  let chip = textView.attributedText.attribute(
+                      .messageFile, at: textItem.range.location, effectiveRange: nil
+                  ) as? MessageFileLink else { return UITextItem.MenuConfiguration(menu: defaultMenu) }
+            return UITextItem.MenuConfiguration(menu: fileMenu(chip.file.menu, link: chip.link))
+        }
+
+        func fileMenu(_ items: [MessageMenuItem], link: String, title: String = "") -> UIMenu {
+            let target = document.target
+            return UIMenu(title: title, children: items.compactMap { item -> UIMenuElement? in
+                if let children = item.children {
+                    return fileMenu(children, link: link, title: item.title)
+                }
+                guard let id = item.id else { return nil }
+                return UIAction(title: item.title) { [weak self] _ in
+                    self?.action?(["action": "file", "text": link, "id": id, "target": target])
+                }
+            })
         }
     }
 
@@ -552,32 +606,26 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         private func refresh() {
             let document = text.document
             let content = MessageAttributes.text(document.blocks, secondary: document.secondary,
-                                                 dark: traitCollection.userInterfaceStyle == .dark)
+                                                 dark: traitCollection.userInterfaceStyle == .dark,
+                                                 foreground: document.foreground)
             let range = text.selectedRange
-            let keep = range.length > 0 && NSMaxRange(range) <= content.length && NSMaxRange(range) <= text
-                .attributedText.length
-                && (text.text as NSString).substring(with: range) == (content.string as NSString).substring(with: range)
-            text.textStorage.setAttributedString(content)
-            // Reuse the native glyph layout for both measurements. TextKit 2's
-            // sizeThatFits on a full-height review retypesets the entire text.
-            let container = text.textContainer
-            let manager = text.layoutManager
-            container.size = CGSize(width: 1_000_000, height: CGFloat.greatestFiniteMagnitude)
-            manager.ensureLayout(for: container)
-            let size = manager.usedRect(for: container).size
-            let width = max(1, min(ceil(size.width), document.maxWidth))
-            container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
-            manager.ensureLayout(for: container)
-            reportSize(CGSize(width: ceil(size.width), height: ceil(manager.usedRect(for: container).maxY)))
-            text.selectedRange = keep ? range : NSRange(location: 0, length: 0)
+            let retained = MessageAttributes.retainedSelection(range, previous: text.text, next: content.string)
+            text.attributedText = content
+            let size = content.size()
+            let width = min(ceil(size.width), document.maxWidth)
+            // Measure at the document's width before NSH lays out this row.
+            // Its current native frame can still belong to a recycled message.
+            let fitted = text.sizeThatFits(CGSize(width: max(1, width), height: .greatestFiniteMagnitude))
+            reportSize(CGSize(width: ceil(size.width), height: ceil(fitted.height)))
+            text.selectedRange = retained
             setNeedsLayout()
         }
 
         override func layoutSubviews() {
             super.layoutSubviews()
             guard bounds.width > 0 else { return }
-            // The frame can still belong to the previous recycled row. The
-            // document supplies its width; resizing the view needs no reflow.
+            // A recycled frame belongs to the previous row until NSH applies
+            // the measured size. Keep the layout established for this document.
             text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: max(0, measuredSize.height))
         }
     }

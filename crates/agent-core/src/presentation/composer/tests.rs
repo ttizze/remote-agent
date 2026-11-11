@@ -429,3 +429,32 @@ fn an_answered_turn_offers_its_background_work_and_stop_while_the_composer_sends
     assert_eq!(composer.controls.running_turn, Some("turn".into()));
     assert!(composer.can_send(true), "a message can follow the work");
 }
+
+#[test]
+fn an_interrupted_turn_or_a_usage_limit_can_be_resumed() {
+    use agent_protocol::execution::{ErrorCategory, ExecutionError};
+    let turn = |status, category: Option<ErrorCategory>| {
+        Arc::new(Turn {
+            id: "turn".into(),
+            status,
+            error: category.map(|category| ExecutionError {
+                category,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    };
+    for (status, category, expected) in [
+        (TurnStatus::Interrupted, None, true),
+        (TurnStatus::Failed, Some(ErrorCategory::UsageLimit), true),
+        (TurnStatus::Failed, Some(ErrorCategory::Other), false),
+        (TurnStatus::Completed, None, false),
+    ] {
+        let thread = Thread {
+            turns: Some(vec![turn(status, category)]),
+            ..Default::default()
+        };
+        assert_eq!(super::resumable(&thread), expected, "{status:?}");
+    }
+    assert!(!super::resumable(&Thread::default()));
+}

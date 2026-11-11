@@ -63,6 +63,7 @@ final class MobilePreferenceStorage: PreferenceStorage, @unchecked Sendable {
         case .models: return UserDefaults.standard.data(forKey: "bex.model-preferences") ?? Data()
         case .editor: return UserDefaults.standard.data(forKey: "bex.editor-preferences") ?? Data()
         case .composer: return UserDefaults.standard.data(forKey: "bex.composer-preferences") ?? Data()
+        case .contrast: return UserDefaults.standard.data(forKey: "bex.contrast") ?? Data()
         case .language:
             guard let language = UserDefaults.standard.string(forKey: "bex.language") else { return Data() }
             return try JSONEncoder().encode(language)
@@ -74,6 +75,7 @@ final class MobilePreferenceStorage: PreferenceStorage, @unchecked Sendable {
         case .models: UserDefaults.standard.set(bytes, forKey: "bex.model-preferences")
         case .editor: UserDefaults.standard.set(bytes, forKey: "bex.editor-preferences")
         case .composer: UserDefaults.standard.set(bytes, forKey: "bex.composer-preferences")
+        case .contrast: UserDefaults.standard.set(bytes, forKey: "bex.contrast")
         case .language:
             try UserDefaults.standard.set(JSONDecoder().decode(String.self, from: bytes), forKey: "bex.language")
         }

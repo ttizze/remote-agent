@@ -193,6 +193,6 @@ impl SessionRouter {
         }
         drop(owned);
         self.close_failed(failed);
-        self.prune(&target, &actor);
+        prune(&self.state, &target, &actor);
     }
 }

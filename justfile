@@ -56,8 +56,16 @@ nsh-acceptance *scenarios:
     cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
     cargo xtask nsh-acceptance "$@"
 
-# Compare the Mac app with T3 Code state by state (apps/nsh/parity/map.toml); T3_CODE_ROOT
-# names a T3 Code checkout with its dependencies installed. `--compare RUN` measures a run
+# Compare the same conversations in hybrid, native, custom NSH and standard NSH renderers.
+# Explicit debugging only: each isolated app takes the Mac's foreground briefly.
+conversation-compare *scenarios:
+    AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
+    cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+    node scripts/compare-conversation.mjs "$@"
+
+# Compare the Mac app with the installed T3 Code state by state (apps/nsh/parity/map.toml);
+# T3_CODE_APP names the app (the Nightly by default) and T3_CODE_ROOT a checkout with its
+# dependencies installed, for Playwright and the Codex schema. `--compare RUN` measures a run
 # again. Only on request, as nsh-acceptance. Report: target/nsh-parity/run-*/report.md.
 nsh-parity *args:
     AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
@@ -114,10 +122,6 @@ ios-maestro:
 # Archive iOS with the pinned package plugins trusted from the first build.
 ios-archive archive-path derived-data-path *args:
     scripts/archive-ios.sh "$@"
-
-# Headless tests of the production iOS Markdown parser.
-ios-markdown:
-    cargo xtask ios-markdown
 
 # Exercise native pages through the Host using an isolated Mac app window.
 macos-e2e:

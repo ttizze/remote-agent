@@ -64,7 +64,7 @@ pub(crate) fn screen(provider: ProviderKind) -> impl IntoElement {
                     .with(|p| p.host_name().unwrap_or_default())
             })
             .text_size(px(13.0))
-            .text_color(ui::colors::MUTED),
+            .text_color(ui::colors::muted()),
         )
         .child(
             text(move || {
@@ -221,7 +221,7 @@ fn account_row(
                                     account.with(|a| a.plan_type.clone().unwrap_or_default())
                                 })
                                 .text_size(px(13.0))
-                                .text_color(ui::colors::MUTED),
+                                .text_color(ui::colors::muted()),
                             ),
                     )
                     .child(actions),
@@ -291,7 +291,7 @@ fn usage(account: ReadSignal<agent_protocol::operations::Account>) -> impl IntoE
                             })
                         })
                         .text_size(px(12.0))
-                        .text_color(ui::colors::MUTED),
+                        .text_color(ui::colors::muted()),
                     )
             },
         ))
@@ -306,7 +306,7 @@ fn usage(account: ReadSignal<agent_protocol::operations::Account>) -> impl IntoE
                 })
             })
             .text_size(px(12.0))
-            .text_color(ui::colors::MUTED),
+            .text_color(ui::colors::muted()),
         )
 }
 
@@ -383,7 +383,7 @@ fn login_panel(
                         .px_3()
                         .rounded(px(ui::RADIUS))
                         .border_1()
-                        .border_color(ui::colors::BORDER),
+                        .border_color(ui::colors::border()),
                 )
                 .child(
                     ui::text_button(tr("サインインを完了"), move || {
@@ -463,7 +463,7 @@ fn credentials(busy: Memo<bool>, perform: impl Fn(Intent) + Copy + 'static) -> i
         .child(ui::text_button(tr("キーの発行ページ"), move || { native::open_link(selected.get_untracked().key_url()); }))
         .child(input().masked(true).auto_correct(false).auto_capitalize(AutoCapitalize::None)
             .placeholder(tr("APIキー")).value(move || key.get()).on_change(move |value: &str| key.set(value.into()))
-            .text_color(move || nsh_base::theme().foreground).w_full().h(px(36.0)).px_3().rounded(px(ui::RADIUS)).border_1().border_color(ui::colors::BORDER))
+            .text_color(move || nsh_base::theme().foreground).w_full().h(px(36.0)).px_3().rounded(px(ui::RADIUS)).border_1().border_color(ui::colors::border()))
         .child(ui::text_button(tr("保存"), move || {
             let value = key.get_untracked(); key.set(String::new());
             perform(Intent::UpdateDshCredential(op::UpdateDshCredential { provider: selected.get_untracked(), key: Some(value) }));
@@ -504,7 +504,7 @@ fn runtime(
     if provider != ProviderKind::Codex {
         return text(tr("このプロバイダーはBexと一緒に更新されます。"))
             .text_size(px(13.0))
-            .text_color(ui::colors::MUTED)
+            .text_color(ui::colors::muted())
             .into_element();
     }
     let status = computed(move || connection.settings.with(|p| p.codex_cli_status()));

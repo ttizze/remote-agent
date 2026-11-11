@@ -32,7 +32,7 @@ impl fmt::Debug for HostSession {
 impl Drop for HostSession {
     fn drop(&mut self) {
         if let Some(state) = self.state.upgrade() {
-            SessionRouter { state }.close_session(self.id);
+            close_session(&state, self.id);
         }
     }
 }
@@ -73,8 +73,43 @@ impl Outbound {
     }
 }
 
+fn close_session(state: &Mutex<State>, session: SessionId) {
+    let actors: HashMap<_, _> = {
+        let mut state = lock_state(state);
+        if let Some(connection) = state.sessions.remove(&session) {
+            connection.alive.store(false, Relaxed);
+        }
+        let targets: Vec<_> = state
+            .subscriptions
+            .values()
+            .filter(|(_, owner)| *owner == session)
+            .map(|(target, _)| target.clone())
+            .collect();
+        state
+            .subscriptions
+            .retain(|_, (_, owner)| *owner != session);
+        targets
+            .into_iter()
+            .filter_map(|target| {
+                state
+                    .executions
+                    .get(&target)
+                    .cloned()
+                    .map(|actor| (target, actor))
+            })
+            .collect()
+    };
+    for (target, actor) in actors {
+        lock_state(&actor)
+            .subscriptions
+            .retain(|_, (owner, _)| *owner != session);
+        prune(state, &target, &actor);
+    }
+}
+
 impl SessionRouter {
     pub(in crate::host_rpc) fn revoke_device(&self, principal: &str) {
+        let activity = lock_state(&self.activity);
         let state = lock_state(&self.state);
         for output in state
             .sessions
@@ -83,7 +118,7 @@ impl SessionRouter {
         {
             output.alive.store(false, Relaxed);
         }
-        if let Some(apns) = &state.apns {
+        if let Some(apns) = &activity.apns {
             apns.revoke(principal);
         }
     }
@@ -135,37 +170,7 @@ impl SessionRouter {
             .ok_or_else(|| "connection is closed".into())
     }
     pub(crate) fn close_session(&self, session: SessionId) {
-        let actors: HashMap<_, _> = {
-            let mut state = lock_state(&self.state);
-            if let Some(connection) = state.sessions.remove(&session) {
-                connection.alive.store(false, Relaxed);
-            }
-            let targets: Vec<_> = state
-                .subscriptions
-                .values()
-                .filter(|(_, owner)| *owner == session)
-                .map(|(target, _)| target.clone())
-                .collect();
-            state
-                .subscriptions
-                .retain(|_, (_, owner)| *owner != session);
-            targets
-                .into_iter()
-                .filter_map(|target| {
-                    state
-                        .executions
-                        .get(&target)
-                        .cloned()
-                        .map(|actor| (target, actor))
-                })
-                .collect()
-        };
-        for (target, actor) in actors {
-            lock_state(&actor)
-                .subscriptions
-                .retain(|_, (owner, _)| *owner != session);
-            self.prune(&target, &actor);
-        }
+        close_session(&self.state, session);
     }
     pub(super) fn close_failed(&self, failed: Vec<SessionId>) {
         for session in failed {

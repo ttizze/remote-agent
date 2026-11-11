@@ -145,8 +145,8 @@ impl Application {
         );
     }
 
-    pub fn select_host(&self, host: String, keep_list: bool) {
-        if self.activate_host(&host, keep_list) {
+    pub fn select_host(&self, host: String) {
+        if self.activate_host(&host, false) {
             self.client.reconnect(host);
         }
     }
@@ -368,7 +368,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (runtime, app) = Application::new(root.path().into(), None).unwrap();
         app.select_all_hosts();
-        app.select_host("missing".into(), false);
+        app.select_host("missing".into());
         assert!(app.snapshot().host.is_empty());
         assert!(!app.snapshot().all_hosts);
         runtime.block_on(app.shutdown()).unwrap();
@@ -455,7 +455,7 @@ mod tests {
                 })
             })
             .await;
-            app.select_host("one".into(), false);
+            app.select_host("one".into());
             publish_connected(&app);
             app.search_list("only one");
             let filtered = until(&app, |state| {
@@ -614,18 +614,16 @@ mod tests {
                 ..two.clone()
             };
             assert!(!app.list_action(&stale, edit("stale"), false));
-            app.select_host("one".into(), true);
+            app.select_host("missing".into());
+            assert_eq!(app.snapshot().host, "two");
             assert!(app.snapshot().all_hosts);
-            app.select_host("missing".into(), false);
-            assert_eq!(app.snapshot().host, "one");
-            assert!(app.snapshot().all_hosts);
-            app.select_host("one".into(), false);
+            app.select_host("one".into());
             assert!(!app.snapshot().all_hosts);
             assert!(!app.list_action(&two, edit("wrong Host"), false));
             app.state
                 .send_modify(|state| Arc::make_mut(state).account_pending = true);
             app.select_all_hosts();
-            app.select_host("two".into(), false);
+            app.select_host("two".into());
             assert!(!app.snapshot().all_hosts);
             assert_eq!(app.snapshot().host, "one");
             assert!(!app.list_action(
@@ -639,7 +637,7 @@ mod tests {
                 .send_modify(|state| Arc::make_mut(state).account_pending = false);
             app.shutdown().await.unwrap();
             app.select_all_hosts();
-            app.select_host("two".into(), false);
+            app.select_host("two".into());
             assert_eq!(app.snapshot().host, "one");
             assert!(!app.snapshot().all_hosts);
             assert!(!app.list_action(&one, edit("closed"), false));
@@ -663,27 +661,28 @@ mod tests {
                 },
             )
             .await;
-            app.select_host("two".into(), true);
+            app.select_host("two".into());
             saved_selection(
                 &path,
                 &ConnectionSelection {
                     host_id: Some("two".into()),
-                    all: true,
+                    all: false,
                 },
             )
             .await;
-            app.select_host("one".into(), true);
+            app.select_host("one".into());
             saved_selection(
                 &path,
                 &ConnectionSelection {
                     host_id: Some("one".into()),
-                    all: true,
+                    all: false,
                 },
             )
             .await;
             for index in 0..64 {
-                app.select_host(if index % 2 == 0 { "one" } else { "two" }.into(), true);
+                app.select_host(if index % 2 == 0 { "one" } else { "two" }.into());
             }
+            app.select_all_hosts();
             app.shutdown().await.unwrap();
         });
         assert_eq!(
@@ -737,7 +736,7 @@ mod tests {
             until(&app, |state| state.failure.is_some()).await;
             std::fs::remove_dir(&path).unwrap();
             app.dismiss_failure();
-            app.select_host("two".into(), false);
+            app.select_host("two".into());
             app.shutdown().await.unwrap();
         });
         assert_eq!(

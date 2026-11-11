@@ -1,0 +1,9 @@
+# The sidebar names what a chat holds for: here, a question.
+expect "検証プロジェクト" 30000
+press このプロジェクトで新しいチャット
+type "AI に依頼する" "[request] 質問を確認します"
+press 送信
+expect "このまま続けますか？" 20000
+press 検証プロジェクト
+expect "入力" 10000
+screenshot badge

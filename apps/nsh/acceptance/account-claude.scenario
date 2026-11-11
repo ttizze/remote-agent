@@ -7,6 +7,7 @@
 expect "何に取り組みますか？" 30000
 press モデル
 expect "Fixture Model" 20000
+press "Fixture Model" after モデルを検索
 press "Claude Code"
 press アカウントと週間残量
 expect "未ログイン" 10000
@@ -17,7 +18,7 @@ press サインインを中止
 expect_absent "2. 認証コードを貼り付け" 10000
 expect_absent "claude@example.invalid"
 press アカウントを追加
-type 認証コード "fixture-code" 15000
+type 認証コード "fixture-code#fixture-only" 15000
 press サインインを完了
 expect "claude@example.invalidを選択中" 20000
 expect "Fable · 週間枠 残り 66%" 10000
@@ -25,7 +26,9 @@ screenshot claude-added
 press Codex
 expect "desktop@example.invalidを選択中" 10000
 press 閉じる
-# The new draft takes Claude's default model, whose picker shows the limits.
-press "Default (recommended)"
+# Browsing an agent did not change the draft: choose Claude explicitly.
+press "Fixture Model"
+press "Claude Code"
+press "Default (recommended)" after モデルを検索
 expect "Fable · 週間枠" 10000
 expect Fable

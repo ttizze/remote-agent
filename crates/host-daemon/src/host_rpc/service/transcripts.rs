@@ -63,7 +63,7 @@ impl HostRpcService {
         }
         let Some(window) = self
             .inner
-            .transcripts
+            .store
             .window(target, end, limit)
             .map_err(storage_failure)?
         else {
@@ -147,18 +147,20 @@ impl HostRpcService {
 
     async fn import(&self, target: SessionRef) -> Result<(), Failure> {
         let started = std::time::Instant::now();
-        let result = match self.import_history(&target).await {
-            Ok(response) => {
-                let transcripts = self.inner.transcripts.clone();
-                let key = target.clone();
-                tokio::task::spawn_blocking(move || transcripts.import(&key, response))
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|result| result)
-                    .map_err(storage_failure)
-            }
-            Err(error) => Err(error),
-        };
+        // Native reads can outlive a rewind or a new recorded turn. Admit
+        // their result only while the captured transcript is still current.
+        let result = async {
+            let version = self.inner.store.version(&target).map_err(storage_failure)?;
+            let response = self.import_history(&target).await?;
+            let transcripts = self.inner.store.clone();
+            let key = target.clone();
+            tokio::task::spawn_blocking(move || transcripts.import(&key, version, response))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result)
+                .map_err(storage_failure)
+        }
+        .await;
         let mut imports = self.inner.imports.lock().unwrap();
         match &result {
             Ok(()) => {
@@ -191,22 +193,21 @@ impl HostRpcService {
         } else {
             self.native_history(target, HistoryUse::Import).await?
         };
-        // Past activity is not imported; turns the Host runs keep every item.
+        // Past work is omitted except for image-bearing results; turns the Host runs keep every item.
         for turn in response.thread.turns.iter_mut().flatten() {
             if let Some(items) = &mut Arc::make_mut(turn).items {
-                items.retain(|item| content(item.body()));
+                items.retain(|item| content(item));
             }
         }
         Ok(response)
     }
 }
 
-/// What an import copies from native history: messages and generated images.
-pub(super) fn content(body: &agent_protocol::items::ItemBody) -> bool {
+/// What an import copies from native history: messages and images.
+pub(super) fn content(item: &agent_protocol::items::Item) -> bool {
     matches!(
-        body,
+        item.body(),
         agent_protocol::items::ItemBody::UserMessage { .. }
             | agent_protocol::items::ItemBody::AssistantText { .. }
-            | agent_protocol::items::ItemBody::ImageGeneration { .. }
-    )
+    ) || item.is_image_output()
 }

@@ -71,6 +71,8 @@ pub enum Notification {
         thread: Box<crate::models::Thread>,
         project: Option<crate::models::Project>,
     },
+    #[serde(rename = "host/session/historyReplaced")]
+    SessionHistoryReplaced { thread: Box<crate::models::Thread> },
     #[serde(other)]
     Unsupported,
 }

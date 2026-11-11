@@ -53,6 +53,7 @@ mod tests {
         };
         state.lists.project_threads = Arc::new([("closed".into(), Arc::new(page))].into());
         let _ = state.accept_task_activity(TaskActivityState {
+            attention: Vec::new(),
             revision: 2,
             waiting: Vec::new(),
             display: TaskActivitySummary::default().display(),
@@ -69,6 +70,7 @@ mod tests {
         let received = state.lists.project_threads.clone();
         let activity = state.lists.activity.clone();
         let _ = state.accept_task_activity(TaskActivityState {
+            attention: Vec::new(),
             revision: 3,
             waiting: Vec::new(),
             display: TaskActivitySummary::default().display(),
@@ -79,6 +81,7 @@ mod tests {
         assert!(Arc::ptr_eq(&state.lists.project_threads, &received));
         assert!(Arc::ptr_eq(&state.lists.activity, &activity));
         let _ = state.accept_task_activity(TaskActivityState {
+            attention: Vec::new(),
             revision: 1,
             waiting: Vec::new(),
             display: TaskActivitySummary {
@@ -96,6 +99,7 @@ mod tests {
     #[test]
     fn delayed_read_cannot_replace_a_newer_completion_or_depend_on_visible_rows() {
         let running = TaskActivityState {
+            attention: Vec::new(),
             waiting: Vec::new(),
             background: Vec::new(),
             unread: Vec::new(),
@@ -108,6 +112,7 @@ mod tests {
             .display(),
         };
         let completed = TaskActivityState {
+            attention: Vec::new(),
             waiting: Vec::new(),
             background: Vec::new(),
             unread: Vec::new(),
@@ -141,6 +146,7 @@ mod tests {
             &mut reconnected,
             "",
             TaskActivityState {
+                attention: Vec::new(),
                 waiting: Vec::new(),
                 background: Vec::new(),
                 unread: Vec::new(),

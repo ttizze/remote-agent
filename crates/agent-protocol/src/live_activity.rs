@@ -21,6 +21,18 @@ pub struct TaskActivityState {
     #[serde(default)]
     pub background: Vec<(crate::session::SessionRef, bool)>,
     pub unread: Vec<(crate::session::SessionRef, crate::ids::TurnId)>,
+    /// What each conversation holding for the user holds for.
+    #[serde(default)]
+    pub attention: Vec<(crate::session::SessionRef, Attention)>,
+}
+
+/// Why a conversation needs its user: its list shows this as T3 Code's badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Attention {
+    Approval,
+    Input,
+    Failed,
 }
 
 /// A receipt covers only the completion the client actually observed.
@@ -192,12 +204,23 @@ pub struct TaskActivityView {
 pub struct TaskState {
     pub status: crate::models::SessionStatus,
     pub waiting: bool,
+    /// What is awaited is a permission, not an answer.
+    pub approval: bool,
     /// Some while the answered turn waits on background work: whether that
     /// work holds the conversation's completion.
     pub background: Option<bool>,
     pub latest: Option<TurnStatus>,
 }
 impl TaskState {
+    pub fn attention(self) -> Option<Attention> {
+        match (self.waiting, self.approval, self.latest) {
+            (true, true, _) => Some(Attention::Approval),
+            (true, false, _) => Some(Attention::Input),
+            (false, _, Some(TurnStatus::Failed)) => Some(Attention::Failed),
+            _ => None,
+        }
+    }
+
     pub fn session_status(self) -> crate::models::SessionStatus {
         use crate::models::SessionStatus;
         match self.phase().0 {
@@ -236,6 +259,34 @@ impl TaskState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attention_names_what_the_conversation_holds_for() {
+        let task = |waiting, approval, latest| TaskState {
+            waiting,
+            approval,
+            latest,
+            ..Default::default()
+        };
+        assert_eq!(
+            task(true, true, None).attention(),
+            Some(Attention::Approval)
+        );
+        assert_eq!(task(true, false, None).attention(), Some(Attention::Input));
+        assert_eq!(
+            task(false, false, Some(TurnStatus::Failed)).attention(),
+            Some(Attention::Failed)
+        );
+        // A request outranks the failed turn before it.
+        assert_eq!(
+            task(true, false, Some(TurnStatus::Failed)).attention(),
+            Some(Attention::Input)
+        );
+        assert_eq!(
+            task(false, false, Some(TurnStatus::Completed)).attention(),
+            None
+        );
+    }
+
     #[test]
     fn an_answer_waiting_on_work_that_wakes_its_agent_stays_running() {
         let waiting = |background| TaskState {
@@ -389,6 +440,7 @@ mod tests {
             ] {
                 assert_eq!(
                     TaskState {
+                        approval: false,
                         status,
                         waiting: false,
                         latest: turn,
@@ -406,6 +458,7 @@ mod tests {
             ] {
                 assert_eq!(
                     TaskState {
+                        approval: false,
                         status,
                         waiting: true,
                         latest: turn,
@@ -430,6 +483,7 @@ mod tests {
         for (turn, expected) in cases {
             assert_eq!(
                 TaskState {
+                    approval: false,
                     status: crate::models::SessionStatus::Idle,
                     waiting: false,
                     latest: turn,
@@ -440,6 +494,7 @@ mod tests {
             );
             assert_eq!(
                 TaskState {
+                    approval: false,
                     status: crate::models::SessionStatus::Running,
                     waiting: false,
                     latest: turn,

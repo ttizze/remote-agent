@@ -4,18 +4,39 @@ use crate::l10n::{localized, tr};
 use nsh_core::{element::NativeView, prelude::*};
 use serde_json::{Value, json};
 
+/// The embedding screen owns the presentation of selected text and links.
+#[derive(Clone, Copy)]
+#[cfg(any(desktop, target_os = "ios"))]
+pub(crate) struct ExternalActions(pub Stored<std::sync::Arc<dyn Fn(Value) + Send + Sync>>);
+
+#[cfg(any(desktop, target_os = "ios"))]
+impl ExternalActions {
+    pub fn emit(self, event: Value) {
+        self.0.with(|send| send(event));
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Serialize)]
 pub(crate) struct RowIndicators {
     pub activity: Option<agent_core::presentation::thread_status::ThreadActivity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<agent_core::presentation::thread_status::ThreadAttention>,
     /// Its worktree has changes its source branch lacks.
     pub changes: bool,
 }
 
 impl RowIndicators {
     pub(crate) fn label(&self) -> String {
-        use agent_core::presentation::thread_status::thread_activity_label;
-        self.activity
-            .map(|activity| localized(thread_activity_label(activity)))
+        use agent_core::presentation::thread_status::{
+            thread_activity_label, thread_attention_label,
+        };
+        // A badge says what a waiting chat waits for.
+        self.attention
+            .map(|attention| localized(thread_attention_label(attention)))
+            .or_else(|| {
+                self.activity
+                    .map(|activity| localized(thread_activity_label(activity)))
+            })
             .into_iter()
             .chain(self.changes.then(|| tr("作成元からの変更あり").to_owned()))
             .collect::<Vec<_>>()
@@ -63,17 +84,7 @@ pub mod macos;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) mod hosted;
-
-/// UI operations returned to the embedding native screen, which owns their presentation.
-#[derive(Clone, Copy)]
-pub(crate) struct ExternalActions(pub Stored<Box<dyn Fn(Value)>>);
-
-impl ExternalActions {
-    pub fn emit(self, event: Value) {
-        self.0.with(|send| send(event));
-    }
-}
+mod hosted;
 #[cfg(target_os = "ios")]
 mod preview_ios;
 #[cfg(target_os = "macos")]
@@ -260,3 +271,5 @@ pub fn date_time(seconds: i64) -> String {
         })
         .unwrap_or_else(|| seconds.to_string())
 }
+#[cfg(all(target_os = "macos", debug_assertions))]
+mod conversation_macos;

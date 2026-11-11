@@ -79,6 +79,7 @@ pub(crate) struct State {
     pub browser_renderer: String,
     pub worktrees: Option<WorktreeEditor>,
     pub language: UiLanguage,
+    pub contrast: u32,
     /// The width the user gave the file list beside an open file.
     #[cfg(any(desktop, test))]
     pub explorer_width: f32,
@@ -113,6 +114,7 @@ impl Default for State {
             browser_renderer: String::new(),
             worktrees: None,
             language: UiLanguage::default(),
+            contrast: agent_core::presentation::appearance::DEFAULT_CONTRAST,
             #[cfg(any(desktop, test))]
             explorer_width: agent_core::presentation::files::EXPLORER_DEFAULT_WIDTH,
             #[cfg(desktop)]
@@ -162,14 +164,23 @@ impl State {
                     p.snapshot
                         .panel_scope(host.clone(), p.context.navigation().draft_key)
                 });
-                if let Some(before) = before
-                    && let Some(session) = value.snapshot.submitted_session(before.draft.clone())
-                {
-                    self.panels = self.panels.clone().rekey(
+                if let Some(before) = before {
+                    let before = if let Some(session) =
+                        value.snapshot.submitted_session(before.draft.clone())
+                    {
+                        let submitted = value
+                            .snapshot
+                            .panel_scope(host.clone(), DraftKey::Session { session });
+                        self.panels = self.panels.clone().rekey(before, submitted.clone());
+                        submitted
+                    } else {
+                        before
+                    };
+                    self.panels = self.panels.clone().inherit_visibility(
                         before,
                         value
                             .snapshot
-                            .panel_scope(host.clone(), DraftKey::Session { session }),
+                            .panel_scope(host.clone(), value.context.navigation().draft_key),
                     );
                 }
                 // Rekey and publication are one update, so every native view sees the same scope.
@@ -262,7 +273,7 @@ impl Application {
         Self::start(root, local, None)
     }
 
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", test))]
     pub(crate) fn embedded(
         root: PathBuf,
         borrowed: crate::client::BorrowedSession,
@@ -308,6 +319,8 @@ impl Application {
         // choice is the default, as on a first launch.
         let language = language.unwrap_or_else(|| client.device.language());
         crate::l10n::set(language);
+        let contrast = client.device.contrast();
+        crate::ui::colors::set_contrast(contrast);
         #[cfg(desktop)]
         let updater = scope.map(|scope| {
             agent_core::updates::Updater::start(
@@ -320,6 +333,7 @@ impl Application {
             host: selection.host_id.clone().unwrap_or_default(),
             all_hosts: selection.all,
             language,
+            contrast,
             #[cfg(any(desktop, test))]
             explorer_width,
             #[cfg(desktop)]
@@ -477,6 +491,18 @@ impl Application {
         crate::l10n::set(language);
         self.state
             .send_modify(|state| Arc::make_mut(state).language = language);
+    }
+
+    /// Saves the interface contrast, then publishes it so the root is made again.
+    #[cfg(desktop)]
+    pub fn select_contrast(&self, contrast: u32) {
+        if let Err(reason) = self.client.device.select_contrast(contrast) {
+            self.fail(reason.to_string());
+            return;
+        }
+        crate::ui::colors::set_contrast(contrast);
+        self.state
+            .send_modify(|state| Arc::make_mut(state).contrast = contrast);
     }
 
     /// Shows `reason` as the application's failure until it is dismissed.
@@ -780,45 +806,104 @@ mod tests {
     }
 
     #[test]
-    fn submitting_a_draft_publishes_its_conversation_and_rekeyed_tabs_together() {
+    fn starting_a_new_chat_keeps_the_open_panel_and_the_sidebar() {
         let mut snapshot = Snapshot::default();
         snapshot.connection.storage_scope = "storage".into();
-        let initial = Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap();
-        let draft = initial.context.navigation().draft_key;
-        let before = snapshot.panel_scope("host".into(), draft.clone());
-        let session = SessionRef::new(ProviderKind::Codex, "submitted".into()).unwrap();
-        let after = snapshot.panel_scope(
-            "host".into(),
-            DraftKey::Session {
-                session: session.clone(),
-            },
-        );
         let mut state = State::default();
+        let host = "host".to_owned();
+        let before = snapshot.panel_scope(
+            host.clone(),
+            snapshot.panes.primary().navigation.draft_key.clone(),
+        );
         state.receive(Update::Presentation {
-            host: "host".into(),
-            value: initial,
+            host: host.clone(),
+            value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
         });
-        let opened =
-            state
-                .panels
-                .clone()
-                .open(before.clone(), PanelKind::Terminal, Some("/project".into()));
+        let opened = state.panels.clone().open(
+            before.clone(),
+            PanelKind::Terminal,
+            Some("/original".into()),
+        );
         state.panels = opened.panels;
-        let retained = state.clone();
-        Arc::make_mut(&mut snapshot.sessions.draft_sessions).insert(draft, session.clone());
-        Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
-            DraftKey::Session { session };
+        snapshot = agent_core::state::reduce(
+            &snapshot,
+            "",
+            agent_core::state::Event::Intent(Intent::NewChat { cwd: "/new".into() }),
+        )
+        .0;
+        let after = snapshot.panel_scope(
+            host.clone(),
+            snapshot.panes.primary().navigation.draft_key.clone(),
+        );
         state.receive(Update::Presentation {
-            host: "host".into(),
+            host,
             value: Presentation::project(Arc::new(snapshot), "", None).unwrap(),
         });
-        assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
-        assert!(state.panels.get(before.clone()).surfaces.is_empty());
+        assert!(state.panels.get(after.clone()).open);
+        assert!(state.panels.get(after).surfaces.is_empty());
+        assert_eq!(state.panels.get(before).active, Some(opened.id));
         assert_eq!(
-            state.publications["host"].pane().navigation.draft_key,
-            after.draft
+            state.sidebar.presentation(1200.),
+            agent_core::presentation::sidebar::SidebarPresentation::Beside
         );
-        assert_eq!(retained.panels.get(before).active, Some(opened.id));
+    }
+
+    #[test]
+    fn submitting_a_draft_publishes_its_conversation_and_rekeyed_tabs_together() {
+        for navigate_to_new_chat in [false, true] {
+            let mut snapshot = Snapshot::default();
+            snapshot.connection.storage_scope = "storage".into();
+            let initial = Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap();
+            let draft = initial.context.navigation().draft_key;
+            let before = snapshot.panel_scope("host".into(), draft.clone());
+            let session = SessionRef::new(ProviderKind::Codex, "submitted".into()).unwrap();
+            let after = snapshot.panel_scope(
+                "host".into(),
+                DraftKey::Session {
+                    session: session.clone(),
+                },
+            );
+            let mut state = State::default();
+            state.receive(Update::Presentation {
+                host: "host".into(),
+                value: initial,
+            });
+            let opened = state.panels.clone().open(
+                before.clone(),
+                PanelKind::Terminal,
+                Some("/project".into()),
+            );
+            state.panels = opened.panels;
+            let retained = state.clone();
+            Arc::make_mut(&mut snapshot.sessions.draft_sessions).insert(draft, session.clone());
+            let selected = if navigate_to_new_chat {
+                DraftKey::from("next-draft")
+            } else {
+                DraftKey::Session { session }
+            };
+            Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
+                selected.clone();
+            state.receive(Update::Presentation {
+                host: "host".into(),
+                value: Presentation::project(Arc::new(snapshot), "", None).unwrap(),
+            });
+            assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
+            assert!(state.panels.get(before.clone()).surfaces.is_empty());
+            assert_eq!(
+                state.publications["host"].pane().navigation.draft_key,
+                selected
+            );
+            if navigate_to_new_chat {
+                let panel = state.panels.get(
+                    state.publications["host"]
+                        .snapshot
+                        .panel_scope("host".into(), selected),
+                );
+                assert!(panel.open);
+                assert!(panel.surfaces.is_empty());
+            }
+            assert_eq!(retained.panels.get(before).active, Some(opened.id));
+        }
     }
 
     #[test]

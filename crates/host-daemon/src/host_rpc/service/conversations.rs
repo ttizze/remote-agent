@@ -2,6 +2,7 @@ use super::*;
 use crate::host_rpc::conversations::{Binding, Conversation, Delivery, Handoff, inline_context};
 use agent_protocol::{
     handoff,
+    protocol::Notification,
     session::{HistoryPage, SessionRef},
 };
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
@@ -15,8 +16,19 @@ pub(super) mod tests;
 pub(super) enum HistoryUse {
     Read,
     Excerpt,
-    /// A transcript copies messages and generated images in full.
+    /// A transcript copies messages and retains image-bearing tool results.
     Import,
+}
+
+fn handoff_content(body: &agent_protocol::items::ItemBody) -> bool {
+    use agent_protocol::items::ItemBody;
+    matches!(
+        body,
+        ItemBody::UserMessage { .. }
+            | ItemBody::AssistantText { .. }
+            | ItemBody::ImageGeneration { .. }
+            | ItemBody::ImageView { .. }
+    )
 }
 
 fn readable_history(state: Option<&agent_protocol::session::HistoryReadState>) -> bool {
@@ -38,7 +50,7 @@ impl HostRpcService {
             self.conversation_history(&row, HistoryUse::Excerpt).await?
         } else if let Some(response) = self
             .inner
-            .transcripts
+            .store
             .history(&params.session)
             .map_err(transcripts::storage_failure)?
         {
@@ -70,10 +82,8 @@ impl HostRpcService {
     ) -> Result<ThreadResponse, Failure> {
         let (fork, inherited) = self.branch(row, turn_id).await?;
         self.inner
-            .transcripts
-            .import(&fork.id, inherited)
-            .map_err(transcripts::storage_failure)?;
-        self.inner.conversations.save(fork.clone())?;
+            .conversations
+            .replace_history(fork.clone(), inherited)?;
         self.publish_conversation(&fork).await
     }
 
@@ -103,6 +113,30 @@ impl HostRpcService {
         if row.startup.is_some() {
             return Err(busy());
         }
+        // Covered transcripts contain settled turns only. Check the active
+        // runtime and live Host state while the submission lock is held.
+        let native = self.inner.providers.get(row.active.provider)?;
+        let state = native.state(&row.active.id).await?.response;
+        if state.thread.id.as_ref() != Some(&row.active) {
+            return Err(Failure::new(
+                "invalid_session",
+                "native session identity changed",
+            ));
+        }
+        if agent_protocol::models::task_active(None, state.thread.status) {
+            return Err(busy());
+        }
+        let live = self.inner.router.overlay_execution(target, state.thread);
+        if agent_protocol::models::task_active(None, live.status)
+            || !live.requests.is_empty()
+            || live
+                .turns
+                .iter()
+                .flatten()
+                .any(|turn| turn.status == agent_protocol::models::TurnStatus::Running)
+        {
+            return Err(busy());
+        }
         let history = self.conversation_history(&row, HistoryUse::Import).await?;
         let turns = history.thread.turns.as_deref().unwrap_or_default();
         if turns
@@ -122,12 +156,28 @@ impl HostRpcService {
         rewound.id = row.id;
         rewound.name = row.name;
         rewound.preview = row.preview;
+        // Complete every fallible response/publication read before committing.
+        // The storage owner returns the version from the same write transaction.
+        let options = self
+            .inner
+            .model_selections
+            .resolve(&rewound.active, None, None, None)?;
+        let mut page = Self::conversation_page(
+            self.describe_conversation_history(&rewound, kept.clone(), options)?,
+            None,
+            5,
+        )?;
+        let projects = self.project_snapshot().await?;
+        let version = self.inner.conversations.replace_history(rewound, kept)?;
+        page.thread.transcript_version = Some(version);
+        self.inner.router.reset_history(target);
+        self.notify_session_updated(page.thread.clone(), &projects.projects);
         self.inner
-            .transcripts
-            .replace(&rewound.id, kept)
-            .map_err(transcripts::storage_failure)?;
-        self.inner.conversations.save(rewound.clone())?;
-        self.publish_conversation(&rewound).await
+            .router
+            .broadcast(Notification::SessionHistoryReplaced {
+                thread: page.thread.clone().into(),
+            });
+        Ok(page)
     }
 
     /// A new native session for a conversation rewound past its first turn.
@@ -185,7 +235,7 @@ impl HostRpcService {
         }
         let history = if let Some(history) = self
             .inner
-            .transcripts
+            .store
             .history(&row.id)
             .map_err(transcripts::storage_failure)?
         {
@@ -322,10 +372,10 @@ impl HostRpcService {
                     turn.items_summary = false;
                 }
                 for item in turn.items.iter_mut().flatten() {
-                    // Handoffs deliberately omit reasoning and native tool
-                    // state. Their deferred bodies need not be recovered.
+                    // Tool output stays deferred until a client opens it.
+                    // Portable context does not consume native tool results.
                     if item.is_deferred()
-                        && (transcripts::content(item.body())
+                        && (handoff_content(item.body())
                             || (usage != HistoryUse::Import
                                 && matches!(
                                     item.body(),
@@ -405,7 +455,7 @@ impl HostRpcService {
             || row.bindings.iter().any(|binding| binding.covered.is_some()))
             && let Some(response) = self
                 .inner
-                .transcripts
+                .store
                 .history(&row.id)
                 .map_err(transcripts::storage_failure)?
         {
@@ -566,7 +616,7 @@ impl HostRpcService {
     async fn handoff_history(&self, root: &SessionRef) -> Result<ThreadResponse, Failure> {
         let response = if let Some(response) = self
             .inner
-            .transcripts
+            .store
             .history(root)
             .map_err(transcripts::storage_failure)?
         {
@@ -576,7 +626,7 @@ impl HostRpcService {
                 importing.await?;
             }
             self.inner
-                .transcripts
+                .store
                 .history(root)
                 .map_err(transcripts::storage_failure)?
                 .ok_or_else(|| {
@@ -592,7 +642,7 @@ impl HostRpcService {
             .iter()
             .flatten()
             .flat_map(|turn| turn.items.iter().flatten())
-            .any(|item| item.is_deferred() && transcripts::content(item.body()))
+            .any(|item| item.is_deferred() && handoff_content(item.body()))
         {
             return Err(Failure::new(
                 "incomplete_history",
@@ -706,7 +756,7 @@ impl HostRpcService {
             };
             if let Some(turn) = self
                 .inner
-                .transcripts
+                .store
                 .turn(root, id)
                 .map_err(transcripts::storage_failure)?
             {

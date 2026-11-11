@@ -1,6 +1,30 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "Fast：オン": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Fast: on" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Fast：オン" } }
+      }
+    },
+    "Fast：オフ": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Fast: off" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Fast：オフ" } }
+      }
+    },
+    "貼り付け": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Paste" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "貼り付け" } }
+      }
+    },
+    "最新の出力に移動": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Jump to latest" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "最新の出力に移動" } }
+      }
+    },
     "Claude Code のアカウント確認": {
       "localizations": {
         "en": {
@@ -6465,6 +6489,22 @@
         }
       }
     },
+    "会話を開けませんでした。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open the conversation."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話を開けませんでした。"
+          }
+        }
+      }
+    },
     "会話に戻る": {
       "localizations": {
         "ja": {
@@ -10257,22 +10297,6 @@
         }
       }
     },
-    "生成画像": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "生成画像"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Generated image"
-          }
-        }
-      }
-    },
     "生成画像 {0}": {
       "localizations": {
         "ja": {
@@ -10369,38 +10393,6 @@
         }
       }
     },
-    "画像を確認: {0}": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を確認: {0}"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "View image: {0}"
-          }
-        }
-      }
-    },
-    "画像を確認しました": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "画像を確認しました"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Viewed image"
-          }
-        }
-      }
-    },
     "画像を表示できません": {
       "localizations": {
         "ja": {
@@ -10493,6 +10485,150 @@
           "stringUnit": {
             "state": "translated",
             "value": "Fit to screen"
+          }
+        }
+      }
+    },
+    "全文を表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "全文を表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show full message"
+          }
+        }
+      }
+    },
+    "折りたたむ": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "折りたたむ"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show less"
+          }
+        }
+      }
+    },
+    "コントラスト": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コントラスト"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Contrast"
+          }
+        }
+      }
+    },
+    "インターフェース全体の色と境界線のコントラストを調整します。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "インターフェース全体の色と境界線のコントラストを調整します。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adjust the contrast of colors and borders across the interface."
+          }
+        }
+      }
+    },
+    "コントラストをリセット": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "コントラストをリセット"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reset contrast"
+          }
+        }
+      }
+    },
+    "会話内を検索": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話内を検索"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Find in thread"
+          }
+        }
+      }
+    },
+    "前の一致": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前の一致"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previous match"
+          }
+        }
+      }
+    },
+    "次の一致": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次の一致"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next match"
+          }
+        }
+      }
+    },
+    "承認を待っています": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "承認"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approval"
           }
         }
       }
@@ -16941,22 +17077,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "接続方法"
-          }
-        }
-      }
-    },
-    "別のフォルダを選択…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose another folder…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "別のフォルダを選択…"
           }
         }
       }

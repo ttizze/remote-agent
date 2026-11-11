@@ -19,7 +19,7 @@ first; the note says which), **n/a** (no Mac equivalent).
 | AccountUITests.testSimulatorSignsInDirectlyFromModelSettings | covered | account-claude (from the model picker's account row), account-sign-in (sign-out confirmation) |
 | AccountUITests.testSimulatorOpensAccountManagementFromSettingsAndModelPicker | covered | settings, accounts, model-picker (account row opens the provider's settings) |
 | AccountUITests.testSimulatorAutomaticallyShowsModelControlsInExistingAndRunningConversations | covered | live-work (model in a running conversation), long-history (sends in an existing one) |
-| AccountUITests.testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone | covered | model-effort (the Mac shows depth and speed in T3 Code's picker, not the composer's bar, so their order beside the microphone is n/a) |
+| AccountUITests.testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone | partial | model-effort checks fast toggle and meter presence and settings synchronization; composer screenshots show their order beside the model name before the microphone |
 | ActivityUITests.testSimulatorSendsWithOneTapWhileReadingHistory | covered | long-history (sends after scrolling into earlier turns) |
 | ActivityUITests.testSimulatorComposerGrowsToFitWrappedDraft | covered | composer (`expect_height`: one line keeps the field's least height, a wrapped draft grows it) |
 | ActivityUITests.testSimulatorCanStartAConversationInAProject | covered | folded-work, approval, tool-panel |
@@ -93,6 +93,7 @@ first; the note says which), **n/a** (no Mac equivalent).
 | Sidebar: a conversation's Copy submenu (path, branch, title, ID) | covered | thread-copy |
 | Sidebar: unseen completions, changes from the source branch | covered | unseen-completion, worktree-changes |
 | New-chat hero: project choice, start without a project | covered | new-chat-hero |
+| Thread details: inline visibility, narrow-window popover, tool panel and Escape | mapped | thread-details (Native clients CI) |
 | Conversation: messages, folded work, approvals, questions | covered | send-message, folded-work, live-work, approval, question-choice, question-skip, question-back |
 | Conversation: errors, reconnecting, opening and its failure | covered | failed-turn, retry-stream, history-loading, history-retry |
 | Conversation: copy, edit in composer, fork from a message, quote a selection | covered | message-actions, fork, claude-fork-while-running, fork-failure |
@@ -107,13 +108,12 @@ first; the note says which), **n/a** (no Mac equivalent).
 | Composer: why a send waits (another agent chosen while the conversation works) | covered | provider-switch |
 | Composer: Japanese input method (confirming return, sending while composing) | covered | input-method |
 | Composer: DeepSeek's OpenRouter route, Flash 4.1 pick and models | covered | openrouter |
-| Composer: approval mode menu | covered | permission-mode |
+| Model picker: approval mode menu | covered | permission-mode |
 | Composer: controls fit narrow windows, none cut off | covered | composer-narrow |
 | Sidebar: a sheet over the content below 768 points, closing on its toggle, Escape or a choice | covered | composer-narrow |
 | Composer: attach files, dictation, completions | partial | attachments, upload-failure, composer, dictation-denied; recording needs the system's microphone permission |
 | Composer: paste text at the selection and undo it (Edit > Undo and ⌘Z), paste an image without the text copied with it | covered | composer-paste |
 | Composer: Escape discards a recording | not yet | recording needs the system's microphone permission |
-| Composer: folder menu (no project, a project, another folder) | covered | folder-menu |
 | Thread details card (workspace, editor, changes, sources) | partial | attachments (sources); the editor button opens an external app |
 | Changed-files bar and review | covered | review-panel, worktree-review, diff-files (the badge opens the diff and its file menu jumps to a file) |
 | Diff: binary files, file menu, copying the diff | covered | diff-files |

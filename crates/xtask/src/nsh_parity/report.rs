@@ -14,7 +14,7 @@ pub struct Outcome<'a> {
 
 pub fn render(run: &str, map: &Map, outcomes: &[Outcome]) -> String {
     let mut report = format!(
-        "# NSH parity {run}\n\nNSH (left of each table, right of each image) against T3 Code rendered from its source by \
+        "# NSH parity {run}\n\nNSH (left of each table, right of each image) against the installed T3 Code rendered by \
          `scripts/nsh-parity-t3.ts`, or, for the sidebar, the GPUI client's layout from its source. Both clients ran \
          against Bex's Codex fixture, at {}×{} points. Positions are in points from the state's column (or the element's \
          anchor) and the window's top; colours are sRGB. Tolerances: position {}, size {}, drawn text and glyphs {}, \

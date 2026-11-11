@@ -12,6 +12,27 @@ pub enum ThreadActivity {
     Unread,
 }
 
+/// What a conversation holds for its user, as T3 Code's list badges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ThreadAttention {
+    Approval,
+    Input,
+    Failed,
+}
+
+impl From<agent_protocol::live_activity::Attention> for ThreadAttention {
+    fn from(attention: agent_protocol::live_activity::Attention) -> Self {
+        use agent_protocol::live_activity::Attention;
+        match attention {
+            Attention::Approval => Self::Approval,
+            Attention::Input => Self::Input,
+            Attention::Failed => Self::Failed,
+        }
+    }
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn thread_activity(
     waiting: bool,
@@ -39,6 +60,16 @@ pub fn thread_activity_label(activity: ThreadActivity) -> String {
         ThreadActivity::Running => "実行中",
         ThreadActivity::Background => "待機中",
         ThreadActivity::Unread => "完了・未確認",
+    }
+    .into()
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn thread_attention_label(attention: ThreadAttention) -> String {
+    match attention {
+        ThreadAttention::Approval => "承認を待っています",
+        ThreadAttention::Input => "入力",
+        ThreadAttention::Failed => "失敗",
     }
     .into()
 }

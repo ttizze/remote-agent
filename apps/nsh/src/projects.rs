@@ -346,9 +346,9 @@ impl Projects {
                     .w(px(448.0))
                     .rounded(px(16.0))
                     .border_1()
-                    .border_color(colors::BORDER)
+                    .border_color(colors::border())
                     .bg(colors::BACKGROUND)
-                    .text_color(colors::FOREGROUND)
+                    .text_color(colors::foreground())
                     .overflow_hidden()
                     .on_press(|| {})
                     .child(
@@ -364,7 +364,7 @@ impl Projects {
                             .child(
                                 text(tr("表示名とセクションはこの端末・接続先ごとに保存されます。フォルダや会話履歴は残ります。"))
                                     .text_size(px(13.0))
-                                    .text_color(colors::MUTED),
+                                    .text_color(colors::muted()),
                             ),
                     )
                     .child(
@@ -407,7 +407,7 @@ impl Projects {
                             .px_6()
                             .py_4()
                             .border_t_1()
-                            .border_t_color(colors::BORDER)
+                            .border_t_color(colors::border())
                             .bg(colors::SURFACE)
                             .child(ui::action_button(
                                 tr("キャンセル"),

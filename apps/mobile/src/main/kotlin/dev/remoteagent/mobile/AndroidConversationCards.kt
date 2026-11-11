@@ -223,7 +223,7 @@ private fun MessageImages(
         sources.forEach { source ->
             AttachmentThumbnail(
                 source,
-                language.text("生成画像"),
+                language.text("画像"),
                 perform,
                 Modifier.widthIn(max = 320.dp).fillMaxWidth().height(320.dp).clickable(
                     onClickLabel = language.text("画像をプレビュー")

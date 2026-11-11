@@ -11,6 +11,7 @@ expect "Claude Code" 20000
 press "Claude Code"
 expect "Default (recommended)" 20000
 press "Default (recommended)"
+key escape
 type "AI に依頼する" "background-roster"
 press 送信
 expect "サブエージェント 1件、コマンド 1件、モニター 1件を待機中" 30000

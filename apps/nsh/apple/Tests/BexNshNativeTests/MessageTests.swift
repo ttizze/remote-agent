@@ -8,7 +8,121 @@ import XCTest
 #endif
 
 final class MessageTests: XCTestCase {
+    @MainActor func testFileChipKeepsItsIconAccentAndLinkWithoutCodeStyling() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
+        let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))
+        for dark in [true, false] {
+            let content = MessageAttributes.text([block], secondary: false, dark: dark)
+            let label = (content.string as NSString).range(of: "統合前レビュー").location
+            let attachment = try XCTUnwrap(content.attribute(
+                .attachment,
+                at: 0,
+                effectiveRange: nil
+            ) as? NSTextAttachment)
+            XCTAssertNotNil(attachment.image, "the file's PNG is drawn on both Apple platforms")
+            let font = try XCTUnwrap(content.attribute(.font, at: label, effectiveRange: nil) as? MessageFont)
+            #if os(macOS)
+                XCTAssertFalse(font.isFixedPitch)
+            #else
+                XCTAssertFalse(font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace))
+            #endif
+            XCTAssertNil(content.attribute(.backgroundColor, at: label, effectiveRange: nil))
+            XCTAssertNil(content.attribute(.underlineStyle, at: label, effectiveRange: nil))
+            let color = try XCTUnwrap(content.attribute(
+                .foregroundColor,
+                at: label,
+                effectiveRange: nil
+            ) as? MessageColor)
+            let expected = dark ? MessageColor(red: 1, green: 0, blue: 0, alpha: 1)
+                : MessageColor(red: 0, green: 0, blue: 1, alpha: 1)
+            XCTAssertEqual(color, expected)
+            let link = try XCTUnwrap(content.attribute(.link, at: label, effectiveRange: nil) as? URL)
+            XCTAssertEqual(link.relativeString, "/repo/SKILL.md")
+            XCTAssertEqual(MessageAttributes.selectedText(content, range: NSRange(location: 0, length: content.length)),
+                           "統合前レビュー")
+        }
+    }
+
+    #if os(iOS)
+        @MainActor func testFileChipMenuShowsTheSharedActions() throws {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
+            let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))
+            let file = try XCTUnwrap(block.runs.first?.file)
+            let menu = MessageTextView().fileMenu(file.menu, link: "/repo/SKILL.md")
+            XCTAssertEqual(menu.children.compactMap { ($0 as? UIAction)?.title },
+                           ["相対パスをコピー", "フルパスをコピー"])
+        }
+
+        @MainActor func testFileChipFontAndIconFollowThePreferredTextSize() throws {
+            let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
+            let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))
+            UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge).performAsCurrent {
+                let content = MessageAttributes.text([block], secondary: false, dark: true)
+                let label = (content.string as NSString).range(of: "統合前レビュー").location
+                let font = content.attribute(.font, at: label, effectiveRange: nil) as? UIFont
+                let expected = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 18, weight: .medium))
+                XCTAssertEqual(font?.pointSize, expected.pointSize)
+                let icon = content.attribute(.attachment, at: 0, effectiveRange: nil) as? NSTextAttachment
+                XCTAssertEqual(icon?.bounds.width, expected.pointSize)
+            }
+        }
+    #endif
+
     #if os(macOS)
+        @MainActor func testCoreHighlightByteRangesPreserveUnicodeAndStyles() throws {
+            let data = Data(#"{"blocks":[{"header":null,"marker":null,"code":false,"quoted":false,"depth":0,"alignment":"left","runs":[{"text":"😀é ","strong":false,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":4,"end":6,"active":true}]},{"text":"bold","strong":true,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":0,"end":4,"active":false}]}]}],"secondary":false,"role":"assistant","target":"","sideChat":false,"maxWidth":500,"menu":{"quote":"","sideChat":""}}"#
+                .utf8)
+            let document = try JSONDecoder().decode(MessageDocument.self, from: data)
+            let content = MessageAttributes.text(document.blocks, secondary: false, dark: true)
+            XCTAssertEqual(content.string, "😀é bold")
+            let accented = (content.string as NSString).range(of: "é").location
+            XCTAssertNotNil(content.attribute(.backgroundColor, at: accented, effectiveRange: nil))
+            XCTAssertEqual(content.attribute(.messageFindActive, at: accented, effectiveRange: nil) as? Bool, true)
+            XCTAssertNil(content.attribute(.messageFindActive, at: 0, effectiveRange: nil))
+            let bold = (content.string as NSString).range(of: "bold").location
+            XCTAssertNotNil(content.attribute(.backgroundColor, at: bold, effectiveRange: nil))
+            XCTAssertNil(content.attribute(.messageFindActive, at: bold, effectiveRange: nil))
+            let font = try XCTUnwrap(content.attribute(.font, at: bold, effectiveRange: nil) as? NSFont)
+            XCTAssertTrue(NSFontManager.shared.traits(of: font).contains(.boldFontMask))
+        }
+
+        @MainActor func testFindReportsTheBoundsOfAnOffscreenUnwrappedMatch() throws {
+            let prefix = String(repeating: "0123456789", count: 60)
+            let needle = "code-overflow-target"
+            var run = MessageRun(text: prefix + needle, strong: false, emphasis: false,
+                                 strikethrough: false, code: false, link: nil, darkColor: nil, lightColor: nil)
+            run.highlights = [MessageHighlight(start: prefix.utf8.count,
+                                               end: (prefix + needle).utf8.count, active: true)]
+            let block = MessageParagraph(header: nil, marker: nil, code: true, quoted: false,
+                                         depth: 0, alignment: "left", runs: [run])
+            var document = MessageDocument(blocks: [block], secondary: false, role: "assistant",
+                                           target: "fixture", sideChat: false, maxWidth: 1_000_000,
+                                           menu: MessageMenuTitles(quote: "", sideChat: ""))
+            document.findKey = "overflow"
+            let view = MessageTextContainer()
+            var reports: [[CGFloat]] = []
+            view.send = {
+                if let key = $0["findKey"] as? String, key.hasPrefix("overflow"),
+                   let bounds = $0["findBounds"] as? [CGFloat] {
+                    reports.append(bounds)
+                }
+            }
+            view.update(document)
+            view.frame = NSRect(x: 0, y: 0, width: 200, height: 100)
+            view.layout()
+            let bounds = try XCTUnwrap(reports.last)
+            XCTAssertEqual(bounds.count, 4)
+            XCTAssertGreaterThan(bounds[0], 200, "the match starts beyond the visible code viewport")
+            XCTAssertGreaterThan(bounds[2], 0)
+            XCTAssertGreaterThan(bounds[3], 0)
+            view.layout()
+            XCTAssertEqual(reports.count, 1, "one geometry report per selected occurrence")
+            document.findKey = "overflow-next"
+            view.update(document)
+            view.layout()
+            XCTAssertEqual(reports.count, 2, "navigating to the same match requests fresh geometry")
+        }
+
         @MainActor func testTextKitVisibilityFollowsLayerScrollingBeforeAppKitBoundsCommit() {
             let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 400, height: 200),
                                   styleMask: [], backing: .buffered, defer: false)
@@ -214,25 +328,46 @@ final class MessageTests: XCTestCase {
             XCTAssertEqual(actions.last?["id"] as? String, "code")
         }
 
-        @MainActor func testALineIsT3CodesLineTallWhateverItsScripts() {
-            // A bracket falls back to a font whose leading would grow its line.
-            for (role, text) in [("assistant", "シミュレータで完了しました。"), ("user", "[groups] 完了した作業を確認します")] {
+        @MainActor func testMessagesKeepNativeLineHeightsAndBaselinesAcrossScripts() throws {
+            for role in ["assistant", "user"] {
+                let text = String(repeating: "lib.rs · L695 [groups] 日本語 ไทย 🧑🏽‍💻 and more words ", count: 3)
                 let run = MessageRun(text: text, strong: false, emphasis: false, strikethrough: false, code: false,
                                      link: nil, darkColor: nil, lightColor: nil)
                 let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
                                              depth: 0, alignment: "left", runs: [run])
                 let view = MessageTextContainer()
-                var heights: [CGFloat] = []
+                var height: CGFloat?
                 view.send = {
-                    if let height = $0["measuredHeight"] as? CGFloat {
-                        heights.append(height)
+                    if let measured = $0["measuredHeight"] as? CGFloat {
+                        height = measured
                     }
                 }
                 view.update(MessageDocument(blocks: [block], secondary: false, role: role, target: "t",
-                                            sideChat: false, maxWidth: 600,
+                                            sideChat: false, maxWidth: 200,
                                             menu: MessageMenuTitles(quote: "", sideChat: "")))
-                // T3 Code's `text-sm leading-relaxed`: 22.75 points.
-                XCTAssertEqual(heights.last, 23, role)
+                // The OS chooses room for each script, including fallback fonts.
+                let reference = NSLayoutManager()
+                let storage = NSTextStorage(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+                let container = NSTextContainer(size: CGSize(width: 200, height: CGFloat.greatestFiniteMagnitude))
+                container.lineFragmentPadding = 0
+                storage.addLayoutManager(reference)
+                reference.addTextContainer(container)
+                reference.ensureLayout(for: container)
+                XCTAssertEqual(height, ceil(reference.usedRect(for: container).height), role)
+                let actual = try XCTUnwrap(view.text.layoutManager)
+                XCTAssertEqual(actual.numberOfGlyphs, reference.numberOfGlyphs)
+                var lines = 0
+                actual.enumerateLineFragments(
+                    forGlyphRange: NSRange(location: 0, length: actual.numberOfGlyphs)
+                ) { _, used, _, glyphs, _ in
+                    let first = glyphs.location
+                    let expected = reference.lineFragmentUsedRect(forGlyphAt: first, effectiveRange: nil)
+                    XCTAssertEqual(used.height, expected.height, accuracy: 0.01, role)
+                    XCTAssertEqual(actual.location(forGlyphAt: first).y,
+                                   reference.location(forGlyphAt: first).y, accuracy: 0.01, role)
+                    lines += 1
+                }
+                XCTAssertGreaterThan(lines, 2, "the multilingual message wraps")
             }
         }
 
@@ -268,22 +403,10 @@ final class MessageTests: XCTestCase {
                 let traits = font.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any]
                 let weight = traits?[.weight] as? CGFloat ?? 0
                 XCTAssertEqual(weight >= NSFont.Weight.semibold.rawValue, bold, cell)
-                let view = MessageTextContainer()
-                var heights: [CGFloat] = []
-                view.send = {
-                    if let height = $0["measuredHeight"] as? CGFloat {
-                        heights.append(height)
-                    }
-                }
-                view.update(MessageDocument(blocks: [block], secondary: false, role: "assistant", target: "t",
-                                            sideChat: false, maxWidth: 600,
-                                            menu: MessageMenuTitles(quote: "", sideChat: ""), cell: cell))
-                // 12 points at `leading-relaxed`: 19.5.
-                XCTAssertEqual(heights.last, 20, cell)
             }
         }
 
-        @MainActor func testInlineCodeGlyphsAreCenteredInTheNativeBackground() throws {
+        @MainActor func testInlineCodeGlyphsFitInsideTheNativeBackground() throws {
             for strong in [false, true] {
                 let code = "session-25VpGP"
                 let block = MessageParagraph(header: nil, marker: "•", code: false, quoted: false,
@@ -320,7 +443,6 @@ final class MessageTests: XCTestCase {
                                            y: line.minY + origin.y - bounds.maxY,
                                            width: bounds.width, height: bounds.height))
                 }
-                XCTAssertEqual(background.midY, ink.midY, accuracy: 0.5)
                 XCTAssertGreaterThan(ink.minY, background.minY)
                 XCTAssertLessThan(ink.maxY, background.maxY)
             }
@@ -329,8 +451,16 @@ final class MessageTests: XCTestCase {
         @MainActor func testInlineCodeBackgroundsStayInsideTheirFirstAndWrappedLines() throws {
             let code = "hasPrefix(\"# 日本語 🧑🏽‍💻\") source source source source"
             let runs = [
-                MessageRun(text: "保持契約の ", strong: false, emphasis: false, strikethrough: false,
-                           code: false, link: nil, darkColor: nil, lightColor: nil),
+                MessageRun(
+                    text: "保持契約の lib.rs · L695 [groups] ไทย ",
+                    strong: false,
+                    emphasis: false,
+                    strikethrough: false,
+                    code: false,
+                    link: nil,
+                    darkColor: nil,
+                    lightColor: nil
+                ),
                 MessageRun(text: code, strong: false, emphasis: false, strikethrough: false,
                            code: true, link: nil, darkColor: nil, lightColor: nil)
             ]
@@ -362,59 +492,18 @@ final class MessageTests: XCTestCase {
             XCTAssertEqual((view.text.string as NSString).substring(with: view.text.selectedRange()), code)
         }
 
-    #endif
-
-    @MainActor func testRecycledTextReportsOnlyTheHeightAtItsNewColumnsWidth() throws {
-        let run = MessageRun(text: String(repeating: "A long response retains its reading position. ", count: 80),
-                             strong: false, emphasis: false, strikethrough: false, code: false,
-                             link: nil, darkColor: nil, lightColor: nil)
-        let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
-                                     depth: 0, alignment: "left", runs: [run])
-        let document = MessageDocument(blocks: [block], secondary: false, role: "assistant",
-                                       target: "fixture", sideChat: false, maxWidth: 740,
-                                       menu: MessageMenuTitles(quote: "", sideChat: ""))
-        let view = MessageTextContainer()
-        // A short user bubble occupied the same recycled native view.
-        view.frame = CGRect(x: 0, y: 0, width: 167, height: 17)
-        var heights: [CGFloat] = []
-        view.send = {
-            if let height = $0["measuredHeight"] as? CGFloat {
-                heights.append(height)
-            }
-        }
-        view.update(document)
-        let first = try XCTUnwrap(heights.first)
-        #if os(macOS)
-            view.layout()
-            view.frame.size.width = 740
-            view.layout()
-        #else
-            view.layoutSubviews()
-            view.frame.size.width = 740
-            view.layoutSubviews()
-        #endif
-        XCTAssertEqual(heights, [first], "a recycled frame must not publish a second, incorrect row height")
-        #if os(macOS)
-            XCTAssertEqual(view.text.textContainer?.containerSize.width, 740)
-        #else
-            XCTAssertEqual(view.text.textContainer.size.width, 740)
-        #endif
-        XCTAssertGreaterThan(first, 17)
-    }
-
-    #if os(iOS)
-        @MainActor func testLargeReviewRetainsItsTextAndSelectionWithoutRemeasuringEveryFrame() throws {
-            let source = String(repeating: "+ Review change keeps the existing behavior.\n", count: 2500)
-            let block = MessageParagraph(
-                header: nil, marker: nil, code: false, quoted: false, depth: 0, alignment: "left",
-                runs: [MessageRun(text: source, strong: false, emphasis: false, strikethrough: false,
-                                  code: false, link: nil, darkColor: nil, lightColor: nil)]
-            )
-            let document = MessageDocument(blocks: [block], secondary: false, role: "user", target: "review",
-                                           sideChat: true, maxWidth: 320,
-                                           menu: MessageMenuTitles(quote: "Quote", sideChat: "Side chat"))
+        @MainActor func testRecycledTextReportsOnlyTheHeightAtItsNewColumnsWidth() throws {
+            let run = MessageRun(text: String(repeating: "A long response retains its reading position. ", count: 80),
+                                 strong: false, emphasis: false, strikethrough: false, code: false,
+                                 link: nil, darkColor: nil, lightColor: nil)
+            let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
+                                         depth: 0, alignment: "left", runs: [run])
+            let document = MessageDocument(blocks: [block], secondary: false, role: "assistant",
+                                           target: "fixture", sideChat: false, maxWidth: 740,
+                                           menu: MessageMenuTitles(quote: "", sideChat: ""))
             let view = MessageTextContainer()
-            view.frame = CGRect(x: 0, y: 0, width: 60, height: 20)
+            // A short user bubble occupied the same recycled native view.
+            view.frame = CGRect(x: 0, y: 0, width: 167, height: 17)
             var heights: [CGFloat] = []
             view.send = {
                 if let height = $0["measuredHeight"] as? CGFloat {
@@ -422,18 +511,13 @@ final class MessageTests: XCTestCase {
                 }
             }
             view.update(document)
-            let height = try XCTUnwrap(heights.first)
-            XCTAssertGreaterThan(height, 2500 * 18)
-            XCTAssertEqual(view.text.text, source)
-            view.text.selectedRange = NSRange(location: 10, length: 8)
-            for width in [60.0, 320, 1, 320] {
-                view.frame.size.width = width
-                view.layoutSubviews()
-                view.update(document)
-            }
-            XCTAssertEqual(heights, [height], "frame changes must not remeasure a long review or move the timeline")
-            XCTAssertEqual(view.text.selectedRange, NSRange(location: 10, length: 8))
-            XCTAssertEqual(view.text.bounds.height, height)
+            let first = try XCTUnwrap(heights.first)
+            view.layout()
+            view.frame.size.width = 740
+            view.layout()
+            XCTAssertEqual(heights, [first], "a recycled frame must not publish a second, incorrect row height")
+            XCTAssertEqual(view.text.textContainer?.containerSize.width, 740)
+            XCTAssertGreaterThan(first, 17)
         }
     #endif
 

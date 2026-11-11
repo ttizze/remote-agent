@@ -28,11 +28,6 @@ struct NshConversationView: UIViewRepresentable {
     final class Coordinator {
         var handle: UnsafeMutableRawPointer?
         var perform: (String, String) -> Void = { _, _ in }
-        deinit {
-            if let handle {
-                releaseConversation(handle)
-            }
-        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -52,10 +47,8 @@ struct NshConversationView: UIViewRepresentable {
             else { return }
             let coordinator = Unmanaged<Coordinator>.fromOpaque(context).takeUnretainedValue()
             let text = event["text"] as? String ?? ""
-            if action == "error" {
-                NSLog("NSH conversation: %@", text)
-            } else {
-                coordinator.perform(action, text)
+            DispatchQueue.main.async { [weak coordinator] in
+                coordinator?.perform(action, text)
             }
         }
         let handle = host.withCString {
@@ -63,12 +56,25 @@ struct NshConversationView: UIViewRepresentable {
             createConversation(session.uniffiCloneHandle(), pane?.uniffiCloneHandle() ?? 0, $0,
                                Unmanaged.passUnretained(coordinator).toOpaque(), callback)
         }
-        guard let handle else { return UIView() }
+        guard let handle else {
+            let failure = UILabel()
+            failure.text = localizedUiText(language: session.snapshot().uiLanguage(), source: "会話を開けませんでした。")
+            failure.numberOfLines = 0
+            return failure
+        }
         coordinator.handle = handle
         return conversationView(handle).takeUnretainedValue()
     }
 
     func updateUIView(_: UIView, context: Context) {
         context.coordinator.perform = perform
+    }
+
+    static func dismantleUIView(_: UIView, coordinator: Coordinator) {
+        if let handle = coordinator.handle {
+            releaseConversation(handle)
+            coordinator.handle = nil
+        }
+        coordinator.perform = { _, _ in }
     }
 }

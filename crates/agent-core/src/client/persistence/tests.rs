@@ -41,7 +41,7 @@ impl PreferenceStorage for DeviceDisk {
             PreferenceKey::Models => self.models.lock().unwrap().clone(),
             PreferenceKey::Editor => self.editor.lock().unwrap().clone(),
             PreferenceKey::Composer => self.composer.lock().unwrap().clone(),
-            PreferenceKey::Language => Vec::new(),
+            PreferenceKey::Language | PreferenceKey::Contrast => Vec::new(),
         })
     }
     fn save(&self, key: PreferenceKey, bytes: Vec<u8>) -> Result<(), AgentError> {
@@ -54,7 +54,9 @@ impl PreferenceStorage for DeviceDisk {
             }
             PreferenceKey::Editor => *self.editor.lock().unwrap() = bytes,
             PreferenceKey::Composer => *self.composer.lock().unwrap() = bytes,
-            PreferenceKey::Language => panic!("this fixture never edits language"),
+            PreferenceKey::Language | PreferenceKey::Contrast => {
+                panic!("this fixture never edits language")
+            }
         }
         self.writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -419,7 +421,7 @@ async fn corrupted_state_or_preferences_are_rejected_without_writing() {
             Some(PreferenceKey::Composer) => {
                 *storage.device.composer.lock().unwrap() = b"invalid".to_vec()
             }
-            Some(PreferenceKey::Language) => unreachable!(),
+            Some(PreferenceKey::Language | PreferenceKey::Contrast) => unreachable!(),
         }
         assert!(
             persistence(storage.clone())

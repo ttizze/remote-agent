@@ -613,7 +613,7 @@ mod draw {
                     .left(px(column as f32 * CELL_WIDTH))
                     .w(px(2.0))
                     .h(px(LINE_HEIGHT))
-                    .bg(colors::FOREGROUND)
+                    .bg(colors::foreground())
             }))
             .into_element()
     }

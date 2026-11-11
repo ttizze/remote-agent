@@ -1,0 +1,9 @@
+# An interrupted turn offers Resume, which continues it as T3 Code does.
+expect "検証プロジェクト" 30000
+press このプロジェクトで新しいチャット
+type "AI に依頼する" "[interrupted] 中断を確認します"
+press 送信
+expect "スレッドを再開" 20000
+screenshot offered
+press スレッドを再開
+expect "Continue where you left off." 20000

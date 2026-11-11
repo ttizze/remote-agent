@@ -141,7 +141,7 @@ impl Saver {
                             .child(
                                 text(move || plan.get().cwd)
                                     .text_size(px(12.0))
-                                    .text_color(colors::MUTED)
+                                    .text_color(colors::muted())
                                     .selectable(true),
                             )
                             .child(text(tr("ワークスペース内のパス")).text_size(px(13.0)))

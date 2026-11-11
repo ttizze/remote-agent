@@ -1,0 +1,278 @@
+diff --git a/src/compiler/fingerprint/mod.rs b/src/compiler/fingerprint/mod.rs
+index 66d19ab..e2caeeb 100644
+--- a/src/compiler/fingerprint/mod.rs
++++ b/src/compiler/fingerprint/mod.rs
+@@ -2010,7 +2010,7 @@ fn local_fingerprints_deps(
+ pub fn built_elsewhere(
+     build_runner: &BuildRunner<'_, '_>,
+     unit: &Unit,
+-) -> Option<impl Fn() -> bool + Send + 'static> {
++) -> Option<impl Fn() -> bool + Clone + Send + 'static> {
+     let loc = build_runner.files().fingerprint_file_path(unit, "");
+     let fingerprint = Arc::clone(build_runner.fingerprints.get(unit)?);
+     Some(move || {
+diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
+index de304a5..8ac4cc7 100644
+--- a/src/compiler/job_queue/job_state.rs
++++ b/src/compiler/job_queue/job_state.rs
+@@ -159,6 +159,14 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+         self.lock_manager.lock(lock)
+     }
+ 
++    pub fn lock_exclusive_unless_built(
++        &self,
++        lock: &LockKey,
++        built: impl Fn() -> bool,
++    ) -> CargoResult<()> {
++        self.lock_manager.lock_unless_built(lock, built)
++    }
++
+     pub fn downgrade_to_shared(&self, lock: &LockKey) -> CargoResult<()> {
+         self.lock_manager.downgrade_to_shared(lock)
+     }
+diff --git a/src/compiler/locking.rs b/src/compiler/locking.rs
+index 3c2a654..43ef02c 100644
+--- a/src/compiler/locking.rs
++++ b/src/compiler/locking.rs
+@@ -12,8 +12,11 @@ use anyhow::bail;
+ use std::{
+     collections::hash_map::Entry,
+     fmt::{Display, Formatter},
++    fs::{File, TryLockError},
+     path::PathBuf,
+     sync::{Mutex, RwLock},
++    thread,
++    time::Duration,
+ };
+ use tracing::instrument;
+ 
+@@ -99,6 +102,21 @@ impl LockManager {
+         Ok(())
+     }
+ 
++    /// Takes the exclusive lock of a unit other Cargos build too, or a shared
++    /// lock once one of them has built it.
++    ///
++    /// Each Cargo keeps a shared lock on the units it has finished. Waiting
++    /// for the exclusive lock alone deadlocks two Cargos that each finished a
++    /// unit the other still wants.
++    #[instrument(skip(self, built))]
++    pub fn lock_unless_built(&self, key: &LockKey, built: impl Fn() -> bool) -> CargoResult<()> {
++        let locks = self.locks.read().unwrap();
++        let Some(lock) = locks.get(key) else {
++            bail!("lock was not found in lock manager: {key}");
++        };
++        lock_exclusive_unless_built(lock.file(), built)
++    }
++
+     /// Upgrades an existing exclusive lock into a shared lock.
+     #[instrument(skip(self))]
+     pub fn downgrade_to_shared(&self, key: &LockKey) -> CargoResult<()> {
+@@ -121,6 +139,24 @@ impl LockManager {
+     }
+ }
+ 
++fn lock_exclusive_unless_built(file: &File, built: impl Fn() -> bool) -> CargoResult<()> {
++    loop {
++        match flock::try_lock_exclusive(file) {
++            Ok(()) => return Ok(()),
++            Err(TryLockError::WouldBlock) => {}
++            Err(TryLockError::Error(e)) => return Err(e.into()),
++        }
++        // A shared lock excludes writers, so a finished fingerprint stays valid.
++        match flock::try_lock_shared(file) {
++            Ok(()) if built() => return Ok(()),
++            Ok(()) => flock::unlock(file)?,
++            Err(TryLockError::WouldBlock) => {}
++            Err(TryLockError::Error(e)) => return Err(e.into()),
++        }
++        thread::sleep(Duration::from_millis(100));
++    }
++}
++
+ #[derive(Debug, Clone, Hash, Eq, PartialEq)]
+ pub struct LockKey(PathBuf);
+ 
+@@ -135,3 +171,101 @@ impl Display for LockKey {
+         write!(f, "{}", self.0.display())
+     }
+ }
++
++#[cfg(test)]
++mod fork_defaults {
++    use super::*;
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicBool, Ordering};
++    use std::time::Instant;
++
++    fn unit_lock(dir: &tempfile::TempDir, name: &str) -> File {
++        std::fs::OpenOptions::new()
++            .create(true)
++            .truncate(false)
++            .read(true)
++            .write(true)
++            .open(dir.path().join(name))
++            .unwrap()
++    }
++
++    fn assert_finishes<T>(waiters: &[thread::JoinHandle<T>]) {
++        let start = Instant::now();
++        while !waiters.iter().all(|waiter| waiter.is_finished()) {
++            assert!(start.elapsed().as_secs() < 30, "cargos deadlocked");
++            thread::sleep(Duration::from_millis(20));
++        }
++    }
++
++    #[test]
++    fn takes_the_exclusive_lock_of_an_unheld_unit() {
++        let dir = tempfile::tempdir().unwrap();
++        let (ours, probe) = (unit_lock(&dir, "a"), unit_lock(&dir, "a"));
++        lock_exclusive_unless_built(&ours, || panic!("nothing holds the unit")).unwrap();
++        assert!(matches!(
++            flock::try_lock_shared(&probe),
++            Err(TryLockError::WouldBlock)
++        ));
++    }
++
++    #[test]
++    fn reuses_a_built_unit_under_a_shared_lock() {
++        let dir = tempfile::tempdir().unwrap();
++        let (ours, theirs, writer) = (
++            unit_lock(&dir, "a"),
++            unit_lock(&dir, "a"),
++            unit_lock(&dir, "a"),
++        );
++        flock::lock_shared(&theirs).unwrap();
++        let waiter = thread::spawn(move || {
++            lock_exclusive_unless_built(&ours, || true).unwrap();
++            ours
++        });
++        assert_finishes(std::slice::from_ref(&waiter));
++        let _ours = waiter.join().unwrap();
++        flock::unlock(&theirs).unwrap();
++        // Ours is what still keeps a writer out.
++        assert!(matches!(
++            flock::try_lock_exclusive(&writer),
++            Err(TryLockError::WouldBlock)
++        ));
++    }
++
++    #[test]
++    fn waits_for_the_holder_of_an_unbuilt_unit() {
++        let dir = tempfile::tempdir().unwrap();
++        let (ours, theirs) = (unit_lock(&dir, "a"), unit_lock(&dir, "a"));
++        flock::lock_shared(&theirs).unwrap();
++        let released = Arc::new(AtomicBool::new(false));
++        let waiter = {
++            let released = released.clone();
++            thread::spawn(move || {
++                lock_exclusive_unless_built(&ours, || false).unwrap();
++                assert!(released.load(Ordering::SeqCst));
++                ours
++            })
++        };
++        thread::sleep(Duration::from_millis(300));
++        released.store(true, Ordering::SeqCst);
++        flock::unlock(&theirs).unwrap();
++        let _ours = waiter.join().unwrap();
++        assert!(matches!(
++            flock::try_lock_shared(&theirs),
++            Err(TryLockError::WouldBlock)
++        ));
++    }
++
++    #[test]
++    fn cargos_that_built_what_the_other_wants_do_not_deadlock() {
++        let dir = tempfile::tempdir().unwrap();
++        let waiters = [("a", "b"), ("b", "a")].map(|(held, wanted)| {
++            let (held, wanted) = (unit_lock(&dir, held), unit_lock(&dir, wanted));
++            flock::lock_shared(&held).unwrap();
++            thread::spawn(move || {
++                lock_exclusive_unless_built(&wanted, || true).unwrap();
++                (held, wanted)
++            })
++        });
++        assert_finishes(&waiters);
++    }
++}
+diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
+index 54b0766..e9e17ee 100644
+--- a/src/compiler/mod.rs
++++ b/src/compiler/mod.rs
+@@ -255,6 +255,13 @@ fn compile<'gctx>(
+                 // Need to link targets on both the dirty and fresh.
+                 Ok(work.then(link_targets(build_runner, unit, true)?))
+             };
++            // Another Cargo may build a shared unit while this one waits
++            // for the exclusive lock below; reuse its output then.
++            let built_elsewhere = (job.freshness().is_dirty()
++                && lock.is_some()
++                && build_runner.files().is_shared_unit(unit))
++            .then(|| fingerprint::built_elsewhere(build_runner, unit))
++            .flatten();
+             job.before(if job.freshness().is_dirty() {
+                 let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
+                     rustdoc(build_runner, unit)?
+@@ -262,12 +269,8 @@ fn compile<'gctx>(
+                     rustc(build_runner, unit, exec)?
+                 };
+                 let work = work.then(link_targets(build_runner, unit, false)?);
+-                // Another Cargo may build a shared unit while this one waits
+-                // for the exclusive lock below; reuse its output then.
+-                match fingerprint::built_elsewhere(build_runner, unit) {
+-                    Some(built_elsewhere)
+-                        if lock.is_some() && build_runner.files().is_shared_unit(unit) =>
+-                    {
++                match built_elsewhere.clone() {
++                    Some(built_elsewhere) => {
+                         let fresh = fresh_work(build_runner)?;
+                         Work::new(move |state| {
+                             if built_elsewhere() {
+@@ -277,7 +280,7 @@ fn compile<'gctx>(
+                             }
+                         })
+                     }
+-                    _ => work,
++                    None => work,
+                 }
+             } else {
+                 fresh_work(build_runner)?
+@@ -295,7 +298,7 @@ fn compile<'gctx>(
+                     // We will hold this shared lock for the remainder of compilation to prevent
+                     // other cargo from re-compiling while we are still using the unit.
+                     build_runner.lock_manager.unlock(&lock)?;
+-                    job.before(prebuild_lock_exclusive(lock.clone()));
++                    job.before(prebuild_lock_exclusive(lock.clone(), built_elsewhere));
+                     job.after(downgrade_lock_to_shared(lock));
+                 }
+             }
+@@ -743,9 +746,15 @@ fn verbose_if_simple_exit_code(err: Error) -> Error {
+     }
+ }
+ 
+-fn prebuild_lock_exclusive(lock: LockKey) -> Work {
++fn prebuild_lock_exclusive(
++    lock: LockKey,
++    built_elsewhere: Option<impl Fn() -> bool + Send + 'static>,
++) -> Work {
+     Work::new(move |state| {
+-        state.lock_exclusive(&lock)?;
++        match built_elsewhere {
++            Some(built) => state.lock_exclusive_unless_built(&lock, built)?,
++            None => state.lock_exclusive(&lock)?,
++        }
+         Ok(())
+     })
+ }
+diff --git a/src/util/flock.rs b/src/util/flock.rs
+index 77d333c..06ce7ce 100644
+--- a/src/util/flock.rs
++++ b/src/util/flock.rs
+@@ -22,7 +22,6 @@ use cargo_util::paths;
+ pub(crate) use self::imp::lock_exclusive;
+ pub(crate) use self::imp::lock_shared;
+ pub(crate) use self::imp::try_lock_exclusive;
+-#[expect(unused_imports, reason = "for non-blocking lock callers")]
+ pub(crate) use self::imp::try_lock_shared;
+ pub(crate) use self::imp::unlock;
+ 

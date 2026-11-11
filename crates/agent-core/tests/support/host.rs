@@ -377,6 +377,7 @@ impl Writer {
                 }
                 state.activity_revision += 1;
                 agent_protocol::live_activity::TaskActivityState {
+                    attention: Vec::new(),
                     revision: state.activity_revision,
                     waiting: Vec::new(),
                     statuses: Vec::new(),

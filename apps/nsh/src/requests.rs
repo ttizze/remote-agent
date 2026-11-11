@@ -2,7 +2,6 @@
 //! (`ComposerBanner`): an approval's label, reason and decisions, an input
 //! request's answer, and the question the composer answers, with its choices.
 use crate::l10n::{language, localized, tr};
-use crate::ui::Tone;
 use crate::ui::{self, Enabled, Icon, colors};
 use crate::{Connection, native};
 use agent_core::{
@@ -18,11 +17,11 @@ use agent_protocol::{
     requests::{Answer, ElicitationAnswer, ElicitationInput, RequestBody},
 };
 use nsh_core::{
-    element::{input, rgb, rgba},
+    element::{Rgba, input, rgb, rgba},
     prelude::*,
 };
 
-const ERROR: Tone = Tone::new(rgb(0xe7000b), rgb(0xff8e86));
+const ERROR: Rgba = rgb(0xff8e86);
 /// How far the banner runs under the composer, which is drawn over it (T3's
 /// `--chat-composer-attachment-overlap`, 1rem and a pixel).
 const OVERLAP: f32 = 17.0;
@@ -30,11 +29,11 @@ const OVERLAP: f32 = 17.0;
 /// `--chat-composer-drawer-inset`, measured from inside the composer's outline).
 const INSET: f32 = 21.0;
 /// The banner's fill: T3's raised surface at its glass opacity over the page.
-const SURFACE: Tone = Tone::new(rgb(0xffffff), rgb(0x101010));
+const SURFACE: Rgba = rgb(0x101010);
 /// A waiting approval's fill: the surface under 8% of T3's warning.
-const WARNING_SURFACE: Tone = Tone::new(rgb(0xfff5eb), rgb(0x231b0f));
-const WARNING_OUTLINE: Tone = Tone::new(rgba(0xfe9a0047), rgba(0xfe9a0047));
-const NEUTRAL_OUTLINE: Tone = Tone::new(rgba(0x0000000d), rgba(0xffffff0d));
+const WARNING_SURFACE: Rgba = rgb(0x231b0f);
+const WARNING_OUTLINE: Rgba = rgba(0xfe9a0047);
+const NEUTRAL_OUTLINE: Rgba = rgba(0xffffff0d);
 /// T3's `--composer-banner-icon-column` beside a row's content.
 const ICON_COLUMN: f32 = 24.0;
 
@@ -70,7 +69,7 @@ pub(crate) fn panels(following: Signal<bool>) -> impl IntoElement {
 
 /// T3's attached banner surface: inset from the composer's sides, rounded
 /// above, with its foot under the composer.
-fn attached(fill: Tone, outline: Tone) -> View {
+fn attached(fill: Rgba, outline: Rgba) -> View {
     view()
         .mx(px(INSET))
         .mb(px(-OVERLAP))
@@ -192,7 +191,7 @@ fn request_banner(
                                     .font_family(SharedString::from("monospace"))
                                     .text_size(px(12.0))
                                     .line_height(px(16.0))
-                                    .text_color(colors::T3_FOREGROUND),
+                                    .text_color(colors::t3_foreground()),
                             ),
                         ),
                 )
@@ -316,9 +315,9 @@ fn outlined(
         .rounded(px(8.0))
         .border_1()
         .border_color(colors::T3_INPUT)
-        .bg(Tone::new(rgba(0x00000007), rgba(0xffffff07)))
-        .text_color(colors::T3_FOREGROUND)
-        .hover(|s| s.bg(Tone::new(rgba(0x00000014), rgba(0xffffff14))))
+        .bg(rgba(0xffffff07))
+        .text_color(colors::t3_foreground())
+        .hover(|s| s.bg(rgba(0xffffff14)))
         .child(content)
 }
 
@@ -386,7 +385,7 @@ fn answer_form(
                     .p_2()
                     .rounded(px(ui::RADIUS))
                     .border_1()
-                    .border_color(colors::BORDER)
+                    .border_color(colors::border())
             },
         ))
         .child(
@@ -449,7 +448,7 @@ fn question_banner(
                             .selectable(true)
                             .text_size(px(14.0))
                             .line_height(px(20.0))
-                            .text_color(colors::T3_FOREGROUND.opacity(0.85)),
+                            .text_color(colors::t3_foreground().opacity(0.85)),
                     )
                     .child(when(
                         move || prompt.with(|p| p.question.multiple),
@@ -458,7 +457,7 @@ fn question_banner(
                                 .mt_1()
                                 .text_size(px(12.0))
                                 .line_height(px(16.0))
-                                .text_color(colors::T3_MUTED)
+                                .text_color(colors::t3_muted())
                         },
                     ))
                     .child(view().mt_2().gap(px(2.0)).child(choices(
@@ -580,7 +579,7 @@ fn question_header(
                     .text_size(px(12.0))
                     .line_height(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors::T3_MUTED),
+                    .text_color(colors::t3_muted()),
                 )
                 .child(when(
                     move || collapsed.get(),
@@ -591,7 +590,7 @@ fn question_header(
                             .truncate()
                             .text_size(px(12.0))
                             .line_height(px(16.0))
-                            .text_color(colors::T3_MUTED)
+                            .text_color(colors::t3_muted())
                     },
                 )),
         )
@@ -601,7 +600,7 @@ fn question_header(
                 text(move || prompt.with(|p| p.progress.clone().unwrap_or_default()))
                     .text_size(px(10.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors::T3_MUTED)
+                    .text_color(colors::t3_muted())
             },
         ))
         .child(when(busy, ui::spinner))
@@ -611,7 +610,7 @@ fn question_header(
                 .h(px(24.0))
                 .items_center()
                 .justify_center()
-                .text_color(colors::T3_MUTED)
+                .text_color(colors::t3_muted())
                 .child(dynamic(move || {
                     ui::icon(
                         if collapsed.get() {
@@ -625,7 +624,7 @@ fn question_header(
         )
         .child(
             ui::icon_button(Icon::CLOSE, tr("回答せずに閉じる"), dismiss)
-                .text_color(colors::T3_MUTED)
+                .text_color(colors::t3_muted())
                 .enabled(move || !busy()),
         )
 }
@@ -649,25 +648,31 @@ fn choices(
                 move || choose(choice.with_untracked(|c| c.id.clone())),
             )
             .flex_row()
-            .items_center()
-            .gap_2()
+            .items_start()
+            .gap(px(10.0))
             .w_full()
-            .px(px(10.0))
-            .py_2()
-            .rounded(px(8.0))
+            .py(px(6.0))
+            .pl(px(6.0))
+            .rounded(px(6.0))
             .text_color(move || {
                 if chosen() {
-                    colors::T3_FOREGROUND
+                    colors::t3_foreground()
                 } else {
-                    colors::T3_FOREGROUND.opacity(0.85)
+                    colors::t3_foreground().opacity(0.7)
                 }
             })
-            .style_when(chosen, |s| {
-                s.bg(Tone::new(rgba(0x00000004), rgba(0xffffff04)))
-            })
-            .hover(|s| s.bg(Tone::new(rgba(0x00000002), rgba(0xffffff02))))
+            .hover(|s| s.bg(rgba(0xffffff05)))
             .disabled_style(|s| s.opacity(0.5))
             .enabled(enabled)
+            .child(
+                view()
+                    .h(px(20.0))
+                    .flex_shrink_0()
+                    .justify_center()
+                    .child(dynamic(move || {
+                        choice_mark(prompt.with(|p| p.question.multiple), chosen()).into_element()
+                    })),
+            )
             .child(
                 view()
                     .flex_1()
@@ -687,31 +692,70 @@ fn choices(
                             text(move || choice.with(|c| c.description.clone()))
                                 .text_size(px(11.0))
                                 .line_height(px(16.0))
-                                .text_color(colors::T3_MUTED)
+                                .text_color(colors::t3_muted())
                         },
                     )),
             )
-            .child(dynamic(move || {
-                if chosen() {
+            .child(when(
+                move || index.get() < 9,
+                move || {
                     view()
-                        .text_color(colors::ACCENT)
-                        .child(ui::icon(Icon::CHECK, 14.0))
-                        .into_element()
-                } else {
-                    view()
-                        .w(px(20.0))
+                        .w(px(24.0))
                         .h(px(20.0))
+                        .flex_shrink_0()
                         .items_center()
                         .justify_center()
                         .child(
-                            text((index.get() + 1).to_string())
-                                .text_size(px(10.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(colors::T3_MUTED),
+                            view()
+                                .h(px(20.0))
+                                .min_w(px(20.0))
+                                .px(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgba(0xffffff12))
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    text((index.get() + 1).to_string())
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(colors::t3_muted()),
+                                ),
                         )
-                        .into_element()
-                }
-            }))
+                },
+            ))
         },
     )
+}
+
+/// T3 Code's `OptionRadio` and `CheckboxMark`: an empty mark, or one filled
+/// with the accent around its dot or check.
+fn choice_mark(multiple: bool, chosen: bool) -> View {
+    let mark = view()
+        .w(px(16.0))
+        .h(px(16.0))
+        .border_1()
+        .border_color(colors::T3_INPUT)
+        .bg(rgba(0xffffff05))
+        .items_center()
+        .justify_center();
+    let mark = if multiple {
+        mark.rounded(px(4.0))
+    } else {
+        mark.rounded_full()
+    };
+    match (chosen, multiple) {
+        (false, _) => mark,
+        (true, true) => mark
+            .bg(colors::ACCENT)
+            .border_color(colors::ACCENT)
+            .text_color(colors::t3_foreground())
+            .child(ui::icon(Icon::CHECK, 12.0)),
+        (true, false) => mark.bg(colors::ACCENT).border_color(colors::ACCENT).child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded_full()
+                .bg(colors::t3_foreground()),
+        ),
+    }
 }

@@ -45,9 +45,20 @@ shift 2
 command -v nix > /dev/null || . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 cd "$root" || exit 1
 exec 9> "$key.lock"
+# Stop when the client's heartbeats end, so a run it abandoned cannot hold or
+# queue for the lock. A lost connection does not always reach this end as EOF.
+exec 3<&0
+while read -r -t 120 -u 3; do :; done > /dev/null 2>&1 9>&- &
+client=$!
 if ! flock -n 9; then
     echo 'Waiting for another remote run of this worktree' >&2
-    flock 9
+    flock 9 3<&- &
+    locker=$!
+    wait -n -p finished "$locker" "$client"
+    if [[ $finished == "$client" ]]; then
+        kill "$locker" 2> /dev/null
+        exit 1
+    fi
 fi
 rm -f "$key.tar"
 if [[ -e $key/.git ]]; then
@@ -57,12 +68,8 @@ else
 fi || exit 1
 touch "$key.marker"
 cd "$key" || exit 1
-# Stop the command when the client disconnects, so it cannot hold the lock.
-exec 3<&0
 setsid --wait scripts/dev-env.sh "$@" < /dev/null 3<&- 9>&- &
 command=$!
-cat <&3 > /dev/null 2>&1 3<&- 9>&- &
-client=$!
 wait -n -p finished "$command" "$client"
 status=$?
 if [[ $finished == "$client" ]]; then
@@ -103,11 +110,11 @@ remote=(ssh -o ControlPath="$work/control" "$builder")
 GIT_SSH_COMMAND="ssh -o ControlPath=$work/control" \
     git push --quiet --force "$builder:$root/repo.git" "$snapshot:refs/snapshots/$key"
 status=0
-# Standard input stays open until this script exits; the builder watches it.
+# Heartbeats on standard input last until this script exits; the builder watches them.
 "${remote[@]}" "bash -c $(quote "$remote_script") remote-run $(quote "$root" "$key" "$@")" \
     < <(
         exec < /dev/null 2> /dev/null 9>&-
-        while kill -0 "$$" 2> /dev/null; do sleep 5; done
+        while kill -0 "$$" 2> /dev/null; do echo; sleep 5; done
     ) || status=$?
 if ! "${remote[@]}" "cat $(quote "$root/$key.tar") && rm -f $(quote "$root/$key.tar")" |
     tar --extract --keep-directory-symlink --file=- --directory="$PWD"; then
