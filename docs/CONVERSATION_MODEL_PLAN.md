@@ -249,10 +249,13 @@ provider に副作用を起こす前に「途中」の状態を保存し、結�
 |---|---|
 | 入力が準備中 | 保存された段階から続ける |
 | 入力が配送中 | 結果不明にして利用者に確認する |
+| 結果不明の入力を利用者が解決中 | 前の接続は失効しているので、保存した再試行・破棄の選択を確定する。再試行の入力は保留する |
 | 実行中のターン | 中断にしてキューを保留する。更新による再起動なら継続の入力を一つ入れる |
 | 対応への履歴の注入中 | その対応を捨てて作り直す |
 | 要求への回答の送信中 | 結果不明にする。ターンが中断なら要求を閉じる |
 | 待機中のターン(再試行の時刻あり) | 時刻から待ち直す |
+
+配送の結果が不明でも、同じ接続が生きている間に実行の証拠が届けば、配送済みにできる。利用者が再試行か破棄を選んだときは、その選択を先に保存し、所有者が対象の配送と接続の世代を失効させてから確定する。先に配送済みと分かった場合は再送しない。正常完了したターンに残った結果不明の steer も失効させ、保存した選択があれば確定し、なければ利用者が解決できるようにする。
 
 - **理由**: 規則が状態の定義と同じ場所にあれば、書き漏れをコンパイラが検出する。復旧のための別の仕組みが要らない。
 - **根拠(Bex)**: 各規則は現状の挙動と同じである。配送の結果不明(`service/queue.rs:157`)、キューの保留(同 `:100`)、注入が曖昧なら新しい対応にする(`service/conversations.rs:846` 付近のコメント)、更新後の継続(`service/update.rs:87`)。現状はそれぞれ別のファイルにある。
@@ -469,7 +472,7 @@ CREATE TABLE inputs (
     body BLOB NOT NULL              -- 内容、配送の種類、選んだモデル、状態ごとの値
 ) STRICT;
 CREATE INDEX inputs_queue ON inputs (thread, position);
-CREATE INDEX inputs_in_flight ON inputs (state) WHERE state IN ('preparing', 'delivering');
+CREATE INDEX inputs_in_flight ON inputs (state) WHERE state IN ('preparing', 'delivering', 'unknown');
 
 CREATE TABLE turns (
     id TEXT NOT NULL,
@@ -554,7 +557,7 @@ CREATE INDEX bindings_in_flight ON bindings (state) WHERE state = 'injecting';
 CREATE TABLE executions (
     thread INTEGER NOT NULL,
     turn_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL,
+    attempt TEXT NOT NULL,          -- Host が割り当てる試行の UUID。再起動後も使い回さない
     source_id INTEGER NOT NULL REFERENCES sources (id),
     native_turn_id TEXT,            -- provider のターンの識別子
     PRIMARY KEY (thread, turn_id, attempt),
@@ -566,7 +569,7 @@ CREATE INDEX executions_native ON executions (source_id, native_turn_id) WHERE n
 CREATE TABLE item_natives (
     thread INTEGER NOT NULL,
     turn_id TEXT NOT NULL,
-    attempt INTEGER NOT NULL,
+    attempt TEXT NOT NULL,
     native_id TEXT NOT NULL,        -- provider の項目の識別子
     item_id TEXT NOT NULL,
     PRIMARY KEY (thread, turn_id, attempt, native_id),

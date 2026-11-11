@@ -1,0 +1,115 @@
+use super::*;
+
+pub(super) fn restart(state: &State, continue_running: bool, context: Context) -> Step {
+    let mut result = Step {
+        changes: vec![Change::Thread(Thread {
+            queue_held: state.has_queued_inputs(),
+            ..state.thread.clone()
+        })],
+        outcome: Outcome::Accepted,
+        ..Step::default()
+    };
+    for input in state.inputs.values() {
+        match &input.state {
+            InputState::Preparing { stage, mode, .. } => {
+                let action = allocate(context.seed, &format!("prepare:{}", input.id));
+                result.changes.push(Change::Input(PendingInput {
+                    state: InputState::Preparing {
+                        stage: *stage,
+                        action,
+                        mode: *mode,
+                    },
+                    ..input.clone()
+                }));
+                result.actions.push(Action::Prepare {
+                    id: input.id.clone(),
+                    action,
+                    stage: *stage,
+                    cwd: state.thread.workspace.cwd().map(str::to_owned),
+                    provider: state.thread.provider,
+                });
+            }
+            InputState::Delivering(_)
+            | InputState::Unknown {
+                status: UnknownState::Live | UnknownState::Resolving { .. },
+                ..
+            } => {
+                result.changes.push(input.fenced().expect("live delivery"));
+            }
+            InputState::Queued { .. }
+            | InputState::Unknown {
+                status: UnknownState::Fenced,
+                ..
+            }
+            | InputState::Failed(_) => {}
+        }
+    }
+    for turn in state.turns.values() {
+        match &turn.state {
+            TurnState::Running { interrupt } => {
+                let finished = execution::finish(state, turn, TurnState::Interrupted);
+                result.changes.extend(finished.changes);
+                if continue_running && interrupt.is_none() {
+                    result.continuations.push(Continuation {
+                        id: allocate(context.seed, &format!("continue:{}", turn.id)),
+                        source: turn.id.clone(),
+                    });
+                }
+            }
+            TurnState::Waiting(Wait::Background { .. }) => result
+                .changes
+                .extend(execution::finish(state, turn, TurnState::Interrupted).changes),
+            TurnState::Waiting(Wait::Retry { at }) => {
+                result
+                    .actions
+                    .push(Action::WaitUntil((*at).max(context.now)));
+                result.changes.push(Change::Attempt {
+                    turn: turn.id.clone(),
+                    value: None,
+                });
+            }
+            TurnState::Completed
+            | TurnState::Interrupted
+            | TurnState::Failed(_)
+            | TurnState::RolledBack => {}
+        }
+    }
+    // No callback from a connection owned by the previous process is current.
+    for attempt in state.attempts.values() {
+        result.changes.push(Change::Attempt {
+            turn: attempt.turn.clone(),
+            value: None,
+        });
+    }
+    for request in state.requests.values() {
+        let turn_ended = state
+            .turns
+            .get(&request.turn)
+            .is_none_or(|turn| !matches!(turn.state, TurnState::Waiting(Wait::Retry { .. })));
+        if turn_ended {
+            result
+                .changes
+                .push(Change::RemoveRequest(request.id.clone()));
+        } else {
+            match request.state {
+                RequestState::Sending { .. } => result.changes.push(Change::Request(Request {
+                    state: RequestState::Unknown,
+                    ..request.clone()
+                })),
+                RequestState::Awaiting => result
+                    .changes
+                    .push(Change::RemoveRequest(request.id.clone())),
+                RequestState::Unknown => {}
+            }
+        }
+    }
+    for (provider, binding) in &state.bindings {
+        if matches!(binding, Binding::Injecting { .. }) {
+            result.changes.push(Change::Binding {
+                provider: *provider,
+                value: None,
+            });
+        }
+    }
+    result
+}

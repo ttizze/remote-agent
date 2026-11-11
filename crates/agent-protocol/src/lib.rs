@@ -3,6 +3,7 @@ pub mod browser;
 pub mod browser_import;
 pub mod browser_native;
 pub mod composer;
+pub mod conversation;
 pub mod diagnostics;
 pub mod dsh;
 pub mod editors;
