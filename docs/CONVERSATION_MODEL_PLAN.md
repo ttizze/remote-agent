@@ -23,13 +23,11 @@ Host が持つ会話の状態、その保存、クライアントへの同期、
 - ライブ更新 `SessionUpdate` は差分で、版番号も連番も持たない(`crates/agent-protocol/src/session.rs:1326`)。
 - 順序を比べる手段が片方にしかないため、core に防御が散らばる。`stale()` が 4 か所(`crates/agent-core/src/state/operations/sessions.rs:426`、`:669`、`:881`、`:942`)、`already_current` と `superseded`(同 `:745`、`:829`)、適用の失敗を取りこぼしとみなす読み直し(`crates/agent-core/src/state/notifications.rs:384`)。
 
-### Host の会話の状態が三つの場所に分かれる
+### 実行中と保存済みの状態を二つの経路で扱う
 
 - 実行中のターンは `SessionActor.timeline` がメモリに持つ(`crates/host-daemon/src/host_rpc/session_actor.rs`)。
 - 完了したターンだけ SQLite に書く。完了後に届いた更新は保存済みターンへ当てる別経路になる(`crates/host-daemon/src/host_rpc/routing.rs:684`、158 行の一関数)。
 - 読み取りはメモリと SQLite を `overlay` で合成する。
-- provider との対応は `bex-conversations.json`、既読は `bex-read-state.json`、モデル選択は `bex-model-selections.json` にある(`crates/host-daemon/src/host_rpc/service.rs:69-95`)。
-- JSON と SQLite を跨ぐ巻き戻しのために rollback journal を持つ(`crates/host-daemon/src/host_rpc/conversations/rewind.rs:1`)。
 
 ### 識別子の所有者が揃っていない
 
@@ -199,7 +197,7 @@ provider との対応、実行の試行、引き継ぎは Host だけが持ち�
   - 次にやることが状態から決まるなら、「やること」を別に保存する必要がない。再起動後も同じ関数で続きが決まる。
   - 対象の識別子だけでは、別々の操作を区別できない。改名を二回した後に一回目の再送が届くと、名前が戻る。配送後に `Input` の行を消し、巻き戻しでその発言も消した後は、同じ送信の再送を止める手がかりが行に残らない。操作の識別子と消さない受付記録で止める。
   - 所有者を一つにしても、前の試行から遅れて届く応答を弾く判定は要る。その判定を所有者の一か所に置く。
-- **根拠(Bex)**: 判断はすでに純粋な関数である(`host_rpc/submission.rs:30`)。準備は段階を保存しながら進む(`service/preparation.rs:276`)。現状は準備、キュー、再試行が別々にタスクを起動する。会話の状態は `Arc<Mutex<SessionActor>>` と、接続、タスク、既読、APNs を一つに入れた全体のロックの下にある(`host_rpc/routing.rs:109`)。
+- **根拠(Bex)**: 判断はすでに純粋な関数である(`host_rpc/submission.rs:30`)。準備は段階を保存しながら進む(`service/preparation.rs:276`)。現状は準備、キュー、再試行が別々にタスクを起動する。会話の状態は `Arc<Mutex<SessionActor>>` と、接続とは分離した活動のロックの下にある(`host_rpc/routing.rs:109`)。
 - **根拠(参照実装)**:
   - OpenCode は入力の受付と実行を分ける。実行は会話ごとに一つで、起こす合図は重ねても一回にまとまる(`specs/v2/session.md` の Execution Is Process-Local)。実行は毎回、保存された履歴を読み直して次を決める。
   - T3 Code はコマンドの識別子ごとに受付記録を、効果と同じトランザクションで書く(`apps/server/src/orchestration-v2/EventSink.ts:166`)。拒否も記録する(同 `:188`)。同じ識別子が別の会話に使われたら衝突として拒否する(`Orchestrator.ts:333`)。イベントは一日で消すが、受付記録は冪等のために残す(`ProjectionMaintenance.ts:256`)。
@@ -399,11 +397,10 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 ## 段階
 
-実装の順序は依存関係に従う。main へ統合できる区切りは三つある。段階 2 から 5 は通信の形を一緒に変えるので、互換処理なしには分けられない。
+実装の順序は依存関係に従う。残る作業を main へ統合できる区切りは二つある。段階 2 から 5 は通信の形を一緒に変えるので、互換処理なしには分けられない。
 
-1. **保存の一本化**: 対応、既読、モデル選択を同じ DB に移し、rollback journal を消す。通信と表示は変えない。既存データは一度だけ取り込み、移行後にそのコードを消す。ここで統合できる。
 2. **protocol**: 対象と状態の型、変更セット、操作、適用関数、次の動作を決める関数。「同期の契約」の不変条件と具体例を、実装より先に試験として書く。
-3. **Host**: 行と連番、削除記録、受付記録、変更セットの生成、会話ごとの所有者、再起動時の規則、対応の合わせ直し、仕事表、絞った接続口。置き換わった `SessionActor`、`Transcripts` の二経路、`Conversations`、各ワークフローを削除する。
+3. **Host**: 行と連番、削除記録、受付記録、変更セットの生成、会話ごとの所有者、再起動時の規則、対応の合わせ直し、仕事表、絞った接続口。置き換わった `SessionActor`、`ConversationStore` の二経路、`Conversations`、各ワークフローを削除する。
 4. **core**: 複製、下書きの識別子、`Intent` の分割、端末キャッシュ。経路ごとの版番号の防御、仮キーの付け替え、送信の突き合わせを削除する。表示の投影の入力を替える。
 5. **クライアント**: NSH、iOS、Android を追随させる。段階 2 から 5 をまとめて統合する。
 6. **一覧の同期**: サイドバーの更新を同じ連番に載せ、Host の `list_revision` と改名、活動の通知を整理する。ここで統合できる。

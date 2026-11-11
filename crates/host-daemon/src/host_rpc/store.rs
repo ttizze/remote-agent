@@ -866,6 +866,45 @@ mod tests {
     }
 
     #[test]
+    fn offline_conversion_without_old_transcripts_preserves_metadata_and_accepts_history() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        // The offline converter only creates host_state when there was no
+        // transcript DB; the Host owns initialization of its transcript tables.
+        connection
+            .execute_batch(
+                "CREATE TABLE host_state (name TEXT PRIMARY KEY, body BLOB NOT NULL) WITHOUT ROWID;
+             PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO host_state VALUES ('bindings', ?)",
+                [br#"["retained"]"#.as_slice()],
+            )
+            .unwrap();
+        drop(connection);
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(
+            store.load_state::<Vec<String>>("bindings").unwrap(),
+            ["retained"]
+        );
+        store
+            .import(
+                &conversation(),
+                None,
+                history(vec![turn("t", &["i"], TurnStatus::Completed)]),
+            )
+            .unwrap();
+        assert_eq!(
+            texts(&store.window(&conversation(), None, 10).unwrap().unwrap()),
+            ["t/i"]
+        );
+    }
+
+    #[test]
     fn successful_commits_are_durable() {
         let (_root, store) = store();
         store
