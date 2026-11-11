@@ -128,6 +128,17 @@ impl HostRpcService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_refuses_unconverted_storage() {
+        let root = tempfile::tempdir().unwrap();
+        rusqlite::Connection::open(root.path().join("bex-transcripts.sqlite"))
+            .unwrap()
+            .execute_batch("CREATE TABLE saved (body BLOB)")
+            .unwrap();
+        let service = HostRpcService::new([], ProjectStore::new(root.path().join("projects.json")));
+        assert!(service.start().unwrap_err().contains("offline conversion"));
+    }
     use crate::host_rpc::routing::HostSession;
     use agent_protocol::live_activity::{MarkSessionRead, ReadTaskActivity, TaskActivityState};
     use agent_protocol::session::SessionRef;
@@ -211,7 +222,7 @@ rl.on('line', line => {
         .unwrap();
         conversation.id = root.clone();
         service.inner.conversations.save(conversation).unwrap();
-        service.start();
+        service.start().unwrap();
 
         let bootstrap = service.read_task_activity(false).await.unwrap();
         assert!(bootstrap.unread.is_empty());

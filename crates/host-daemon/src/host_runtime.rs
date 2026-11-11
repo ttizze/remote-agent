@@ -53,7 +53,7 @@ impl HostRuntime {
         shutdown: CancellationToken,
         worktree_cleanup_interval: Duration,
     ) -> Result<()> {
-        self.service.start();
+        self.service.start().map_err(anyhow::Error::msg)?;
         let service = self.service.clone();
         let maintenance_stop = shutdown.clone();
         let maintenance = tokio::spawn(async move {

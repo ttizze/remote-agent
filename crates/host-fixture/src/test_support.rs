@@ -134,7 +134,7 @@ impl HostFixture {
             .enable_browser(directory.join("browser"))
             .await
             .map_err(anyhow::Error::msg)?;
-        service.start();
+        service.start().unwrap();
         let runtime = Arc::new(
             HostRuntime::new(
                 service,

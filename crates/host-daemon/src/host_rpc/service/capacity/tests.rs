@@ -101,7 +101,7 @@ rl.on('line', line => {
             [crate::providers::codex::Codex::new(Ok(server.clone())).into()],
             ProjectStore::new(directory.path().join("projects.json")),
         );
-        service.start();
+        service.start().unwrap();
         let session = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
         let lease = service
             .inner

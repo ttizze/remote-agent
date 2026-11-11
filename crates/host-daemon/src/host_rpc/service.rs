@@ -200,8 +200,10 @@ impl HostRpcService {
         self.inner.providers.errors()
     }
 
-    pub fn start(&self) {
+    pub fn start(&self) -> Result<(), String> {
+        self.inner.store.check_ready()?;
         self.start_event_pumps();
+        Ok(())
     }
 
     /// Dispatch a classified message from an authenticated session.
