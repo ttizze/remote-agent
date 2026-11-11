@@ -3,14 +3,44 @@ use crate::ui::Enabled;
 use crate::{Connection, shared::Shared};
 use agent_core::{
     presentation::conversation::{
-        ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedConversation,
-        RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding, turn_rows,
+        ActivityPresentation, ConversationRow, ConversationRowContent, ItemSource, LANE_WIDTH,
+        RenderedConversation, RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress,
+        lane_padding, turn_rows,
     },
     state::{Intent, operations as op},
 };
 use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 use std::collections::{HashMap, HashSet};
+
+#[cfg(any(all(target_os = "macos", debug_assertions), test))]
+pub(crate) mod native;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Renderer {
+    Hybrid,
+    Native,
+    Nsh,
+    Standard,
+}
+
+impl Renderer {
+    fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("native") => Self::Native,
+            Some("nsh") => Self::Nsh,
+            Some("standard") => Self::Standard,
+            _ => Self::Hybrid,
+        }
+    }
+}
+
+pub(crate) fn renderer() -> Renderer {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    return Renderer::named(std::env::var("BEX_CONVERSATION_RENDERER").ok().as_deref());
+    #[cfg(not(all(target_os = "macos", debug_assertions)))]
+    Renderer::named(None)
+}
 
 /// T3 Code's timeline as its dark theme draws it.
 pub(crate) mod look {
@@ -124,6 +154,7 @@ impl Shape {
 struct Row {
     id: String,
     body: SharedString,
+    streaming: bool,
     kind: Kind,
     shape: Shape,
     /// A group's work, which its icon names (`Icon::work`).
@@ -163,6 +194,7 @@ impl Row {
         Self {
             id,
             body: body.into(),
+            streaming: false,
             kind,
             shape,
             group_kind: String::new(),
@@ -271,6 +303,15 @@ fn gap(kind: Kind, shape: Shape, actions: bool, next: Option<Shape>) -> f32 {
 /// A row of a turn on T3 Code's timeline.
 fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
     use crate::activity::{Item, Status};
+    let streaming = match &row {
+        TurnRow::Row(ConversationRow {
+            content: ConversationRowContent::Response { item, .. },
+            ..
+        })
+        | TurnRow::Commentary(item) => matches!(&item.source, ItemSource::Native(native)
+            if native.status == agent_protocol::models::ItemStatus::Running),
+        _ => false,
+    };
     let activity_item =
         |row: &agent_core::presentation::conversation::ConversationRow, live, label| {
             let ConversationRowContent::Activity { item, turn_id } = &row.content else {
@@ -288,7 +329,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
         row.status = Some(status);
         row
     };
-    Some(match row {
+    let mut shown = match row {
         TurnRow::Row(row) => source_row(row)?,
         TurnRow::Fold { activity, open } => {
             let mut row = Row::new(
@@ -387,7 +428,10 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             Shape::Interrupted,
             tr("実行を中断しました"),
         ),
-    })
+    };
+    shown.streaming =
+        streaming && turn.source.status == agent_protocol::models::TurnStatus::Running;
+    Some(shown)
 }
 
 /// A row of the conversation's projection as it is.
@@ -533,6 +577,29 @@ pub(crate) struct Timeline {
 }
 
 impl Timeline {
+    fn set_activity(
+        self,
+        activity: ActivityPresentation,
+        opening: bool,
+    ) -> Option<op::LoadTurnItems> {
+        self.expanded.update(|all| {
+            if opening {
+                all.insert(activity.id.clone(), activity.status);
+            } else {
+                all.remove(&activity.id);
+            }
+        });
+        opening.then_some(activity.load_items).flatten()
+    }
+
+    fn toggle_group(self, id: String) {
+        self.groups.update(|all| {
+            if !all.remove(&id) {
+                all.insert(id);
+            }
+        });
+    }
+
     /// The loaded messages' texts, each with its row's place in the list.
     pub(crate) fn message_texts(self) -> Vec<(usize, String, String)> {
         self.rows.with(|rows| {
@@ -550,6 +617,10 @@ impl Timeline {
     /// Brings a row into view.
     pub(crate) fn reveal(self, row: usize) {
         self.following.set(false);
+        if renderer() == Renderer::Native {
+            self.list.command("reveal", serde_json::json!({"row": row}));
+            return;
+        }
         reveal_row(self.list, row as u32);
     }
 
@@ -616,14 +687,21 @@ impl Timeline {
         (self.width.get() - 2.0 * lane_padding(window().width.0)).clamp(0.0, LANE_WIDTH)
     }
 
-    pub(crate) fn list(self) -> impl IntoElement {
-        list(self)
+    pub(crate) fn list(self) -> AnyElement {
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if renderer() == Renderer::Native {
+            return native::view(self).into_element();
+        }
+        list(self).into_element()
     }
 
     /// T3 Code's minimap at the leading edge of the conversation, beside its
     /// timeline and composer, on a canvas `canvas` points wide.
     pub(crate) fn minimap(self, canvas: impl Fn() -> f32 + Copy + 'static) -> impl IntoElement {
-        when(is_desktop, move || minimap(self, canvas))
+        when(
+            move || is_desktop() && renderer() != Renderer::Native,
+            move || minimap(self, canvas),
+        )
     }
 }
 
@@ -649,8 +727,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
     // Where the list was last scrolled to, for Core's follow rule.
     let scrolled = position;
     let scroll_pending = stored(false);
-    // Further from the end than following reaches, as T3 Code offers the way
-    // back.
+    // Far enough from the end to offer T3 Code's way back.
     let away_from_end = signal(false);
     let clock = signal(std::time::SystemTime::now());
     let padding = move || lane_padding(window().width.0);
@@ -999,20 +1076,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             // where they were: at the end if
                                                             // they followed it.
                                                             let opening = !untracked(open);
-                                                            expanded.update(|all| {
-                                                                if opening {
-                                                                    all.insert(
-                                                                        activity.id.clone(),
-                                                                        activity.status,
-                                                                    );
-                                                                } else {
-                                                                    all.remove(&activity.id);
-                                                                }
-                                                            });
-                                                            if opening
-                                                                && let Some(load) =
-                                                                    activity.load_items
-                                                            {
+                                                            if let Some(load) = timeline.set_activity(activity, opening) {
                                                                 connection.dispatch(
                                                                     Intent::LoadTurnItems(load),
                                                                 );
@@ -1040,11 +1104,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 }) else {
                                                     return;
                                                 };
-                                                groups.update(|groups| {
-                                                    if !groups.remove(&id) {
-                                                        groups.insert(id);
-                                                    }
-                                                });
+                                                timeline.toggle_group(id);
                                             })
                                         },
                                     ))
@@ -1150,6 +1210,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             label().map(|text| text.to_string())
                                                         },
                                                         kind,
+                                                        move || row.try_get().flatten().is_some_and(|row| row.streaming),
                                                         move || {
                                                             if user() {
                                                                 (column_width
@@ -1733,6 +1794,7 @@ fn plan_card(
                 surroundings,
                 move || Some(note().to_string()),
                 || Kind::Response,
+                || false,
                 move || (column_width.try_get().unwrap_or_default() - 8.0 - 42.0).max(0.0),
             ))),
     )
@@ -2426,5 +2488,33 @@ mod tests {
             rows.last().and_then(|row| row.status),
             Some(crate::activity::Status::Thinking)
         );
+    }
+
+    #[test]
+    fn only_the_live_response_of_a_running_turn_uses_streaming_markdown() {
+        let mut live = text("live", "unknown");
+        live["status"] = serde_json::json!("running");
+        let items = serde_json::json!([text("finished", "unknown"), command("pwd"), live]);
+        let running = conversation("running", items.clone());
+        let rows = project(&running, &HashMap::new(), &HashSet::new());
+        assert!(rows.iter().any(|row| row.body.as_ref() == "finished"));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.streaming)
+                .map(|row| row.body.as_ref())
+                .collect::<Vec<_>>(),
+            ["live"]
+        );
+        for status in ["completed", "interrupted"] {
+            assert!(
+                project(
+                    &conversation(status, items.clone()),
+                    &HashMap::new(),
+                    &HashSet::new()
+                )
+                .iter()
+                .all(|row| !row.streaming)
+            );
+        }
     }
 }

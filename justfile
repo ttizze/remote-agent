@@ -56,6 +56,13 @@ nsh-acceptance *scenarios:
     cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
     cargo xtask nsh-acceptance "$@"
 
+# Compare the same conversations in hybrid, native, custom NSH and standard NSH renderers.
+# Explicit debugging only: each isolated app takes the Mac's foreground briefly.
+conversation-compare *scenarios:
+    AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
+    cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+    node scripts/compare-conversation.mjs "$@"
+
 # Compare the Mac app with the installed T3 Code state by state (apps/nsh/parity/map.toml);
 # T3_CODE_APP names the app (the Nightly by default) and T3_CODE_ROOT a checkout with its
 # dependencies installed, for Playwright and the Codex schema. `--compare RUN` measures a run

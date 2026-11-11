@@ -110,6 +110,12 @@ struct MessageMenuTitles: Decodable, Equatable {
 }
 
 @MainActor enum MessageAttributes {
+    static func retainedSelection(_ range: NSRange, previous: String, next: String) -> NSRange {
+        guard range.length > 0, NSMaxRange(range) <= previous.utf16.count, NSMaxRange(range) <= next.utf16.count,
+              (previous as NSString).substring(with: range) == (next as NSString).substring(with: range)
+        else { return NSRange(location: 0, length: 0) }
+        return range
+    }
     /// `answer`: an assistant's text, which T3 Code draws at 80% of the
     /// foreground on the Mac. `cell`: a table's cell (`header` or `body`).
     static func text(_ blocks: [MessageParagraph], secondary: Bool, dark: Bool,
