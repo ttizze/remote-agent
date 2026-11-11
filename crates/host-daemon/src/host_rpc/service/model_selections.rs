@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 #[derive(Serialize, Deserialize)]
-struct Selection {
+pub(in crate::host_rpc) struct Selection {
     session: SessionRef,
     #[serde(flatten)]
     options: SelectedOptions,

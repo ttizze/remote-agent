@@ -5,7 +5,7 @@ use agent_protocol::ids::TurnId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Completion {
+pub(in crate::host_rpc) struct Completion {
     session: SessionRef,
     turn_id: TurnId,
     unread: bool,

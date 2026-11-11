@@ -3,7 +3,7 @@
 mod activity;
 mod capacity;
 mod conversations;
-mod model_selections;
+pub(super) mod model_selections;
 mod preparation;
 mod project_import;
 mod queue;

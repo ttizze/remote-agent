@@ -130,14 +130,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_refuses_unconverted_storage() {
+    fn startup_reports_invalid_storage() {
         let root = tempfile::tempdir().unwrap();
-        rusqlite::Connection::open(root.path().join("bex-transcripts.sqlite"))
-            .unwrap()
-            .execute_batch("CREATE TABLE saved (body BLOB)")
-            .unwrap();
+        std::fs::write(root.path().join("bex-conversations.json"), b"invalid").unwrap();
         let service = HostRpcService::new([], ProjectStore::new(root.path().join("projects.json")));
-        assert!(service.start().unwrap_err().contains("offline conversion"));
+        assert!(
+            service
+                .start()
+                .unwrap_err()
+                .contains("bex-conversations.json")
+        );
     }
     use crate::host_rpc::routing::HostSession;
     use agent_protocol::live_activity::{MarkSessionRead, ReadTaskActivity, TaskActivityState};

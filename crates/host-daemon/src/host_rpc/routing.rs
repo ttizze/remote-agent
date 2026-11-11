@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 mod activity;
 mod connections;
-mod read_state;
+pub(super) mod read_state;
 mod requests;
 #[cfg(test)]
 mod tests;

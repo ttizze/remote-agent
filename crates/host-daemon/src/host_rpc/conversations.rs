@@ -660,7 +660,7 @@ fn owner<'a>(rows: &'a [Conversation], native: &SessionRef) -> Option<&'a Conver
     })
 }
 
-fn validate(rows: &[Conversation]) -> Result<(), String> {
+pub(super) fn validate(rows: &[Conversation]) -> Result<(), String> {
     let mut identities = std::collections::HashSet::new();
     let public: std::collections::HashSet<_> = rows.iter().map(|row| &row.id).collect();
     if public.len() != rows.len() {

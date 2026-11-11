@@ -16,6 +16,8 @@ use std::{collections::HashMap, path::Path, sync::Mutex};
 /// A window stops growing past this many encoded bytes, keeping at least one turn.
 const WINDOW_BYTES: usize = 1 << 20;
 
+mod upgrade;
+
 pub(crate) struct ConversationStore {
     // A store that failed to open stays failed; reads must not fall back to
     // an empty transcript that would look like a conversation without turns.
@@ -50,7 +52,7 @@ impl ConversationStore {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(failure)?;
             }
-            let connection = Connection::open(path).map_err(failure)?;
+            let mut connection = Connection::open(path).map_err(failure)?;
             // A restarting Host can briefly overlap its predecessor.
             connection
                 .busy_timeout(std::time::Duration::from_secs(10))
@@ -63,36 +65,21 @@ impl ConversationStore {
                     "unsupported conversation database version: {version}"
                 ));
             }
-            if version == 0 {
-                let populated: bool = connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table')",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(failure)?;
-                // A pre-unification Host may have metadata without a transcript
-                // database yet. Detect it, but never read or convert it here.
-                let metadata = [
-                    "bex-conversations.json",
-                    "bex-read-state.json",
-                    "bex-model-selections.json",
-                    "bex-conversations.rewind",
-                ]
-                .iter()
-                .any(|name| path.with_file_name(name).exists());
-                if populated || metadata {
-                    return Err("conversation storage requires the one-time offline conversion; stop the old Host, back up its state directory, and run the conversion tool before starting this version".into());
-                }
-            }
+            let previous = if version == 0 {
+                upgrade::prepare(&connection, path)?
+            } else {
+                None
+            };
             // A successful receipt or rewind must survive a Host restart.
             connection
                 .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")
                 .map_err(failure)?;
-            connection
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            transaction
                 .execute_batch(
-                    "BEGIN IMMEDIATE;
-                     CREATE TABLE IF NOT EXISTS host_state (
+                    "CREATE TABLE IF NOT EXISTS host_state (
                          name TEXT PRIMARY KEY,
                          body BLOB NOT NULL
                      ) WITHOUT ROWID;
@@ -127,11 +114,19 @@ impl ConversationStore {
                          id TEXT NOT NULL,
                          body BLOB NOT NULL,
                          PRIMARY KEY (provider, id)
-                     ) WITHOUT ROWID;
-                     PRAGMA user_version = 1;
-                     COMMIT;",
+                     ) WITHOUT ROWID;",
                 )
                 .map_err(failure)?;
+            let backup = previous
+                .map(|previous| previous.write(&transaction))
+                .transpose()?;
+            transaction
+                .pragma_update(None, "user_version", 1)
+                .map_err(failure)?;
+            transaction.commit().map_err(failure)?;
+            if let Some(backup) = backup {
+                let _ = backup.keep();
+            }
             Ok(connection)
         })();
         Self {
@@ -822,32 +817,20 @@ mod tests {
     }
 
     #[test]
-    fn existing_unversioned_and_future_databases_are_rejected_without_changes() {
-        for version in [0, 2] {
-            let root = tempfile::tempdir().unwrap();
-            let path = root.path().join("bex-transcripts.sqlite");
-            let connection = Connection::open(&path).unwrap();
-            connection.execute_batch(&format!(
-                "CREATE TABLE saved (body TEXT); INSERT INTO saved VALUES ('keep'); PRAGMA user_version = {version};"
-            )).unwrap();
-            drop(connection);
-            let before = std::fs::read(&path).unwrap();
-            let store = ConversationStore::open(&path);
-            assert!(store.check_ready().is_err());
-            assert!(store.load_state::<Vec<String>>("bindings").is_err());
-            assert!(store.save_state("bindings", &Vec::<String>::new()).is_err());
-            assert_eq!(std::fs::read(path).unwrap(), before);
-        }
-    }
-
-    #[test]
-    fn metadata_without_a_database_requires_offline_conversion() {
+    fn future_databases_are_rejected_without_changes() {
         let root = tempfile::tempdir().unwrap();
-        let metadata = root.path().join("bex-conversations.json");
-        std::fs::write(&metadata, b"[]").unwrap();
-        let store = ConversationStore::open(&root.path().join("bex-transcripts.sqlite"));
+        let path = root.path().join("bex-transcripts.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE saved (body TEXT); INSERT INTO saved VALUES ('keep'); PRAGMA user_version = 2;"
+        ).unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let store = ConversationStore::open(&path);
         assert!(store.check_ready().is_err());
-        assert_eq!(std::fs::read(metadata).unwrap(), b"[]");
+        assert!(store.load_state::<Vec<String>>("bindings").is_err());
+        assert!(store.save_state("bindings", &Vec::<String>::new()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[test]
@@ -855,6 +838,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("bex-transcripts.sqlite");
         let store = ConversationStore::open(&path);
+        assert!(
+            !std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .any(|entry| entry.file_type().unwrap().is_dir())
+        );
         store.save_state("models", &vec!["selected"]).unwrap();
         drop(store);
         let store = ConversationStore::open(&path);
@@ -865,13 +854,387 @@ mod tests {
         );
     }
 
+    // A fixed version-0 fixture, independent of current schema initialization.
+    // Keep the connection open so committed transcript and queue rows stay in WAL.
+    fn old_storage(path: &Path) -> Connection {
+        let connection = Connection::open(path).unwrap();
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE conversations (provider TEXT NOT NULL, id TEXT NOT NULL, cwd TEXT, metadata BLOB, PRIMARY KEY(provider,id)) WITHOUT ROWID;
+            CREATE TABLE turns (provider TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, turn_id TEXT NOT NULL, running INTEGER NOT NULL, body BLOB NOT NULL, PRIMARY KEY(provider,id,position)) WITHOUT ROWID;
+            CREATE TABLE versions (provider TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY(provider,id)) WITHOUT ROWID;
+            CREATE TABLE queues (provider TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(provider,id)) WITHOUT ROWID;").unwrap();
+        let session = conversation();
+        connection
+            .execute(
+                "INSERT INTO conversations VALUES (?1, ?2, NULL, ?3)",
+                params![
+                    session.provider.key(),
+                    session.id,
+                    protocol::encode(&history(vec![])).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO turns VALUES (?1, ?2, 0, 't', 0, ?3)",
+                params![
+                    session.provider.key(),
+                    session.id,
+                    protocol::encode(&turn("t", &["i"], TurnStatus::Completed)).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO versions VALUES (?1, ?2, 7)",
+                params![session.provider.key(), session.id],
+            )
+            .unwrap();
+        let queue = InputQueue {
+            inputs: vec![agent_protocol::operations::Submission {
+                thread_id: session.clone(),
+                client_user_message_id: "waiting".into(),
+                input: vec![],
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+            }],
+            held: true,
+        };
+        connection
+            .execute(
+                "INSERT INTO queues VALUES (?1, ?2, ?3)",
+                params![
+                    session.provider.key(),
+                    session.id,
+                    protocol::encode(&queue).unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+    }
+
     #[test]
-    fn offline_conversion_without_old_transcripts_preserves_metadata_and_accepts_history() {
+    fn startup_upgrades_old_storage_once_and_preserves_a_consistent_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let old = old_storage(&path);
+        let session = conversation();
+        let binding = super::super::conversations::Conversation::new(&Thread {
+            cwd: Some("/workspace".into()),
+            ..history(vec![]).thread
+        })
+        .unwrap();
+        for (file, data) in [
+            ("bex-conversations.json", serde_json::to_vec(&vec![binding]).unwrap()),
+            ("bex-read-state.json", serde_json::to_vec(&serde_json::json!([{"session":session,"turn_id":"t","unread":true}])).unwrap()),
+            ("bex-model-selections.json", serde_json::to_vec(&serde_json::json!([{"session":session,"model":null,"effort":"high","service_tier":"fast"}])).unwrap()),
+        ] {
+            std::fs::write(root.path().join(file), data).unwrap();
+        }
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(store.version(&session).unwrap(), Some(7));
+        assert_eq!(
+            texts(&store.window(&session, None, 10).unwrap().unwrap()),
+            ["t/i"]
+        );
+        assert_eq!(
+            store.queues().unwrap()[0].1.inputs[0]
+                .client_user_message_id
+                .as_str(),
+            "waiting"
+        );
+        assert_eq!(
+            store
+                .load_state::<Vec<serde_json::Value>>("bindings")
+                .unwrap()[0]["id"],
+            serde_json::to_value(&session).unwrap()
+        );
+        assert_eq!(
+            store.load_state::<Vec<serde_json::Value>>("reads").unwrap()[0]["unread"],
+            true
+        );
+        assert_eq!(
+            store
+                .load_state::<Vec<serde_json::Value>>("models")
+                .unwrap()[0]["service_tier"],
+            "fast"
+        );
+        let backups: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("before-storage-unification-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open(backups[0].path().join("bex-transcripts.sqlite")).unwrap();
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT count(*) FROM turns", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(backups[0].path().join("bex-read-state.json")).unwrap(),
+            std::fs::read(root.path().join("bex-read-state.json")).unwrap()
+        );
+        store.save_state("models", &vec!["new selection"]).unwrap();
+        drop(store);
+        drop(old);
+        // Stale (even corrupted) JSON cannot overwrite the committed upgrade.
+        std::fs::write(root.path().join("bex-model-selections.json"), b"invalid").unwrap();
+        let reopened = ConversationStore::open(&path);
+        assert_eq!(
+            reopened.load_state::<Vec<String>>("models").unwrap(),
+            ["new selection"]
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("before-storage-unification-"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn metadata_only_storage_upgrades_on_first_start() {
+        let root = tempfile::tempdir().unwrap();
+        let session = conversation();
+        std::fs::write(
+            root.path().join("bex-read-state.json"),
+            serde_json::to_vec(
+                &serde_json::json!([{"session":session,"turn_id":"t","unread":true}]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ConversationStore::open(&root.path().join("bex-transcripts.sqlite"));
+        store.check_ready().unwrap();
+        assert_eq!(
+            store
+                .load_state::<Vec<serde_json::Value>>("reads")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .load_state::<Vec<serde_json::Value>>("bindings")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transcript_only_storage_upgrades_without_metadata_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let old = old_storage(&path);
+        let store = ConversationStore::open(&path);
+        store.check_ready().unwrap();
+        assert_eq!(store.version(&conversation()).unwrap(), Some(7));
+        assert_eq!(
+            texts(&store.window(&conversation(), None, 10).unwrap().unwrap()),
+            ["t/i"]
+        );
+        assert!(store.queues().unwrap()[0].1.held);
+        assert_eq!(
+            old.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_dir())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_upgrade_keeps_old_storage_and_can_retry_after_repair() {
+        for invalid in [b"invalid".as_slice(), b"{}", b"[{}]"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("bex-transcripts.sqlite");
+            let connection = old_storage(&path);
+            std::fs::write(root.path().join("bex-read-state.json"), invalid).unwrap();
+            let failed = ConversationStore::open(&path);
+            assert!(failed.check_ready().is_err());
+            assert!(failed.save_state("reads", &Vec::<String>::new()).is_err());
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                0
+            );
+            std::fs::write(root.path().join("bex-read-state.json"), b"[]").unwrap();
+            let repaired = ConversationStore::open(&path);
+            repaired.check_ready().unwrap();
+            assert_eq!(
+                texts(&repaired.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["t/i"]
+            );
+        }
+    }
+
+    #[test]
+    fn failed_rewind_upgrade_rolls_back_schema_and_history_together() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bex-transcripts.sqlite");
+        let old = old_storage(&path);
+        old.execute_batch("CREATE TRIGGER reject_restore BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'injected upgrade failure'); END;").unwrap();
+        std::fs::write(root.path().join("bex-conversations.rewind"), serde_json::to_vec(&serde_json::json!({"previous":null,"history":history(vec![turn("restored", &["before"], TurnStatus::Completed)])})).unwrap()).unwrap();
+        assert!(ConversationStore::open(&path).check_ready().is_err());
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_dir())
+                .count(),
+            0
+        );
+        assert_eq!(
+            old.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            old.query_row("SELECT turn_id FROM turns", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "t"
+        );
+        assert_eq!(
+            old.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='host_state'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+            0
+        );
+        old.execute_batch("DROP TRIGGER reject_restore").unwrap();
+        let repaired = ConversationStore::open(&path);
+        assert_eq!(
+            texts(&repaired.window(&conversation(), None, 10).unwrap().unwrap()),
+            ["restored/before"]
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().unwrap().is_dir())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn upgrade_rejects_invalid_bindings_including_rewind_results_and_retries() {
+        for rewind in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("bex-transcripts.sqlite");
+            let old = old_storage(&path);
+            let mut binding = super::super::conversations::Conversation::new(&Thread {
+                cwd: Some("/workspace".into()),
+                ..history(vec![]).thread
+            })
+            .unwrap();
+            binding.cwd.clear();
+            let file = if rewind {
+                "bex-conversations.rewind"
+            } else {
+                "bex-conversations.json"
+            };
+            let value = if rewind {
+                serde_json::json!({"previous":binding,"history":history(vec![])})
+            } else {
+                serde_json::json!([binding])
+            };
+            std::fs::write(root.path().join(file), serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(ConversationStore::open(&path).check_ready().is_err());
+            assert_eq!(
+                old.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                0
+            );
+            std::fs::remove_file(root.path().join(file)).unwrap();
+            let repaired = ConversationStore::open(&path);
+            repaired.check_ready().unwrap();
+            assert_eq!(
+                texts(&repaired.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["t/i"]
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_restores_an_interrupted_rewind_before_serving_history() {
+        for managed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("bex-transcripts.sqlite");
+            let old = old_storage(&path);
+            let binding = super::super::conversations::Conversation::new(&Thread {
+                cwd: Some("/workspace".into()),
+                ..history(vec![]).thread
+            })
+            .unwrap();
+            let previous = managed.then_some(binding.clone());
+            std::fs::write(
+                root.path().join("bex-conversations.json"),
+                serde_json::to_vec(&vec![binding]).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(root.path().join("bex-conversations.rewind"), serde_json::to_vec(&serde_json::json!({"previous":previous,"history":history(vec![turn("restored", &["before"], TurnStatus::Completed)])})).unwrap()).unwrap();
+            let store = ConversationStore::open(&path);
+            store.check_ready().unwrap();
+            assert_eq!(
+                texts(&store.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["restored/before"]
+            );
+            assert_eq!(
+                store
+                    .load_state::<Vec<serde_json::Value>>("bindings")
+                    .unwrap()
+                    .len(),
+                usize::from(managed)
+            );
+            drop(store);
+            drop(old);
+            let reopened = ConversationStore::open(&path);
+            assert_eq!(
+                texts(&reopened.window(&conversation(), None, 10).unwrap().unwrap()),
+                ["restored/before"]
+            );
+        }
+    }
+
+    #[test]
+    fn version_one_metadata_only_storage_accepts_history_without_another_upgrade() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("bex-transcripts.sqlite");
         let connection = Connection::open(&path).unwrap();
-        // The offline converter only creates host_state when there was no
-        // transcript DB; the Host owns initialization of its transcript tables.
+        // An already-upgraded metadata-only store may not have transcript
+        // tables yet; startup initializes them without replacing saved state.
         connection
             .execute_batch(
                 "CREATE TABLE host_state (name TEXT PRIMARY KEY, body BLOB NOT NULL) WITHOUT ROWID;

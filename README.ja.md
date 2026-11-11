@@ -39,6 +39,8 @@ scripts/dev-env.sh just complexity
 
 macOSでは、`scripts/dev-env.sh just dev`で開発用アプリをビルドして起動できます。エージェントを動かすバックグラウンドプロセス（Host）は開発用に分かれますが、既存のアカウントと会話履歴は共有します。
 
+ソースから更新する場合は、`main`をpullし、通常どおりアプリまたはHostをビルドして再起動してください。新版Hostの初回起動時に、既存の会話データをDBと同じ場所の`before-storage-unification-*`ディレクトリへバックアップし、自動で更新します。履歴が大きい場合、初回の起動には時間がかかります。別の変換ツールを実行する必要はありません。
+
 開発・統合のルールは[AGENTS.md](AGENTS.md)、ビルド・検証コマンドは[justfile](justfile)を参照してください。
 
 ## 関連情報
