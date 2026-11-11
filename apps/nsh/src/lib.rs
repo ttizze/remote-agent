@@ -186,7 +186,11 @@ pub fn App() -> impl IntoElement {
     cleanup(move || {
         let _ = runtime.block_on(service.shutdown());
     });
-    app_view(stored_service, Area::Mobile)
+    view()
+        .w_full()
+        .h_full()
+        .child(app_view(stored_service, Area::Mobile))
+        .into_element()
 }
 
 #[derive(Clone, Copy, PartialEq)]
