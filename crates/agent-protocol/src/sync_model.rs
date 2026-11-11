@@ -2,8 +2,6 @@
 //! of the current production protocol. Host state is the independent oracle.
 //! The ordered stream can stop at any message; a new subscription fences old
 //! messages and resumes only from state the client actually applied.
-mod streaming;
-
 use proptest::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
 
