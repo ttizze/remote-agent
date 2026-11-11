@@ -36,6 +36,9 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
 
 #if os(macOS)
     final class MessageTextView: NSTextView, NSTextViewDelegate {
+        /// The native conversation viewport uses AppKit's clipping geometry.
+        /// Only a TextKit leaf inside an NSH-scrolled row needs layer observers.
+        var nativeScrolling = false
         var action: (([String: Any]) -> Void)?
         var document = MessageDocument.empty
         /// The modifier keys of the click being handled: a link opens from
@@ -50,6 +53,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         func watchScrollingGeometry() {
             geometryObservers.removeAll()
             lastVisibleRect = .zero
+            guard !nativeScrolling else { return }
             guard window != nil else { return }
             let redraw: @Sendable () -> Void = { [weak self] in
                 MainActor.assumeIsolated {
@@ -124,6 +128,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         /// and suppresses glyphs until the trailing scroll commit. Convert the
         /// actual layer clips instead, keeping TextKit on the displayed frame.
         override var visibleRect: NSRect {
+            if nativeScrolling { return super.visibleRect }
             guard let own = layer, let root = window?.contentView?.layer else { return super.visibleRect }
             var rect = bounds.intersection(own.convert(root.bounds, from: root))
             var ancestor = own.superlayer
@@ -425,10 +430,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                                                  answer: document.role == "assistant", cell: document.cell,
                                                  foreground: document.foreground)
             let range = text.selectedRange()
-            let keep = range.length > 0 && NSMaxRange(range) <= content.length && NSMaxRange(range) <= text.string.utf16
-                .count
-                && (text.string as NSString).substring(with: range) == (content.string as NSString)
-                .substring(with: range)
+            let retained = MessageAttributes.retainedSelection(range, previous: text.string, next: content.string)
             #if DEBUG
                 if RenderProbe.enabled {
                     text.preparePaints(for: content.string)
@@ -446,7 +448,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 manager.ensureLayout(for: container)
                 reportSize(CGSize(width: ceil(size.width), height: ceil(manager.usedRect(for: container).height)))
             }
-            text.setSelectedRange(keep ? range : NSRange(location: 0, length: 0))
+            text.setSelectedRange(retained)
             needsLayout = true
         }
 

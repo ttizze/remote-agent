@@ -12,6 +12,33 @@ use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(any(all(target_os = "macos", debug_assertions), test))]
+pub(crate) mod native;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Renderer {
+    Hybrid,
+    Native,
+    Nsh,
+}
+
+impl Renderer {
+    fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("native") => Self::Native,
+            Some("nsh") => Self::Nsh,
+            _ => Self::Hybrid,
+        }
+    }
+}
+
+pub(crate) fn renderer() -> Renderer {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    return Renderer::named(std::env::var("BEX_CONVERSATION_RENDERER").ok().as_deref());
+    #[cfg(not(all(target_os = "macos", debug_assertions)))]
+    Renderer::named(None)
+}
+
 /// T3 Code's timeline as its dark theme draws it.
 pub(crate) mod look {
     use crate::ui::colors;
@@ -533,6 +560,29 @@ pub(crate) struct Timeline {
 }
 
 impl Timeline {
+    fn set_activity(
+        self,
+        activity: ActivityPresentation,
+        opening: bool,
+    ) -> Option<op::LoadTurnItems> {
+        self.expanded.update(|all| {
+            if opening {
+                all.insert(activity.id.clone(), activity.status);
+            } else {
+                all.remove(&activity.id);
+            }
+        });
+        opening.then_some(activity.load_items).flatten()
+    }
+
+    fn toggle_group(self, id: String) {
+        self.groups.update(|all| {
+            if !all.remove(&id) {
+                all.insert(id);
+            }
+        });
+    }
+
     /// The loaded messages' texts, each with its row's place in the list.
     pub(crate) fn message_texts(self) -> Vec<(usize, String, String)> {
         self.rows.with(|rows| {
@@ -550,6 +600,10 @@ impl Timeline {
     /// Brings a row into view.
     pub(crate) fn reveal(self, row: usize) {
         self.following.set(false);
+        if renderer() == Renderer::Native {
+            self.list.command("reveal", serde_json::json!({"row": row}));
+            return;
+        }
         reveal_row(self.list, row as u32);
     }
 
@@ -616,14 +670,21 @@ impl Timeline {
         (self.width.get() - 2.0 * lane_padding(window().width.0)).clamp(0.0, LANE_WIDTH)
     }
 
-    pub(crate) fn list(self) -> impl IntoElement {
-        list(self)
+    pub(crate) fn list(self) -> AnyElement {
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if renderer() == Renderer::Native {
+            return native::view(self).into_element();
+        }
+        list(self).into_element()
     }
 
     /// T3 Code's minimap at the leading edge of the conversation, beside its
     /// timeline and composer, on a canvas `canvas` points wide.
     pub(crate) fn minimap(self, canvas: impl Fn() -> f32 + Copy + 'static) -> impl IntoElement {
-        when(is_desktop, move || minimap(self, canvas))
+        when(
+            move || is_desktop() && renderer() != Renderer::Native,
+            move || minimap(self, canvas),
+        )
     }
 }
 
@@ -998,20 +1059,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             // where they were: at the end if
                                                             // they followed it.
                                                             let opening = !untracked(open);
-                                                            expanded.update(|all| {
-                                                                if opening {
-                                                                    all.insert(
-                                                                        activity.id.clone(),
-                                                                        activity.status,
-                                                                    );
-                                                                } else {
-                                                                    all.remove(&activity.id);
-                                                                }
-                                                            });
-                                                            if opening
-                                                                && let Some(load) =
-                                                                    activity.load_items
-                                                            {
+                                                            if let Some(load) = timeline.set_activity(activity, opening) {
                                                                 connection.dispatch(
                                                                     Intent::LoadTurnItems(load),
                                                                 );
@@ -1039,11 +1087,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 }) else {
                                                     return;
                                                 };
-                                                groups.update(|groups| {
-                                                    if !groups.remove(&id) {
-                                                        groups.insert(id);
-                                                    }
-                                                });
+                                                timeline.toggle_group(id);
                                             })
                                         },
                                     ))

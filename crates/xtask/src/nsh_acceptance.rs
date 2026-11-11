@@ -8,7 +8,7 @@ use crate::{
     Result,
     supervision::{self, Child},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
@@ -88,6 +88,13 @@ pub async fn run(filters: &[String]) -> Result<()> {
         }
     }
     let report = records.join("report.md");
+    fs::write(
+        records.join("summary.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "scenarios": scenarios.iter().map(|path| name(path)).collect::<Vec<_>>(),
+            "outcomes": outcomes,
+        }))?,
+    )?;
     fs::write(&report, render(&format!("run-{seconds}"), &outcomes))?;
     println!("report: {}", report.display());
     let failed = outcomes.iter().filter(|outcome| !outcome.passed()).count();
@@ -147,7 +154,7 @@ impl Tools {
 }
 
 /// What the app's driver wrote to `result.json`.
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 pub(crate) struct Report {
     passed: Option<bool>,
     /// The app quit for the runner to start it again.
@@ -175,7 +182,7 @@ impl Report {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StepResult {
     line: u64,
@@ -186,6 +193,7 @@ struct StepResult {
     artifact: Option<String>,
 }
 
+#[derive(Serialize)]
 struct Outcome {
     name: String,
     result: Report,
@@ -408,7 +416,7 @@ pub(crate) async fn scenario(
 /// A process of the scenario that sees none of the shell's `AGENT_*` or `BEX_*`
 /// settings, which can name an installed app's runtime, Host or state. Its
 /// runtime (the Claude SDK bridge, Node and the provider supervisor) is the
-/// freshly built app's.
+/// freshly built app's. Only the debug conversation renderer is forwarded.
 fn isolated(program: &Path, tools: &Tools) -> Command {
     let mut command = Command::new(program);
     for (name, _) in std::env::vars_os() {
@@ -418,6 +426,11 @@ fn isolated(program: &Path, tools: &Tools) -> Command {
         {
             command.env_remove(name);
         }
+    }
+    if program == tools.app
+        && let Some(preview) = std::env::var_os("BEX_CONVERSATION_RENDERER")
+    {
+        command.env("BEX_CONVERSATION_RENDERER", preview);
     }
     let runtime = tools
         .app

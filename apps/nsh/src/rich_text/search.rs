@@ -111,7 +111,10 @@ pub(super) fn decorate(
 }
 
 /// Only the paragraph carrying the selected start needs a new drawn anchor.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(any(
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions)
+))]
 pub(super) fn reveals(block: &Value) -> bool {
     std::iter::once(&block["markerHighlights"])
         .chain(
@@ -126,7 +129,10 @@ pub(super) fn reveals(block: &Value) -> bool {
 }
 
 /// Styled fragments of one run, in UTF-8 bytes; native views convert to UTF-16.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(any(
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions)
+))]
 #[derive(Default)]
 pub(super) struct Fragment {
     pub text: String,
@@ -135,7 +141,10 @@ pub(super) struct Fragment {
     pub reveal: bool,
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(any(
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions)
+))]
 pub(super) fn fragments(run: &Value) -> Vec<Fragment> {
     let text = run["text"].as_str().unwrap_or_default();
     let mut result = Vec::new();

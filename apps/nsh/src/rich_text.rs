@@ -251,7 +251,7 @@ fn file_paths(blocks: &[MarkdownBlock]) -> Vec<String> {
 }
 
 /// Where the content's menus and links act: its Host, draft and workspace.
-fn target(connection: Connection) -> Memo<String> {
+pub(crate) fn target(connection: Connection) -> Memo<String> {
     computed(move || {
         let scope = connection.scope.get();
         let (cwd, provider) = connection
@@ -273,7 +273,7 @@ fn target(connection: Connection) -> Memo<String> {
 /// What message text asks for: a selection quoted, explained or asked about
 /// in a side chat, a link pressed, or an item of a file chip's menu chosen.
 #[cfg(any(desktop, target_os = "ios"))]
-fn action(surroundings: Surroundings, data: &Value) {
+pub(crate) fn action(surroundings: Surroundings, data: &Value) {
     let connection = surroundings.connection;
     // TextKit's selection changed: where it is, in the window's content.
     #[cfg(target_os = "macos")]
@@ -405,6 +405,11 @@ fn view_parts(
                 // for another row; unwrapped code keeps its lines.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let message = move |wrap: Option<Signal<bool>>, scrolls: crate::find::Viewports, reference: ElementRef| {
+                    #[cfg(all(target_os = "macos", debug_assertions))]
+                    if crate::conversation::renderer() == crate::conversation::Renderer::Nsh {
+                        return drawn::message(part, move || kind() == Kind::Activity, target, surroundings, cell)
+                            .element_ref(&reference).w_full().into_element();
+                    }
                     native("bex.messageText")
                         .element_ref(&reference)
                         .prop("data", move || {
@@ -416,16 +421,19 @@ fn view_parts(
                             else {
                                 return Value::Null;
                             };
+                            let row = match surroundings.find_row {
+                                Some(row) => {
+                                    let Some(row) = row.try_get() else { return Value::Null };
+                                    row
+                                }
+                                None => String::new(),
+                            };
                             part.with(|(_, part)| {
                                 let code = matches!(part, Part::Code { .. });
                                 let (Part::Text(blocks) | Part::Code { blocks, .. }) = part else {
                                     return Value::Null;
                                 };
                                 let kind = kind();
-                                let row = surroundings
-                                    .find_row
-                                    .map(|row| row.get())
-                                    .unwrap_or_default();
                                 let document = search::document(blocks);
                                 let query = if row.is_empty() {
                                     String::new()
@@ -481,7 +489,9 @@ fn view_parts(
                 };
                 if matches!(value, Part::Code { .. }) {
                     let selected = computed(move || {
-                        let row = surroundings.find_row?.get();
+                        // Recycled parts can finish after their conversation row
+                        // was disposed. Such a row has no search selection.
+                        let row = surroundings.find_row?.try_get()?;
                         let document = part.with(|(_, part)| match part {
                             Part::Code { blocks, .. } => search::document(blocks),
                             _ => 0,
@@ -555,11 +565,13 @@ fn view_parts(
     #[cfg(target_os = "macos")]
     let content = {
         let multiple = move || {
-            cell.is_none()
-                && !surroundings
-                    .find_row
-                    .is_some_and(|row| surroundings.find.selected_row(&row.get()))
-                && parts.try_get().is_some_and(|parts| parts.len() > 1)
+            let recyclable = match surroundings.find_row {
+                Some(row) => row
+                    .try_get()
+                    .is_some_and(|row| !surroundings.find.selected_row(&row)),
+                None => true,
+            };
+            cell.is_none() && recyclable && parts.try_get().is_some_and(|parts| parts.len() > 1)
         };
         view()
             .w_full()
@@ -957,10 +969,12 @@ fn table(
 }
 
 /// Message text NSH lays out where TextKit does not: each paragraph of the
-/// native document as selectable styled text, its links opened as TextKit's
-/// are. Selection copies; quoting a selection and asking a side chat about it
-/// are TextKit's menu, which these texts do not have.
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+/// native document as selectable styled text. Links and selection menus use
+/// the same actions as the TextKit renderer.
+#[cfg(any(
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions)
+))]
 mod drawn {
     use super::{Part, Surroundings, Target};
     use crate::ui::colors;
@@ -997,12 +1011,17 @@ mod drawn {
         let message = selection_actions(message, target_json, surroundings);
         message.child(each(
             move || {
+                let row = match surroundings.find_row {
+                    Some(row) => {
+                        let Some(row) = row.try_get() else {
+                            return Vec::new();
+                        };
+                        row
+                    }
+                    None => String::new(),
+                };
                 part.with(|(_, part)| match part {
                     Part::Text(blocks) | Part::Code { blocks, .. } => {
-                        let row = surroundings
-                            .find_row
-                            .map(|row| row.get())
-                            .unwrap_or_default();
                         let document = super::search::document(blocks);
                         let query = if row.is_empty() {
                             String::new()
@@ -1292,7 +1311,7 @@ mod drawn {
 }
 
 /// A paragraph of the native document; a run naming a file carries its chip.
-fn paragraph(runs: Vec<MarkdownRun>, style: &MarkdownStyle, chip: Chip) -> Value {
+pub(crate) fn paragraph(runs: Vec<MarkdownRun>, style: &MarkdownStyle, chip: Chip) -> Value {
     json!({
         "header": style.header, "marker": style.marker, "code": style.code,
         "quoted": style.quoted, "depth": style.list_depth,
