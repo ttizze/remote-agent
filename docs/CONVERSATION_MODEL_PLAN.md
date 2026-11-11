@@ -138,7 +138,7 @@ provider との対応、実行の試行、引き継ぎは Host だけが持ち�
 - **退けた案**:
   - イベントを正本にして表を導出する。作り直しと監査ができるが、Bex にその利用者がいない。
   - 再開用に短命なイベントの末尾を持つ(T3 Code の現在の形)。再接続でトランザクション単位の再生ができるが、行と同じ内容を一定期間二重に持つ。行の最新をまとめて渡す形で一致するなら要らない。
-- **確認が要る点**: 削除記録の保持期間。T3 Code がイベントを残す一日を出発点にする。
+- **保持**: 削除記録は一日で消す。T3 Code がイベントを残す期間と同じにする。利用者が決めた(2026-11-11)。受付記録は消さない(決定 8)。
 
 ### 決定 6: 同期は行の版による上書き。ライブは変更セット単位
 
@@ -179,13 +179,14 @@ provider との対応、実行の試行、引き継ぎは Host だけが持ち�
 T3 Code と同じ形にする。利用者が決めた(2026-11-11)。一文字ずつの差分は同期に載せない。
 
 - **アシスタントの本文と推論**: 所有者は provider から届く差分をためる。Markdown の区切りで、最短 400 ミリ秒の間隔を空けて、項目全体を保存して上書きとして送る。区切りが来ないまま 800 ミリ秒止まったら、たまった分を送る。項目の完了でも送る。
-- **コマンド出力**: 実行中の出力は同期に載せない。クライアントは、その行を展開している間だけ、項目ごとの出力の流れを購読する。Host は、追記を最短 100 ミリ秒の間隔で送り、購読者が遅れたら末尾の全体を送り直す。途中から購読したクライアントには、最初に末尾を送る。項目が完了すると、保存した出力は項目の行に入る。
+- **コマンド出力**: 実行中の出力は同期に載せない。クライアントは、その行を展開している間だけ、項目ごとの出力の流れを購読する。Host は、追記を最短 100 ミリ秒の間隔で送り、購読者が遅れたら末尾の全体を送り直す。途中から購読したクライアントには、最初に末尾を送る。項目が完了すると、保存した出力は項目の行に入る。保存するのは出力の末尾 64 KiB で、それより前を捨てたことを印で示す。
 
 - **理由**: 同期が運ぶのは保存済みの行の上書きだけになる。差分の順序、取りこぼし、途中からの接続のための規則が要らない。コマンド出力は、見ている行でだけ要り、失っても完了時の出力で置き換わるので、会話の状態と分けられる。
 - **根拠(参照実装)**: どちらも T3 Code の形である。
   - 本文は「Markdown の区切りで、最短 400 ミリ秒ごと」に届け、止まったら 800 ミリ秒で送る(`apps/server/src/orchestration-v2/assistantStreaming.ts:113`、`:73`、`:160`)。項目全体を運ぶ(`packages/contracts/src/orchestrationV2.ts:1992`)。
+  - 保存する出力は末尾 64 KiB である(`packages/shared/src/terminalOutput.ts:39`、`apps/server/src/orchestration-v2/CommandOutputHub.ts:93-99`)。
   - コマンド出力は「同期のイベントを通さない。展開した行が、末尾、まとめた追記、保存した出力の順に受け取る」(`apps/server/src/orchestration-v2/CommandOutputHub.ts:29`)。送る間隔は 100 ミリ秒、遅れた購読者には末尾を送り直す(同 `:32-36`)。項目の行は、出力を省いたことを示せる(`orchestrationV2.ts:1699` の `outputOmitted`)。
-- **変わる表示**: 本文は現状の一文字ずつから、区切りごとになる。コマンド出力は、展開した行で流れる。
+- **変わる表示**: 本文は現状の一文字ずつから、区切りごとになる。コマンド出力は、展開した行で流れる。長いコマンド出力は、完了後は末尾 64 KiB だけが残る。
 - **退けた案**: 一文字ずつの差分を同期に載せる。表示は細かいが、差分に基準の版と開始位置を付け、保存の通知と回復の手順を持つことになる。T3 Code に手本がなく、自前で保ち続ける部分になる。レビューで見つかった同期の穴の半分がここから出た。
 
 ### 決定 8: 書き込みは受付と、会話ごとの所有者のループ
@@ -262,6 +263,24 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 - **根拠(Bex)**: 置き換わるものは「現状の構造と問題」のとおり。適用関数を共有する形は現状と同じ(`crates/agent-protocol/src/session.rs:365`)。
 - **根拠(参照実装)**: T3 Code の端末キャッシュは連番と状態を保存し、連番から再開する(`packages/client-runtime/src/state/threads.ts`)。
 
+### 決定 13: 一覧も同じ連番で同期する
+
+サイドバーの一覧を、会話と同じ規則で同期する。利用者が決めた(2026-11-11)。
+
+- **範囲**: すべての会話の要約と、登録済みのプロジェクト。床は持たない。
+- **要約**: `threads` の行のうち、一覧に出す値である。名前、状態、最後の発言の抜粋、未読、親、今の provider、更新時刻。
+- **同期**: 会話と同じく、スナップショット、追いつき、ライブの三つで届く。カーソルは一覧に一つ持つ。
+- **件数の制限**: プロジェクトごとに数件だけ出し、「もっと見る」で増やす表示は、端末が持っている範囲から作る。Host へは問い合わせない。
+- **provider の側の会話**: 仕事が provider の一覧を読み、`threads` の行にする。一覧は行だけから作る。履歴の取り込みは、会話を開いたときに行う。
+- **同期に載せないもの**: 検索は問い合わせと応答のままにする。変更の有無、ブランチ、プロジェクトのアイコンは、git とファイルから読む値なので、読み取りのままにする。
+- **Host の中の利用者**: 通知と Live Activity は、一覧の変更を購読して送る。実行中、待ち、未読の一覧を別に配る通知はなくなる。
+
+- **理由**: 会話の状態が変わるとき、一覧の要約も同じトランザクションで変わる。同じ連番で届ければ、会話の画面と一覧が食い違う瞬間がない。一覧のための版番号、ページ、通知の突き合わせが要らなくなる。
+- **根拠(Bex)**: 現状の一覧は、provider の一覧、登録済みのプロジェクト、Host の会話を読むたびに合成する(`crates/host-daemon/src/host_rpc/service/titles.rs:1`)。変更は版番号(`host_rpc/routing.rs:104` の `list_revision`)と、更新、改名、活動の通知で伝え、core がページごとに突き合わせる(`crates/agent-core/src/state/operations/lists.rs`)。利用者の Host の会話は 363 件で、全件の要約を一度に送っても小さい。
+- **根拠(参照実装)**: T3 Code は一覧を一本の流れで送る。スナップショットは会話の要約とプロジェクトを含み、その後は会話とプロジェクトの更新と削除が連番付きで届く(`packages/contracts/src/orchestrationV2.ts:2250-2290`)。要約は一覧のための値だけを持つ(同 `:2099`)。差が 1,000 件を超えたらスナップショットを送り直す(`apps/server/src/ws.ts:687`)。検索は別の問い合わせである(`apps/server/src/orchestration-v2/ThreadSearch.ts`)。
+- **退けた案**: 一覧を更新時刻の床で区切る。件数が多い Host では最初に送る量が減るが、「もっと見る」が Host への問い合わせに戻り、プロジェクトごとの件数の制限と床の関係を定めることになる。今の件数では要らない。件数が増えて最初の同期が重くなったら、T3 Code と同じく古い会話を別に分ける。
+- **確認が要る点**: provider の一覧を読む仕事の間隔と、provider の側で消えた会話の扱い。別のブランチで進んでいる「完了した会話の整理」は `threads` の行の値として載せる。
+
 ## 同期の契約
 
 決定 5、6、7、8 が成立する条件を、規則と具体例で定める。試験はこの節から作る。
@@ -285,7 +304,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 - カーソルは範囲を跨いで使えない。会話 A のカーソルは、会話 B について何も保証しない。
 - 範囲内の項目の行はすべて持ち、大きな本文だけを省く。現状はターンごとに要約の項目だけを持てるが(`items_summary`、`crates/agent-protocol/src/session.rs:1255` の突き合わせ)、ターンの中身が部分的だと「完全に持っている」を定義できない。
 - 床を項目の位置にするのは、一つのターンが非常に大きいときに、ターンの途中でウィンドウを区切れるようにするためである。T3 Code は、ウィンドウを 10 ユーザーターン、1 ターン 500 項目、1 MiB で区切り、長いターンの内側でも止める(`apps/server/src/orchestration-v2/threadHistoryPaging.ts:11-21`)。本文を省いた項目は一件ずつ読む(`packages/contracts/src/orchestrationV2.ts:4177`)。
-- 一覧の範囲は段階 6 で定める。それまで一覧は現状の読み取りと通知を使う。
+- **一覧の範囲**: すべての会話の `Thread` の行のうち一覧に出す要約と、すべての `Project` の行(決定 13)。床は持たない。カーソルは会話の範囲とは別に一つ持つ。`Thread` の行は会話の範囲と一覧の範囲の両方に属する。
 
 ### Host が送るもの
 
@@ -407,6 +426,13 @@ CREATE UNIQUE INDEX threads_identity ON threads (ifnull(provider, ''), id);
 CREATE INDEX threads_changed ON threads (seq);
 CREATE INDEX threads_children ON threads (parent) WHERE parent IS NOT NULL;
 
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    seq INTEGER NOT NULL,
+    body BLOB NOT NULL              -- 名前、フォルダ
+) STRICT;
+CREATE INDEX projects_changed ON projects (seq);
+
 CREATE TABLE inputs (
     id TEXT PRIMARY KEY,            -- 操作の識別子を兼ね、配送後は発言の項目の識別子になる
     thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
@@ -452,13 +478,14 @@ CREATE INDEX requests_in_flight ON requests (state) WHERE state = 'sending';
 
 -- 同期のための表
 CREATE TABLE removals (
-    thread INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    kind TEXT NOT NULL,             -- input | turn | item | request
+    kind TEXT NOT NULL,             -- input | turn | item | request | project
     id TEXT NOT NULL,
+    thread INTEGER,                 -- 会話の範囲の行なら、その会話の行のキー。一覧だけの行では空
     at INTEGER NOT NULL,            -- 保持期間の判定に使う
-    PRIMARY KEY (thread, seq, kind, id)
+    PRIMARY KEY (seq, kind, id)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX removals_thread ON removals (thread, seq) WHERE thread IS NOT NULL;
 
 CREATE TABLE receipts (
     operation_id TEXT PRIMARY KEY,
@@ -557,8 +584,9 @@ provider の識別子は、それを発行した範囲の中でしか一意で�
 | スナップショット。会話の末尾から項目を数件 | `items_order` |
 | 範囲の拡張。ある位置より前の項目を数件 | `items_order` |
 | 追いつき。会話の中で連番がカーソルより大きい項目 | `items_changed` |
-| 追いつき。会話の中の削除記録 | `removals` の主キー |
-| 一覧の追いつき(段階 6) | `threads_changed` |
+| 追いつき。会話の中の削除記録 | `removals_thread` |
+| 一覧の追いつき。プロジェクトの削除記録 | `removals` の主キー |
+| 一覧の追いつき | `threads_changed`、`projects_changed` |
 | 起動時に続きが要る行 | `inputs_in_flight`、`turns_in_flight`、`requests_in_flight`、`bindings_in_flight` |
 | provider のイベントを会話へ振り分ける | `sources_native` |
 | 取り込みで既存のターンを見つける | `executions_native` |
@@ -616,7 +644,7 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 | 巻き戻したターン | 消さずに、巻き戻し済みの状態で行を残す。T3 Code と同じである(`apps/server/src/orchestration-v2/CheckpointRollbackService.ts:349`)。利用者が決めた(2026-11-11)。巻き戻しを取り消す操作は作らない |
 | 取り込みで写さなかった内容 | 手当てしない。本文だけを写すのは決定済みである。provider の履歴が残っている間は再取り込みで戻せる |
 | 実行中のコマンド出力 | 手当てしない。Host が落ちれば、そのコマンドも止まっている |
-| 長いコマンド出力の先頭 | 保存する出力に上限を付けるかは未決定。T3 Code は末尾 64 KiB だけを残す |
+| 長いコマンド出力の先頭 | 手当てしない。T3 Code と同じく末尾 64 KiB だけを残す。利用者が決めた(2026-11-11) |
 
 ### 切り替えたら戻りにくいもの
 
@@ -666,7 +694,7 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 3. **Host**: 「保存の形」の表、行と連番、削除記録、受付記録、変更セットの生成、会話ごとの所有者、再起動時の規則、対応の合わせ直し、仕事表、絞った接続口。メモリと保存済み履歴を合成する二経路をなくし、置き換わった `SessionActor`、`Conversations`、各ワークフローを削除する。
 4. **core**: 複製、下書きの識別子、`Intent` の分割、端末キャッシュ。経路ごとの版番号の防御、仮キーの付け替え、送信の突き合わせを削除する。表示の投影の入力を替える。
 5. **クライアント**: NSH、iOS、Android を追随させる。段階 2 から 5 をまとめて統合する。
-6. **一覧の同期**: サイドバーの更新を同じ連番に載せ、Host の `list_revision` と改名、活動の通知を整理する。ここで統合できる。
+6. **一覧の同期**(決定 13): プロジェクトを同じ DB に移し、provider の一覧を行にする仕事を置く。一覧を同じ連番で同期し、通知と Live Activity を一覧の変更の購読に替える。置き換わった一覧の読み取り、`list_revision`、更新と改名と活動の通知、core のページの突き合わせを削除する。ここで統合できる。
 
 ## 検証
 
@@ -693,10 +721,6 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 - 範囲内の項目の行をすべて持つ形は、現状(要約の項目だけ)より最初に送る行が増える。会話を開く速さを落とさないことを、段階 3 で実測して確かめる。ウィンドウを区切る項目数と容量は、その実測で決める。
 - 本文を区切りごとに保存する頻度と、遅い接続の上限は測っていない。間隔は T3 Code の値(400 ミリ秒、800 ミリ秒、100 ミリ秒)を出発点にする。
 - T3 Code は一か月で保持の方針が変わった。引用した位置は実装の前に最新で確認し直す。
-- 決めたい点。
-  - 削除記録の保持期間。出発点は一日。
-  - 受付記録の保持。出発点は無期限(T3 Code と同じ)。
-  - 段階 6 をこの計画に含めるか。
 
 ## この計画に含めないもの
 
