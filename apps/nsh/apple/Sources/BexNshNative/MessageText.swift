@@ -29,7 +29,16 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         do { try view.update(JSONDecoder().decode(MessageDocument.self, from: data)) }
         catch {
             // Keep decoder failures visible rather than silently dropping a message.
-            view.text.stringValueForFailure(error.localizedDescription)
+            let width = view.text.document.maxWidth > 0 ? view.text.document.maxWidth : view.bounds.width
+            view.update(MessageDocument(
+                blocks: [MessageParagraph(
+                    header: nil, marker: nil, code: false, quoted: false, depth: 0, alignment: "left",
+                    runs: [MessageRun(text: error.localizedDescription, strong: false, emphasis: false,
+                                      strikethrough: false, code: false, link: nil, darkColor: nil, lightColor: nil)]
+                )],
+                secondary: false, role: "assistant", target: "", sideChat: false,
+                maxWidth: width > 0 ? width : 1_000_000, menu: MessageMenuTitles(quote: "", sideChat: "")
+            ))
         }
     }
 }
@@ -355,10 +364,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                      "command": clickModifiers.contains(.command)])
             return true
         }
-
-        func stringValueForFailure(_ reason: String) {
-            string = reason
-        }
     }
 
     final class MessageTextContainer: NSView {
@@ -565,10 +570,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 }
             })
         }
-
-        func stringValueForFailure(_ reason: String) {
-            text = reason
-        }
     }
 
     final class MessageTextContainer: UIView {
@@ -608,22 +609,24 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                                                  dark: traitCollection.userInterfaceStyle == .dark,
                                                  foreground: document.foreground)
             let range = text.selectedRange
-            let keep = range.length > 0 && NSMaxRange(range) <= content.length && NSMaxRange(range) <= text
-                .attributedText.length
-                && (text.text as NSString).substring(with: range) == (content.string as NSString).substring(with: range)
+            let retained = MessageAttributes.retainedSelection(range, previous: text.text, next: content.string)
             text.attributedText = content
             let size = content.size()
-            reportSize(CGSize(width: ceil(size.width), height: ceil(size.height)))
-            text.selectedRange = keep ? range : NSRange(location: 0, length: 0)
+            let width = min(ceil(size.width), document.maxWidth)
+            // Measure at the document's width before NSH lays out this row.
+            // Its current native frame can still belong to a recycled message.
+            let fitted = text.sizeThatFits(CGSize(width: max(1, width), height: .greatestFiniteMagnitude))
+            reportSize(CGSize(width: ceil(size.width), height: ceil(fitted.height)))
+            text.selectedRange = retained
             setNeedsLayout()
         }
 
         override func layoutSubviews() {
             super.layoutSubviews()
             guard bounds.width > 0 else { return }
-            let height = ceil(text.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height)
-            text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
-            reportSize(CGSize(width: max(0, measuredSize.width), height: height))
+            // A recycled frame belongs to the previous row until NSH applies
+            // the measured size. Keep the layout established for this document.
+            text.frame = CGRect(x: 0, y: 0, width: bounds.width, height: max(0, measuredSize.height))
         }
     }
 #endif
