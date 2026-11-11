@@ -116,11 +116,11 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
     });
     let projected = signal(None::<Result<Shared<Vec<WorkspaceDiffFile>>, String>>);
     effect(move || {
-        let review = review.get();
-        projected.set(None);
-        if let Some(review) = review {
+        if let Some(review) = review.get() {
             // Parsing large diffs does not block the UI. The effect's task is
             // cancelled when a newer review or a different surface replaces it.
+            // Keep the mounted list until its replacement is ready, including
+            // while the workspace review is being fetched.
             spawn(async move {
                 projected.set(Some(
                     blocking(move || Shared(Arc::new(diff_files(&review))))
@@ -128,6 +128,8 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                         .map_err(|reason| reason.to_string()),
                 ));
             });
+        } else {
+            projected.set(None);
         }
     });
     let load = move || {
@@ -139,9 +141,7 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
             )
         })
     };
-    effect(move || {
-        load();
-    });
+    effect(load);
     let pending = computed(move || {
         connection.publication.with(|p| {
             p.snapshot
@@ -170,9 +170,6 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
     let body = computed(move || {
         if failed.get() {
             return DiffBody::Hidden;
-        }
-        if pending.get() {
-            return DiffBody::Loading;
         }
         projected.with(|result| match result {
             None => DiffBody::Loading,
@@ -326,7 +323,8 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
 }
 
 /// What the Diff panel shows under its header: nothing on a workspace error (its
-/// notice tells), a spinner while the diff loads, why there are no files, or them.
+/// notice tells), a spinner before the first diff loads, why there are no files,
+/// or the last parsed files while their replacement loads.
 #[derive(Clone, PartialEq)]
 enum DiffBody {
     Hidden,
@@ -638,6 +636,9 @@ fn agent_row(agent: ReadSignal<AgentSummary>) -> impl IntoElement {
                 .number_of_lines(1),
         )
 }
+
+#[cfg(test)]
+mod refresh_tests;
 
 #[cfg(test)]
 mod tests {
