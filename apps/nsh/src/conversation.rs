@@ -649,8 +649,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
     // Where the list was last scrolled to, for Core's follow rule.
     let scrolled = position;
     let scroll_pending = stored(false);
-    // Further from the end than following reaches, as T3 Code offers the way
-    // back.
+    // Far enough from the end to offer T3 Code's way back.
     let away_from_end = signal(false);
     let clock = signal(std::time::SystemTime::now());
     let padding = move || lane_padding(window().width.0);

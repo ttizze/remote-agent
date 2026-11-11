@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 mod follow;
-pub use follow::{FOLLOW_REARM_DISTANCE, ScrollPosition, away_from_end, follows_end};
+pub use follow::{ScrollPosition, away_from_end, follows_end};
 mod images;
 pub mod rows;
 mod timeline;

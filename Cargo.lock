@@ -4455,7 +4455,7 @@ dependencies = [
 [[package]]
 name = "nsh-base"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "chrono",
  "html5ever 0.27.0",
@@ -4484,7 +4484,7 @@ dependencies = [
 [[package]]
 name = "nsh-core"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "cap-std",
  "crc32fast",
@@ -4519,7 +4519,7 @@ dependencies = [
 [[package]]
 name = "nsh-engine"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -4537,7 +4537,7 @@ dependencies = [
 [[package]]
 name = "nsh-macros"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "imagesize 0.15.0",
  "proc-macro2",
@@ -4550,7 +4550,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-ios"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4574,7 +4574,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-macos"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -4600,7 +4600,7 @@ dependencies = [
 [[package]]
 name = "nsh-platform-windows"
 version = "0.4.0"
-source = "git+https://github.com/ttizze/nsh?rev=337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e#337b22e3411e0a6a4c2664ca2f0f950fc76a4d2e"
+source = "git+https://github.com/ttizze/nsh?rev=56741e2fba707427cd0dcc7be3e6391c4cccf67b#56741e2fba707427cd0dcc7be3e6391c4cccf67b"
 dependencies = [
  "crossbeam-channel",
  "image",
