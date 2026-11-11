@@ -64,11 +64,15 @@ T3 は最初に手元の fork(`fecdf4497e`、2026-10-07)で読み、引用する
 
 **既存の識別子は変えない。** 利用者が決めた(2026-11-11)。会話の識別子は、Host、通信、各端末に保存された下書きとキャッシュ、ワークツリーの記録、通知の登録、履歴を読むコマンドで使われている。付け替えると、どれがどの会話のものかを失い、後から直せない。
 
-- 会話の識別子の型と形は、今の `SessionRef`(provider と id の組)のままにする。既存の会話の識別子は一字も変えない。移行は識別子を書き換えず、対応表も持たない。
-- 新しい会話の識別子も今と同じ形にする。`id` は今も、クライアントが割り当てた値から決まる。クライアントは Host の応答を待たずに同じ値を作る。
-- 識別子の中の provider は、会話が作られたときの provider を表すだけである。今の provider は会話の行が持つ。識別子から今の provider を読み取らない。
+- 既存の会話の識別子(provider と id の組)は一字も変えない。移行は識別子を書き換えず、対応表も持たない。
+- Bex で新しく作る会話の識別子は、provider を含めない。クライアントが下書きを作ったときに乱数の UUID を割り当て、それがそのまま会話の識別子になる。T3 Code と同じ形である。利用者が決めた(2026-11-11)。
+- 型は今の `SessionRef` を使い、provider を省けるようにする。provider を持つ識別子と持たない識別子は、id が同じでも別の会話である。
+- provider の側で作られた会話(外部で始めた会話、provider が作るサブエージェント)は、取り込む前から、provider とその provider の識別子の組で一覧に出ている。その組を識別子として使い続ける。
+- 識別子から今の provider を読み取らない。今の provider は会話の行が持つ。
+- 入力の識別子は、会話の識別子とは別に、入力ごとにクライアントが割り当てる。現状は会話の `id` を最初の入力の識別子から作るが、新しい会話ではそうしない。
 - 既存のターンと項目の識別子は、会話の中で一意なものをそのまま使う。新しく作るものから、Host が割り当てる。provider が使い回したために同じ識別子を持つ既存のターンは、行を区別できないので、移行で一意な識別子を振る。ターンと項目の識別子は、会話の識別子と違って端末のキャッシュの中にしかなく、キャッシュはスナップショットで置き換わる。
-- 送信前の下書きは provider がまだ決まっていないので、クライアントが割り当てた値で持つ。送信のときに、その値と選んだ provider から識別子が決まる。
+- 下書きは、作ったときから会話の識別子で持つ。送信の前後で付け替えない。端末は「このプロジェクトで書きかけの新規会話」から、その下書きの識別子への対応を持つ。現状は仮のキーがこの役割を兼ねている(`crates/agent-core/src/state.rs` の `DraftKey::new_chat`)。
+- 更新の時点で端末に残っている送信前の下書きは、Host にまだ識別子がないので、新しい識別子を割り当てる。
 
 - **理由**: 識別子が生まれた時点で確定していれば、クライアントと core は付け替えも突き合わせもしない。下書きは最初から会話の識別子で持てる。送った入力はそのままユーザー発言になる。
 - **残る対応付け**: provider との対応付けはなくならない。Host の provider との境界(接続と取り込み)に集める。
@@ -77,12 +81,13 @@ T3 は最初に手元の fork(`fecdf4497e`、2026-10-07)で読み、引用する
   - 取り込み。同じ組で既存の行を見つけ、二重に作らない。
 - **根拠(Bex)**: 上の「識別子の所有者が揃っていない」のうち、クライアントの付け替え(`DraftKey::Local`、`draft_sessions`)と core の突き合わせ(`reconcile_pending`)がなくなる。出現の照合は Host の境界の一か所に移る。
 - **根拠(参照実装)**: 読んだ全実装が同じ答えである。
-  - T3 Code: 会話、実行、発言、項目がすべてアプリの識別子で、provider 側は `ProviderThread`、`ProviderTurn` として別に持つ。
+  - T3 Code: 会話、実行、発言、項目がすべてアプリの識別子で、provider 側は `ProviderThread`、`ProviderTurn` として別に持つ。会話の識別子は、クライアントが下書きを作るときに乱数の UUID で決め(`apps/web/src/lib/utils.ts:51`、`apps/web/src/composerDraftStore.ts:2614`)、会話を作るコマンドに入れて送る(`packages/contracts/src/orchestrationV2.ts:2946`)。provider は識別子に含めない。プロジェクトから下書きへの対応も端末が持つ(`composerDraftStore.ts` の `logicalProjectDraftThreadKeyByLogicalProjectKey`)。
   - Happy: 「provider の識別子を使ってはならない」と明記する(`docs/session-protocol.md` の Subagents)。
   - Paseo: 本文の一致で突き合わせていたのを「クライアントの識別子で行が生まれ、以後変わらない」に改めた(`docs/timeline-sync.md` の canonical submitted row)。
   - OpenCode: 同じ識別子での再送は最初の受付が勝つ(`specs/v2/session.md` の Prompt Admission)。
 - **退けた案**:
   - 識別子を Host の応答で受け取る現状。クライアントが送信前に識別子を知らないので、付け替えが残る。
+  - 新しい会話にも provider を含める。形は一種類で済むが、provider は送信するまで決まらないので、下書きの段階で識別子が確定せず、端末の中の付け替えが残る。
   - 会話の識別子を provider を含まない新しい形に振り直す。形は整うが、既存の参照をすべて付け替えることになり、戻せない。
 
 ### 決定 2: 会話の正本は Host の一つの DB
@@ -389,7 +394,7 @@ CREATE TABLE store (
 -- 同期する表
 CREATE TABLE threads (
     key INTEGER PRIMARY KEY,        -- DB の中だけで使う行のキー
-    provider TEXT NOT NULL,         -- 会話の識別子。今の SessionRef の組をそのまま持つ
+    provider TEXT,                  -- 会話の識別子。Bex で作った会話は provider を持たない
     id TEXT NOT NULL,
     seq INTEGER NOT NULL,
     parent INTEGER,                 -- サブエージェントの親の行のキー
@@ -398,7 +403,7 @@ CREATE TABLE threads (
     history_seq INTEGER NOT NULL,   -- 最後に履歴を置き換えた連番
     body BLOB NOT NULL              -- 名前、今の provider、モデル選択、既読、キューの保留、一覧に出す要約
 ) STRICT;
-CREATE UNIQUE INDEX threads_identity ON threads (provider, id);
+CREATE UNIQUE INDEX threads_identity ON threads (ifnull(provider, ''), id);
 CREATE INDEX threads_changed ON threads (seq);
 CREATE INDEX threads_children ON threads (parent) WHERE parent IS NOT NULL;
 
@@ -457,7 +462,7 @@ CREATE TABLE removals (
 
 CREATE TABLE receipts (
     operation_id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,         -- 対象の会話の識別子。会話を消した後も残すので、行のキーでは持たない
+    provider TEXT,                  -- 対象の会話の識別子。会話を消した後も残すので、行のキーでは持たない
     thread_id TEXT NOT NULL,
     seq INTEGER NOT NULL,           -- 効果を書いたトランザクションの連番
     outcome BLOB NOT NULL           -- 受付か、理由付きの拒否
@@ -559,6 +564,7 @@ provider の識別子は、それを発行した範囲の中でしか一意で�
 | 取り込みで既存のターンを見つける | `executions_native` |
 | 取り込みで既存の項目を見つける | `item_natives` の主キー |
 | 操作の再送 | `receipts` の主キー |
+| 会話の識別子から行を引く | `threads_identity` |
 | サブエージェントの一覧 | `threads_children` |
 
 ### T3 Code の表との対応
@@ -614,7 +620,7 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 
 ### 切り替えたら戻りにくいもの
 
-- **識別子**: 付け替えない(決定 1)。これを守れば、ほかの切り替えは変換でやり直せる。
+- **識別子**: 既存の会話の識別子は付け替えない(決定 1)。新しい会話から、provider を含めない形にする。これを守れば、ほかの切り替えは変換でやり直せる。
 - **新しい形への移行(段階 3)**: 移行の前にバックアップを取り、古いファイルを残す。今の自動更新と同じ方式である(`crates/host-daemon/src/host_rpc/store/upgrade.rs:94`)。新しい版で会話を続けた後に古い版へ戻すと、その間の内容は失われる。
 - **Host とクライアントの同時更新**: 通信の形が変わるので、古いクライアントは繋がらなくなる。iPhone は TestFlight の承認を挟むので、iPhone 版が使えるようになってから Host を上げる。
 
