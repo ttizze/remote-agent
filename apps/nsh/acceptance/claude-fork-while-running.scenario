@@ -5,6 +5,8 @@ press このプロジェクトで新しいチャット
 press "Fixture Model"
 press "Claude Code"
 press "Default (recommended)" after モデルを検索 20000
+expect "モデルを検索"
+key escape
 expect_absent "モデルを検索"
 type "AI に依頼する" "分岐元の回答です"
 press 送信

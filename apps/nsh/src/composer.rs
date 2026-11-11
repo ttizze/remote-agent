@@ -356,17 +356,14 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             .label(prompt)
             .masked(move || answering.with(|q| q.as_ref().is_some_and(|q| q.question.secret)))
             .readonly(move || {
-                recording.get()
-                    || requesting.get()
-                    || controls.with(|c| c.transcribing)
-                    || answering.with(|q| {
-                        q.as_ref().is_some_and(|q| {
-                            !q.can_respond
-                                || !q.question.allow_free_text
-                                || controls.with(|c| c.question_phase.clone())
-                                    == Some(op::OperationPhase::Running)
-                        })
+                answering.with(|q| {
+                    q.as_ref().is_some_and(|q| {
+                        !q.can_respond
+                            || !q.question.allow_free_text
+                            || controls.with(|c| c.question_phase.clone())
+                                == Some(op::OperationPhase::Running)
                     })
+                })
             })
             .text_color(move || nsh_base::theme().foreground)
             .placeholder_color(move || color(nsh_base::theme().muted_foreground))
@@ -461,6 +458,14 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             view()
         }
     };
+    let dictating =
+        move || recording.get() || requesting.get() || controls.with(|c| c.transcribing);
+    let field_content = move || {
+        let content = view().child(when(move || !dictating(), field));
+        #[cfg(dictation)]
+        let content = content.child(when(dictating, move || dictation.body()));
+        content
+    };
     let actions = move || {
         view()
             .grid()
@@ -475,58 +480,82 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             .items_center()
             .gap_1()
             .child(
-                field()
+                field_content()
                     .min_w_0()
                     .w_full()
                     .col_start(move || if collapsed() { 2_i16 } else { 1_i16 })
                     .col_end(move || if collapsed() { 3_i16 } else { 6_i16 })
                     .row_start(1),
             )
-            .child(
-                native::menu(
-                    "plus",
-                    tr("添付"),
-                    native::choices(&[tr("写真を選択"), tr("ファイルを選択")]),
-                    move |item| {
-                        let host = connection.host.get_untracked();
-                        let key = controls.with_untracked(|c| c.navigation.draft_key.clone());
-                        if item == tr("写真を選択") {
-                            let picked = pick_images(nsh_core::picker::PickRequest::new(true, 10));
-                            spawn(async move {
-                                let images = picked.await;
-                                connection.application.with(|app| {
-                                    app.attach(
-                                        host,
-                                        connection.pane,
-                                        key,
-                                        images
-                                            .into_iter()
-                                            .map(|file| crate::client::AttachmentSource::Image {
-                                                name: file.name,
-                                                bytes: file.data.to_vec(),
-                                            })
-                                            .collect(),
-                                    )
+            .child(when(
+                move || !recording.get() && !requesting.get(),
+                move || {
+                    native::menu(
+                        "plus",
+                        tr("添付"),
+                        native::choices(&[tr("写真を選択"), tr("ファイルを選択")]),
+                        move |item| {
+                            let host = connection.host.get_untracked();
+                            let key = controls.with_untracked(|c| c.navigation.draft_key.clone());
+                            if item == tr("写真を選択") {
+                                let picked =
+                                    pick_images(nsh_core::picker::PickRequest::new(true, 10));
+                                spawn(async move {
+                                    let images = picked.await;
+                                    connection.application.with(|app| {
+                                        app.attach(
+                                            host,
+                                            connection.pane,
+                                            key,
+                                            images
+                                                .into_iter()
+                                                .map(|file| {
+                                                    crate::client::AttachmentSource::Image {
+                                                        name: file.name,
+                                                        bytes: file.data.to_vec(),
+                                                    }
+                                                })
+                                                .collect(),
+                                        )
+                                    });
                                 });
-                            });
-                        } else if !is_desktop() {
-                            file_target.replace(Some((host, key)));
-                            file_pick.update(|value| *value += 1);
-                        } else {
-                            pick_files(connection.application.get(), host, connection.pane, key);
-                        }
-                    },
-                )
-                .prop(
-                    "appearance",
-                    json!(if is_desktop() { "plain" } else { "automatic" }),
-                )
-                .prop("enabled", move || json!(can_attach()))
-                .min_h(px(44.0))
-                .min_w(px(44.0))
-                .col_start(1)
-                .row_start(move || if collapsed() { 1_i16 } else { 2_i16 }),
-            )
+                            } else if !is_desktop() {
+                                file_target.replace(Some((host, key)));
+                                file_pick.update(|value| *value += 1);
+                            } else {
+                                pick_files(
+                                    connection.application.get(),
+                                    host,
+                                    connection.pane,
+                                    key,
+                                );
+                            }
+                        },
+                    )
+                    .prop(
+                        "appearance",
+                        json!(if is_desktop() { "plain" } else { "automatic" }),
+                    )
+                    .prop("enabled", move || json!(can_attach()))
+                    .min_h(px(44.0))
+                    .min_w(px(44.0))
+                    .col_start(1)
+                    .row_start(move || if collapsed() { 1_i16 } else { 2_i16 })
+                },
+            ))
+            .child(when(
+                move || recording.get() || requesting.get(),
+                move || {
+                    #[cfg(dictation)]
+                    {
+                        dictation.cancel_button().col_start(1).row_start(2)
+                    }
+                    #[cfg(not(dictation))]
+                    {
+                        view()
+                    }
+                },
+            ))
             .child(when(
                 move || !collapsed(),
                 || {
@@ -596,46 +625,32 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             !enabled()
                 || (composer.with(|c| c.draft.text.trim().is_empty()) && !stopping() && !resuming())
         };
-        // T3 Code's footer: the controls between attaching and sending fit the
-        // room the row leaves them, as `footer::controls_layout` decides.
+        // The model name shortens to fit between attaching and sending.
         let row_width = signal(None::<f32>);
         let attach_width = signal(0_f32);
         let primary_width = signal(0_f32);
         let model_width = signal(0_f32);
-        // The approval control is the one block after the model control, and
-        // as wide as the "more" control as its icon.
-        #[cfg(desktop)]
-        let approval_width = signal(0_f32);
-        #[cfg(desktop)]
-        let blocks = move || {
-            use crate::permissions::ICON_WIDTH;
-            (vec![approval_width.get()], vec![ICON_WIDTH], ICON_WIDTH)
+        let room = move || {
+            let quick = connection.settings.with(|p| p.quick_controls());
+            row_width.get().unwrap_or_default()
+                - attach_width.get()
+                - primary_width.get()
+                - crate::model_controls::quick_width(
+                    quick.toggle_fast_to.is_some(),
+                    quick.efforts.len(),
+                )
         };
-        #[cfg(not(desktop))]
-        let blocks = || (Vec::new(), Vec::new(), 0.0);
-        let room =
-            move || row_width.get().unwrap_or_default() - attach_width.get() - primary_width.get();
-        let measurement = move || {
-            let (blocks, icon_blocks, overflow) = blocks();
-            footer::ControlsMeasurement {
-                gap: 0.0,
-                model: model_width.get(),
-                blocks,
-                icon_blocks,
-                overflow,
-            }
-        };
-        let layout = signal(footer::ControlsLayout::default());
+        let width = signal(Some(footer::MODEL_MINIMUM_WIDTH));
         effect(move || {
             if row_width.get().is_some() {
-                let previous = layout.get_untracked();
-                let next = footer::controls_layout(&measurement(), room(), Some(previous));
+                let previous = width.get_untracked();
+                let next = footer::model_width(model_width.get(), room(), previous.is_some());
                 if next != previous {
-                    layout.set(next);
+                    width.set(next);
                 }
             }
         });
-        let shown = move || layout.with(|layout| layout.visible);
+        let shown = move || width.with(Option::is_some);
         let controls_row = view()
             .flex_row()
             .items_center()
@@ -667,37 +682,14 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                         },
                     )),
             );
-        #[cfg(desktop)]
-        let controls_row = controls_row.child(when(shown, move || {
-            use crate::permissions::Look;
-            crate::permissions::control(approval_width, move || {
-                layout.with(|layout| {
-                    if layout.hidden_at(0, 1) {
-                        Look::More
-                    } else if layout.icon_only_at(0, 1) {
-                        Look::Icon
-                    } else {
-                        Look::Labelled
-                    }
-                })
-            })
-        }));
         view()
-            .element_ref(&connection.composer_box)
-            .w_full()
-            .p(px(7.0))
-            .gap_2()
-            .rounded(px(22.0))
-            .bg(colors::SURFACE)
-            .border_1()
-            .border_color(colors::border())
             .child(view().px_2().pt(px(10.0)).pb_1().child(field().w_full()))
             .child(
                 controls_row
                     .child(view().flex_1())
                     .child(when(shown, move || {
                         crate::model_controls::controls(model_width, move || {
-                            footer::model_width(&measurement(), room(), layout.get())
+                            width.get().unwrap_or_default()
                         })
                     }))
                     .child(
@@ -805,7 +797,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
     let column = column.child(review_card());
     // As the desktop client's composer, Escape discards a recording (or its
     // permission request) before it is transcribed.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(dictation)]
     let column = column.child(when(
         move || recording.get() || requesting.get(),
         move || {
@@ -883,6 +875,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
         .child(when(
             move || {
                 answering.with(Option::is_none)
+                    && (!is_desktop() || !dictating())
                     && composer.with(|c| !c.draft.attachments.is_empty())
             },
             move || {
@@ -924,7 +917,24 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
         .child(
             view()
                 .child(crate::requests::panels(following))
-                .child(when(is_desktop, desktop_box))
+                .child(when(is_desktop, move || {
+                    use crate::ui::colors;
+                    let frame = view()
+                        .label(tr("メッセージを入力"))
+                        .element_ref(&connection.composer_box)
+                        .w_full()
+                        .p(px(7.0))
+                        .gap_2()
+                        .rounded(px(22.0))
+                        .bg(colors::SURFACE)
+                        .border_1()
+                        .border_color(colors::border())
+                        .child(when(move || !dictating(), desktop_box));
+                    #[cfg(all(dictation, desktop))]
+                    let frame =
+                        frame.child(when(dictating, move || dictation.bar(submit, enabled)));
+                    frame
+                }))
                 .child(when(
                     move || !is_desktop(),
                     move || {

@@ -103,12 +103,12 @@ reason). Reasons recur:
 
 | State | Source | Status |
 |---|---|---|
-| Resting: surface, placeholder, model, effort, access mode, attach, send | `ComposerFooterModeControls`, `ComposerPrimaryActions.tsx` | covered: `draft`, `turn-finished` |
+| Resting: surface, placeholder, model, attach, send | `ComposerFooterModeControls`, `ComposerPrimaryActions.tsx` | covered: `draft`, `turn-finished` |
 | Draft typed, grown to three lines | `useComposerMultilinePrompt.ts` | covered: `composer-draft` |
 | Running: stop button | `ComposerPrimaryActions.tsx` | covered: `turn-thinking`, `turn-live` |
 | Context strip: environment, branch, worktree mode | `ComposerSurface.ContextStrip`, `BranchToolbar*.tsx` | not compared: NSH leaves it out by product decision; the project comes from the draft hero and the sidebar, the Host from the connection list |
-| Model picker open (account, models, search) | `ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ModelPickerAccount.tsx` | covered: `model-picker` |
-| Effort (traits) picker and access mode select open | `TraitsPicker.tsx`, runtime mode `Select` | not yet: not mapped |
+| Model picker open (providers, models, search, reasoning, speed, permissions, account) | `ProviderModelPicker.tsx`, `ModelPickerContent.tsx`, `ModelPickerAccount.tsx` | covered: `model-picker` |
+| Permissions menu open inside the model picker | `ProviderModelPicker.tsx` | not yet: menu choices are exercised before capture, but the open menu is not mapped |
 | Compact controls menu (narrow composer) | `CompactComposerControlsMenu.tsx` | not yet: needs a narrower viewport |
 | Slash command, @mention and $skill menus | `ComposerCommandMenu.tsx` | not yet: not mapped |
 | Attachments: image thumbnails, files, video, upload failure | `ComposerImageThumbnail.tsx`, `ComposerFileAttachment` | not yet: not mapped (NSH `attachments` scenario attaches through the open panel) |

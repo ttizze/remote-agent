@@ -122,6 +122,12 @@ macro_rules! icon {
 }
 
 impl Icon {
+    pub(crate) const FAST: Self = Self {
+        markup: include_str!("../assets/bolt.svg"),
+    };
+    pub(crate) const FAST_ON: Self = Self {
+        markup: include_str!("../assets/bolt-fill.svg"),
+    };
     pub(crate) const ARROW_LEFT: Self = icon!(ArrowLeft);
     pub(crate) const ARROW_RIGHT: Self = icon!(ArrowRight);
     pub(crate) const ARROW_UP: Self = icon!(ArrowUp);
@@ -428,7 +434,10 @@ pub(crate) fn toggle(
 
 /// nsh-base's button (focus, keys, accessibility) in the desktop client's
 /// ghost look, its content filling it.
-fn ghost(label: impl IntoReactive<SharedString>, content: View) -> nsh_base::ButtonElement {
+pub(crate) fn ghost(
+    label: impl IntoReactive<SharedString>,
+    content: View,
+) -> nsh_base::ButtonElement {
     nsh_base::button()
         .accessibility_label(nsh_core::element::Prop::from(
             label.into_reactive().map(Some),

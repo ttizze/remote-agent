@@ -1,5 +1,5 @@
 # The model picker opens from the composer, lists the provider's models and,
-# as T3 Code's picker, closes once a model is chosen, which the composer shows.
+# keeps it open to adjust its reasoning level, which the composer shows.
 # iOS: testSimulatorModelPickerUsesNativeFormAndAgentPicker, testSimulatorOpensAccountManagementFromSettingsAndModelPicker
 expect "何に取り組みますか？" 30000
 press モデル
@@ -7,10 +7,11 @@ expect "Fixture Model" 20000
 expect "モデルを検索"
 expect "Claude Code"
 screenshot picker
-press "Fixture Model"
-expect_absent "モデルを検索"
+press "Fixture Model" after モデルを検索
+expect "モデルを検索"
 expect "Fixture Model"
 screenshot applied
+key escape
 # Escape closes it without choosing.
 press "Fixture Model"
 expect "モデルを検索"

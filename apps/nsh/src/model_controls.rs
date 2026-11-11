@@ -57,6 +57,13 @@ const PADDING: f32 = 8.0;
 #[cfg(desktop)]
 const LABEL_FONT: &str = "14px system-ui";
 
+const FAST_WIDTH: f32 = 40.0;
+const EFFORT_WIDTH: f32 = 44.0;
+
+pub(crate) fn quick_width(has_fast: bool, effort_count: usize) -> f32 {
+    (if has_fast { FAST_WIDTH } else { 0.0 }) + if effort_count > 0 { EFFORT_WIDTH } else { 0.0 }
+}
+
 /// The model control and its picker. On the desktop the control sets `natural`
 /// to its width with the whole name and is `width` wide, its name shortened to
 /// fit; elsewhere it takes its own width.
@@ -95,6 +102,80 @@ pub(crate) fn controls(
     let enabled = move || {
         connection.settings.with(|p| p.connected())
             && !connection.composer.with(|c| c.controls.sending)
+    };
+    let quick = computed(move || connection.settings.with(|p| p.quick_controls()));
+    let fast_button = move || {
+        use crate::ui::{self, Icon};
+        ui::ghost(
+            move || {
+                SharedString::from(tr(if quick.with(|q| q.fast) {
+                    "Fast：オン"
+                } else {
+                    "Fast：オフ"
+                }))
+            },
+            view().child(dynamic(move || {
+                ui::icon(
+                    if quick.with(|q| q.fast) {
+                        Icon::FAST_ON
+                    } else {
+                        Icon::FAST
+                    },
+                    18.0,
+                )
+            })),
+        )
+        .w(px(FAST_WIDTH))
+        .h(px(44.0))
+        .text_color(move || {
+            if quick.with(|q| q.fast) {
+                crate::ui::colors::foreground()
+            } else {
+                crate::ui::colors::muted()
+            }
+        })
+        .enabled(enabled)
+        .on_press(move || {
+            if let Some(service_tier) = quick.with_untracked(|q| q.toggle_fast_to.clone()) {
+                connection.dispatch(Intent::SelectServiceTier {
+                    thread_id: connection.settings.with_untracked(|p| p.draft_key()),
+                    service_tier,
+                });
+            }
+        })
+    };
+    let effort_button = move || {
+        use crate::ui::{self, colors};
+        ui::ghost(
+            move || {
+                SharedString::from(crate::l10n::tr_format(
+                    "推論の強度：{0}",
+                    [&quick.with(|q| q.effort.clone())],
+                ))
+            },
+            view().child(dynamic(move || {
+                let count = quick.with(|q| q.efforts.len());
+                (0..count).fold(view().flex_row().gap(px(2.0)).items_end(), |bars, index| {
+                    bars.child(
+                        view()
+                            .w(px(3.0))
+                            .h(px(6.0 + 10.0 * (index + 1) as f32 / count as f32))
+                            .rounded(px(1.0))
+                            .bg(move || {
+                                if index < quick.with(|q| q.effort_level) as usize {
+                                    colors::foreground()
+                                } else {
+                                    nsh_core::element::rgb(0x555555)
+                                }
+                            }),
+                    )
+                })
+            })),
+        )
+        .w(px(EFFORT_WIDTH))
+        .h(px(44.0))
+        .enabled(enabled)
+        .on_press(open_picker)
     };
     // Drawn by NSH, so that its name shortens with an ellipsis as T3 Code's does.
     #[cfg(desktop)]
@@ -139,42 +220,65 @@ pub(crate) fn controls(
     #[cfg(desktop)]
     {
         use nsh_core::overlay::{Align, Placement};
-        view().flex_row().items_center().child(
-            nsh_base::popover()
-                .open(move || Some(picker.with(Option::is_some)))
-                .on_open_change(move |event: &nsh_base::PopoverEvent| {
-                    if matches!(event, nsh_base::PopoverEvent::OpenChange(false, _)) {
-                        picker.set(None);
-                    }
-                })
-                .placement(Placement::Top)
-                .align(Align::End)
-                .offset(px(8.0))
-                .popup_class("bg-[#0f0f0f] rounded-[10px] border border-[#303030]")
-                .trigger(trigger)
-                .child(panel(data, act)),
-        )
+        view()
+            .flex_row()
+            .items_center()
+            .child(when(
+                move || quick.with(|q| q.toggle_fast_to.is_some()),
+                fast_button,
+            ))
+            .child(
+                nsh_base::popover()
+                    .open(move || Some(picker.with(Option::is_some)))
+                    .on_open_change(move |event: &nsh_base::PopoverEvent| {
+                        if matches!(event, nsh_base::PopoverEvent::OpenChange(false, _)) {
+                            picker.set(None);
+                        }
+                    })
+                    .placement(Placement::Top)
+                    .align(Align::End)
+                    .offset(px(8.0))
+                    .popup_class("bg-[#0f0f0f] rounded-[10px] border border-[#303030]")
+                    .trigger(trigger)
+                    .child(panel(data, act)),
+            )
+            .child(when(
+                move || quick.with(|q| !q.efforts.is_empty()),
+                effort_button,
+            ))
     }
     #[cfg(not(desktop))]
     {
-        view().flex_row().items_center().child(trigger).child(
-            native("bex.details")
-                .prop("data", move || json!({"modelPicker": {"data": data.get()}}))
-                .on_native_event(move |event: &NativeEvent| {
-                    if picker.with_untracked(|picker| {
-                        picker
-                            .as_ref()
-                            .is_some_and(|picker| event.data["token"].as_str() == Some(&picker.id))
-                    }) {
-                        act(
-                            event.data["action"].as_str().unwrap_or_default(),
-                            event.data["value"].as_str().unwrap_or_default(),
-                        );
-                    }
-                })
-                .w(px(0.0))
-                .h(px(0.0)),
-        )
+        view()
+            .flex_row()
+            .items_center()
+            .child(when(
+                move || quick.with(|q| q.toggle_fast_to.is_some()),
+                fast_button,
+            ))
+            .child(trigger)
+            .child(when(
+                move || quick.with(|q| !q.efforts.is_empty()),
+                effort_button,
+            ))
+            .child(
+                native("bex.details")
+                    .prop("data", move || json!({"modelPicker": {"data": data.get()}}))
+                    .on_native_event(move |event: &NativeEvent| {
+                        if picker.with_untracked(|picker| {
+                            picker.as_ref().is_some_and(|picker| {
+                                event.data["token"].as_str() == Some(&picker.id)
+                            })
+                        }) {
+                            act(
+                                event.data["action"].as_str().unwrap_or_default(),
+                                event.data["value"].as_str().unwrap_or_default(),
+                            );
+                        }
+                    })
+                    .w(px(0.0))
+                    .h(px(0.0)),
+            )
     }
 }
 
@@ -219,6 +323,9 @@ fn act(connection: Connection, picker: Signal<Option<Picker>>, action: &str, val
                         picker.query.clear();
                     }
                 });
+                // The phone's segmented form selects an agent immediately;
+                // desktop tabs browse its models until one is chosen.
+                #[cfg(not(desktop))]
                 if let Some(model) = connection
                     .settings
                     .with_untracked(|p| p.model_for_provider(provider))
@@ -235,12 +342,8 @@ fn act(connection: Connection, picker: Signal<Option<Picker>>, action: &str, val
                 publication.with_untracked(|p| picker_intent(p, &current, action, value))
             {
                 connection.dispatch(intent);
-                // As T3 Code's popover, choosing a model closes it; the form's
-                // other settings keep it open to adjust several. As the desktop
-                // client's, the OpenRouter pick shows OpenRouter's models instead.
-                if cfg!(target_os = "macos") && matches!(action, "model" | "custom") {
-                    picker.set(None);
-                } else if action == "openrouter-flash" {
+                // Keep the picker open to adjust the selected model's effort.
+                if action == "openrouter-flash" {
                     picker.update(|picker| {
                         if let Some(picker) = picker {
                             picker.query = OPENROUTER_MODEL_QUERY.into();
@@ -292,11 +395,11 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
     };
     let disabled = move || field("disabled")().as_bool().unwrap_or(true);
     let agents = view()
+        .w(px(44.0))
         .flex_shrink_0()
-        .gap_2()
-        .pr_2()
-        .border_r_1()
-        .border_r_color(colors::border())
+        .p_1()
+        .gap_1()
+        .bg(colors::RAISED)
         .child(each(
             move || field("providers")().as_array().cloned().unwrap_or_default(),
             |choice: &Value| choice["id"].as_str().unwrap_or_default().to_owned(),
@@ -306,18 +409,21 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                 let title = choice["title"].as_str().unwrap_or_default().to_owned();
                 let selected = {
                     let id = id.clone();
-                    move || field("provider")().as_str() == Some(id.as_str())
+                    let selected =
+                        computed(move || field("provider")().as_str() == Some(id.as_str()));
+                    move || selected.get()
                 };
                 let mark = provider_mark(&id);
                 nsh_base::button()
                     .accessibility_label(Some(SharedString::from(title.clone())))
                     .disabled(disabled)
-                    .w(px(44.0))
-                    .h(px(44.0))
-                    .rounded(px(8.0))
+                    .w(px(36.0))
+                    .h(px(36.0))
+                    .rounded(px(6.0))
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(colors::GHOST_HOVER))
+                    .selected(selected)
                     .style_when(selected, |s| s.bg(colors::SELECTED))
                     .on_press(move || act("provider", &id))
                     .child(match mark {
@@ -336,7 +442,8 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
         ));
     let account = nsh_base::button()
         .accessibility_label(Some(SharedString::from(tr("アカウントと週間残量"))))
-        .p_2()
+        .px_3()
+        .py_2()
         .gap_2()
         .rounded(px(8.0))
         .hover(|s| s.bg(colors::GHOST_HOVER))
@@ -356,9 +463,9 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                     .flex_1()
                     .min_w_0()
                     .number_of_lines(1)
-                    .text_size(px(16.0)),
+                    .text_size(px(12.0)),
                 )
-                .child(ui::icon(Icon::CHEVRON_RIGHT, 16.0)),
+                .child(ui::icon(Icon::CHEVRON_RIGHT, 12.0)),
         )
         .child(each(
             move || {
@@ -409,8 +516,10 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                     .child(text(move || format!("{}%", percent())).text_size(px(12.0)))
             },
         ));
-    let models = scroll().max_h(px(264.0)).child(
+    let models = scroll().flex_1().min_h_0().child(
         view()
+            .px_2()
+            .pt(px(10.0))
             .child(when(
                 move || field("models")().as_array().is_none_or(Vec::is_empty),
                 move || {
@@ -442,20 +551,34 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                     nsh_base::button()
                         .accessibility_label(Some(SharedString::from(title.clone())))
                         .disabled(disabled)
-                        .h(px(44.0))
+                        .h(px(32.0))
                         .px_2()
                         .flex_row()
                         .items_center()
-                        .justify_between()
+                        .gap_2()
                         .rounded(px(ui::RADIUS))
                         .hover(|s| s.bg(colors::GHOST_HOVER))
-                        .style_when(selected, |s| s.bg(colors::RAISED))
+                        .selected(selected)
+                        .selected_style(|s| s.bg(colors::SELECTED))
                         .on_press(move || act("model", &id))
-                        .child(text(title).text_size(px(16.0)).number_of_lines(1).min_w_0())
+                        .child(dynamic(move || {
+                            let mark = field("provider")().as_str().and_then(provider_mark);
+                            view().child(mark.map(|(markup, color)| {
+                                svg(ImageSrc::svg_markup(&markup.replacen(
+                                    "<svg ",
+                                    "<svg fill=\"currentColor\" ",
+                                    1,
+                                )))
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .text_color(color)
+                            }))
+                        }))
+                        .child(text(title).text_size(px(14.0)).number_of_lines(1).min_w_0())
                         .child(when(selected, || {
                             view()
-                                .text_color(colors::ACCENT)
-                                .child(ui::icon(Icon::CHECK, 20.0))
+                                .text_color(colors::foreground())
+                                .child(ui::icon(Icon::CHECK, 14.0))
                         }))
                 },
             ))
@@ -474,47 +597,11 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                 },
             )),
     );
-    let choice_menu = move |key: &'static str, title: &'static str, action: &'static str| {
-        ui::text_button(
-            move || {
-                let quick = field("quick")();
-                let current = &quick[key];
-                // A speed reads as its menu names it (通常, 高速), not its id.
-                let shown = if key == "speed" {
-                    quick["speeds"]
-                        .as_array()
-                        .and_then(|speeds| speeds.iter().find(|speed| speed["id"] == *current))
-                        .and_then(|speed| speed["title"].as_str())
-                } else {
-                    current.as_str()
-                };
-                SharedString::from(format!("{title}: {}", shown.unwrap_or(tr("既定"))))
-            },
-            move || {
-                let quick = field("quick")();
-                let items = if key == "effort" {
-                    quick["efforts"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|effort| json!({"id": effort, "title": effort, "selected": effort == &quick["effort"]}))
-                        .collect::<Vec<_>>()
-                } else {
-                    quick["speeds"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|speed| json!({"id": speed["id"], "title": speed["title"], "selected": speed["id"] == quick["speed"]}))
-                        .collect::<Vec<_>>()
-                };
-                ui::popup(&json!(items), move |value: &str| act(action, value));
-            },
-        )
-    };
     let body = view()
-        .flex_1()
+        .w(px(316.0))
         .min_w_0()
-        .gap_2()
+        .border_l_1()
+        .border_l_color(colors::border())
         .child(each(
             move || field("notices")().as_array().cloned().unwrap_or_default(),
             |notice: &Value| notice["id"].as_str().unwrap_or_default().to_owned(),
@@ -546,17 +633,23 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                     )
             },
         ))
-        .child(account)
-        .child(view().h(px(1.0)).bg(colors::RAISED))
         .child(
-            input()
-                .h(px(32.0))
-                .px_2()
-                .text_size(px(16.0))
-                .placeholder(tr("モデルを検索"))
-                .label(tr("モデルを検索"))
-                .value(move || field("query")().as_str().unwrap_or_default().to_owned())
-                .on_change(move |value: &str| act("search", value)),
+            view()
+                .h(px(44.0))
+                .px_3()
+                .justify_center()
+                .border_b_1()
+                .border_b_color(colors::border())
+                .child(
+                    input()
+                        .auto_focus(true)
+                        .h(px(32.0))
+                        .text_size(px(14.0))
+                        .placeholder(tr("モデルを検索"))
+                        .label(tr("モデルを検索"))
+                        .value(move || field("query")().as_str().unwrap_or_default().to_owned())
+                        .on_change(move |value: &str| act("search", value)),
+                ),
         )
         .child(when(
             move || !field("openrouter")().is_null(),
@@ -579,42 +672,154 @@ fn panel(data: Memo<Option<Value>>, act: impl Fn(&str, &str) + Copy + 'static) -
                 .text_color(nsh_core::element::rgb(0xff7777))
             },
         ))
-        .child(when(
-            move || !field("quick")().is_null(),
-            move || {
-                view()
-                    .flex_row()
-                    .gap_3()
-                    .pt_2()
-                    .border_t_1()
-                    .border_t_color(colors::border())
-                    .child(when(
-                        move || {
-                            field("quick")()["efforts"]
-                                .as_array()
-                                .is_some_and(|e| !e.is_empty())
-                        },
-                        move || choice_menu("effort", tr("思考の深さ"), "effort"),
-                    ))
-                    .child(when(
-                        move || {
-                            field("quick")()["speeds"]
-                                .as_array()
-                                .is_some_and(|s| s.len() > 1)
-                        },
-                        move || choice_menu("speed", tr("速度"), "speed"),
-                    ))
-            },
-        ));
+        .child(account);
     view()
-        .w(px(440.0))
-        .p_3()
-        .flex_row()
-        .items_stretch()
-        .gap_3()
+        .w(px(552.0))
         .text_color(colors::foreground())
-        .child(agents)
-        .child(body)
+        .child(
+            view()
+                .flex_row()
+                .h(px(346.0))
+                .min_h_0()
+                .child(agents)
+                .child(body)
+                .child(effort_column(field("quick"), disabled, act)),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_t_color(colors::border())
+                .child(when(
+                    move || {
+                        field("quick")()["speeds"]
+                            .as_array()
+                            .is_some_and(|s| s.len() > 1)
+                    },
+                    move || speed_control(field("quick"), disabled, act),
+                ))
+                .child(view().flex_1())
+                .child(crate::permissions::picker_control()),
+        )
+}
+
+#[cfg(desktop)]
+fn effort_column(
+    quick: impl Fn() -> Value + Copy + 'static,
+    disabled: impl Fn() -> bool + Copy + 'static,
+    act: impl Fn(&str, &str) + Copy + 'static,
+) -> View {
+    use crate::ui::{self, Icon, colors};
+    let connection = use_context::<Connection>().unwrap();
+    view()
+        .w(px(192.0))
+        .flex_shrink_0()
+        .border_l_1()
+        .border_l_color(colors::border())
+        .child(
+            view()
+                .h(px(44.0))
+                .px_3()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_b_color(colors::border())
+                .child(
+                    text(tr("思考の深さ"))
+                        .text_size(px(12.0))
+                        .text_color(colors::muted()),
+                )
+                .child(
+                    text(move || {
+                        connection
+                            .settings
+                            .with(|s| s.selected_model_name().unwrap_or_default())
+                    })
+                    .text_size(px(12.0))
+                    .text_color(colors::muted())
+                    .truncate()
+                    .flex_1()
+                    .min_w_0(),
+                ),
+        )
+        .child(
+            scroll()
+                .flex_1()
+                .min_h_0()
+                .child(view().px_2().pt(px(10.0)).child(each(
+                    move || quick()["efforts"].as_array().cloned().unwrap_or_default(),
+                    |effort: &Value| effort.as_str().unwrap_or_default().to_owned(),
+                    move |effort, _| {
+                        let id = effort
+                            .get_untracked()
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        let current = {
+                            let id = id.clone();
+                            let current =
+                                computed(move || quick()["effort"].as_str() == Some(id.as_str()));
+                            move || current.get()
+                        };
+                        let label =
+                            agent_core::presentation::model_settings::reasoning_effort_label(
+                                crate::l10n::language(),
+                                &id,
+                            );
+                        ui::bare_button(label.clone(), move || act("effort", &id))
+                            .enabled(move || !disabled())
+                            .selected(current)
+                            .w_full()
+                            .h(px(32.0))
+                            .px_2()
+                            .rounded(px(2.0))
+                            .hover(|s| s.bg(colors::GHOST_HOVER))
+                            .child(text(label).text_size(px(14.0)).flex_1())
+                            .child(when(current, || ui::icon(Icon::CHECK, 14.0)))
+                    },
+                ))),
+        )
+}
+
+#[cfg(desktop)]
+fn speed_control(
+    quick: impl Fn() -> Value + Copy + 'static,
+    disabled: impl Fn() -> bool + Copy + 'static,
+    act: impl Fn(&str, &str) + Copy + 'static,
+) -> View {
+    use crate::ui::{self, colors};
+    view()
+        .flex_row()
+        .p(px(2.0))
+        .rounded(px(8.0))
+        .bg(colors::RAISED)
+        .child(each(
+            move || quick()["speeds"].as_array().cloned().unwrap_or_default(),
+            |speed: &Value| speed["id"].as_str().unwrap_or_default().to_owned(),
+            move |speed, _| {
+                let speed = speed.get_untracked();
+                let id = speed["id"].as_str().unwrap_or_default().to_owned();
+                let title = speed["title"].as_str().unwrap_or_default().to_owned();
+                let current = {
+                    let id = id.clone();
+                    let current = computed(move || quick()["speed"].as_str() == Some(id.as_str()));
+                    move || current.get()
+                };
+                ui::bare_button(title.clone(), move || act("speed", &id))
+                    .enabled(move || !disabled())
+                    .selected(current)
+                    .h(px(24.0))
+                    .px_2()
+                    .rounded(px(6.0))
+                    .style_when(current, |s| s.bg(colors::SELECTED))
+                    .child(text(title).text_size(px(12.0)))
+            },
+        ))
 }
 
 /// The desktop client's OpenRouter shortcuts over DeepSeek's models: where the

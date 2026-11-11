@@ -9,15 +9,17 @@ expect "Claude Code" 20000
 # The missing Codex is an error in the UI's language over its own words.
 expect "エラーが発生しました。\ncodex: failed to resolve Codex executable" 10000
 press "Claude Code"
+press "Default (recommended)" after モデルを検索
 press アカウントと週間残量
 press アカウントを追加
-type 認証コード "fixture-code" 15000
+type 認証コード "fixture-code#fixture-only" 15000
 press サインインを完了
 expect "claude@example.invalidを選択中" 20000
 expect_absent "desktop@example.invalid"
 press 閉じる
 press "Default (recommended)"
 screenshot claude-models
+key escape
 type "AI に依頼する" "Claude standalone"
 press 送信
 expect "reply 1: Claude standalone" 30000

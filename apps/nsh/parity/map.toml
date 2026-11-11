@@ -28,7 +28,7 @@ description = "A new chat in the project before anything is sent: the hero and t
 nsh = ["press \"New chat in this project\"", "expect \"Ask AI\""]
 t3 = []
 column = "composer"
-elements = ["window", "header", "header-project", "header-new-chat", "composer", "composer-placeholder", "composer-send", "composer-attach", "composer-model", "composer-mode", "composer-dictation", "draft-hero", "draft-hero-project", "draft-without-project"]
+elements = ["window", "header", "header-project", "header-new-chat", "composer", "composer-placeholder", "composer-send", "composer-attach", "composer-model", "composer-dictation", "draft-hero", "draft-hero-project", "draft-without-project"]
 
 [[state]]
 name = "composer-draft"
@@ -43,10 +43,10 @@ elements = ["composer", "composer-overlay", "composer-text", "composer-send"]
 name = "model-picker"
 screen = "Conversation"
 description = "The composer's model picker open."
-nsh = ["press \"New chat in this project\"", "press \"Fixture Model\"", "wait 800"]
+nsh = ["press \"New chat in this project\"", "press \"Fixture Model\"", "press \"Change approval mode\"", "press \"Full access\"", "wait 800"]
 t3 = [{ click = "[data-chat-provider-model-picker]" }, { waitMs = 800 }]
 column = "composer"
-elements = ["composer", "composer-overlay", "composer-model", "model-menu", "model-menu-row"]
+elements = ["composer", "composer-overlay", "composer-model", "model-menu", "model-menu-row", "model-effort", "model-permissions"]
 
 [[state]]
 name = "turn-thinking"
@@ -229,9 +229,8 @@ what = "Composer surface"
 kind = "box"
 group = "composer"
 t3 = "[data-chat-composer-surface]"
-# The surface filled behind the field and its footer, whose access mode control
-# every state shows (a question takes the attach button away).
-nsh = { text = "Change approval mode", up = "background" }
+# The input surface stays present when its model picker opens.
+nsh = { text = "Message", role = "AXGroup" }
 
 [[element]]
 id = "composer-overlay"
@@ -240,7 +239,7 @@ kind = "box"
 group = "composer"
 t3 = "[data-chat-composer-overlay=true]"
 # The view over the timeline holding the composer and what stands on it.
-nsh = { text = "Change approval mode", up = 8 }
+nsh = { text = "Message", role = "AXGroup", up = 2 }
 
 [[element]]
 id = "composer-placeholder"
@@ -302,33 +301,45 @@ what = "Model picker"
 kind = "text"
 group = "composer"
 t3 = "[data-chat-provider-model-picker]"
-nsh = { text = "Fixture Model", class = "NSButton" }
-anchor = "composer"
-
-[[element]]
-id = "composer-mode"
-what = "Access mode picker"
-kind = "text"
-group = "composer"
-t3 = "button[aria-label='Runtime mode']"
-nsh = { text = "Change approval mode" }
+nsh = { text = "Fixture Model", role = "AXButton" }
 anchor = "composer"
 
 [[element]]
 id = "model-menu"
 what = "Model picker popup"
 kind = "box"
-group = "composer"
+group = "model-picker"
 t3 = "[data-slot=popover-popup]"
 nsh = { text = "Search models", up = "background" }
+anchor = "composer-model"
+from_end = true
 
 [[element]]
 id = "model-menu-row"
 what = "Model picker: the model's row"
 kind = "text"
-group = "composer"
-t3 = "[data-slot=popover-popup] [role=option], [data-slot=popover-popup] button"
-nsh = { text = "Fixture Model", role = "AXButton" }
+group = "model-picker"
+t3 = "[data-model-picker-content] [role=option] .truncate.text-sm"
+nsh = { text = "Fixture Model", role = "AXStaticText", nth = 1 }
+anchor = "model-menu"
+
+[[element]]
+id = "model-effort"
+what = "The model picker's reasoning levels"
+kind = "box"
+group = "model-picker"
+t3 = "[data-model-picker-effort]"
+nsh = { text = "Reasoning depth", up = 2 }
+anchor = "model-menu"
+
+[[element]]
+id = "model-permissions"
+what = "Permissions in the model picker's footer"
+kind = "text"
+group = "model-picker"
+t3 = "[data-slot=popover-popup] [data-composer-permissions-trigger]"
+nsh = { text = "Change approval mode", role = "AXButton" }
+anchor = "model-menu"
 
 [[element]]
 id = "draft-hero"

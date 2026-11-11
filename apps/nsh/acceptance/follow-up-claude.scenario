@@ -5,6 +5,7 @@ press このプロジェクトで新しいチャット
 press "Fixture Model" 20000
 press "Claude Code"
 press "Default (recommended)" 10000
+key escape
 type "AI に依頼する" "wait"
 press 送信
 expect "Waiting for interruption" 30000

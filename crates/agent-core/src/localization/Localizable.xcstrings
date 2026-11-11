@@ -1,6 +1,18 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "Fast：オン": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Fast: on" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Fast：オン" } }
+      }
+    },
+    "Fast：オフ": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Fast: off" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Fast：オフ" } }
+      }
+    },
     "貼り付け": {
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Paste" } },

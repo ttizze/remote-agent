@@ -1,38 +1,50 @@
 # The model picker offers the selected Codex model's thinking depth and speed,
-# named as their menus name them, and keeps the choices; Claude's default model
+# in its model and effort columns, and keeps the choices; Claude's default model
 # has no speed to choose and thinks deeply by default.
-# iOS: testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone (the Mac
-# shows them in T3 Code's picker rather than the composer's bar)
+# iOS: testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone
 expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
+expect_absent 承認方法を変更
+expect Fast：オフ
+press Fast：オフ
+expect Fast：オン
+press Fast：オン
+expect Fast：オフ
+expect 推論の強度：medium
 press "Fixture Model" 20000
 expect "モデルを検索" 10000
-expect "思考の深さ: medium"
-expect "速度: 通常"
-press "速度: 通常"
+expect 思考の深さ
+expect 中
+expect 高
+expect 通常
+expect 高速
 press 高速
-expect "速度: 高速" 10000
-press "速度: 高速"
+expect Fast：オン
+expect "モデルを検索"
 press 通常
-expect "速度: 通常" 10000
-press "思考の深さ: medium"
-press high
-expect "思考の深さ: high" 10000
+expect Fast：オフ
+press 高
+expect "モデルを検索"
+expect 承認方法を変更
 screenshot codex-controls
 key escape
 expect_absent "モデルを検索" 10000
+expect 推論の強度：high
 press "Fixture Model"
-expect "思考の深さ: high" 10000
+expect 思考の深さ
 press "Claude Code"
 press アカウントと週間残量
 press アカウントを追加
-type 認証コード "fixture-code" 15000
+type 認証コード "fixture-code#fixture-only" 15000
 press サインインを完了
 expect "claude@example.invalidを選択中" 20000
 press 閉じる
-press "Default (recommended)"
-press "Default (recommended)"
+press "Fixture Model"
+press "Claude Code"
+press "Default (recommended)" after モデルを検索
 expect "モデルを検索" 10000
-expect_absent "速度:"
-expect "思考の深さ: high"
+expect_absent 高速
+expect 高
 screenshot claude-controls
+key escape
+expect 推論の強度：high

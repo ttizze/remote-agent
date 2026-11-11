@@ -9,9 +9,11 @@
             var input: [UInt8] = []
             var inputReceived: XCTestExpectation?
             var menus = 0
+            var menuReceived: XCTestExpectation?
 
             @objc func menuBegan(_ note: Notification) {
                 menus += 1
+                menuReceived?.fulfill()
                 if let menu = note.object as? NSMenu {
                     DispatchQueue.main.async { menu.cancelTracking() }
                 }
@@ -149,12 +151,16 @@
             try view.mouseDown(with: click(.leftMouseDown, count: 2))
             try view.mouseUp(with: click(.leftMouseUp, count: 2))
             XCTAssertEqual(events.menus, 0, "the next click can still select a line")
+            let lineMenu = expectation(description: "the final line selection opens its native menu")
+            events.menuReceived = lineMenu
             try view.mouseDown(with: click(.leftMouseDown, count: 3))
             try view.mouseUp(with: click(.leftMouseUp, count: 3))
             let line = try XCTUnwrap(view.getSelection())
             XCTAssertTrue(line.contains("selected text"))
-            // This is the native multi-click deadline, not a retry after failure.
-            RunLoop.main.run(until: Date().addingTimeInterval(NSEvent.doubleClickInterval + 0.05))
+            // Menu tracking begins asynchronously after the multi-click timer;
+            // its notification, rather than a fixed extra frame, completes the action.
+            wait(for: [lineMenu], timeout: NSEvent.doubleClickInterval + 1)
+            events.menuReceived = nil
             XCTAssertEqual(events.menus, 1, "only the final line selection opens a menu")
             feed("\u{1b}[?1000h", into: handle)
             try view.mouseDown(with: click(.leftMouseDown, count: 1))
@@ -167,11 +173,14 @@
                 "a mouse-reporting click preserves the old selection without reopening its menu"
             )
             feed("\u{1b}[?1000l", into: handle)
+            let repeatedMenu = expectation(description: "a repeated selection opens its native menu")
+            events.menuReceived = repeatedMenu
             try view.mouseDown(with: click(.leftMouseDown, count: 1, x: 1))
             try view.mouseDragged(with: click(.leftMouseDragged, count: 1, x: 220))
             try view.mouseUp(with: click(.leftMouseUp, count: 1, x: 220))
             XCTAssertEqual(view.getSelection(), line, "the same text can be selected again")
-            RunLoop.main.run(until: Date().addingTimeInterval(NSEvent.doubleClickInterval + 0.05))
+            wait(for: [repeatedMenu], timeout: NSEvent.doubleClickInterval + 1)
+            events.menuReceived = nil
             XCTAssertEqual(events.menus, 2, "reselecting identical text opens its actions again")
         }
 

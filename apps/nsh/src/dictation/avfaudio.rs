@@ -57,10 +57,18 @@ impl Capture {
             #[cfg(target_os = "ios")]
             _session: session,
         };
+        unsafe { capture.recorder.setMeteringEnabled(true) };
         if !unsafe { capture.recorder.record() } {
             return Err(tr("録音を開始できませんでした。").into());
         }
         Ok(capture)
+    }
+
+    pub(super) fn level(&self) -> f32 {
+        unsafe {
+            self.recorder.updateMeters();
+            10_f32.powf(self.recorder.averagePowerForChannel(0) / 20.0)
+        }
     }
 
     pub(super) fn finish(self) -> Result<Vec<u8>, String> {
