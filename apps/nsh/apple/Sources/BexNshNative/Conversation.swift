@@ -341,7 +341,9 @@
         }
 
         func tableView(_: NSTableView, heightOfRow index: Int) -> CGFloat {
-            guard let id = source.itemIdentifier(forRow: index), let row = rows[id] else { return 0 }
+            // A new snapshot can arrive while AppKit still measures the old
+            // table. Its delegate must always return a positive row height.
+            guard let id = source.itemIdentifier(forRow: index), let row = rows[id] else { return table.rowHeight }
             if let height = heights[id] { return height }
             measurement.update(row, width: laneWidth, scope: scope, send: { _ in })
             let height = ceil(measurement.fittingSize.height)

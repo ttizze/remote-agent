@@ -80,6 +80,7 @@
             XCTAssertEqual(view.table.numberOfRows, 101)
             XCTAssertEqual(view.scroll.documentVisibleRect.minY - view.table.rect(ofRow: 51).minY, before, accuracy: 1)
             XCTAssertFalse(events.contains { $0["action"] as? String == "scroll" }, "layout changes are not user scrolling")
+            view.setFrameSize(NSSize(width: 380, height: 500))
             apply(view, scope: "second", order: ["new"], changed: [row("new", "Another conversation")], reset: true)
             XCTAssertEqual(view.table.numberOfRows, 1)
             let cell = view.table.view(atColumn: 0, row: 0, makeIfNecessary: true) as? NativeConversationCell
