@@ -225,17 +225,15 @@ impl Dictation {
                 .enabled(move || self.active.get()),
             )
             .child(
-                ui::ghost(
-                    tr("文字起こしして送信"),
-                    view().child(ui::icon(Icon::ARROW_UP, 24.0)),
-                )
-                .w(px(44.0))
-                .h(px(44.0))
-                .rounded_full()
-                .bg(colors::foreground())
-                .text_color(colors::SIDEBAR)
-                .on_press(send)
-                .enabled(move || self.active.get() && enabled()),
+                ui::bare_button(tr("文字起こしして送信"), send)
+                    .w(px(44.0))
+                    .h(px(44.0))
+                    .rounded_full()
+                    .bg(colors::foreground())
+                    .text_color(colors::SIDEBAR)
+                    .disabled_style(|s| s.opacity(0.5))
+                    .child(ui::icon(Icon::ARROW_UP, 24.0))
+                    .enabled(move || self.active.get() && enabled()),
             )
     }
 
