@@ -1,11 +1,11 @@
-// Explicit Mac debugging: render the same fixture conversations three ways.
+// Explicit Mac debugging: render the same fixture conversations with each adapter.
 // UI journeys run sequentially so their windows never steal each other's input.
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const MODES = ['hybrid', 'native', 'nsh'];
+export const MODES = ['hybrid', 'native', 'nsh', 'standard'];
 export const DEFAULT_SCENARIOS = [
   'long-history', 'history-position', 'history-live-scroll', 'long-markdown',
   'markdown-document', 'markdown-table', 'images', 'selection-bar',

@@ -56,7 +56,7 @@ nsh-acceptance *scenarios:
     cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
     cargo xtask nsh-acceptance "$@"
 
-# Compare the same conversation fixtures in the hybrid, native and NSH renderers.
+# Compare the same conversations in hybrid, native, custom NSH and standard NSH renderers.
 # Explicit debugging only: each isolated app takes the Mac's foreground briefly.
 conversation-compare *scenarios:
     AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev

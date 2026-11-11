@@ -3,8 +3,9 @@ use crate::ui::Enabled;
 use crate::{Connection, shared::Shared};
 use agent_core::{
     presentation::conversation::{
-        ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedConversation,
-        RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding, turn_rows,
+        ActivityPresentation, ConversationRow, ConversationRowContent, ItemSource, LANE_WIDTH,
+        RenderedConversation, RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress,
+        lane_padding, turn_rows,
     },
     state::{Intent, operations as op},
 };
@@ -20,6 +21,7 @@ pub(crate) enum Renderer {
     Hybrid,
     Native,
     Nsh,
+    Standard,
 }
 
 impl Renderer {
@@ -27,6 +29,7 @@ impl Renderer {
         match name {
             Some("native") => Self::Native,
             Some("nsh") => Self::Nsh,
+            Some("standard") => Self::Standard,
             _ => Self::Hybrid,
         }
     }
@@ -151,6 +154,7 @@ impl Shape {
 struct Row {
     id: String,
     body: SharedString,
+    streaming: bool,
     kind: Kind,
     shape: Shape,
     /// A group's work, which its icon names (`Icon::work`).
@@ -190,6 +194,7 @@ impl Row {
         Self {
             id,
             body: body.into(),
+            streaming: false,
             kind,
             shape,
             group_kind: String::new(),
@@ -298,6 +303,15 @@ fn gap(kind: Kind, shape: Shape, actions: bool, next: Option<Shape>) -> f32 {
 /// A row of a turn on T3 Code's timeline.
 fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
     use crate::activity::{Item, Status};
+    let streaming = match &row {
+        TurnRow::Row(ConversationRow {
+            content: ConversationRowContent::Response { item, .. },
+            ..
+        })
+        | TurnRow::Commentary(item) => matches!(&item.source, ItemSource::Native(native)
+            if native.status == agent_protocol::models::ItemStatus::Running),
+        _ => false,
+    };
     let activity_item =
         |row: &agent_core::presentation::conversation::ConversationRow, live, label| {
             let ConversationRowContent::Activity { item, turn_id } = &row.content else {
@@ -315,7 +329,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
         row.status = Some(status);
         row
     };
-    Some(match row {
+    let mut shown = match row {
         TurnRow::Row(row) => source_row(row)?,
         TurnRow::Fold { activity, open } => {
             let mut row = Row::new(
@@ -414,7 +428,10 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             Shape::Interrupted,
             tr("実行を中断しました"),
         ),
-    })
+    };
+    shown.streaming =
+        streaming && turn.source.status == agent_protocol::models::TurnStatus::Running;
+    Some(shown)
 }
 
 /// A row of the conversation's projection as it is.
@@ -1193,6 +1210,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             label().map(|text| text.to_string())
                                                         },
                                                         kind,
+                                                        move || row.try_get().flatten().is_some_and(|row| row.streaming),
                                                         move || {
                                                             if user() {
                                                                 (column_width
@@ -1776,6 +1794,7 @@ fn plan_card(
                 surroundings,
                 move || Some(note().to_string()),
                 || Kind::Response,
+                || false,
                 move || (column_width.try_get().unwrap_or_default() - 8.0 - 42.0).max(0.0),
             ))),
     )
@@ -2469,5 +2488,33 @@ mod tests {
             rows.last().and_then(|row| row.status),
             Some(crate::activity::Status::Thinking)
         );
+    }
+
+    #[test]
+    fn only_the_live_response_of_a_running_turn_uses_streaming_markdown() {
+        let mut live = text("live", "unknown");
+        live["status"] = serde_json::json!("running");
+        let items = serde_json::json!([text("finished", "unknown"), command("pwd"), live]);
+        let running = conversation("running", items.clone());
+        let rows = project(&running, &HashMap::new(), &HashSet::new());
+        assert!(rows.iter().any(|row| row.body.as_ref() == "finished"));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.streaming)
+                .map(|row| row.body.as_ref())
+                .collect::<Vec<_>>(),
+            ["live"]
+        );
+        for status in ["completed", "interrupted"] {
+            assert!(
+                project(
+                    &conversation(status, items.clone()),
+                    &HashMap::new(),
+                    &HashSet::new()
+                )
+                .iter()
+                .all(|row| !row.streaming)
+            );
+        }
     }
 }
