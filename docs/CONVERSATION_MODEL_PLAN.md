@@ -31,8 +31,8 @@ Host が持つ会話の状態、その保存、クライアントへの同期、
 
 ### 識別子の所有者が揃っていない
 
-- 会話の識別子 `SessionRef { provider, id }` は「最初の provider に属する住所」である(`crates/agent-protocol/src/session.rs:30`)。Host が受け付けた新規会話には Host が発行するが、外部で作られた会話は provider の識別子がそのまま入る。
-- 発行するのが Host なので、クライアントは送信前の下書きを仮のキーで持ち、後で付け替える(`crates/agent-core/src/state.rs:106` の `DraftKey::Local`、同 `:410` の `draft_sessions`)。
+- 会話の識別子 `SessionRef { provider, id }` は「最初の provider に属する住所」である(`crates/agent-protocol/src/session.rs:30`)。新規会話の `id` は、`bex-task:` に、クライアントが割り当てた最初の入力の識別子を続けたものである(`crates/host-daemon/src/host_rpc/service/preparation.rs:41`)。外部で作られた会話は provider の識別子がそのまま入る。
+- 新規会話の識別子はクライアントの値から決まるのに、クライアントはそれを Host の応答で受け取る。それまで送信前の下書きを仮のキーで持ち、後で付け替える(`crates/agent-core/src/state.rs:106` の `DraftKey::Local`、同 `:410` の `draft_sessions`)。
 - ターンと項目の識別子は provider のものを使う。provider がターン識別子を再利用するため、項目の重なりで出現を照合する(`turn_index`、`matches_occurrence`、`shares_items` が 21 か所)。
 - 送った入力と provider が返すユーザー発言を `client_input_id` で突き合わせる(25 か所、`reconcile_pending` など)。
 
@@ -62,6 +62,14 @@ T3 は最初に手元の fork(`fecdf4497e`、2026-10-07)で読み、引用する
 
 会話、入力、ターン、項目、要求の識別子はアプリのものとする。会話と入力はクライアントが割り当て、入力の識別子は配送後にそのままユーザー発言の項目の識別子になる。ターンと、それ以外の項目は Host が割り当てる。provider の識別子は、Host だけが読む表に持ち、クライアントには送らない。
 
+**既存の識別子は変えない。** 利用者が決めた(2026-11-11)。会話の識別子は、Host、通信、各端末に保存された下書きとキャッシュ、ワークツリーの記録、通知の登録、履歴を読むコマンドで使われている。付け替えると、どれがどの会話のものかを失い、後から直せない。
+
+- 会話の識別子の型と形は、今の `SessionRef`(provider と id の組)のままにする。既存の会話の識別子は一字も変えない。移行は識別子を書き換えず、対応表も持たない。
+- 新しい会話の識別子も今と同じ形にする。`id` は今も、クライアントが割り当てた値から決まる。クライアントは Host の応答を待たずに同じ値を作る。
+- 識別子の中の provider は、会話が作られたときの provider を表すだけである。今の provider は会話の行が持つ。識別子から今の provider を読み取らない。
+- 既存のターンと項目の識別子は、会話の中で一意なものをそのまま使う。新しく作るものから、Host が割り当てる。provider が使い回したために同じ識別子を持つ既存のターンは、行を区別できないので、移行で一意な識別子を振る。ターンと項目の識別子は、会話の識別子と違って端末のキャッシュの中にしかなく、キャッシュはスナップショットで置き換わる。
+- 送信前の下書きは provider がまだ決まっていないので、クライアントが割り当てた値で持つ。送信のときに、その値と選んだ provider から識別子が決まる。
+
 - **理由**: 識別子が生まれた時点で確定していれば、クライアントと core は付け替えも突き合わせもしない。下書きは最初から会話の識別子で持てる。送った入力はそのままユーザー発言になる。
 - **残る対応付け**: provider との対応付けはなくならない。Host の provider との境界(接続と取り込み)に集める。
   - 配送した入力と、provider が返すユーザー発言。provider の識別子を対応として記録し、行は増やさない。
@@ -73,7 +81,9 @@ T3 は最初に手元の fork(`fecdf4497e`、2026-10-07)で読み、引用する
   - Happy: 「provider の識別子を使ってはならない」と明記する(`docs/session-protocol.md` の Subagents)。
   - Paseo: 本文の一致で突き合わせていたのを「クライアントの識別子で行が生まれ、以後変わらない」に改めた(`docs/timeline-sync.md` の canonical submitted row)。
   - OpenCode: 同じ識別子での再送は最初の受付が勝つ(`specs/v2/session.md` の Prompt Admission)。
-- **退けた案**: Host が発行する現状。新規会話では provider の識別子を避けられるが、クライアントが送信前に識別子を知らないので付け替えが残る。
+- **退けた案**:
+  - 識別子を Host の応答で受け取る現状。クライアントが送信前に識別子を知らないので、付け替えが残る。
+  - 会話の識別子を provider を含まない新しい形に振り直す。形は整うが、既存の参照をすべて付け替えることになり、戻せない。
 
 ### 決定 2: 会話の正本は Host の一つの DB
 
@@ -255,7 +265,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 - **連番**: Host 全体で一本。書き込みトランザクション一回に一つ。
 - **行の版**: その行を最後に変えたトランザクションの連番。上書きは必ず行の版を運ぶ。
-- **削除記録**: 消した行の種類、識別子、消したトランザクションの連番。
+- **削除記録**: 範囲から外れた行の種類、識別子、そのトランザクションの連番。行を消したときと、ターンを巻き戻し済みにしたときに書く。
 - **保存領域の識別子**: DB を作ったときに決まる値。
 - 識別子は再利用しない。消した行と同じ識別子の行は二度と作らない。
 
@@ -302,7 +312,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 ### クライアントの適用規則
 
 - **上書き**: 持っていない行、または届いた版が持っている版より大きい行だけを置き換える。版が同じで、持っていない本文が付いていれば、本文だけを取り込む。
-- **削除**: 持っている行の版が削除の連番より小さければ消す。`Thread` の削除は範囲の全行を、`Turn` の削除はその `Item` を一緒に消す。
+- **削除**: 持っている行の版が削除の連番より小さければ消す。`Turn` の削除はその `Item` を一緒に消す。巻き戻しも、クライアントには削除として届く。
 - **スナップショット**: 範囲を置き換える。スナップショットに含まれない行をすべて消し、床とカーソルをスナップショットのものにする。削除記録が消えた後は、どの行が消されたかを知る手段がスナップショットしかないためである。それまでに広げていた過去の範囲も捨て、必要になったら広げ直す。
 - **追いつき**: 一度に適用し、カーソルを H にする。
 - 範囲外の行への上書きは捨てる。
@@ -378,72 +388,76 @@ CREATE TABLE store (
 
 -- 同期する表
 CREATE TABLE threads (
-    id TEXT PRIMARY KEY,
+    key INTEGER PRIMARY KEY,        -- DB の中だけで使う行のキー
+    provider TEXT NOT NULL,         -- 会話の識別子。今の SessionRef の組をそのまま持つ
+    id TEXT NOT NULL,
     seq INTEGER NOT NULL,
-    parent_id TEXT,                 -- サブエージェントの親
+    parent INTEGER,                 -- サブエージェントの親の行のキー
     cwd TEXT,                       -- 取り込んだ会話では不明なことがある
     updated_at INTEGER NOT NULL,    -- 一覧の順
     history_seq INTEGER NOT NULL,   -- 最後に履歴を置き換えた連番
-    body BLOB NOT NULL              -- 名前、モデル選択、既読、キューの保留、一覧に出す要約
+    body BLOB NOT NULL              -- 名前、今の provider、モデル選択、既読、キューの保留、一覧に出す要約
 ) STRICT;
+CREATE UNIQUE INDEX threads_identity ON threads (provider, id);
 CREATE INDEX threads_changed ON threads (seq);
-CREATE INDEX threads_children ON threads (parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX threads_children ON threads (parent) WHERE parent IS NOT NULL;
 
 CREATE TABLE inputs (
     id TEXT PRIMARY KEY,            -- 操作の識別子を兼ね、配送後は発言の項目の識別子になる
-    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     position INTEGER NOT NULL,      -- キューの順
     state TEXT NOT NULL,            -- preparing | queued | delivering | unknown | failed
     body BLOB NOT NULL              -- 内容、配送の種類、選んだモデル、状態ごとの値
 ) STRICT;
-CREATE INDEX inputs_queue ON inputs (thread_id, position);
+CREATE INDEX inputs_queue ON inputs (thread, position);
 CREATE INDEX inputs_in_flight ON inputs (state) WHERE state IN ('preparing', 'delivering');
 
 CREATE TABLE turns (
     id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
-    ordinal INTEGER NOT NULL,
-    state TEXT NOT NULL,            -- running | waiting | completed | interrupted | failed
+    ordinal INTEGER NOT NULL,       -- 使い回さない
+    state TEXT NOT NULL,            -- running | waiting | completed | interrupted | failed | rolled_back
     body BLOB NOT NULL              -- 時刻、状態ごとの値(待機中の作業、再試行の時刻、エラー)
 ) STRICT;
-CREATE UNIQUE INDEX turns_order ON turns (thread_id, ordinal);
+CREATE UNIQUE INDEX turns_order ON turns (thread, ordinal);
 CREATE INDEX turns_in_flight ON turns (state) WHERE state IN ('running', 'waiting');
 
 CREATE TABLE items (
     id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     position INTEGER NOT NULL,      -- 会話の中での順
     body BLOB NOT NULL              -- 種類ごとの内容。本文を含む
 ) STRICT;
-CREATE UNIQUE INDEX items_order ON items (thread_id, position);
-CREATE INDEX items_changed ON items (thread_id, seq);
+CREATE UNIQUE INDEX items_order ON items (thread, position);
+CREATE INDEX items_changed ON items (thread, seq);
 
 CREATE TABLE requests (
     id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     state TEXT NOT NULL,            -- awaiting | sending | unknown
     body BLOB NOT NULL              -- 対象のターンと項目、承認か質問の内容
 ) STRICT;
-CREATE INDEX requests_thread ON requests (thread_id);
+CREATE INDEX requests_thread ON requests (thread);
 CREATE INDEX requests_in_flight ON requests (state) WHERE state = 'sending';
 
 -- 同期のための表
 CREATE TABLE removals (
-    thread_id TEXT NOT NULL,
+    thread INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    kind TEXT NOT NULL,             -- thread | input | turn | item | request
+    kind TEXT NOT NULL,             -- input | turn | item | request
     id TEXT NOT NULL,
     at INTEGER NOT NULL,            -- 保持期間の判定に使う
-    PRIMARY KEY (thread_id, seq, kind, id)
+    PRIMARY KEY (thread, seq, kind, id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE receipts (
     operation_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,         -- 対象の会話の識別子。会話を消した後も残すので、行のキーでは持たない
     thread_id TEXT NOT NULL,
     seq INTEGER NOT NULL,           -- 効果を書いたトランザクションの連番
     outcome BLOB NOT NULL           -- 受付か、理由付きの拒否
@@ -454,7 +468,7 @@ CREATE TABLE receipts (
 -- 会話に関わった provider のセッション。今の対応も、作り直す前のものも、取り込み元も含む。
 CREATE TABLE sources (
     id INTEGER PRIMARY KEY,
-    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     provider TEXT NOT NULL,
     native_id TEXT NOT NULL         -- provider のセッションの識別子
 ) STRICT;
@@ -462,13 +476,13 @@ CREATE UNIQUE INDEX sources_native ON sources (provider, native_id);
 
 -- provider ごとに、今使うセッション。
 CREATE TABLE bindings (
-    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     provider TEXT NOT NULL,
     source_id INTEGER NOT NULL REFERENCES sources (id),
     covered INTEGER,                -- そのセッションが知っている最後のターンの順序番号
     state TEXT NOT NULL,            -- ready | injecting
     body BLOB NOT NULL,             -- 渡した履歴
-    PRIMARY KEY (thread_id, provider)
+    PRIMARY KEY (thread, provider)
 ) STRICT;
 CREATE INDEX bindings_in_flight ON bindings (state) WHERE state = 'injecting';
 
@@ -495,7 +509,7 @@ CREATE TABLE item_natives (
 CREATE TABLE jobs (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,             -- 取り込み、タイトル生成、後片付け
-    thread_id TEXT,
+    thread INTEGER,
     run_after INTEGER NOT NULL,
     body BLOB NOT NULL
 ) STRICT;
@@ -506,7 +520,8 @@ CREATE TABLE jobs (
 表の定義だけでは守れない約束を、ここに定める。どれも、書き込みのたびに成り立つ不変条件として試験する。
 
 - 一つのトランザクションは、最初に `store.seq` を一つ進め、そのトランザクションで足した行と変えた行すべての `seq` をその値にする。
-- 行を消すトランザクションは、同じ連番の削除記録を書く。ターンを消すときの項目には、削除記録を書かない。クライアントは親と一緒に消す。
+- 行を消すトランザクションと、ターンを巻き戻し済みにするトランザクションは、同じ連番の削除記録を書く。ターンに属する項目には、削除記録を書かない。クライアントは親と一緒に消す。
+- 巻き戻し済みのターンとその項目は、行を残す。スナップショット、追いつき、範囲の拡張には含めない。ターンの順序番号と項目の位置は使い回さず、巻き戻しの後に作るものは続きの番号を取る。
 - 受付記録は、操作の効果と同じトランザクションで書く。
 - 履歴を置き換えるトランザクションは、`threads.history_seq` をその連番にする。
 
@@ -522,9 +537,11 @@ provider の識別子は、それを発行した範囲の中でしか一意で�
 
 `threads` の本体にある一覧用の要約(状態、最後の発言の抜粋)は、`turns` と `items` から導ける値である。一覧の範囲が連番で同期できるように `threads` に置く。書くのは所有者だけで、元になる行と同じトランザクションで書くので、食い違わない。
 
-`items` は会話の識別子を、ターンを辿れば分かるのに自分でも持つ。会話の中の位置で引く索引に要るためである。変わらない値なので食い違わない。
+会話の識別子は `threads` の一か所にだけ持つ。ほかの表は、DB の中だけで使う行のキーで会話を指す。行のキーは外に出さない。
 
-`removals` と `receipts` は `threads` を参照しない。会話を消した後も残すためである。
+`items` は会話の行のキーを、ターンを辿れば分かるのに自分でも持つ。会話の中の位置で引く索引に要るためである。変わらない値なので食い違わない。
+
+`receipts` は `threads` を参照せず、会話の識別子をそのまま持つ。会話を消した後も、同じ操作の再送を止めるためである。
 
 ### 読み書きと索引
 
@@ -560,7 +577,7 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 | `projection_run_attempts`、`projection_provider_turns` | `executions`、`item_natives` | クライアントに送らない |
 | `projection_provider_sessions`、`provider_threads`、`provider_session_bindings` | `sources`、`bindings` | provider のプロセスの状態は保存しない。会話に関わったセッションと、今使うセッションだけを持つ |
 | `projection_context_handoffs`、`context_transfers` | `bindings` の状態と本体 | 決定 10 |
-| `projection_subagents` | `threads.parent_id` | 子の会話として持つ |
+| `projection_subagents` | `threads.parent` | 子の会話として持つ |
 | `effect_outbox` | `jobs` と途中の状態の列 | 決定 8、決定 9 |
 | `projection_checkpoints`、`checkpoint_scopes` | なし | 対応する機能がない |
 
@@ -572,13 +589,34 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 
 - **言える点**: 同じ値を列と本体に重ねない。同じ事実を表す表が一つ(T3 Code は発言、項目、実行ノードの三つ)。Host だけが読む表が分かれている。途中の状態を列で探せる。
 - **言えない点**: T3 Code の表は実際に動いていて、100 本のマイグレーションを経ている。この表はまだ書いていない。読み取りの速さも測っていない。
-- **劣る点**: 本体は通信と同じ符号化(MessagePack)なので、`sqlite3` で開いても中身を読めない。T3 Code と OpenCode は JSON で、SQL の中で読める。符号化を一つにする利点を取り、調べるときは Host の読み取りコマンドを使う。
+- **劣る点**: 本体は通信と同じ符号化(MessagePack)なので、`sqlite3` で開いても中身を読めない。T3 Code と OpenCode は JSON で、SQL の中で読める。符号化を一つにする利点を取り、調べるときは Host の読み取りコマンドを使う。本体は Rust の型から書き出すので、後から全行を読んで JSON で書き直せば替えられる。
 
 ### 確認が要る点
 
 - `sources`、`bindings`、`executions`、`item_natives` の列と、provider の識別子が一意である範囲は、段階 3 の前に Codex、Claude、DeepSeek の接続の内部へ照らして確かめる。項目の識別子が試行の中で一意でない provider があれば、`item_natives` の主キーを見直す。
 - 取り込み元の範囲(現状の `Segment`)は、`sources` と `executions` から導ける。どのターンがどのセッションから来たかを `executions` が持つためである。取り込みの経路を書くときに、これで足りることを確かめる。
-- 会話の削除は現状の操作にない。`removals` の `thread` は、足すときのために置く。
+- 会話の削除は現状の操作にない。足すときは、会話が存在しないことを購読の応答で返す(同期の契約)。
+- ターンと項目の識別子が、端末のキャッシュ以外に保存されていないこと(展開した行の記憶など)を、段階 4 の前に確かめる。
+
+## 戻せないものと手当て
+
+後から変換すれば替えられるもの(本体の符号化、表の形、本文の区切り、保持期間)と、戻せないものを分ける。
+
+### 捨てたら戻らないもの
+
+| 捨てるもの | 手当て |
+|---|---|
+| 変更の履歴。行を上書きするので、過去の状態は残らない | 手当てしない。T3 Code も一日で消す |
+| 巻き戻したターン | 消さずに、巻き戻し済みの状態で行を残す。T3 Code と同じである(`apps/server/src/orchestration-v2/CheckpointRollbackService.ts:349`)。利用者が決めた(2026-11-11)。巻き戻しを取り消す操作は作らない |
+| 取り込みで写さなかった内容 | 手当てしない。本文だけを写すのは決定済みである。provider の履歴が残っている間は再取り込みで戻せる |
+| 実行中のコマンド出力 | 手当てしない。Host が落ちれば、そのコマンドも止まっている |
+| 長いコマンド出力の先頭 | 保存する出力に上限を付けるかは未決定。T3 Code は末尾 64 KiB だけを残す |
+
+### 切り替えたら戻りにくいもの
+
+- **識別子**: 付け替えない(決定 1)。これを守れば、ほかの切り替えは変換でやり直せる。
+- **新しい形への移行(段階 3)**: 移行の前にバックアップを取り、古いファイルを残す。今の自動更新と同じ方式である(`crates/host-daemon/src/host_rpc/store/upgrade.rs:94`)。新しい版で会話を続けた後に古い版へ戻すと、その間の内容は失われる。
+- **Host とクライアントの同時更新**: 通信の形が変わるので、古いクライアントは繋がらなくなる。iPhone は TestFlight の承認を挟むので、iPhone 版が使えるようになってから Host を上げる。
 
 ## 経路の対応
 
@@ -592,7 +630,7 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 | steer | 入力に steer の指定 | 実行中で provider が対応していれば送る。なければキュー |
 | 中断 | ターンに中断要求 | provider に中断を送る |
 | provider 切替 | 会話の provider、対応の段階 | 対応を履歴に合わせてから配送 |
-| 巻き戻し | ターンの削除 | 次の配送時に対応を合わせ直す |
+| 巻き戻し | ターンを巻き戻し済みにする | 次の配送時に対応を合わせ直す |
 | 分岐 | 新しい会話と写した履歴 | 巻き戻しと同じ |
 | 容量超過の再試行 | ターンが待機(再試行の時刻) | 時刻まで待って続行 |
 | 承認と質問 | 要求が待ち、送信中、済み | 回答を provider に送る |
@@ -605,6 +643,7 @@ T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 ## 維持する契約
 
 - 既存の操作と表示を維持する。受け入れ条件とスナップショットの期待値を実装に合わせて変えない。
+- 既存の会話の識別子を変えない。
 - 送信の結果が不明なとき、利用者に復元か破棄かを確認する。
 - 中断、失敗、再起動の後はキューを保留し、利用者が再開する。
 - 開いたときは最新の 10 ターンを表示し、過去はページングで読む。作業の詳細は展開したときに読み込む。会話を開く速さを落とさない。
