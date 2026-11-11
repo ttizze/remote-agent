@@ -270,7 +270,8 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 クライアントが完全に持っている行の集まりを範囲と呼ぶ。カーソルは範囲ごとに持つ。
 
-- **項目の位置**: `Item` は会話の中で作られた順の位置を持つ。位置は変わらず、再利用しない。
+- **項目の位置**: `Item` は会話の中での順を表す位置を持つ。位置が変わるのは、履歴の置き換えのときだけである。
+- **履歴の置き換え**: 外部で続けた会話の再取り込みは、取り込んだターンを Host が記録したターンの間に入れるので、項目の位置を振り直す。Host は置き換えの連番を会話に記録する。
 - **会話の範囲**: その会話の `Thread` の行、すべての `Input`、すべての `Request`、床以上の位置にある `Item` の行すべて、床の項目が属するターン以降の `Turn` の行すべて。床は、持っている最も古い項目の位置である。
 - **カーソル C の意味**: 範囲内の全行について、連番 C 時点の最新を持っている。
 - カーソルは範囲を跨いで使えない。会話 A のカーソルは、会話 B について何も保証しない。
@@ -298,6 +299,9 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 - 保存領域の識別子が一致する。
 - C が現在の連番以下である。
 - C より後の削除記録がすべて残っている。
+- C が、その会話の最後の履歴の置き換えより後である。
+
+履歴を置き換えたとき、所有者は購読中のクライアントにスナップショットを送り直す。位置が変わると、クライアントの床が指す内容が変わるためである。
 
 会話が存在しなければ、その旨を返す。クライアントは範囲を捨てる。
 
@@ -350,6 +354,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 | 会話 A をカーソル 30 まで持つ。会話 B は未取得 | カーソルは範囲ごと | B はカーソルなしで購読し、スナップショットを受け取る |
 | 三日ぶりの再接続。削除記録は保持期間を過ぎて消えている | 追いつきの条件を満たさない | スナップショット |
 | DB を作り直した | 保存領域の識別子が不一致 | スナップショット。古い保存領域への未送信の操作は拒否される |
+| 会話を再取り込みして項目の位置が振り直された。あるクライアントは購読中で、別のクライアントは切断中 | 履歴の置き換え | 購読中のクライアントにはスナップショットを送り直す。切断中のクライアントのカーソルは置き換えより前なので、再接続時にスナップショットを返す |
 | 改名を二回した後、一回目の操作が再送される | 受付記録 | 一回目の結果を返すだけで、名前は戻らない |
 | 送信が配送され、巻き戻しでその発言が消えた後、同じ送信が再送される | 受付記録は消さない | 何も起きない |
 | 承認への回答の応答が失われ、クライアントが再送する | 受付記録 | 一回目の結果を返す。provider には二度送らない |
@@ -360,6 +365,202 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 | 実行中のコマンドの出力を省いて持つクライアントが、その項目を開く。再送の間も出力は流れ続ける | 項目の再送 | 保存済みの出力、その時点の未保存分、以後の差分が順に届き、抜けなく一文字ずつに戻る |
 | 表示中の本文への差分を足せなかった | 回復 | 項目の再送を求め、次の保存を待たずに追いつく |
 | 中断して再開した後、前の試行のイベントが provider から遅れて届く | 所有者が現在の試行と比べる | 捨てる |
+
+## 保存の形
+
+段階 3 で作る DB の表を定める。現状の表は保存先を一つにしただけで、形は以前のままである。項目はターンの塊の中にあり、provider との対応、既読、モデル選択は全件を一つの塊で持つ(`crates/host-daemon/src/host_rpc/store.rs:82`)。
+
+### 規則
+
+- **一つの値は、列か本体のどちらか一方に持つ。** 列にするのは、キー、順序、SQL で絞り込む値、途中の状態の判別子だけである。それ以外は本体に持つ。本体は Rust の型をそのまま符号化したもので、状態ごとに持つ値は enum が決める。
+- **同期する表の行はすべて連番を持つ。** 連番はその行を最後に変えたトランザクションのものである。
+- **途中の状態は判別子の列で探せる。** 起動時に、全会話の本体を読まずに、続きが要る行を見つける。
+- **Host だけが読む表を分ける。** クライアントに送る行と、provider との対応を混ぜない。
+- **本体の符号化は通信と同じものを使う。** 符号化と型の定義が一つで済む。
+
+### 表
+
+```sql
+-- 一行だけ持つ。保存領域の識別子、連番、削除記録を消し終えた連番。
+CREATE TABLE store (
+    id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    removals_pruned_through INTEGER NOT NULL
+) STRICT;
+
+-- 同期する表
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    seq INTEGER NOT NULL,
+    parent_id TEXT,                 -- サブエージェントの親
+    cwd TEXT,                       -- 取り込んだ会話では不明なことがある
+    updated_at INTEGER NOT NULL,    -- 一覧の順
+    history_seq INTEGER NOT NULL,   -- 最後に履歴を置き換えた連番
+    body BLOB NOT NULL              -- 名前、モデル選択、既読、キューの保留、一覧に出す要約
+) STRICT;
+CREATE INDEX threads_changed ON threads (seq);
+CREATE INDEX threads_children ON threads (parent_id) WHERE parent_id IS NOT NULL;
+
+CREATE TABLE inputs (
+    id TEXT PRIMARY KEY,            -- 操作の識別子を兼ね、配送後は発言の項目の識別子になる
+    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    position INTEGER NOT NULL,      -- キューの順
+    state TEXT NOT NULL,            -- preparing | queued | delivering | unknown | failed
+    body BLOB NOT NULL              -- 内容、配送の種類、選んだモデル、状態ごとの値
+) STRICT;
+CREATE INDEX inputs_queue ON inputs (thread_id, position);
+CREATE INDEX inputs_in_flight ON inputs (state) WHERE state IN ('preparing', 'delivering');
+
+CREATE TABLE turns (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    state TEXT NOT NULL,            -- running | waiting | completed | interrupted | failed
+    body BLOB NOT NULL              -- 時刻、状態ごとの値(待機中の作業、再試行の時刻、エラー)
+) STRICT;
+CREATE UNIQUE INDEX turns_order ON turns (thread_id, ordinal);
+CREATE INDEX turns_in_flight ON turns (state) WHERE state IN ('running', 'waiting');
+
+CREATE TABLE items (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    position INTEGER NOT NULL,      -- 会話の中での順
+    native_id TEXT,                 -- provider の項目の識別子
+    body BLOB NOT NULL              -- 種類ごとの内容。流れる本文は含まない
+) STRICT;
+CREATE UNIQUE INDEX items_order ON items (thread_id, position);
+CREATE INDEX items_changed ON items (thread_id, seq);
+CREATE INDEX items_native ON items (thread_id, native_id) WHERE native_id IS NOT NULL;
+
+-- 流れる本文。保存のたびに一行を足し、書き直さない。
+CREATE TABLE item_texts (
+    item_id TEXT NOT NULL REFERENCES items (id) ON DELETE CASCADE,
+    field TEXT NOT NULL,
+    part INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (item_id, field, part)
+) STRICT;
+
+CREATE TABLE requests (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    state TEXT NOT NULL,            -- awaiting | sending | unknown
+    body BLOB NOT NULL              -- 対象のターンと項目、承認か質問の内容
+) STRICT;
+CREATE INDEX requests_thread ON requests (thread_id);
+CREATE INDEX requests_in_flight ON requests (state) WHERE state = 'sending';
+
+-- 同期のための表
+CREATE TABLE removals (
+    thread_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,             -- thread | input | turn | item | request
+    id TEXT NOT NULL,
+    at INTEGER NOT NULL,            -- 保持期間の判定に使う
+    PRIMARY KEY (thread_id, seq, kind, id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE receipts (
+    operation_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,           -- 効果を書いたトランザクションの連番
+    outcome BLOB NOT NULL           -- 受付か、理由付きの拒否
+) STRICT, WITHOUT ROWID;
+
+-- Host だけが読む表
+CREATE TABLE bindings (
+    thread_id TEXT NOT NULL REFERENCES threads (id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    native_id TEXT NOT NULL,        -- provider のセッションの識別子
+    covered INTEGER,                -- そのセッションが知っている最後のターンの順序番号
+    state TEXT NOT NULL,            -- ready | injecting
+    body BLOB NOT NULL,             -- 渡した履歴
+    PRIMARY KEY (thread_id, provider)
+) STRICT;
+CREATE UNIQUE INDEX bindings_native ON bindings (provider, native_id);
+CREATE INDEX bindings_in_flight ON bindings (state) WHERE state = 'injecting';
+
+CREATE TABLE executions (
+    turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    native_turn_id TEXT,            -- provider のターンの識別子
+    PRIMARY KEY (turn_id, attempt)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX executions_native ON executions (provider, native_turn_id) WHERE native_turn_id IS NOT NULL;
+
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,             -- 取り込み、タイトル生成、後片付け
+    thread_id TEXT,
+    run_after INTEGER NOT NULL,
+    body BLOB NOT NULL
+) STRICT;
+```
+
+`threads` の本体にある一覧用の要約(状態、最後の発言の抜粋)は、`turns` と `items` から導ける値である。一覧の範囲が連番で同期できるように `threads` に置く。書くのは所有者だけで、元になる行と同じトランザクションで書くので、食い違わない。
+
+`items` は会話の識別子を、ターンを辿れば分かるのに自分でも持つ。会話の中の位置で引く索引に要るためである。変わらない値なので食い違わない。
+
+`removals` と `receipts` は `threads` を参照しない。会話を消した後も残すためである。
+
+### 読み書きと索引
+
+契約と経路が必要とする読み取りを挙げ、どの索引で引くかを決めた。上の定義を SQLite に読み込み、スナップショット、範囲の拡張、追いつき、削除記録、起動時の探索、provider からの振り分けの六つについて、実行計画が索引を使うことを確かめた。データを入れた速さは測っていない。
+
+| 読み取り | 使う索引 |
+|---|---|
+| スナップショット。会話の末尾から項目を数件 | `items_order` |
+| 範囲の拡張。ある位置より前の項目を数件 | `items_order` |
+| 追いつき。会話の中で連番がカーソルより大きい項目 | `items_changed` |
+| 追いつき。会話の中の削除記録 | `removals` の主キー |
+| 一覧の追いつき(段階 6) | `threads_changed` |
+| 起動時に続きが要る行 | `inputs_in_flight`、`turns_in_flight`、`requests_in_flight`、`bindings_in_flight` |
+| provider のイベントを会話へ振り分ける | `bindings_native` |
+| 取り込みで既存の行を見つける | `items_native`、`executions_native` |
+| 操作の再送 | `receipts` の主キー |
+| サブエージェントの一覧 | `threads_children` |
+
+### T3 Code の表との対応
+
+T3 Code の表は `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts` にある。
+
+| T3 Code | この計画 | 違いと理由 |
+|---|---|---|
+| `events` | なし | 決定 5 |
+| `command_receipts` | `receipts` | 同じ役割。効果の連番も同じく持つ |
+| `projection_threads` | `threads` | 下の「値の重複」 |
+| `projection_runs`、`thread_launch_workflows` | `inputs`、`turns` | 決定 4 |
+| `projection_messages`、`projection_nodes`、`projection_plans` | `items` | 決定 3。発言も計画も項目の種類にする |
+| `projection_turn_items`、`turn_item_positions` | `items`、`item_texts` | 位置は列にする。本文は追記できる形に分ける |
+| `projection_runtime_requests` | `requests` | 同じ役割 |
+| `projection_run_attempts`、`projection_provider_turns` | `executions` | クライアントに送らない |
+| `projection_provider_sessions`、`provider_threads`、`provider_session_bindings` | `bindings` | provider のプロセスの状態は保存しない。会話との対応だけを持つ |
+| `projection_context_handoffs`、`context_transfers` | `bindings` の状態と本体 | 決定 10 |
+| `projection_subagents` | `threads.parent_id` | 子の会話として持つ |
+| `effect_outbox` | `jobs` と途中の状態の列 | 決定 8、決定 9 |
+| `projection_checkpoints`、`checkpoint_scopes` | なし | 対応する機能がない |
+
+**値の重複**: T3 Code の表は、絞り込み用の列と、対象全体を入れた `payload_json` を持つ。列の値は本体にも入っている(`apps/server/src/orchestration-v2/ProjectionStore.ts:2632`。`ordinal`、`type`、`status` を本体から取り出して列にも書く)。この計画では、列に置いた値は本体から除く。
+
+**同じにした点**: 対象ごとに一行。項目は一件一行で、会話の中の位置に索引を持つ。受付記録は専用の表。どれも T3 Code にあり、現状の Bex にないものである。
+
+### T3 Code より良いと言える点、言えない点
+
+- **言える点**: 同じ値を列と本体に重ねない。同じ事実を表す表が一つ(T3 Code は発言、項目、実行ノードの三つ)。Host だけが読む表が分かれている。途中の状態を列で探せる。長い本文を書き直さない。
+- **言えない点**: T3 Code の表は実際に動いていて、100 本のマイグレーションを経ている。この表はまだ書いていない。読み取りの速さも測っていない。
+- **劣る点**: 本体は通信と同じ符号化(MessagePack)なので、`sqlite3` で開いても中身を読めない。T3 Code と OpenCode は JSON で、SQL の中で読める。符号化を一つにする利点を取り、調べるときは Host の読み取りコマンドを使う。
+
+### 確認が要る点
+
+- `executions` と `bindings` の列は、段階 3 の前に Claude と DeepSeek の接続の内部へ照らして確かめる。
+- 取り込み元の範囲(現状の `Segment`)が要るかは、取り込みの形で決まる。取り込みが本文をすべて行に写すなら要らない。
+- 会話の削除は現状の操作にない。`removals` の `thread` は、足すときのために置く。
 
 ## 経路の対応
 
@@ -399,7 +600,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 実装の順序は依存関係に従う。残る作業を main へ統合できる区切りは二つある。段階 2 から 5 は通信の形を一緒に変えるので、互換処理なしには分けられない。
 
 2. **protocol**: 対象と状態の型、変更セット、操作、適用関数、次の動作を決める関数。「同期の契約」の不変条件と具体例を、実装より先に試験として書く。
-3. **Host**: 行と連番、削除記録、受付記録、変更セットの生成、会話ごとの所有者、再起動時の規則、対応の合わせ直し、仕事表、絞った接続口。メモリと保存済み履歴を合成する二経路をなくし、置き換わった `SessionActor`、`Conversations`、各ワークフローを削除する。
+3. **Host**: 「保存の形」の表、行と連番、削除記録、受付記録、変更セットの生成、会話ごとの所有者、再起動時の規則、対応の合わせ直し、仕事表、絞った接続口。メモリと保存済み履歴を合成する二経路をなくし、置き換わった `SessionActor`、`Conversations`、各ワークフローを削除する。
 4. **core**: 複製、下書きの識別子、`Intent` の分割、端末キャッシュ。経路ごとの版番号の防御、仮キーの付け替え、送信の突き合わせを削除する。表示の投影の入力を替える。
 5. **クライアント**: NSH、iOS、Android を追随させる。段階 2 から 5 をまとめて統合する。
 6. **一覧の同期**: サイドバーの更新を同じ連番に載せ、Host の `list_revision` と改名、活動の通知を整理する。ここで統合できる。
