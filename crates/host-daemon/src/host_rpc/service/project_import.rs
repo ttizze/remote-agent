@@ -105,7 +105,7 @@ impl HostRpcService {
             .collect();
         let conversations = self
             .inner
-            .transcripts
+            .store
             .imported()
             .map_err(transcripts::storage_failure)?;
         for (conversation, cwd) in conversations {

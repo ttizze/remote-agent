@@ -1053,7 +1053,7 @@ fn late_item_changes_update_the_correct_recorded_occurrence() {
     };
     for retained in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let transcripts = Arc::new(crate::host_rpc::transcripts::Transcripts::open(
+        let transcripts = Arc::new(crate::host_rpc::store::ConversationStore::open(
             &directory.path().join("transcripts.sqlite"),
         ));
         let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
@@ -1087,7 +1087,7 @@ fn late_item_changes_update_the_correct_recorded_occurrence() {
                 },
             )
             .unwrap();
-        let router = SessionRouter::new().with_transcripts(transcripts.clone());
+        let router = SessionRouter::new().with_store(transcripts.clone());
         let lease = retained.then(|| router.retain_execution(target.clone()).unwrap());
         if retained {
             router.session_change(

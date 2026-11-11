@@ -26,7 +26,7 @@ mod requests;
 #[cfg(test)]
 mod tests;
 
-use activity::{Task, record_task_facts};
+use activity::record_task_facts;
 pub use connections::HostSession;
 pub(super) use connections::Outbound;
 use connections::{MAX_QUEUED_BYTES, frame_cost};
@@ -49,7 +49,7 @@ impl Drop for SessionLease {
         let mut actor = lock_state(&self.actor);
         actor.leases -= 1;
         drop(actor);
-        self.router.prune(&self.target, &self.actor);
+        prune(&self.router.state, &self.target, &self.actor);
     }
 }
 
@@ -76,7 +76,7 @@ impl Drop for HostSubscription {
             lock_state(&actor).subscriptions.remove(&self.id);
             if let Some(state) = self.state.upgrade() {
                 lock_state(&state).subscriptions.remove(&self.id);
-                SessionRouter { state }.prune(&self.target, &actor);
+                prune(&state, &self.target, &actor);
             }
         }
         while let Ok(frame) = self.receiver.try_recv() {
@@ -98,13 +98,9 @@ impl From<protocol::Response> for HostReply {
     }
 }
 
-/// Connections and compact task facts share this lock; conversation history has its own lock.
+/// Connections, subscriptions and request routing. Activity has its own lock.
 #[derive(Default)]
 struct State {
-    apns: Option<Arc<crate::apns::Apns>>,
-    tasks: HashMap<SessionRef, Task>,
-    reads: read_state::ReadState,
-    task_revision: u64,
     list_revision: u64,
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
@@ -112,11 +108,12 @@ struct State {
     subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
     requests: HashMap<agent_protocol::ids::RequestId, SessionRef>,
     native_requests: HashMap<(uuid::Uuid, String), agent_protocol::ids::RequestId>,
-    transcripts: Option<Arc<super::transcripts::Transcripts>>,
+    store: Option<Arc<super::store::ConversationStore>>,
 }
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
     state: Arc<Mutex<State>>,
+    activity: Arc<Mutex<activity::ActivityState>>,
 }
 fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     state.lock().unwrap_or_else(|e| e.into_inner())
@@ -124,6 +121,22 @@ fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn record_failure(result: Result<(), String>) {
     if let Err(message) = result {
         tracing::error!(target: "agent", operation = "host.transcript.write", message);
+    }
+}
+
+fn prune(state: &Mutex<State>, target: &SessionRef, actor: &Arc<Mutex<SessionActor>>) {
+    let mut owned = lock_state(actor);
+    if owned.release() || !owned.subscriptions.is_empty() {
+        return;
+    }
+    let mut state = lock_state(state);
+    if Arc::strong_count(actor) == 2
+        && state
+            .executions
+            .get(target)
+            .is_some_and(|current| Arc::ptr_eq(current, actor))
+    {
+        state.executions.remove(target);
     }
 }
 
@@ -148,8 +161,9 @@ impl SessionRouter {
             } => self.resolve_native_request(instance, &native_id),
             AgentChange::SourceClosed(instance) => self.close_request_source(instance),
             AgentChange::Renamed { session, name } => {
-                if let Some(transcripts) = lock_state(&self.state).transcripts.clone() {
-                    record_failure(transcripts.rename(&session, name.as_deref()));
+                let store = lock_state(&self.state).store.clone();
+                if let Some(store) = store {
+                    record_failure(store.rename(&session, name.as_deref()));
                 }
                 self.broadcast(Notification::SessionRenamed {
                     session,
@@ -165,6 +179,7 @@ impl SessionRouter {
     }
     pub(crate) fn new() -> Self {
         Self {
+            activity: Default::default(),
             state: Arc::new(Mutex::new(State {
                 next_session_id: 1,
                 ..Default::default()
@@ -173,32 +188,32 @@ impl SessionRouter {
     }
     /// Finished turns are recorded while their conversation is still locked,
     /// so the store observes them in execution order.
-    pub(super) fn with_transcripts(
-        self,
-        transcripts: Arc<super::transcripts::Transcripts>,
-    ) -> Self {
-        lock_state(&self.state).transcripts = Some(transcripts);
+    pub(super) fn with_store(self, store: Arc<super::store::ConversationStore>) -> Self {
+        {
+            lock_state(&self.activity).reads = read_state::ReadState::load(store.clone());
+            lock_state(&self.state).store = Some(store);
+        }
         self
     }
     /// Running turns end with the Host; record what they produced.
     pub(super) fn record_running(&self) {
-        let (transcripts, actors) = {
+        let (store, actors) = {
             let state = lock_state(&self.state);
             let actors: Vec<_> = state
                 .executions
                 .iter()
                 .map(|(target, actor)| (target.clone(), actor.clone()))
                 .collect();
-            (state.transcripts.clone(), actors)
+            (state.store.clone(), actors)
         };
-        let Some(transcripts) = transcripts else {
+        let Some(store) = store else {
             return;
         };
         for (target, actor) in actors {
             let actor = lock_state(&actor);
             for turn in actor.timeline.turns.iter().flatten() {
                 if turn.status == agent_protocol::execution::TurnStatus::Running {
-                    record_failure(transcripts.record(&target, turn, None));
+                    record_failure(store.record(&target, turn, None));
                 }
             }
         }
@@ -213,28 +228,13 @@ impl SessionRouter {
     fn existing(&self, target: &SessionRef) -> Option<Arc<Mutex<SessionActor>>> {
         lock_state(&self.state).executions.get(target).cloned()
     }
-    fn prune(&self, target: &SessionRef, actor: &Arc<Mutex<SessionActor>>) {
-        let mut owned = lock_state(actor);
-        if owned.release() || !owned.subscriptions.is_empty() {
-            return;
-        }
-        let mut state = lock_state(&self.state);
-        if Arc::strong_count(actor) == 2
-            && state
-                .executions
-                .get(target)
-                .is_some_and(|current| Arc::ptr_eq(current, actor))
-        {
-            state.executions.remove(target);
-        }
-    }
     pub(super) fn submission_lock(&self, target: &SessionRef) -> Arc<tokio::sync::Mutex<()>> {
         lock_state(&self.actor(target)).submission_lock.clone()
     }
     pub(crate) fn overlay_execution(&self, target: &SessionRef, mut thread: Thread) -> Thread {
         if let Some(actor) = self.existing(target) {
             thread = lock_state(&actor).overlay(thread);
-            self.prune(target, &actor);
+            prune(&self.state, target, &actor);
         }
         thread
     }
@@ -246,7 +246,7 @@ impl SessionRouter {
         owned.timeline = Default::default();
         owned.request_origins.clear();
         owned.queued_turns.clear();
-        let mut state = lock_state(&self.state);
+        let mut state = lock_state(&self.activity);
         state.tasks.remove(target);
         state.reads.forget(target);
     }
@@ -267,7 +267,7 @@ impl SessionRouter {
             }
             _ => None,
         };
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
         receipt
     }
     /// The conversation's input waiting for its running turn.
@@ -276,7 +276,7 @@ impl SessionRouter {
             return Default::default();
         };
         let queue = lock_state(&actor).timeline.queue.clone();
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
         queue
     }
     /// Input waits and nothing holds the queue.
@@ -296,7 +296,7 @@ impl SessionRouter {
             .flatten()
             .rfind(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
             .map(|turn| turn.id.clone());
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
         turn
     }
     /// Marks the turn that queued input started, now and when it changes later,
@@ -332,7 +332,7 @@ impl SessionRouter {
         }
         drop(owned);
         self.close_failed(failed);
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
     }
     pub(super) fn running(&self, target: &SessionRef) -> bool {
         self.existing(target).is_some_and(|actor| {
@@ -410,7 +410,7 @@ impl SessionRouter {
         }
         drop(owned);
         self.close_failed(failed);
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
     }
     pub(crate) fn item(
         &self,
@@ -424,7 +424,7 @@ impl SessionRouter {
         let result = agent_protocol::session::item_position(turns, turn_id, item_id)
             .map(|(turn, item)| turns[turn].items.as_ref().unwrap()[item].clone());
         drop(owned);
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
         result
     }
 
@@ -444,7 +444,7 @@ impl SessionRouter {
                     .rfind(|current| current.id.as_str() == turn)
                     .cloned()
             });
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
         result
     }
 
@@ -561,7 +561,7 @@ impl SessionRouter {
         }
         let id = uuid::Uuid::new_v4();
         let (sender, receiver) = mpsc::unbounded_channel();
-        // Conversation -> registry is the only nested lock order. Registration,
+        // Conversation -> registry follows the router lock order. Registration,
         // removal and claims all verify the same live connection here.
         let mut state = lock_state(&self.state);
         if !state.sessions.contains_key(&session) || !connection.alive.load(Relaxed) {
@@ -599,7 +599,7 @@ impl SessionRouter {
         let mut failed = Vec::new();
         self.change_locked(&mut lock_state(&actor), target, &change, &mut failed);
         self.close_failed(failed);
-        self.prune(target, &actor);
+        prune(&self.state, target, &actor);
     }
     pub(crate) fn fail_provider(
         &self,
@@ -678,7 +678,7 @@ impl SessionRouter {
             }
             drop(owned);
             self.close_failed(failed);
-            self.prune(&target, &actor);
+            prune(&self.state, &target, &actor);
         }
     }
     fn change_locked(
@@ -733,12 +733,12 @@ impl SessionRouter {
         let removed_from_history = matches!(change, SessionChange::RemoveItem { turn_id, item_id }
             if agent_protocol::session::item_position(previous_turns, turn_id, item_id).is_none());
         let updated = change.turn_index(previous_turns);
-        let transcripts = lock_state(&self.state).transcripts.clone();
-        let archived_item = if let (Some(transcripts), SessionChange::Item { turn_id, item }) =
-            (&transcripts, change)
+        let store = lock_state(&self.state).store.clone();
+        let archived_item = if let (Some(store), SessionChange::Item { turn_id, item }) =
+            (&store, change)
         {
             agent_protocol::session::item_position(previous_turns, turn_id, &item.id).is_none()
-                && match transcripts.item(target, turn_id, &item.id, false) {
+                && match store.item(target, turn_id, &item.id, false) {
                     Ok(item) => item.is_some(),
                     Err(message) => {
                         tracing::error!(target: "agent", operation = "host.transcript.read", message);
@@ -805,28 +805,31 @@ impl SessionRouter {
             .expect("activity encodes");
             failed.extend(self.broadcast_frames(frame));
         }
-        let mut state = lock_state(&self.state);
-        failed.extend(record_task_facts(
-            &mut state,
-            target,
-            &actor.timeline,
-            change,
-        ));
-        drop(state);
-        // The queue survives a Host restart, as T3 Code's queued runs do.
-        if let (Some(transcripts), SessionChange::Queue { queue }) = (&transcripts, change) {
-            record_failure(transcripts.save_queue(target, queue));
+        {
+            let mut activity = lock_state(&self.activity);
+            if let Some(update) = record_task_facts(&mut activity, target, &actor.timeline, change)
+            {
+                failed.extend(activity::publish_task_activity(
+                    activity.apns.as_deref(),
+                    &lock_state(&self.state).sessions,
+                    &update,
+                ));
+            }
         }
-        if let (Some(transcripts), Some(turn)) = (&transcripts, finished) {
+        // The queue survives a Host restart, as T3 Code's queued runs do.
+        if let (Some(store), SessionChange::Queue { queue }) = (&store, change) {
+            record_failure(store.save_queue(target, queue));
+        }
+        if let (Some(store), Some(turn)) = (&store, finished) {
             let removed_item = match change {
                 SessionChange::RemoveItem { item_id, .. } => Some(item_id),
                 _ => None,
             };
-            record_failure(transcripts.record(target, &turn, removed_item));
+            record_failure(store.record(target, &turn, removed_item));
         }
-        if let (Some(transcripts), true, Some(turn_id)) = (&transcripts, late, change.turn_id()) {
+        if let (Some(store), true, Some(turn_id)) = (&store, late, change.turn_id()) {
             record_failure(
-                transcripts.update_turn(target, turn_id, change.item_id(), |turn| {
+                store.update_turn(target, turn_id, change.item_id(), |turn| {
                     let (timeline, result) =
                         change.apply_timeline(agent_protocol::session::Timeline {
                             turns: Some(vec![Arc::new(turn)]),

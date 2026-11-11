@@ -63,7 +63,7 @@ impl HostRpcService {
         }
         let Some(window) = self
             .inner
-            .transcripts
+            .store
             .window(target, end, limit)
             .map_err(storage_failure)?
         else {
@@ -150,13 +150,9 @@ impl HostRpcService {
         // Native reads can outlive a rewind or a new recorded turn. Admit
         // their result only while the captured transcript is still current.
         let result = async {
-            let version = self
-                .inner
-                .transcripts
-                .version(&target)
-                .map_err(storage_failure)?;
+            let version = self.inner.store.version(&target).map_err(storage_failure)?;
             let response = self.import_history(&target).await?;
-            let transcripts = self.inner.transcripts.clone();
+            let transcripts = self.inner.store.clone();
             let key = target.clone();
             tokio::task::spawn_blocking(move || transcripts.import(&key, version, response))
                 .await

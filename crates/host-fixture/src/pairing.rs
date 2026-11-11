@@ -304,10 +304,27 @@ fn route(
 // Native fixture item IDs locate a backing session, while UI assertions must
 // use its persisted public address. Unmanaged fixture sessions own their ID.
 fn session_identity(root: &Path, native: &str) -> Result<serde_json::Value> {
-    let rows: Vec<serde_json::Value> = match fs::read(root.join("bex-conversations.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
+    use rusqlite::OptionalExtension;
+    let path = root.join("bex-transcripts.sqlite");
+    let rows: Vec<serde_json::Value> = if path.exists() {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        connection.busy_timeout(Duration::from_secs(10))?;
+        let bytes: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT body FROM host_state WHERE name = 'bindings'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()?
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
     let native = json!({"provider":"codex", "id":native});
     Ok(rows

@@ -55,7 +55,7 @@ struct ServiceInner {
     terminals: crate::terminals::Terminals,
     dictation: crate::dictation::Dictation,
     conversations: super::conversations::Conversations,
-    transcripts: Arc<super::transcripts::Transcripts>,
+    store: Arc<super::store::ConversationStore>,
     imports: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, transcripts::Import>>,
     model_selections: model_selections::ModelSelections,
     capacity: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, capacity::Run>>,
@@ -68,28 +68,21 @@ impl HostRpcService {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
-        let transcripts = Arc::new(super::transcripts::Transcripts::open(
+        let store = Arc::new(super::store::ConversationStore::open(
             &projects.path().with_file_name("bex-transcripts.sqlite"),
         ));
-        let conversations = super::conversations::Conversations::new(
-            projects.path().with_file_name("bex-conversations.json"),
-        );
-        conversations.recover_rewind(&transcripts);
-        let router = SessionRouter::new()
-            .with_read_state(projects.path().with_file_name("bex-read-state.json"))
-            .with_transcripts(transcripts.clone());
+        let conversations = super::conversations::Conversations::new(store.clone());
+        let router = SessionRouter::new().with_store(store.clone());
         let (providers, dictation) = crate::providers::Registry::new(backends);
         Self {
             inner: Arc::new(ServiceInner {
                 history_scope: OnceLock::new(),
                 updating: std::sync::atomic::AtomicBool::new(false),
                 conversations,
-                transcripts,
+                store: store.clone(),
                 imports: Default::default(),
                 capacity: Default::default(),
-                model_selections: model_selections::ModelSelections::new(
-                    projects.path().with_file_name("bex-model-selections.json"),
-                ),
+                model_selections: model_selections::ModelSelections::new(store),
                 browser: OnceLock::new(),
                 provider_settings: crate::providers::Settings::new(
                     projects.path().with_file_name("bex-providers.json"),
@@ -714,7 +707,7 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
-            if let Err(message) = self.inner.transcripts.interrupt_running() {
+            if let Err(message) = self.inner.store.interrupt_running() {
                 tracing::error!(target: "agent", operation = "host.transcript.write", message);
             }
             self.restore_queues();

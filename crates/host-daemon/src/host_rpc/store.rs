@@ -1,7 +1,6 @@
-//! Host-owned transcripts. Native provider history is read once to import a
-//! conversation; afterwards the Host records each turn as it finishes and
-//! never returns to native storage for reads. Rows keep every item inline;
-//! readers summarize or defer bodies for transfer.
+//! Host-owned conversation storage: transcripts, bindings, receipts and options.
+//! Native history is imported once; afterwards the Host records completed turns.
+//! Stored items keep their bodies inline; readers summarize or defer them for transfer.
 use agent_protocol::{
     execution::TurnStatus,
     ids::{ItemId, TurnId},
@@ -11,12 +10,13 @@ use agent_protocol::{
     session::SessionRef,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::HashMap, path::Path, sync::Mutex};
 
 /// A window stops growing past this many encoded bytes, keeping at least one turn.
 const WINDOW_BYTES: usize = 1 << 20;
 
-pub(crate) struct Transcripts {
+pub(crate) struct ConversationStore {
     // A store that failed to open stays failed; reads must not fall back to
     // an empty transcript that would look like a conversation without turns.
     state: Mutex<Result<Connection, String>>,
@@ -44,7 +44,7 @@ fn decode_turn(body: &[u8]) -> Result<Turn, String> {
     protocol::decode(body).map_err(failure)
 }
 
-impl Transcripts {
+impl ConversationStore {
     pub(crate) fn open(path: &Path) -> Self {
         let state = (|| {
             if let Some(parent) = path.parent() {
@@ -55,12 +55,15 @@ impl Transcripts {
             connection
                 .busy_timeout(std::time::Duration::from_secs(10))
                 .map_err(failure)?;
-            // Rewind removes its cross-file recovery journal after replace
-            // commits, including when restoring. Each WAL commit must be durable.
+            // A successful receipt or rewind must survive a Host restart.
             connection
                 .execute_batch(
                     "PRAGMA journal_mode = WAL;
                      PRAGMA synchronous = FULL;
+                     CREATE TABLE IF NOT EXISTS host_state (
+                         name TEXT PRIMARY KEY,
+                         body BLOB NOT NULL
+                     ) WITHOUT ROWID;
                      CREATE TABLE IF NOT EXISTS conversations (
                          provider TEXT NOT NULL,
                          id TEXT NOT NULL,
@@ -119,6 +122,59 @@ impl Transcripts {
         })
     }
 
+    pub(super) fn load_state<T: DeserializeOwned + Default>(
+        &self,
+        name: &str,
+    ) -> Result<T, String> {
+        self.with(|connection| {
+            let bytes: Option<Vec<u8>> = connection
+                .query_row(
+                    "SELECT body FROM host_state WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            bytes
+                .map(|bytes| serde_json::from_slice(&bytes).map_err(failure))
+                .unwrap_or_else(|| Ok(T::default()))
+        })
+    }
+
+    pub(super) fn save_state(&self, name: &str, value: &impl Serialize) -> Result<(), String> {
+        let bytes = serde_json::to_vec(value).map_err(failure)?;
+        self.write(|transaction| write_state(transaction, name, &bytes))
+    }
+
+    pub(super) fn replace_with_bindings(
+        &self,
+        conversation: &SessionRef,
+        response: ThreadResponse,
+        bindings: &[super::conversations::Conversation],
+    ) -> Result<u64, String> {
+        let bytes = serde_json::to_vec(bindings).map_err(failure)?;
+        self.write(|transaction| {
+            let version = store(transaction, conversation, response, false)?;
+            write_state(transaction, "bindings", &bytes)?;
+            Ok(version)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn reject_state_writes(&self, reject: bool) {
+        self.with(|connection| {
+            connection
+                .execute_batch(if reject {
+                    "CREATE TEMP TRIGGER reject_state BEFORE INSERT ON host_state
+             BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;"
+                } else {
+                    "DROP TRIGGER reject_state;"
+                })
+                .map_err(failure)
+        })
+        .unwrap();
+    }
+
     /// Native history fills in what the Host did not run. A turn the Host
     /// recorded keeps its recorded items, which an import does not copy in
     /// full; recorded turns missing from native history follow it in order.
@@ -139,15 +195,6 @@ impl Transcripts {
     /// Capture before reading native history; import checks it in its transaction.
     pub(crate) fn version(&self, conversation: &SessionRef) -> Result<Option<u64>, String> {
         self.with(|connection| transcript_version(connection, conversation))
-    }
-
-    /// Replace everything held for `conversation`, recorded turns included.
-    pub(crate) fn replace(
-        &self,
-        conversation: &SessionRef,
-        response: ThreadResponse,
-    ) -> Result<u64, String> {
-        self.write(|transaction| store(transaction, conversation, response, false))
     }
 
     /// Replace the stored occurrence of a live turn, or append it. Conversations
@@ -492,6 +539,17 @@ impl Transcripts {
     }
 }
 
+fn write_state(transaction: &Transaction, name: &str, bytes: &[u8]) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO host_state(name, body) VALUES (?1, ?2)
+        ON CONFLICT(name) DO UPDATE SET body = excluded.body",
+            params![name, bytes],
+        )
+        .map_err(failure)?;
+    Ok(())
+}
+
 fn find_turn<T>(
     connection: &Connection,
     conversation: &SessionRef,
@@ -719,14 +777,14 @@ mod tests {
         }
     }
 
-    fn store() -> (tempfile::TempDir, Transcripts) {
+    fn store() -> (tempfile::TempDir, ConversationStore) {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(&root.path().join("state/transcripts.sqlite"));
+        let store = ConversationStore::open(&root.path().join("state/transcripts.sqlite"));
         (root, store)
     }
 
     #[test]
-    fn commits_are_durable_before_cross_file_recovery_journals_can_be_removed() {
+    fn successful_commits_are_durable() {
         let (_root, store) = store();
         store
             .with(|connection| {
@@ -978,7 +1036,7 @@ mod tests {
             )
             .unwrap();
         drop(store);
-        let store = Transcripts::open(&root.path().join("state/transcripts.sqlite"));
+        let store = ConversationStore::open(&root.path().join("state/transcripts.sqlite"));
         let latest = store.window(&target, None, 1).unwrap().unwrap();
         assert_eq!(latest.start, 1);
         assert_eq!(texts(&latest), ["second/b"]);
@@ -1287,7 +1345,7 @@ mod tests {
     #[test]
     fn complete_history_requires_an_import_and_is_not_limited_to_a_display_window() {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(&root.path().join("transcripts.sqlite"));
+        let store = ConversationStore::open(&root.path().join("transcripts.sqlite"));
         let target = conversation();
         let mut first = turn("first", &["large"], TurnStatus::Completed);
         Arc::make_mut(&mut first.items.as_mut().unwrap()[0]).body =
@@ -1324,7 +1382,7 @@ mod tests {
     #[test]
     fn an_unopened_store_fails_instead_of_reporting_empty_transcripts() {
         let root = tempfile::tempdir().unwrap();
-        let store = Transcripts::open(root.path());
+        let store = ConversationStore::open(root.path());
         assert!(store.window(&conversation(), None, 10).is_err());
         assert!(
             store

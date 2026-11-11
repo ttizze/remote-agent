@@ -2654,6 +2654,7 @@ dependencies = [
  "png 0.18.1",
  "reqwest",
  "rstest",
+ "rusqlite",
  "rustix 1.1.5",
  "rustls",
  "serde",

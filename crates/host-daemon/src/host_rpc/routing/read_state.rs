@@ -1,8 +1,8 @@
 //! Completion receipts belong to the Host, including while clients are offline.
 use super::*;
+use crate::host_rpc::store::ConversationStore;
 use agent_protocol::ids::TurnId;
 use serde::{Deserialize, Serialize};
-use std::{io::Write, path::PathBuf};
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Completion {
@@ -12,26 +12,22 @@ struct Completion {
 }
 
 pub(super) struct ReadState {
-    path: Option<PathBuf>,
+    store: Option<Arc<ConversationStore>>,
     completions: Result<Vec<Completion>, String>,
 }
 impl Default for ReadState {
     fn default() -> Self {
         Self {
-            path: None,
+            store: None,
             completions: Ok(Vec::new()),
         }
     }
 }
 impl ReadState {
-    pub(super) fn load(path: PathBuf) -> Self {
-        let completions = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.to_string()),
-        };
+    pub(super) fn load(store: Arc<ConversationStore>) -> Self {
+        let completions = store.load_state("reads");
         Self {
-            path: Some(path),
+            store: Some(store),
             completions,
         }
     }
@@ -64,21 +60,12 @@ impl ReadState {
         }
     }
     fn save(&self, completions: &[Completion]) -> Result<(), Failure> {
-        let Some(path) = &self.path else {
+        let Some(store) = &self.store else {
             return Ok(());
         };
-        let bytes = serde_json::to_vec(completions)?;
-        let write = || -> anyhow::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite).write(|file| {
-                file.write_all(&bytes)?;
-                file.sync_all()
-            })?;
-            Ok(())
-        };
-        write().map_err(|error| Failure::new("read_state_storage_failed", error))
+        store
+            .save_state("reads", &completions)
+            .map_err(|error| Failure::new("read_state_storage_failed", error))
     }
     pub(super) fn record(
         &mut self,
@@ -142,26 +129,25 @@ impl ReadState {
 }
 
 impl SessionRouter {
-    pub(in crate::host_rpc) fn with_read_state(self, path: PathBuf) -> Self {
-        lock_state(&self.state).reads = ReadState::load(path);
-        self
-    }
     pub(in crate::host_rpc) fn check_read_state(&self) -> Result<(), Failure> {
-        lock_state(&self.state).reads.check()
+        lock_state(&self.activity).reads.check()
     }
     pub(in crate::host_rpc) fn mark_session_read(
         &self,
         params: &agent_protocol::live_activity::MarkSessionRead,
     ) -> Result<(), Failure> {
-        let mut state = lock_state(&self.state);
+        let mut state = lock_state(&self.activity);
         if !state.reads.mark_read(&params.session, &params.turn_id)? {
             return Ok(());
         }
         state.task_revision += 1;
         let activity =
             activity::task_activity_state(state.task_revision, &state.tasks, state.reads.unread());
-        let failed =
-            activity::publish_task_activity(state.apns.as_deref(), &state.sessions, &activity);
+        let failed = activity::publish_task_activity(
+            state.apns.as_deref(),
+            &lock_state(&self.state).sessions,
+            &activity,
+        );
         drop(state);
         self.close_failed(failed);
         Ok(())
@@ -173,10 +159,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn activity_io_does_not_block_connection_lifecycle() {
+        let router = SessionRouter::new();
+        // Receipt I/O holds this lock. Connection registration must remain
+        // independent for its entire lifetime, including while SQLite waits.
+        let activity = lock_state(&router.activity);
+        let other = router.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let session = other.open_session();
+            drop(session);
+            sent.send(()).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(activity);
+        thread.join().unwrap();
+        result.unwrap();
+    }
+
+    #[test]
     fn only_a_fresh_running_list_clears_a_saved_completion() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reads.json");
-        let router = SessionRouter::new().with_read_state(path.clone());
+        let path = directory.path().join("state.sqlite");
+        let router = SessionRouter::new().with_store(Arc::new(
+            crate::host_rpc::store::ConversationStore::open(&path),
+        ));
         let id = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
         router.task_activity(
             vec![Thread {
@@ -210,18 +217,26 @@ mod tests {
         assert_eq!(late.unread, vec![(id.clone(), "second".into())]);
         let fresh = router.task_activity(vec![running], late.revision);
         assert!(fresh.unread.is_empty());
-        assert!(ReadState::load(path).unread().is_empty());
+        assert!(
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread()
+            .is_empty()
+        );
     }
 
     #[test]
     fn receipts_survive_restart_and_do_not_hide_newer_or_other_provider_completions() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reads.json");
+        let path = directory.path().join("state.sqlite");
         let codex = SessionRef::new(ProviderKind::Codex, "same".into()).unwrap();
         let claude = SessionRef::new(ProviderKind::Claude, "same".into()).unwrap();
         let first = "first".into();
         let second = "second".into();
-        let mut state = ReadState::load(path.clone());
+        let mut state = ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+            &path,
+        )));
         assert!(state.record(&codex, false, Some(&first)));
         assert!(state.record(&claude, false, Some(&first)));
         assert!(state.mark_read(&codex, &first).unwrap());
@@ -230,7 +245,10 @@ mod tests {
             "duplicate completion must stay read"
         );
         assert_eq!(
-            ReadState::load(path.clone()).unread(),
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread(),
             vec![(claude.clone(), first.clone())]
         );
         assert!(state.record(&codex, false, Some(&second)));
@@ -238,25 +256,43 @@ mod tests {
             !state.mark_read(&codex, &first).unwrap(),
             "a delayed receipt cannot clear new work"
         );
-        assert_eq!(ReadState::load(path.clone()).unread().len(), 2);
+        assert_eq!(
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread()
+            .len(),
+            2
+        );
         assert!(state.mark_read(&claude, &first).unwrap());
         assert_eq!(
-            ReadState::load(path.clone()).unread(),
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread(),
             vec![(codex.clone(), second.clone())]
         );
         assert!(
             state.record(&codex, true, None),
             "starting new work clears the old badge"
         );
-        assert!(ReadState::load(path).unread().is_empty());
+        assert!(
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread()
+            .is_empty()
+        );
     }
 
     #[test]
     fn subagent_completions_never_survive_as_standalone_unread_results() {
         use agent_protocol::{execution::TurnStatus, models::SessionStatus};
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reads.json");
-        let router = SessionRouter::new().with_read_state(path.clone());
+        let path = directory.path().join("state.sqlite");
+        let router = SessionRouter::new().with_store(Arc::new(
+            crate::host_rpc::store::ConversationStore::open(&path),
+        ));
         let root = SessionRef::new(ProviderKind::Codex, "root".into()).unwrap();
         let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
         let conversation = Thread {
@@ -280,8 +316,16 @@ mod tests {
         }
         let expected = vec![(root, "completed".into())];
         assert_eq!(router.task_activity(Vec::new(), 0).unread, expected);
-        assert_eq!(ReadState::load(path.clone()).unread(), expected);
-        let restarted = SessionRouter::new().with_read_state(path);
+        assert_eq!(
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread(),
+            expected
+        );
+        let restarted = SessionRouter::new().with_store(Arc::new(
+            crate::host_rpc::store::ConversationStore::open(&path),
+        ));
         let state = restarted.task_activity(vec![conversation], 0);
         assert_eq!(state.unread, expected);
         assert_eq!(state.display.current.total, 1);
@@ -292,26 +336,34 @@ mod tests {
     fn a_failed_receipt_write_preserves_unread_and_can_be_retried() {
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("state");
-        let path = parent.join("reads.json");
+        let path = parent.join("state.sqlite");
         let id = SessionRef::new(ProviderKind::Claude, "task".into()).unwrap();
         let turn = "completed".into();
-        let mut state = ReadState::load(path.clone());
+        let mut state = ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+            &path,
+        )));
         assert!(state.record(&id, false, Some(&turn)));
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&parent).unwrap();
-        std::fs::write(&parent, b"blocked").unwrap();
+        state.store.as_ref().unwrap().reject_state_writes(true);
         assert!(state.mark_read(&id, &turn).is_err());
         assert_eq!(state.unread(), vec![(id.clone(), turn.clone())]);
-        std::fs::remove_file(&parent).unwrap();
+        state.store.as_ref().unwrap().reject_state_writes(false);
         assert!(state.mark_read(&id, &turn).unwrap());
-        assert!(ReadState::load(path).unread().is_empty());
+        assert!(
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread()
+            .is_empty()
+        );
     }
 
     #[test]
     fn rewinding_forgets_removed_completion_receipts_without_affecting_other_tasks() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reads.json");
-        let mut state = ReadState::load(path.clone());
+        let path = directory.path().join("state.sqlite");
+        let mut state = ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+            &path,
+        )));
         let a = SessionRef::new(ProviderKind::Codex, "a".into()).unwrap();
         let b = SessionRef::new(ProviderKind::Codex, "b".into()).unwrap();
         state.record(&a, false, Some(&"removed".into()));
@@ -319,15 +371,23 @@ mod tests {
         state.forget(&a);
         state.forget(&a);
         assert!(!state.mark_read(&a, &"removed".into()).unwrap());
-        assert_eq!(ReadState::load(path).unread(), [(b, "retained".into())]);
+        assert_eq!(
+            ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .unread(),
+            [(b, "retained".into())]
+        );
     }
 
     #[test]
     fn corrupted_receipts_are_reported_and_never_overwritten() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reads.json");
+        let path = directory.path().join("state.sqlite");
         std::fs::write(&path, b"damaged").unwrap();
-        let mut state = ReadState::load(path.clone());
+        let mut state = ReadState::load(Arc::new(crate::host_rpc::store::ConversationStore::open(
+            &path,
+        )));
         let id = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
         assert!(state.check().is_err());
         assert!(state.mark_read(&id, &"turn".into()).is_err());

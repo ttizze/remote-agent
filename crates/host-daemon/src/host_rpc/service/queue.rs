@@ -98,7 +98,7 @@ impl HostRpcService {
     /// they waited for, so they come back held, as T3 Code's recovery holds
     /// queued runs, and their senders see them accepted.
     pub(super) fn restore_queues(&self) {
-        let queues = match self.inner.transcripts.queues() {
+        let queues = match self.inner.store.queues() {
             Ok(queues) => queues,
             Err(message) => {
                 tracing::error!(target: "agent", operation = "session.queue.restore", message);

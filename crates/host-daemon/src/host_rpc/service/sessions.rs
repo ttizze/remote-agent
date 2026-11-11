@@ -14,7 +14,7 @@ impl HostRpcService {
             .map_err(|error| Failure::new("invalid_params", error))?;
         let stored = self
             .inner
-            .transcripts
+            .store
             .turn(&params.session, &params.turn_id)
             .map_err(transcripts::storage_failure)?
             .and_then(|turn| turn.items);
@@ -241,7 +241,7 @@ impl HostRpcService {
         )?;
         let renamed = agent.rename(&target.id, &params.name).await?;
         self.inner
-            .transcripts
+            .store
             .rename(target, Some(&params.name))
             .map_err(transcripts::storage_failure)?;
         Ok(renamed)
@@ -621,7 +621,7 @@ impl HostRpcService {
             Some(item) => Some(item),
             None => self
                 .inner
-                .transcripts
+                .store
                 .item(target, &params.turn_id, &params.item_id, true)
                 .map_err(transcripts::storage_failure)?
                 .filter(|item| !item.is_deferred()),
@@ -1106,7 +1106,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while service
                 .inner
-                .transcripts
+                .store
                 .window(&target, None, 1)
                 .unwrap()
                 .is_none()

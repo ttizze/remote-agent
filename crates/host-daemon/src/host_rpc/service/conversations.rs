@@ -50,7 +50,7 @@ impl HostRpcService {
             self.conversation_history(&row, HistoryUse::Excerpt).await?
         } else if let Some(response) = self
             .inner
-            .transcripts
+            .store
             .history(&params.session)
             .map_err(transcripts::storage_failure)?
         {
@@ -82,10 +82,8 @@ impl HostRpcService {
     ) -> Result<ThreadResponse, Failure> {
         let (fork, inherited) = self.branch(row, turn_id).await?;
         self.inner
-            .transcripts
-            .replace(&fork.id, inherited)
-            .map_err(transcripts::storage_failure)?;
-        self.inner.conversations.save(fork.clone())?;
+            .conversations
+            .replace_history(fork.clone(), inherited)?;
         self.publish_conversation(&fork).await
     }
 
@@ -170,10 +168,7 @@ impl HostRpcService {
             5,
         )?;
         let projects = self.project_snapshot().await?;
-        let version =
-            self.inner
-                .conversations
-                .rewind(&self.inner.transcripts, rewound, history, kept)?;
+        let version = self.inner.conversations.replace_history(rewound, kept)?;
         page.thread.transcript_version = Some(version);
         self.inner.router.reset_history(target);
         self.notify_session_updated(page.thread.clone(), &projects.projects);
@@ -240,7 +235,7 @@ impl HostRpcService {
         }
         let history = if let Some(history) = self
             .inner
-            .transcripts
+            .store
             .history(&row.id)
             .map_err(transcripts::storage_failure)?
         {
@@ -460,7 +455,7 @@ impl HostRpcService {
             || row.bindings.iter().any(|binding| binding.covered.is_some()))
             && let Some(response) = self
                 .inner
-                .transcripts
+                .store
                 .history(&row.id)
                 .map_err(transcripts::storage_failure)?
         {
@@ -621,7 +616,7 @@ impl HostRpcService {
     async fn handoff_history(&self, root: &SessionRef) -> Result<ThreadResponse, Failure> {
         let response = if let Some(response) = self
             .inner
-            .transcripts
+            .store
             .history(root)
             .map_err(transcripts::storage_failure)?
         {
@@ -631,7 +626,7 @@ impl HostRpcService {
                 importing.await?;
             }
             self.inner
-                .transcripts
+                .store
                 .history(root)
                 .map_err(transcripts::storage_failure)?
                 .ok_or_else(|| {
@@ -761,7 +756,7 @@ impl HostRpcService {
             };
             if let Some(turn) = self
                 .inner
-                .transcripts
+                .store
                 .turn(root, id)
                 .map_err(transcripts::storage_failure)?
             {

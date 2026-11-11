@@ -882,7 +882,7 @@ async fn rewinding_keeps_the_conversation_and_continues_without_the_later_turns(
     let _subscription = opened.updates.unwrap();
     let before_version = host
         .inner
-        .transcripts
+        .store
         .window(&root, None, 100)
         .unwrap()
         .unwrap()
@@ -914,7 +914,7 @@ async fn rewinding_keeps_the_conversation_and_continues_without_the_later_turns(
 
     let committed_version = host
         .inner
-        .transcripts
+        .store
         .window(&root, None, 100)
         .unwrap()
         .unwrap()
@@ -1030,7 +1030,7 @@ async fn rewind_publication_failure_leaves_the_conversation_unchanged() {
         binding
     );
     assert_eq!(
-        message_texts(&host.inner.transcripts.history(&root).unwrap().unwrap()),
+        message_texts(&host.inner.store.history(&root).unwrap().unwrap()),
         ["first", "second"]
     );
     std::fs::remove_file(projects).unwrap();
@@ -1184,7 +1184,7 @@ async fn covered_rewind_refuses_live_work_missing_from_the_stored_transcript() {
                 },
             ),
         }
-        let stored = host.inner.transcripts.history(&root).unwrap().unwrap();
+        let stored = host.inner.store.history(&root).unwrap().unwrap();
         assert!(
             stored
                 .thread
@@ -1207,7 +1207,7 @@ async fn covered_rewind_refuses_live_work_missing_from_the_stored_transcript() {
         );
         assert_eq!(b.records.lock().unwrap().len(), before);
         assert_eq!(
-            message_texts(&host.inner.transcripts.history(&root).unwrap().unwrap()),
+            message_texts(&host.inner.store.history(&root).unwrap().unwrap()),
             ["first", "second"]
         );
     }
@@ -1287,8 +1287,7 @@ async fn a_failed_native_thread_registration_unloads_and_can_be_retried() {
     let b = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
     let host = service(directory.path(), &a, &b);
     let client = host.open_session();
-    let registry = directory.path().join("bex-conversations.json");
-    std::fs::create_dir(&registry).unwrap();
+    host.inner.store.reject_state_writes(true);
     let request = Call::CreateSession(op::CreateSession {
         provider: ProviderKind::Claude,
         cwd: Some(directory.path().to_string_lossy().into_owned()),
@@ -1308,7 +1307,7 @@ async fn a_failed_native_thread_registration_unloads_and_can_be_retried() {
             .is_empty()
     );
 
-    std::fs::remove_dir(&registry).unwrap();
+    host.inner.store.reject_state_writes(false);
     let created: agent_protocol::session::OpenedSession =
         call(&host, client.id(), request).await.unwrap();
     assert_eq!(
@@ -2273,7 +2272,7 @@ async fn incomplete_native_history_without_a_complete_host_import_blocks_handoff
     )
     .await
     .unwrap();
-    assert!(host.inner.transcripts.history(&root).unwrap().is_none());
+    assert!(host.inner.store.history(&root).unwrap().is_none());
     *a.open_failure.lock().unwrap() = Some(Failure::new(
         "incomplete_history",
         "transcript parent is unavailable",
@@ -3318,7 +3317,7 @@ async fn handoff_and_excerpts_recover_deferred_native_messages() {
 async fn imported_turns(host: &HostRpcService, root: &SessionRef, expected: &[&str]) {
     let stored = || {
         host.inner
-            .transcripts
+            .store
             .window(root, None, 1000)
             .unwrap()
             .map(|window| {
@@ -3475,7 +3474,7 @@ async fn unreadable_native_bodies_stay_deferred_without_blocking_their_import() 
     imported_turns(&host, &root, &["turn-0"]).await;
     let stored = host
         .inner
-        .transcripts
+        .store
         .turn(&root, &"turn-0".into())
         .unwrap()
         .unwrap()
@@ -3542,10 +3541,10 @@ async fn recorded_items_with_reused_turn_ids_do_not_need_the_native_provider() {
         })
     });
     host.inner
-        .transcripts
+        .store
         .import(
             &target,
-            host.inner.transcripts.version(&target).unwrap(),
+            host.inner.store.version(&target).unwrap(),
             ThreadResponse {
                 thread: Thread {
                     id: Some(target.clone()),
@@ -3678,7 +3677,7 @@ async fn imports_copy_messages_and_tool_images_while_host_turns_keep_activity() 
         imported_turns(&host, &root, &["past", "live"]).await;
         let items = |id: &str| {
             host.inner
-                .transcripts
+                .store
                 .turn(&root, &id.into())
                 .unwrap()
                 .unwrap()
@@ -3702,7 +3701,7 @@ async fn imports_copy_messages_and_tool_images_while_host_turns_keep_activity() 
         );
         let imported = host
             .inner
-            .transcripts
+            .store
             .turn(&root, &"past".into())
             .unwrap()
             .unwrap();

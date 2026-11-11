@@ -10,7 +10,6 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -375,7 +374,7 @@ pub(super) fn source(id: &str) -> Result<(SessionRef, String), Failure> {
 }
 
 pub(super) struct Conversations {
-    path: PathBuf,
+    store: Arc<super::store::ConversationStore>,
     // Loading errors remain errors; a damaged registry must never create a
     // second logical conversation or redirect an input to an old native session.
     state: Mutex<Result<Vec<Conversation>, String>>,
@@ -391,38 +390,36 @@ fn replacing(mut rows: Vec<Conversation>, conversation: Conversation) -> Vec<Con
 }
 
 impl Conversations {
-    pub fn new(path: PathBuf) -> Self {
-        let state = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Vec<Conversation>>(&bytes)
-                .map_err(|error| error.to_string())
-                .and_then(|mut rows| {
-                    validate(&rows)?;
-                    for row in &mut rows {
-                        if let Some(startup) = &mut row.startup {
-                            startup.preparation.status = match startup.preparation.status {
-                                PreparationStatus::Preparing => PreparationStatus::Failed {
-                                    error: agent_protocol::execution::ExecutionError {
-                                        message: "ホストの再起動で準備が中断されました。再試行してください。".into(),
-                                        ..Default::default()
-                                    },
+    pub fn new(store: Arc<super::store::ConversationStore>) -> Self {
+        let state = store
+            .load_state::<Vec<Conversation>>("bindings")
+            .and_then(|mut rows| {
+                validate(&rows)?;
+                for row in &mut rows {
+                    if let Some(startup) = &mut row.startup {
+                        startup.preparation.status = match startup.preparation.status {
+                            PreparationStatus::Preparing => PreparationStatus::Failed {
+                                error: agent_protocol::execution::ExecutionError {
+                                    message:
+                                        "ホストの再起動で準備が中断されました。再試行してください。"
+                                            .into(),
+                                    ..Default::default()
                                 },
-                                PreparationStatus::Sending => PreparationStatus::Unknown,
-                                ref status => status.clone(),
-                            };
-                        }
-                        for handoff in &mut row.handoffs {
-                            if handoff.submission == SubmissionDelivery::Sending {
-                                handoff.submission = SubmissionDelivery::Unknown;
-                            }
+                            },
+                            PreparationStatus::Sending => PreparationStatus::Unknown,
+                            ref status => status.clone(),
+                        };
+                    }
+                    for handoff in &mut row.handoffs {
+                        if handoff.submission == SubmissionDelivery::Sending {
+                            handoff.submission = SubmissionDelivery::Unknown;
                         }
                     }
-                    Ok(rows)
-                }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.to_string()),
-        };
+                }
+                Ok(rows)
+            });
         Self {
-            path,
+            store,
             state: Mutex::new(state),
         }
     }
@@ -576,7 +573,9 @@ impl Conversations {
         next: Vec<Conversation>,
     ) -> Result<(), Failure> {
         validate(&next).map_err(|error| Failure::new("invalid_conversation", error))?;
-        rewind::save_json(&self.path, &next)?;
+        self.store
+            .save_state("bindings", &next)
+            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
         *state = Ok(next);
         Ok(())
     }
@@ -792,8 +791,10 @@ mod tests {
             PreparationStage::Provider,
         ] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("conversations.json");
-            let store = Conversations::new(path.clone());
+            let path = directory.path().join("state.sqlite");
+            let store = Conversations::new(Arc::new(
+                crate::host_rpc::store::ConversationStore::open(&path),
+            ));
             for status in [PreparationStatus::Preparing, PreparationStatus::Sending] {
                 let mut row = conversation();
                 let submission = agent_protocol::operations::Submission {
@@ -816,10 +817,12 @@ mod tests {
                     started_at: 1.,
                 });
                 store.save(row.clone()).unwrap();
-                let restored = Conversations::new(path.clone())
-                    .get(&row.id)
-                    .unwrap()
-                    .unwrap();
+                let restored = Conversations::new(Arc::new(
+                    crate::host_rpc::store::ConversationStore::open(&path),
+                ))
+                .get(&row.id)
+                .unwrap()
+                .unwrap();
                 let startup = restored.startup.unwrap();
                 assert_eq!(startup.preparation.submission, submission);
                 assert_eq!(startup.preparation.stage, stage);
@@ -841,31 +844,42 @@ mod tests {
     #[test]
     fn persistence_recovers_preparation_and_does_not_commit_failed_writes() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("conversations.json");
-        let store = Conversations::new(path.clone());
+        let path = directory.path().join("state.sqlite");
+        let store = Conversations::new(Arc::new(crate::host_rpc::store::ConversationStore::open(
+            &path,
+        )));
         let mut row = conversation();
         row.cover(3);
         store.save(row.clone()).unwrap();
-        let recovered = Conversations::new(path.clone())
-            .get(&row.id)
-            .unwrap()
-            .unwrap();
+        let recovered = Conversations::new(Arc::new(
+            crate::host_rpc::store::ConversationStore::open(&path),
+        ))
+        .get(&row.id)
+        .unwrap()
+        .unwrap();
         assert_eq!(recovered.segments.len(), 1);
         assert_eq!(recovered.bindings[0].covered, Some(3));
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
+        store.store.reject_state_writes(true);
         row.name = Some("uncommitted".into());
         assert!(store.save(row.clone()).is_err());
         assert_eq!(store.get(&row.id).unwrap().unwrap().name, None);
-        std::fs::remove_dir(&path).unwrap();
+        drop(store);
         std::fs::write(&path, "broken").unwrap();
-        assert!(Conversations::new(path).get(&row.id).is_err());
+        assert!(
+            Conversations::new(Arc::new(crate::host_rpc::store::ConversationStore::open(
+                &path
+            )))
+            .get(&row.id)
+            .is_err()
+        );
     }
 
     #[test]
     fn released_provider_callbacks_cannot_change_the_active_conversation() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Conversations::new(directory.path().join("conversations.json"));
+        let store = Conversations::new(Arc::new(crate::host_rpc::store::ConversationStore::open(
+            &directory.path().join("state.sqlite"),
+        )));
         let mut row = conversation();
         let target = SessionRef {
             provider: ProviderKind::Claude,
