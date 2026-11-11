@@ -31,6 +31,7 @@ use agent_protocol::{
 };
 #[cfg(any(
     test,
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]
@@ -46,6 +47,7 @@ const LIGHT_SURFACES: [u32; 3] = [0xffffff, 0xfafafa, 0xf4f4f5];
 /// The editor-opening modifier follows the platform's primary shortcut key.
 #[cfg(any(
     test,
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]

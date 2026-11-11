@@ -15,7 +15,11 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 mod search;
-#[cfg(any(all(target_os = "macos", debug_assertions), test))]
+#[cfg(any(
+    feature = "standard-text",
+    all(target_os = "macos", debug_assertions),
+    test
+))]
 mod standard;
 pub(crate) use search::documents as search_documents;
 
@@ -186,7 +190,7 @@ pub(crate) fn content(
     kind: impl Fn() -> Kind + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> nsh_core::element::View {
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     if crate::conversation::renderer() == crate::conversation::Renderer::Standard {
         return standard::content(surroundings, blocks, kind, max_width);
     }
@@ -209,7 +213,7 @@ pub(crate) fn message(
     kind: impl Fn() -> Kind + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> nsh_core::element::View {
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     if crate::conversation::renderer() == crate::conversation::Renderer::Standard {
         return standard::message(surroundings, source, kind, max_width);
     }
@@ -435,7 +439,7 @@ fn view_parts(
                 // for another row; unwrapped code keeps its lines.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let message = move |wrap: Option<Signal<bool>>, scrolls: crate::find::Viewports, reference: ElementRef| {
-                    #[cfg(all(target_os = "macos", debug_assertions))]
+                    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
                     if crate::conversation::renderer() == crate::conversation::Renderer::Nsh {
                         return drawn::message(part, move || kind() == Kind::Activity, target, surroundings, cell)
                             .element_ref(&reference).w_full().into_element();
@@ -1037,6 +1041,7 @@ fn table(
 #[cfg(all(
     desktop,
     any(
+        feature = "standard-text",
         not(any(target_os = "macos", target_os = "ios")),
         all(target_os = "macos", debug_assertions)
     )
@@ -1097,6 +1102,7 @@ fn selection_actions(message: View, target: Memo<String>, surroundings: Surround
 /// native document as selectable styled text. Links and selection menus use
 /// the same actions as the TextKit renderer.
 #[cfg(any(
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]
@@ -1318,7 +1324,10 @@ mod drawn {
                 let key = find.key();
                 let mut anchor = view().element_ref(&reference).w(px(0.0)).h(px(1.0));
                 if core_reveal {
-                    #[cfg(all(target_os = "macos", debug_assertions))]
+                    #[cfg(any(
+                        feature = "standard-text",
+                        all(target_os = "macos", debug_assertions)
+                    ))]
                     spawn(async move {
                         next_frame().await;
                         if let Some(key) = key {

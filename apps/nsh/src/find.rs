@@ -80,7 +80,7 @@ pub(crate) struct Find {
     selected: Signal<Option<(u64, Match)>>,
     timeline: Stored<Option<Timeline>>,
     // Rendering the same hit again must not undo a reader's manual scroll.
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     last_anchor: Stored<Option<String>>,
 }
 
@@ -92,7 +92,7 @@ impl Find {
             current: signal((0, 0)),
             selected: signal(None),
             timeline: stored(None),
-            #[cfg(all(target_os = "macos", debug_assertions))]
+            #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
             last_anchor: stored(None),
         }
     }
@@ -216,14 +216,14 @@ impl Find {
         self.key().as_ref() == Some(&key)
     }
 
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     pub(crate) fn reset_anchor(self) {
         self.last_anchor.replace(None);
     }
 
     /// The standard TextView's inline match is revealed by NSH. Remember it
     /// only after measuring succeeds, so a culled attempt cannot suppress it.
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     pub(crate) fn reveal_anchor(self, view: ElementRef, key: String) {
         if self.key().as_ref() != Some(&key)
             || self.last_anchor.with(|last| last.as_ref() == Some(&key))

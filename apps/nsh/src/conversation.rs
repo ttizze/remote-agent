@@ -30,6 +30,7 @@ impl Renderer {
             Some("native") => Self::Native,
             Some("nsh") => Self::Nsh,
             Some("standard") => Self::Standard,
+            _ if cfg!(feature = "standard-text") => Self::Standard,
             _ => Self::Hybrid,
         }
     }

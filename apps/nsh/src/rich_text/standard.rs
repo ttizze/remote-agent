@@ -1,10 +1,14 @@
 //! One standard TextView per message, using Core's shared workspace semantics.
 //! Only application-specific chips, diagrams and search spans use custom nodes;
 //! TextView owns paragraph, code and table layout and the timeline owns scrolling.
-#[cfg(any(test, all(target_os = "macos", debug_assertions)))]
+#[cfg(any(
+    feature = "standard-text",
+    test,
+    all(target_os = "macos", debug_assertions)
+))]
 mod document;
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 use {
     super::{Kind, MarkdownBlock, Part, Surroundings, Target},
     nsh_base::{
@@ -15,7 +19,7 @@ use {
     serde_json::Value,
 };
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 pub(super) fn message(
     surroundings: Surroundings,
     source: impl Fn() -> Option<String> + 'static,
@@ -26,7 +30,7 @@ pub(super) fn message(
     render_parts(surroundings, move || parts.get(), kind, max_width)
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 pub(super) fn content(
     surroundings: Surroundings,
     blocks: impl Fn() -> Vec<MarkdownBlock> + 'static,
@@ -41,7 +45,7 @@ pub(super) fn content(
     )
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn render_parts(
     surroundings: Surroundings,
     parts: impl Fn() -> Vec<Part> + 'static,
@@ -75,17 +79,15 @@ fn render_parts(
         let navigation = active.and_then(|_| surroundings.find.key());
         document::presentation(parts(), &query, active, navigation.as_deref(), &wraps.get())
     });
-    super::selection_actions(
-        view()
-            .w_full()
-            .max_w(move || px(max_width()))
-            .min_w_0()
-            .selectable(true)
-            .style_when(move || kind() == Kind::Activity, |s| s.opacity(0.75)),
-        target,
-        surroundings,
-    )
-    .child(
+    let message = view()
+        .w_full()
+        .max_w(move || px(max_width()))
+        .min_w_0()
+        .selectable(true)
+        .style_when(move || kind() == Kind::Activity, |s| s.opacity(0.75));
+    #[cfg(desktop)]
+    let message = super::selection_actions(message, target, surroundings);
+    message.child(
         text_view()
             .document(move || document.get())
             .w_full()
@@ -111,7 +113,7 @@ fn render_parts(
     )
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn custom(
     node: &CustomNode,
     surroundings: Surroundings,
@@ -170,7 +172,7 @@ fn custom(
     }
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn run(run: &Value, surroundings: Surroundings) -> Text {
     let text = super::drawn::highlighted_run(run, surroundings.find, None, true);
     match run["darkColor"]
@@ -182,7 +184,7 @@ fn run(run: &Value, surroundings: Surroundings) -> Text {
     }
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn diagram(
     data: &Value,
     surroundings: Surroundings,
@@ -223,7 +225,7 @@ fn diagram(
     )
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn code_actions(
     code: &CodeBlock,
     wraps: Signal<std::collections::HashMap<String, bool>>,

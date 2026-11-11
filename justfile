@@ -82,6 +82,12 @@ nsh-ios-simulator:
     CC=/usr/bin/clang CXX=/usr/bin/clang++ CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang cargo build --locked -p agent-nsh --target aarch64-apple-ios-sim
     bash apps/nsh/package.sh
 
+# NSH message-body preview for a paired iPhone; signing values come from the environment.
+nsh-ios-device:
+    bash apps/nsh/build-native.sh ios-device
+    CC=/usr/bin/clang CXX=/usr/bin/clang++ CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=/usr/bin/clang cargo build --locked -p agent-nsh --features standard-text --target aarch64-apple-ios
+    bash apps/nsh/package.sh ios-device
+
 macos-unit-tests:
     cargo test --locked -p native-focus --test native_focus
 
