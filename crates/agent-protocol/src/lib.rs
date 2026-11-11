@@ -24,7 +24,5 @@ pub mod protocol;
 pub mod providers;
 pub mod requests;
 pub mod session;
+pub mod sync;
 pub mod tool_output;
-
-#[cfg(test)]
-mod sync_model;

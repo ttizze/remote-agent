@@ -275,7 +275,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 - **同期に載せないもの**: 検索は問い合わせと応答のままにする。変更の有無、ブランチ、プロジェクトのアイコンは、git とファイルから読む値なので、読み取りのままにする。
 - **Host の中の利用者**: 通知と Live Activity は、一覧の変更を購読して送る。実行中、待ち、未読の一覧を別に配る通知はなくなる。
 
-- **理由**: 会話の状態が変わるとき、一覧の要約も同じトランザクションで変わる。同じ連番で届ければ、会話の画面と一覧が食い違う瞬間がない。一覧のための版番号、ページ、通知の突き合わせが要らなくなる。
+- **理由**: 会話の状態が変わるとき、一覧の要約も同じトランザクションで変わる。同じ連番で、それぞれがどの時点の状態かを比べられる。別々の購読の到着・適用時刻が一致する保証はない。一覧のための版番号、ページ、通知の突き合わせが要らなくなる。
 - **根拠(Bex)**: 現状の一覧は、provider の一覧、登録済みのプロジェクト、Host の会話を読むたびに合成する(`crates/host-daemon/src/host_rpc/service/titles.rs:1`)。変更は版番号(`host_rpc/routing.rs:104` の `list_revision`)と、更新、改名、活動の通知で伝え、core がページごとに突き合わせる(`crates/agent-core/src/state/operations/lists.rs`)。利用者の Host の会話は 363 件で、全件の要約を一度に送っても小さい。
 - **根拠(参照実装)**: T3 Code は一覧を一本の流れで送る。スナップショットは会話の要約とプロジェクトを含み、その後は会話とプロジェクトの更新と削除が連番付きで届く(`packages/contracts/src/orchestrationV2.ts:2250-2290`)。要約は一覧のための値だけを持つ(同 `:2099`)。差が 1,000 件を超えたらスナップショットを送り直す(`apps/server/src/ws.ts:687`)。検索は別の問い合わせである(`apps/server/src/orchestration-v2/ThreadSearch.ts`)。
 - **退けた案**: 一覧を更新時刻の床で区切る。件数が多い Host では最初に送る量が減るが、「もっと見る」が Host への問い合わせに戻り、プロジェクトごとの件数の制限と床の関係を定めることになる。今の件数では要らない。件数が増えて最初の同期が重くなったら、T3 Code と同じく古い会話を別に分ける。
@@ -290,7 +290,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 - **連番**: Host 全体で一本。書き込みトランザクション一回に一つ。
 - **行の版**: その行を最後に変えたトランザクションの連番。上書きは必ず行の版を運ぶ。
 - **削除記録**: 範囲から外れた行の種類、識別子、そのトランザクションの連番。行を消したときと、ターンを巻き戻し済みにしたときに書く。
-- **保存領域の識別子**: DB を作ったときに決まる値。
+- **保存領域の識別子**: DB を作ったときに決まる値。バックアップから復元して過去の状態に戻すときも再発行する。通常の形式更新では保持する。同じ識別子で連番を巻き戻すと、古い端末のカーソルが別の履歴を指すためである。
 - 識別子は再利用しない。消した行と同じ識別子の行は二度と作らない。
 
 ### 範囲とカーソル
@@ -299,7 +299,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 - **項目の位置**: `Item` は会話の中での順を表す位置を持つ。位置が変わるのは、履歴の置き換えのときだけである。
 - **履歴の置き換え**: 外部で続けた会話の再取り込みは、取り込んだターンを Host が記録したターンの間に入れるので、項目の位置を振り直す。Host は置き換えの連番を会話に記録する。
-- **会話の範囲**: その会話の `Thread` の行、すべての `Input`、すべての `Request`、床以上の位置にある `Item` の行すべて、床の項目が属するターン以降の `Turn` の行すべて。床は、持っている最も古い項目の位置である。
+- **会話の範囲**: その会話の `Thread` の行、すべての `Input`、すべての `Request`、床のターンに属する床以上の位置の `Item` と、それより後のターンの `Item` の行すべて、床のターンの順序番号以降の `Turn` の行すべて。床は、項目の位置とターンの順序番号の組である。削除後もその境界を保持し、項目がまだない実行中のターンもターンの境界以降なら含める。空の会話の床は両方を 0 とする。範囲の順はターンの順序番号、同じターンなら項目の位置で比べる。古いターンに遅れて追加された項目の位置が、新しいターンの項目より大きくても、後のターンの項目を範囲から落とさない。
 - **カーソル C の意味**: 範囲内の全行について、連番 C 時点の最新を持っている。
 - カーソルは範囲を跨いで使えない。会話 A のカーソルは、会話 B について何も保証しない。
 - 範囲内の項目の行はすべて持ち、大きな本文だけを省く。現状はターンごとに要約の項目だけを持てるが(`items_summary`、`crates/agent-protocol/src/session.rs:1255` の突き合わせ)、ターンの中身が部分的だと「完全に持っている」を定義できない。
@@ -312,8 +312,8 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 - **スナップショット**: 一貫した読み取り時点 H での範囲の全行。H と床を含む。
 - **追いつき**: クライアントのカーソル C と床を受け取る。範囲内で版が C より大きい行の最新と、連番が C より大きい削除記録を、一貫した読み取り時点 H でまとめる。
-- **ライブ**: トランザクション一回分のうち、購読の床以上の範囲に触れた上書きと削除。
-- **範囲の拡張**: クライアントが求めた新しい床から、それまでの床までの行。Host は送ると同時に購読の床を下げる。
+- **ライブ**: トランザクション一回分のうち、購読の床以上の範囲に触れた上書きと削除。ただし履歴を置き換えたトランザクションはライブの変更セットにせず、その位置にスナップショットを一つ送る。
+- **範囲の拡張**: 新しい範囲に入り、それまでの範囲になかった行。Host は送ると同時に購読の床を下げる。
 - **項目の再送**: クライアントが求めた項目の、本文つきの現在の行。
 
 実行中のコマンド出力は、この流れに載せない。項目ごとの別の流れで送る(決定 7)。失っても会話の状態は変わらない。
@@ -329,11 +329,13 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 - C より後の削除記録がすべて残っている。削除記録を消し終えた連番を P とすると、C ≥ P である。
 - C が、その会話の最後の履歴の置き換えの連番以上である。置き換えの連番で取ったスナップショットのカーソルは、置き換えの後の状態を持っているので有効である。
 
-履歴を置き換えたとき、所有者は購読中のクライアントにスナップショットを送り直す。位置が変わると、クライアントの床が指す内容が変わるためである。
+履歴を置き換えたとき、所有者は購読中のクライアントに、そのトランザクションの変更セットの代わりにスナップショットを送る。変更セットを先に送って同じ連番へカーソルを進めてはならない。位置が変わると、クライアントの床が指す内容が変わるためである。
 
 会話が存在しなければ、その旨を返す。クライアントは範囲を捨てる。
 
 ### クライアントの適用規則
+
+購読を張り直すたびに端末側で新しい世代を割り当て、前の購読から届いたものは捨てる。追いつきとライブは、対象範囲を完全に持つ直前のカーソルも運ぶ。直前のカーソルが手元と一致しなければ適用せず、購読し直す。連番の数値の飛びは、別の会話の変更によって起きるので許す。
 
 - **上書き**: 持っていない行、または届いた版が持っている版より大きい行だけを置き換える。版が同じで、持っていない本文が付いていれば、本文だけを取り込む。
 - **削除**: 持っている行の版が削除の連番より小さければ消す。`Turn` の削除はその `Item` を一緒に消す。巻き戻しも、クライアントには削除として届く。
@@ -347,7 +349,7 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 
 部分読み込みは、どちらも購読の流れの中で届く。応答として別に返すと、ライブとの間に順序の保証がなく、取得中の変更が抜ける。
 
-- **範囲の拡張**: クライアントは新しい床を求める。所有者は、それまでの床より前の行を読んで流れに載せ、購読の床を下げる。一度に送る量には上限があるので、拡張は実際に下がった床を運ぶ。クライアントは行を取り込み、床をその値にする。それより後のライブは広がった範囲への変更を含むので、取得の前後で変更が抜けない。
+- **範囲の拡張**: クライアントは新しい床を求める。所有者は、新しい範囲に入り旧範囲にはなかった行を読んで流れに載せ、購読の床を下げる。古いターンに遅れて追加された項目も、そのターンが新たに範囲に入れば含める。一度に送る量には上限があるので、拡張は実際に下がった床を運ぶ。クライアントは行を取り込み、床をその値にする。それより後のライブは広がった範囲への変更を含むので、取得の前後で変更が抜けない。
 - **項目の再送**: 上書きは、大きな本文を省いたことを示せる。クライアントは、本文が要るときに項目の再送を求める。所有者は、本文つきの現在の行を流れに載せる。クライアントは、版が同じでも、持っていない本文を取り込む。
 
 ### 操作と受付記録
@@ -373,8 +375,8 @@ core は会話の複製を持ち、変更セットを適用する。適用関数
 | カーソル 9 で切断。その間に連番 10 が項目 A、11 が項目 B を変えた | 追いつき | A と B の両方が届く。片方だけを受け取る経路はない |
 | 項目 A が連番 10、12、15 で変わった。カーソル 9 で再接続 | 追いつきは行の最新 | 版 15 の A だけが届く |
 | 持っている項目 X が Host で消され、その削除記録も保持期間を過ぎて消えた後に再接続 | スナップショットは範囲を置き換える | X はスナップショットに含まれないので消える |
-| 床が位置 100。位置 50 まで範囲を広げた後、位置 75 の項目が更新される | 範囲の拡張で購読の床も下がる | 更新がライブで届く |
-| 位置 50 まで範囲を広げる要求と、位置 75 の項目の削除が同時に起きる | 拡張はそれまでのライブの後、次のライブの前に流れに載る | 削除が先なら拡張に 75 は含まれない。後なら拡張の後に削除が届く。どちらでも 75 は残らない |
+| 床が(ターン 2、位置 100)。(ターン 1、位置 50)まで広げた後、ターン 1 の位置 75 の項目が更新される | 範囲の拡張で購読の床も下がる | 更新がライブで届く |
+| (ターン 2、位置 100)から(ターン 1、位置 50)まで広げる要求と、ターン 1 の位置 75 の項目の削除が同時に起きる | 拡張はそれまでのライブの後、次のライブの前に流れに載る | 削除が先なら拡張に 75 は含まれない。後なら拡張の後に削除が届く。どちらでも 75 は残らない |
 | 会話 A をカーソル 30 まで持つ。会話 B は未取得 | カーソルは範囲ごと | B はカーソルなしで購読し、スナップショットを受け取る |
 | 三日ぶりの再接続。削除記録は保持期間を過ぎて消えている | 追いつきの条件を満たさない | スナップショット |
 | DB を作り直した | 保存領域の識別子が不一致 | スナップショット。古い保存領域への未送信の操作は拒否される |
@@ -445,26 +447,30 @@ CREATE INDEX inputs_queue ON inputs (thread, position);
 CREATE INDEX inputs_in_flight ON inputs (state) WHERE state IN ('preparing', 'delivering');
 
 CREATE TABLE turns (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,       -- 使い回さない
     state TEXT NOT NULL,            -- running | waiting | completed | interrupted | failed | rolled_back
-    body BLOB NOT NULL              -- 時刻、状態ごとの値(待機中の作業、再試行の時刻、エラー)
+    body BLOB NOT NULL,             -- 時刻、状態ごとの値(待機中の作業、再試行の時刻、エラー)
+    PRIMARY KEY (thread, id)
 ) STRICT;
 CREATE UNIQUE INDEX turns_order ON turns (thread, ordinal);
 CREATE INDEX turns_in_flight ON turns (state) WHERE state IN ('running', 'waiting');
 
 CREATE TABLE items (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
-    turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
     position INTEGER NOT NULL,      -- 会話の中での順
-    body BLOB NOT NULL              -- 種類ごとの内容。本文を含む
+    body BLOB NOT NULL,             -- 種類ごとの内容。本文を含む
+    PRIMARY KEY (thread, id),
+    FOREIGN KEY (thread, turn_id) REFERENCES turns (thread, id) ON DELETE CASCADE
 ) STRICT;
 CREATE UNIQUE INDEX items_order ON items (thread, position);
 CREATE INDEX items_changed ON items (thread, seq);
+CREATE INDEX items_turn ON items (thread, turn_id, position);
 
 CREATE TABLE requests (
     id TEXT PRIMARY KEY,
@@ -482,9 +488,10 @@ CREATE TABLE removals (
     kind TEXT NOT NULL,             -- input | turn | item | request | project
     id TEXT NOT NULL,
     thread INTEGER,                 -- 会話の範囲の行なら、その会話の行のキー。一覧だけの行では空
-    at INTEGER NOT NULL,            -- 保持期間の判定に使う
-    PRIMARY KEY (seq, kind, id)
-) STRICT, WITHOUT ROWID;
+    at INTEGER NOT NULL             -- 保持期間の判定に使う
+) STRICT;
+CREATE UNIQUE INDEX removals_identity ON removals (seq, kind, id, ifnull(thread, 0));
+CREATE INDEX removals_changed ON removals (seq);
 CREATE INDEX removals_thread ON removals (thread, seq) WHERE thread IS NOT NULL;
 
 CREATE TABLE receipts (
@@ -520,22 +527,26 @@ CREATE INDEX bindings_in_flight ON bindings (state) WHERE state = 'injecting';
 
 -- ターンの試行と、それを実行した provider のセッション、provider のターン。
 CREATE TABLE executions (
-    turn_id TEXT NOT NULL REFERENCES turns (id) ON DELETE CASCADE,
+    thread INTEGER NOT NULL,
+    turn_id TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     source_id INTEGER NOT NULL REFERENCES sources (id),
     native_turn_id TEXT,            -- provider のターンの識別子
-    PRIMARY KEY (turn_id, attempt)
+    PRIMARY KEY (thread, turn_id, attempt),
+    FOREIGN KEY (thread, turn_id) REFERENCES turns (thread, id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX executions_native ON executions (source_id, native_turn_id) WHERE native_turn_id IS NOT NULL;
 
 -- 項目と provider の項目の対応。試行の中でだけ一意である。
 CREATE TABLE item_natives (
+    thread INTEGER NOT NULL,
     turn_id TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     native_id TEXT NOT NULL,        -- provider の項目の識別子
-    item_id TEXT NOT NULL REFERENCES items (id) ON DELETE CASCADE,
-    PRIMARY KEY (turn_id, attempt, native_id),
-    FOREIGN KEY (turn_id, attempt) REFERENCES executions (turn_id, attempt) ON DELETE CASCADE
+    item_id TEXT NOT NULL,
+    PRIMARY KEY (thread, turn_id, attempt, native_id),
+    FOREIGN KEY (thread, item_id) REFERENCES items (thread, id) ON DELETE CASCADE,
+    FOREIGN KEY (thread, turn_id, attempt) REFERENCES executions (thread, turn_id, attempt) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE jobs (
@@ -548,6 +559,8 @@ CREATE TABLE jobs (
 ```
 
 ### 書き込みの規則
+
+既存のターンと項目の識別子は会話の中で一意なので、保存と同期のキーは必ず会話と組にする。新しい UUID についても同じ契約を使う。削除記録も会話が違えば同じ識別子を同じ連番で記録できる。
 
 表の定義だけでは守れない約束を、ここに定める。どれも、書き込みのたびに成り立つ不変条件として試験する。
 
@@ -571,7 +584,7 @@ provider の識別子は、それを発行した範囲の中でしか一意で�
 
 会話の識別子は `threads` の一か所にだけ持つ。ほかの表は、DB の中だけで使う行のキーで会話を指す。行のキーは外に出さない。
 
-`items` は会話の行のキーを、ターンを辿れば分かるのに自分でも持つ。会話の中の位置で引く索引に要るためである。変わらない値なので食い違わない。
+`items` は会話の行のキーを、ターンを辿れば分かるのに自分でも持つ。会話の中の位置で引く索引に要るためである。ターンへの複合外部キーで、別の会話のターンを参照できないようにする。
 
 `receipts` は `threads` を参照せず、会話の識別子をそのまま持つ。会話を消した後も、同じ操作の再送を止めるためである。
 
@@ -581,11 +594,11 @@ provider の識別子は、それを発行した範囲の中でしか一意で�
 
 | 読み取り | 使う索引 |
 |---|---|
-| スナップショット。会話の末尾から項目を数件 | `items_order` |
-| 範囲の拡張。ある位置より前の項目を数件 | `items_order` |
+| スナップショット。末尾のターンを選び、そのターンの項目を読む | `turns_order` → `items_turn` |
+| 範囲の拡張。新しく入るターンと、境界のターン内の項目 | `turns_order` → `items_turn` / `items_order` |
 | 追いつき。会話の中で連番がカーソルより大きい項目 | `items_changed` |
 | 追いつき。会話の中の削除記録 | `removals_thread` |
-| 一覧の追いつき。プロジェクトの削除記録 | `removals` の主キー |
+| 一覧の追いつき。プロジェクトの削除記録 | `removals_changed` |
 | 一覧の追いつき | `threads_changed`、`projects_changed` |
 | 起動時に続きが要る行 | `inputs_in_flight`、`turns_in_flight`、`requests_in_flight`、`bindings_in_flight` |
 | provider のイベントを会話へ振り分ける | `sources_native` |
