@@ -1,64 +1,11 @@
 //! One NSH surface draws the whole window: AppKit's on the Mac, Win32's on Windows.
 //! On the Mac, WebKit's pages are owned by a hosted container.
-use crate::{Area, application::Application, shared::Shared};
-use nsh_core::element::*;
+use crate::{Area, application::Application};
 #[cfg(target_os = "macos")]
 use nsh_platform_macos as platform;
 #[cfg(windows)]
 use nsh_platform_windows as platform;
-use platform::{AppOptions, AppSource, Root, run_app};
-use std::sync::Arc;
-
-#[derive(Clone, PartialEq)]
-struct ViewProps {
-    application: Option<Shared<Application>>,
-    area: Area,
-}
-
-// This is a Rust-only embedding root. The shared owner never crosses a JSON boundary.
-impl Props for ViewProps {
-    fn spec(_: &mut TsTypes) -> Vec<PropSpec> {
-        Vec::new()
-    }
-    fn initial() -> Self {
-        Self {
-            application: None,
-            area: Area::Shell,
-        }
-    }
-    fn set(&mut self, name: &str, value: Option<AnyValue>) -> Result<bool, PropError> {
-        ().set(name, value)
-    }
-    fn set_slot(&mut self, _: &str, _: Option<Slot>) -> bool {
-        false
-    }
-    fn set_children(&mut self, _: Children) -> bool {
-        false
-    }
-}
-
-struct ViewRoot;
-impl Component for ViewRoot {
-    type Props = ViewProps;
-    type Event = NoEvent;
-    fn view(props: ViewProps, _: Scope<NoEvent>) -> impl IntoElement {
-        let content = crate::app_view(
-            props.application.expect("native root has an application").0,
-            props.area,
-        );
-        view()
-            .flex_1()
-            .text_color(move || nsh_base::theme().foreground)
-            .child(content)
-    }
-}
-
-pub(super) fn root(application: Arc<Application>, area: Area) -> Root {
-    Root::new::<ViewRoot>(move || ViewProps {
-        application: Some(Shared(application.clone())),
-        area,
-    })
-}
+use platform::{AppOptions, AppSource, run_app};
 
 /// Ends the app's event loop once an update's worker waits to replace it.
 pub(crate) fn quit() {
@@ -137,7 +84,7 @@ pub fn run() -> std::process::ExitCode {
         Err(reason) => return fail(&reason),
     };
     let result = run_app(
-        AppSource::Rust(root(application.clone(), Area::Shell)),
+        AppSource::Rust(crate::root::root(application.clone(), Area::Shell, None)),
         options,
     );
     tracing::info!(target: "agent", operation = "shutdown", "Bex shutting down");

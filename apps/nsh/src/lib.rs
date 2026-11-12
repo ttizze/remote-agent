@@ -20,6 +20,8 @@ mod devices;
 #[cfg(dictation)]
 mod dictation;
 mod editor;
+#[cfg(target_os = "ios")]
+pub mod embedded_ios;
 mod environment;
 mod file_actions;
 mod files;
@@ -39,6 +41,8 @@ mod projects;
 mod queue;
 mod requests;
 mod rich_text;
+#[cfg(any(desktop, target_os = "ios"))]
+mod root;
 #[cfg(desktop)]
 mod selection_bar;
 #[cfg(desktop)]
@@ -186,16 +190,16 @@ pub fn App() -> impl IntoElement {
     cleanup(move || {
         let _ = runtime.block_on(service.shutdown());
     });
-    view()
-        .w_full()
-        .h_full()
-        .child(app_view(stored_service, Area::Mobile))
-        .into_element()
+    app_view(stored_service, Area::Mobile)
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Area {
     Mobile,
+    #[cfg(target_os = "ios")]
+    Conversation {
+        pane: Option<u64>,
+    },
     #[cfg(desktop)]
     Shell,
 }
@@ -217,11 +221,17 @@ fn app_view(service: Arc<application::Application>, area: Area) -> AnyElement {
         nsh_core::element::desktop::set_menu_labels(desktop::menu_labels());
     });
     let contrast = computed(move || state.with(|state| state.contrast));
-    each(
+    let content = each(
         move || vec![(language.get(), contrast.get())],
         |(language, contrast)| (language.code(), *contrast),
         move |_, _| app_content(service.clone(), state.read_only(), area),
-    )
+    );
+    view()
+        .w_full()
+        .h_full()
+        .text_color(move || nsh_base::theme().foreground)
+        .child(content)
+        .into_element()
 }
 
 fn app_content(
@@ -247,7 +257,14 @@ fn app_content(
         client,
         pairing: computed(move || state.with(|state| state.pairing)),
     };
-    let connection = Connection::new(handles, host, publication, None);
+    #[cfg(target_os = "ios")]
+    let pane = match area {
+        Area::Conversation { pane } => pane,
+        _ => None,
+    };
+    #[cfg(not(target_os = "ios"))]
+    let pane = None;
+    let connection = Connection::new(handles, host, publication, pane);
     provide_context(connection);
     let preview = media::Preview::new();
     provide_context(preview);
@@ -258,6 +275,23 @@ fn app_content(
     provide_context(terminal::Focus::new());
     provide_context(find::Find::new());
     let failure = computed(move || state.with(|state| state.failure.clone().map(l10n::localized)));
+    #[cfg(target_os = "ios")]
+    if matches!(area, Area::Conversation { .. }) {
+        if let Some(actions) = use_context::<native::ExternalActions>() {
+            effect(move || {
+                if let Some(error) = failure.get() {
+                    actions.emit(serde_json::json!({"action":"error", "text":error}));
+                    application.with(|application| application.dismiss_failure());
+                }
+            });
+        }
+        let timeline = conversation::Timeline::new(signal(true));
+        return view()
+            .flex_1()
+            .child(media::preview())
+            .child(timeline.list())
+            .into_element();
+    }
     let routes = signal(vec![0_u8]);
     let settings = computed(move || state.with(|state| state.settings));
     let provider = computed(move || state.with(|state| state.provider));
@@ -607,6 +641,8 @@ fn app_content(
                 .into_element();
         }
         Area::Mobile => {}
+        #[cfg(target_os = "ios")]
+        Area::Conversation { .. } => unreachable!("embedded conversation returned above"),
     }
     let navigation = nsh_base::nav_stack().flex_1().child(each(
         move || {

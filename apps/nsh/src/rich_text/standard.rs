@@ -83,16 +83,25 @@ fn render_parts(
         .w_full()
         .max_w(move || px(max_width()))
         .min_w_0()
-        .selectable(true)
         .style_when(move || kind() == Kind::Activity, |s| s.opacity(0.75));
     #[cfg(desktop)]
-    let message = super::selection_actions(message, target, surroundings);
+    let message = super::selection_actions(message.selectable(true), target, surroundings);
     message.child(
         text_view()
             .document(move || document.get())
             .w_full()
             .min_w_0()
             .selectable(true)
+            .on_selection_change(move |event: &nsh_base::TextViewSelectionEvent| {
+                #[cfg(target_os = "ios")]
+                if let Some(actions) = surroundings.external_actions {
+                    actions.emit(
+                        serde_json::json!({"action":"selection", "text":event.text.to_string()}),
+                    );
+                }
+                #[cfg(not(target_os = "ios"))]
+                let _ = event;
+            })
             .render_code_block_actions(move |code: &CodeBlock| {
                 code_actions(code, wraps, surroundings.find)
             })

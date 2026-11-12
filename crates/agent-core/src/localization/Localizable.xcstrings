@@ -6489,6 +6489,22 @@
         }
       }
     },
+    "会話を開けませんでした。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open the conversation."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話を開けませんでした。"
+          }
+        }
+      }
+    },
     "会話に戻る": {
       "localizations": {
         "ja": {

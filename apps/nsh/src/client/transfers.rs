@@ -47,7 +47,10 @@ impl Client {
         let (send, receive) = async_channel::bounded(1);
         let owner = self.clone();
         self.spawn(async move {
-            let result = owner.download_file(&host, source).await;
+            let result = tokio::select! {
+                _ = owner.closing.cancelled() => return,
+                result = owner.download_file(&host, source) => result,
+            };
             // If the view went away, dropping the result releases only this transfer's directory.
             let _ = send.send(result).await;
         });

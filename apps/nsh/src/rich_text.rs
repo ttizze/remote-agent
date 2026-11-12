@@ -135,6 +135,8 @@ pub(crate) struct Surroundings {
     pub files: crate::files::Browser,
     pub preview: crate::media::Preview,
     pub workspace: crate::workbench::Workbench,
+    #[cfg(any(desktop, target_os = "ios"))]
+    pub external_actions: Option<crate::native::ExternalActions>,
     pub find: crate::find::Find,
     pub find_row: Option<Memo<String>>,
     pub find_scroll: crate::find::Viewports,
@@ -151,6 +153,8 @@ impl Surroundings {
             files: use_context::<crate::files::Browser>().unwrap(),
             preview: use_context::<crate::media::Preview>().unwrap(),
             workspace: use_context::<crate::workbench::Workbench>().unwrap(),
+            #[cfg(any(desktop, target_os = "ios"))]
+            external_actions: use_context::<crate::native::ExternalActions>(),
             find: use_context::<crate::find::Find>().unwrap(),
             find_row: None,
             find_scroll: None,
@@ -175,6 +179,10 @@ impl Surroundings {
     /// in-app browser with it; on the desktop, a file by its primary action,
     /// which the editor takes with it; anything else as the file browser does.
     fn open_link(self, link: String, target: Target, command: bool) {
+        #[cfg(any(desktop, target_os = "ios"))]
+        if let Some(actions) = self.external_actions {
+            return actions.emit(json!({"action":"link", "text":link}));
+        }
         if command && (link.starts_with("https://") || link.starts_with("http://")) {
             return self.workspace.browse(link);
         }
@@ -304,6 +312,14 @@ pub(crate) fn target(connection: Connection) -> Memo<String> {
 /// in a side chat, a link pressed, or an item of a file chip's menu chosen.
 #[cfg(any(desktop, target_os = "ios"))]
 pub(crate) fn action(surroundings: Surroundings, data: &Value) {
+    if let Some(actions) = surroundings.external_actions
+        && matches!(
+            data["action"].as_str(),
+            Some("quote" | "sideChat" | "explain")
+        )
+    {
+        return actions.emit(data.clone());
+    }
     let connection = surroundings.connection;
     // TextKit's selection changed: where it is, in the window's content.
     #[cfg(target_os = "macos")]

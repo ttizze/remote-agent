@@ -422,6 +422,13 @@ jobs:
           just quality swift
           just ios-markdown
           just conversation-ui --build-only
+          AGENT_IOS_NSH=1 scripts/build-agent-ios.sh simulator
+          xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath target/qa/ios-nsh-preview \
+            -xcconfig apps/mobile/iosApp/Config/NshPreview.xcconfig \
+            -onlyUsePackageVersionsFromResolvedFile -skipPackagePluginValidation \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO AGENT_CARGO_TARGET_DIR="$PWD/target" build
           CHECKS
           fi
       - name: Share the iPhone app, Host fixtures and test runner

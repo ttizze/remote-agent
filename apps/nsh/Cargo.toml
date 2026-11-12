@@ -41,6 +41,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 objc2-quick-look-ui = { version = "=0.3.2", default-features = false, features = ["std", "QLPreviewItem", "QLPreviewPanel", "objc2-app-kit"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+uniffi = { version = "=0.32.2", default-features = false }
 nsh-platform-ios = { git = "https://github.com/ttizze/nsh", rev = "c1aa6e888aaf4566936e0f773fa6138b445b4eca", default-features = false }
 objc2 = "=0.6.5"
 objc2-foundation = "=0.3.2"

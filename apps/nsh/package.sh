@@ -45,10 +45,10 @@ def copy_file(source, destination):
 destination, executable, native, platform, revision, build_number = sys.argv[1:]
 bundle = pathlib.Path(destination)
 info = {
-    "CFBundleIdentifier": "com.bex.nsh-preview",
+    "CFBundleIdentifier": "com.bex.nsh-standalone",
     "CFBundleExecutable": "agent-nsh",
     "CFBundleName": "Bex NSH Preview",
-    "CFBundleDisplayName": "Bex NSH",
+    "CFBundleDisplayName": "Bex NSH Standalone",
     "CFBundlePackageType": "APPL",
     "CFBundleShortVersionString": "1.0" if platform == "iPhoneOS" else "0.1.0",
     "CFBundleVersion": build_number,
@@ -91,7 +91,7 @@ if [[ $platform == ios-device ]]; then
 import plistlib, sys
 profile = plistlib.loads(sys.stdin.buffer.read())
 entitlements = profile["Entitlements"]
-assert entitlements["application-identifier"].endswith(".com.bex.nsh-preview")
+assert entitlements["application-identifier"].endswith(".com.bex.nsh-standalone")
 assert entitlements.get("get-task-allow"), "A development profile is required"
 with open(sys.argv[1], "wb") as output:
     plistlib.dump(entitlements, output)

@@ -4,6 +4,18 @@ use crate::l10n::{localized, tr};
 use nsh_core::{element::NativeView, prelude::*};
 use serde_json::{Value, json};
 
+/// The embedding screen owns the presentation of selected text and links.
+#[derive(Clone, Copy)]
+#[cfg(any(desktop, target_os = "ios"))]
+pub(crate) struct ExternalActions(pub Stored<std::sync::Arc<dyn Fn(Value) + Send + Sync>>);
+
+#[cfg(any(desktop, target_os = "ios"))]
+impl ExternalActions {
+    pub fn emit(self, event: Value) {
+        self.0.with(|send| send(event));
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Serialize)]
 pub(crate) struct RowIndicators {
     pub activity: Option<agent_core::presentation::thread_status::ThreadActivity>,

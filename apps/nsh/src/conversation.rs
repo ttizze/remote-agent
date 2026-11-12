@@ -814,7 +814,9 @@ fn list(timeline: Timeline) -> impl IntoElement {
             .context
             .with(|p| p.opening().is_none().then(|| p.history()).flatten())
     });
-    let column = view().label(tr("会話の履歴"));
+    let column = view()
+        .role(AccessibilityRole::Group)
+        .label(tr("会話の履歴"));
     #[cfg(desktop)]
     let column = column.child(surroundings.selection_bar());
     column
@@ -1315,6 +1317,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                     rows.with(|rows| rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
                 })
                 .element_ref(&list)
+                .role(AccessibilityRole::Group)
                 .label(SharedString::from(tr("この会話")))
                 .estimated_item_size(px(170.0))
                 // While it follows, the list keeps its end as rows grow; a

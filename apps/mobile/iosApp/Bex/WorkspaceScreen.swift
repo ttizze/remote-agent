@@ -19,7 +19,7 @@ struct ConversationDestination: View {
     @State private var width: CGFloat = 0
 
     var body: some View {
-        ThreadScreen(model: model, environment: environment, conversation: model.conversation, openTools: openTools)
+        ThreadScreen(model: model, environment: environment, openTools: openTools)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
                 guard value.startLocation.x >= width - 32,

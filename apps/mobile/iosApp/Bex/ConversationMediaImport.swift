@@ -1,3 +1,4 @@
+import AgentCore
 import AVFoundation
 import PhotosUI
 import SwiftUI
@@ -27,6 +28,26 @@ extension ComposerMediaPicker {
 }
 
 extension ConversationComposer {
+    func startDictation() {
+        composerFocused = false
+        model.transferError = nil
+        model.notice = nil
+        sendRecordedText = false
+        let sendIntent = $sendRecordedText
+        let key = model.draftKey
+        var preparation: DictationPreparation?
+        dictation.start(started: { [weak model] in
+            preparation = model?.prepareDictation()
+        }, completion: { [weak model] result in
+            guard let model, model.draftKey == key else { return }
+            switch result {
+            case let .success(audio): model.transcribe(audio, draftKey: key, sendImmediately: sendIntent.wrappedValue,
+                                                       preparation: preparation)
+            case let .failure(error): model.transferError = error.localizedDescription
+            }
+        })
+    }
+
     func openCamera() {
         composerFocused = false
         guard UIImagePickerController.isSourceTypeAvailable(.camera) else {

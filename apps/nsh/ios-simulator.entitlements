@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
     <key>application-identifier</key>
-    <string>com.bex.nsh-preview</string>
+    <string>com.bex.nsh-standalone</string>
     <key>keychain-access-groups</key>
-    <array><string>com.bex.nsh-preview</string></array>
+    <array><string>com.bex.nsh-standalone</string></array>
 </dict>
 </plist>
