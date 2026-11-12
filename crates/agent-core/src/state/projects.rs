@@ -56,7 +56,7 @@ impl<'a> ChatPlacements<'a> {
     }
 }
 
-pub(super) fn chat_placement<'a>(
+pub(crate) fn chat_placement<'a>(
     preferences: Option<&'a BTreeMap<String, ProjectPreferences>>,
     id: &crate::session::SessionRef,
 ) -> Option<&'a str> {

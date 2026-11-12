@@ -1,6 +1,118 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "検索をクリア": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "検索をクリア"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear search"
+          }
+        }
+      }
+    },
+    "プロジェクトを検索": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトを検索"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search projects"
+          }
+        }
+      }
+    },
+    "プロジェクトを検索…": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトを検索…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search projects..."
+          }
+        }
+      }
+    },
+    "プロジェクトで絞り込む": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトで絞り込む"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Filter threads by project"
+          }
+        }
+      }
+    },
+    "プロジェクトで絞り込む: {0}": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトで絞り込む: {0}"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Filter threads by project: {0}"
+          }
+        }
+      }
+    },
+    "一致するプロジェクトはありません": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一致するプロジェクトはありません"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching projects."
+          }
+        }
+      }
+    },
+    "{0}のプロジェクト設定": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{0}のプロジェクト設定"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Project settings for {0}"
+          }
+        }
+      }
+    },
     "ワークスペースが変わりました。更新して再試行してください。": {"localizations":{"en":{"stringUnit":{"state":"translated","value":"The workspace changed. Refresh and try again."}},"ja":{"stringUnit":{"state":"translated","value":"ワークスペースが変わりました。更新して再試行してください。"}}}},
     "比較先を変更": {
       "localizations": {
@@ -15668,22 +15780,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "開くアプリを確認してください。"
-          }
-        }
-      }
-    },
-    "フォルダをプロジェクトに追加…": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Add folder as project…"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "フォルダをプロジェクトに追加…"
           }
         }
       }

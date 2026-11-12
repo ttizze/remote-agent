@@ -93,6 +93,17 @@ impl State {
             .collect()
     }
 
+    #[cfg(any(desktop, test))]
+    pub fn sidebar_catalog_ready(&self) -> bool {
+        self.list_hosts().all(|host| {
+            self.publications.get(&host.id).is_some_and(|value| {
+                value.composer.controls.connected
+                    && value.list.is_some()
+                    && value.snapshot.sidebar_catalog_ready()
+            })
+        })
+    }
+
     pub fn list_scope_matches(&self, scope: &ListScope) -> bool {
         self.list_publications().any(|(host, value)| {
             host == scope.host && value.snapshot.connection.storage_scope == scope.storage
@@ -147,6 +158,8 @@ impl Application {
 
     pub fn select_host(&self, host: String) {
         if self.activate_host(&host, false) {
+            #[cfg(any(desktop, test))]
+            self.select_sidebar_projects(Vec::new());
             self.client.reconnect(host);
         }
     }
@@ -154,6 +167,7 @@ impl Application {
     /// A folder picked on this PC inside a WSL distro belongs to that distro's
     /// Host: it becomes the chosen Host, which runs `intent` for the folder's
     /// Linux path once it is reached. Whether the folder was a distro's.
+    #[cfg(any(desktop, test))]
     pub fn open_wsl_folder(
         &self,
         path: &Path,
@@ -279,6 +293,73 @@ mod tests {
         client::persistence::ClientStorage,
         state::{Event, Snapshot},
     };
+
+    #[test]
+    fn sidebar_catalog_waits_for_every_selected_hosts_authoritative_publication() {
+        let mut snapshot = Snapshot::default();
+        snapshot.connection.connected = true;
+        snapshot.lists.threads = Some(Arc::new(
+            serde_json::from_value(serde_json::json!({
+                "projects": [], "data": [], "limit":60, "hasMore":false,
+                "hasMoreProjects":false, "projectPages":{}
+            }))
+            .unwrap(),
+        ));
+        let publication = |snapshot: Snapshot| {
+            Shared(Presentation::project(Arc::new(snapshot), "", None).unwrap())
+        };
+        let mut state = State {
+            all_hosts: true,
+            host: "one".into(),
+            hosts: vec![
+                Host {
+                    id: "one".into(),
+                    name: "One".into(),
+                },
+                Host {
+                    id: "two".into(),
+                    name: "Two".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        state
+            .publications
+            .insert("one".into(), publication(snapshot.clone()));
+        assert!(
+            !state.sidebar_catalog_ready(),
+            "a missing Host is not a complete catalog"
+        );
+        state
+            .publications
+            .insert("two".into(), publication(snapshot.clone()));
+        assert!(state.sidebar_catalog_ready());
+        let mut offline = snapshot.clone();
+        offline.connection.connected = false;
+        let mut no_list = snapshot.clone();
+        no_list.lists.threads = None;
+        let mut searching = snapshot.clone();
+        Arc::make_mut(&mut searching.lists.list_query).search_term = "query".into();
+        let mut loading = snapshot.clone();
+        Arc::make_mut(&mut loading.operations).insert(
+            agent_core::state::operations::OperationKey::SessionList,
+            agent_core::state::operations::OperationState {
+                generation: 1,
+                phase: agent_core::state::operations::OperationPhase::Running,
+            },
+        );
+        for pending in [offline, no_list, searching, loading] {
+            state
+                .publications
+                .insert("two".into(), publication(pending));
+            assert!(!state.sidebar_catalog_ready());
+        }
+        state.all_hosts = false;
+        assert!(
+            state.sidebar_catalog_ready(),
+            "a Host outside the list scope does not block it"
+        );
+    }
 
     fn profiles(root: &Path) -> Vec<Profile> {
         let profiles: Vec<_> = ["one", "two"]

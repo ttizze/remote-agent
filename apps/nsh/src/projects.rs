@@ -2,12 +2,14 @@
 use crate::application::{Application, ListScope, ListSource};
 use crate::l10n::{localized, tr};
 use crate::{native, shared::Shared};
+#[cfg(any(desktop, test))]
+use agent_core::state::operations as op;
 use agent_core::{
     presentation::{
         list::{ProjectSummary, ThreadList},
         project_menu::{ProjectAction, ProjectMenuItem},
     },
-    state::{Intent, operations as op},
+    state::Intent,
 };
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
@@ -47,16 +49,8 @@ fn encode(items: Vec<ProjectMenuItem>, scope: &ListScope) -> Vec<Value> {
         }).collect()
 }
 
-pub(crate) fn header_menu(
-    hidden: &[ProjectSummary],
-    desktop: bool,
-    selected_host: &str,
-    sources: &[ListSource],
-) -> Value {
+pub(crate) fn restore_menu(hidden: &[ProjectSummary], sources: &[ListSource]) -> Value {
     let mut items = Vec::new();
-    if desktop {
-        items.push(json!({"id": "add", "title": tr("フォルダをプロジェクトに追加…"), "enabled": sources.iter().any(|source| source.scope.host == selected_host && source.scope.host == "local" && source.connected)}));
-    }
     if !hidden.is_empty() {
         let hidden: Vec<_> = sources
             .iter()
@@ -84,21 +78,40 @@ pub(crate) fn header_menu(
     json!(items)
 }
 
+#[cfg(any(desktop, test))]
+fn folder_scope<'a>(host: &str, sources: &'a [ListSource]) -> Option<&'a ListScope> {
+    sources
+        .iter()
+        .find(|source| host == "local" && source.scope.host == host && source.connected)
+        .map(|source| &source.scope)
+}
+
+#[cfg(any(desktop, test))]
+pub(crate) fn folder_button(
+    application: Stored<Arc<Application>>,
+    host: Memo<String>,
+    sources: Memo<Vec<ListSource>>,
+) -> impl IntoElement {
+    use crate::ui::{self, Enabled, Icon, colors};
+    ui::icon_button_sized(
+        Icon::FOLDER_PLUS,
+        tr("プロジェクトを追加"),
+        28.0,
+        16.0,
+        move || {
+            sources
+                .with_untracked(|sources| add_folder(application, &host.get_untracked(), sources))
+        },
+    )
+    .text_color(colors::muted())
+    .enabled(move || sources.with(|sources| folder_scope(&host.get(), sources).is_some()))
+}
+
 /// Adds a folder the user picks as a project of this device's Host, which
 /// starts a chat in it; a WSL distro's folder goes to that distro's Host.
-pub(crate) fn add_folder(
-    application: Stored<Arc<Application>>,
-    host: &str,
-    sources: &[ListSource],
-) {
-    if !is_desktop() || host != "local" {
-        return;
-    }
-    let Some(scope) = sources
-        .iter()
-        .find(|source| source.scope.host == host)
-        .map(|source| source.scope.clone())
-    else {
+#[cfg(any(desktop, test))]
+fn add_folder(application: Stored<Arc<Application>>, host: &str, sources: &[ListSource]) {
+    let Some(scope) = folder_scope(host, sources).cloned() else {
         return;
     };
     let choice = pick_paths(nsh_core::file_dialog::OpenDialog::folders());
@@ -145,23 +158,17 @@ struct Editor {
 pub(crate) struct Projects {
     editor: Signal<Option<Editor>>,
     application: Stored<Arc<Application>>,
-    host: Memo<String>,
-    sources: Memo<Vec<ListSource>>,
     list: Memo<Option<Shared<ThreadList>>>,
 }
 
 impl Projects {
     pub fn new(
         application: Stored<Arc<Application>>,
-        host: Memo<String>,
-        sources: Memo<Vec<ListSource>>,
         list: Memo<Option<Shared<ThreadList>>>,
     ) -> Self {
         Self {
             editor: signal(None),
             application,
-            host,
-            sources,
             list,
         }
     }
@@ -172,12 +179,6 @@ impl Projects {
     }
 
     pub fn select(self, command: &str) {
-        if command == "add" {
-            self.sources.with_untracked(|sources| {
-                add_folder(self.application, &self.host.get_untracked(), sources)
-            });
-            return;
-        }
         let Ok(command) = serde_json::from_str::<Command>(command) else {
             return;
         };
@@ -430,6 +431,26 @@ fn editor_data(editor: Option<&Editor>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_addition_requires_the_selected_local_host_to_be_connected() {
+        for (host, connected, enabled) in [
+            ("local", false, false),
+            ("local", true, true),
+            ("remote", true, false),
+        ] {
+            let sources = [ListSource {
+                scope: ListScope {
+                    host: host.into(),
+                    storage: "scope".into(),
+                },
+                connected,
+            }];
+            assert_eq!(folder_scope(host, &sources).is_some(), enabled);
+            assert!(folder_scope("other", &sources).is_none());
+        }
+        assert!(folder_scope("local", &[]).is_none());
+    }
 
     #[test]
     fn native_editor_contract_preserves_input_and_validation_without_exposing_routing_state() {

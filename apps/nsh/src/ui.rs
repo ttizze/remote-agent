@@ -168,6 +168,7 @@ impl Icon {
     pub(crate) const GLOBE: Self = icon!(Globe);
     pub(crate) const NETWORK: Self = icon!(Network);
     pub(crate) const KEYBOARD: Self = icon!(Keyboard);
+    #[cfg(any(desktop, test))]
     pub(crate) const FOLDER_PLUS: Self = icon!(FolderPlus);
     pub(crate) const LOADER: Self = icon!(Loader);
     #[cfg(dictation)]
@@ -195,6 +196,10 @@ impl Icon {
     pub(crate) const REFRESH: Self = icon!(RotateCw);
     #[cfg(desktop)]
     pub(crate) const SEARCH: Self = icon!(Search);
+    #[cfg(desktop)]
+    pub(crate) const FILTER: Self = icon!(ListFilter);
+    #[cfg(desktop)]
+    pub(crate) const PIN: Self = icon!(Pin);
     pub(crate) const SHARE: Self = icon!(Share);
     pub(crate) const EXPAND_ALL: Self = icon!(ChevronsUpDown);
     pub(crate) const COLLAPSE_ALL: Self = icon!(ChevronsDownUp);
