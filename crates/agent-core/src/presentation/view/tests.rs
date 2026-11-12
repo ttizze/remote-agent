@@ -72,6 +72,7 @@ fn workspace_review_publications_refresh_the_native_composer_summary() {
         Arc::make_mut(&mut Arc::make_mut(state.panes.primary_mut()).workspace).review =
             Some(Arc::new(WorkspaceReview {
                 options: None,
+                base_ref: Some("origin/main".into()),
                 branch: "main".into(),
                 additions,
                 deletions,

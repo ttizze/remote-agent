@@ -508,6 +508,8 @@ pub struct WorkspaceReview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<crate::workspace::WorkspaceOptions>,
     pub branch: String,
+    /// The reference whose merge base produced the diff, for example `origin/main`.
+    pub base_ref: Option<String>,
     pub additions: u64,
     pub deletions: u64,
     pub files: Vec<ChangedFile>,

@@ -547,6 +547,7 @@ mod path_tests {
                     worktrees: vec!["/existing".into()],
                 }),
                 branch: "main".into(),
+                base_ref: None,
                 additions: 0,
                 deletions: 0,
                 files: vec![],

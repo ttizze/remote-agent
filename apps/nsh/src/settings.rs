@@ -10,6 +10,7 @@ use crate::{
 use agent_core::{
     localization::UiLanguage,
     presentation::connections::ConnectionAgent,
+    presentation::web_links::WebLinkTarget,
     state::{ComposerPreferences, Intent, SendShortcut},
     updates::{Channel, UpdatePhase},
 };
@@ -275,6 +276,13 @@ fn general(connection: Connection) -> View {
             send_shortcut(connection),
         ),
         ui::setting(
+            tr("リンクの開き先"),
+            || {
+                tr("Webリンクを開く場所を選択します。Ctrl／⌘＋クリックでは既定のブラウザで開きます。").to_owned()
+            },
+            web_links(connection),
+        ),
+        ui::setting(
             tr("フォローアップの動作"),
             move || follow_up_description(preferences(connection).send_shortcut),
             follow_up(connection),
@@ -286,6 +294,37 @@ fn preferences(connection: Connection) -> ComposerPreferences {
     connection
         .composer
         .with(|c| c.controls.follow_up.preferences)
+}
+
+fn web_links(connection: Connection) -> ui::Control {
+    const TARGETS: [WebLinkTarget; 2] = [WebLinkTarget::SystemBrowser, WebLinkTarget::InAppBrowser];
+    let name = |target| match target {
+        WebLinkTarget::SystemBrowser => tr("既定のブラウザ"),
+        WebLinkTarget::InAppBrowser => "Bex",
+    };
+    let current = move || {
+        connection
+            .publication
+            .with(|p| p.snapshot.catalog.web_link_target)
+    };
+    choice(
+        move || name(current()).to_owned(),
+        move || {
+            json!(TARGETS.map(|target| json!({"id": name(target), "title": name(target), "selected": target == current()})))
+        },
+        move |id: &str| {
+            if let Some(target) = TARGETS.into_iter().find(|target| name(*target) == id) {
+                let result = connection
+                    .client
+                    .with(|client| client.device.select_web_link_target(target));
+                if let Err(reason) = result {
+                    connection
+                        .application
+                        .with(|app| app.fail(reason.to_string()));
+                }
+            }
+        },
+    )
 }
 
 fn set_preferences(connection: Connection, change: impl FnOnce(&mut ComposerPreferences)) {

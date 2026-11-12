@@ -791,7 +791,7 @@ async fn read_after_status(
     }
 }
 fn review() -> Value {
-    json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":""})
+    json!({"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":""})
 }
 async fn new_chat(
     store: &Store,
@@ -4230,7 +4230,7 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         ),
         (
             Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: "/old".into() }),
-            json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":"old"}),
+            json!({"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":"old"}),
         ),
     ] {
         let (store, mut reader, writer) = setup(Snapshot::default()).await;
@@ -4431,7 +4431,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     for (method, result) in [
         (
             "host/workspace/review",
-            json!({"branch":"main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
+            json!({"branch":"main","base_ref":"origin/main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
         ),
         ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
@@ -5562,7 +5562,7 @@ async fn independent_view_operations_complete_without_invalidating_each_other() 
                 pane: ("").to_owned()
             })
     );
-    writer.reply(&review_request, json!({"result":{"branch":"main","additions":0,"deletions":0,"files":[],"diff":"review"}})).await.unwrap();
+    writer.reply(&review_request, json!({"result":{"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":"review"}})).await.unwrap();
     reviewing.await.unwrap();
     assert!(
         !store

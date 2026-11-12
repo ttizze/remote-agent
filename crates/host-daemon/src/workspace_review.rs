@@ -53,6 +53,7 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
     Ok(WorkspaceReview {
         options: None,
         branch: comparison.branch,
+        base_ref: comparison.base_ref,
         additions,
         deletions,
         files,
@@ -81,6 +82,7 @@ fn empty_review() -> WorkspaceReview {
     WorkspaceReview {
         options: None,
         branch: String::new(),
+        base_ref: None,
         additions: 0,
         deletions: 0,
         files: Vec::new(),
@@ -168,7 +170,7 @@ mod tests {
         crate::git::text(cwd, &configured).unwrap()
     }
 
-    async fn assert_changes(cwd: &Path, paths: &[&str], lines: (u64, u64)) {
+    async fn assert_changes(cwd: &Path, paths: &[&str], lines: (u64, u64)) -> WorkspaceReview {
         let cwd_text = cwd.to_str().unwrap().to_owned();
         let review = inspect_workspace(cwd_text.clone()).await.unwrap();
         assert_eq!((review.additions, review.deletions), lines);
@@ -177,6 +179,7 @@ mod tests {
         assert_eq!(actual, paths.iter().copied().collect());
         let marks = directory_changes([cwd_text.clone()].into()).await.unwrap();
         assert_eq!(marks.get(&cwd_text), Some(&!paths.is_empty()));
+        review
     }
 
     #[tokio::test]
@@ -210,7 +213,10 @@ mod tests {
             git(&task, &["config", "--get", &key]).trim(),
             "refs/heads/source"
         );
-        assert_changes(&task, &[], (0, 0)).await;
+        assert_eq!(
+            assert_changes(&task, &[], (0, 0)).await.base_ref.as_deref(),
+            Some("source")
+        );
         assert!(!git(&task, &["diff", "--name-only", "main...HEAD"]).is_empty());
 
         std::fs::write(root.join("source-only.txt"), "newer source work\n").unwrap();
@@ -294,7 +300,13 @@ mod tests {
                 "refs/heads/deleted",
             ],
         );
-        assert_changes(cwd, &["inherited.txt"], (1, 0)).await;
+        assert_eq!(
+            assert_changes(cwd, &["inherited.txt"], (1, 0))
+                .await
+                .base_ref
+                .as_deref(),
+            Some("main")
+        );
         git(cwd, &["switch", "main"]);
         git(cwd, &["merge", "--no-edit", "task"]);
         git(cwd, &["switch", "task"]);
@@ -327,7 +339,13 @@ mod tests {
         std::fs::write(cwd.join("own.txt"), "task work\n").unwrap();
         git(cwd, &["add", "."]);
         git(cwd, &["commit", "-m", "task work"]);
-        assert_changes(cwd, &["own.txt"], (1, 0)).await;
+        assert_eq!(
+            assert_changes(cwd, &["own.txt"], (1, 0))
+                .await
+                .base_ref
+                .as_deref(),
+            Some("mirror/trunk")
+        );
 
         git(cwd, &["remote", "add", "origin", "./also-unreachable"]);
         git(cwd, &["update-ref", "refs/remotes/origin/release", "main"]);
@@ -339,7 +357,13 @@ mod tests {
                 "refs/remotes/origin/release",
             ],
         );
-        assert_changes(cwd, &["inherited.txt", "own.txt"], (2, 0)).await;
+        assert_eq!(
+            assert_changes(cwd, &["inherited.txt", "own.txt"], (2, 0))
+                .await
+                .base_ref
+                .as_deref(),
+            Some("origin/release")
+        );
         git(cwd, &["update-ref", "refs/remotes/origin/release", "HEAD"]);
         assert_changes(cwd, &[], (0, 0)).await;
     }
@@ -360,9 +384,15 @@ mod tests {
         git(cwd, &["remote", "add", "other", "./also-unreachable"]);
         git(cwd, &["update-ref", "refs/remotes/other/stable", "HEAD"]);
         git(cwd, &["branch", "--set-upstream-to=other/stable"]);
-        assert_changes(cwd, &[], (0, 0)).await;
+        assert_eq!(
+            assert_changes(cwd, &[], (0, 0)).await.base_ref.as_deref(),
+            Some("other/stable")
+        );
         git(cwd, &["checkout", "--detach"]);
-        assert_changes(cwd, &[], (0, 0)).await;
+        assert_eq!(
+            assert_changes(cwd, &[], (0, 0)).await.base_ref.as_deref(),
+            Some("HEAD")
+        );
         std::fs::write(cwd.join("own.txt"), "pending edit\n").unwrap();
         assert_changes(cwd, &["own.txt"], (1, 1)).await;
     }
@@ -410,7 +440,10 @@ mod tests {
         std::fs::write(cwd.join("own.txt"), "committed\n").unwrap();
         git(cwd, &["add", "."]);
         git(cwd, &["commit", "-m", "task work"]);
-        assert_changes(cwd, &[], (0, 0)).await;
+        assert_eq!(
+            assert_changes(cwd, &[], (0, 0)).await.base_ref.as_deref(),
+            Some("HEAD")
+        );
         std::fs::write(cwd.join("own.txt"), "pending\n").unwrap();
         assert_changes(cwd, &["own.txt"], (1, 1)).await;
         std::fs::write(cwd.join("own.txt"), "committed\n").unwrap();
@@ -510,6 +543,7 @@ mod tests {
             }
             let review = collect_workspace_review(directory.path().into()).unwrap();
             assert!(review.branch.is_empty());
+            assert!(review.base_ref.is_none());
             assert_eq!((review.additions, review.deletions), (0, 0));
             assert!(review.files.is_empty());
             assert!(review.diff.is_empty());
@@ -539,6 +573,10 @@ mod tests {
         crate::git::text(cwd, &["init", "--initial-branch=main"]).unwrap();
         std::fs::write(cwd.join("notes.txt"), "first\nsecond\n").unwrap();
         let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+        assert!(
+            review.base_ref.is_none(),
+            "an unborn branch has no comparison ref"
+        );
         assert_eq!((review.additions, review.deletions), (2, 0));
         assert!(review.diff.starts_with("diff --git "));
         assert!(review.diff.contains("+first\n+second\n"));

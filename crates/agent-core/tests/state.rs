@@ -663,7 +663,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     );
     let review: Arc<agent_protocol::models::WorkspaceReview> = Arc::new(
         serde_json::from_value(json!({
-            "branch":"main", "additions":1, "deletions":0, "files":[], "diff":"old"
+            "branch":"main", "base_ref":"origin/main", "additions":1, "deletions":0, "files":[], "diff":"old"
         }))
         .unwrap(),
     );

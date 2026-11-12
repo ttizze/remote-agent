@@ -22,6 +22,8 @@ struct MessageRun: Decodable, Equatable {
     let lightColor: UInt32?
     /// The shared chip of the file the run names.
     var file: MessageFile?
+    /// Explicit web destinations supplied by Core; absent for file/other links.
+    var webMenu: [MessageMenuItem]?
     var highlights: [MessageHighlight]? = nil
 }
 
@@ -54,6 +56,7 @@ struct MessageMenuItem: Decodable, Equatable {
 extension NSAttributedString.Key {
     /// The chip a range of message text shows, and the link it opens.
     static let messageFile = NSAttributedString.Key("BexMessageFile")
+    static let messageWebLink = NSAttributedString.Key("BexMessageWebLink")
     static let messageFindActive = NSAttributedString.Key("BexMessageFindActive")
     /// The plain text replacing a chip's decorative icon and spacing when selected.
     static let messageDecoration = NSAttributedString.Key("BexMessageDecoration")
@@ -67,6 +70,16 @@ final class MessageFileLink: NSObject {
     init(link: String, file: MessageFile) {
         self.link = link
         self.file = file
+    }
+}
+
+final class MessageWebLink: NSObject {
+    let link: String
+    let menu: [MessageMenuItem]
+
+    init(link: String, menu: [MessageMenuItem]) {
+        self.link = link
+        self.menu = menu
     }
 }
 
@@ -330,6 +343,9 @@ struct MessageMenuTitles: Decodable, Equatable {
         }
         if let url = run.link.flatMap(URL.init(string:)) {
             result[.link] = url
+            if let menu = run.webMenu {
+                result[.messageWebLink] = MessageWebLink(link: url.absoluteString, menu: menu)
+            }
             #if os(macOS)
                 // The text view draws links as their runs say, so a chip
                 // keeps its accent; other links are underlined in the link

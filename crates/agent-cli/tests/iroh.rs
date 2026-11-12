@@ -87,7 +87,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 }
                 Some("host/workspace/review") => {
                     assert_eq!(request["params"], json!({"cwd":"/fixture"}));
-                    json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":""})
+                    json!({"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":""})
                 }
                 Some("host/session/submit") => {
                     assert_eq!(mode, "send");

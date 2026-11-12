@@ -113,6 +113,7 @@ impl Persistence {
             snapshot.catalog.model_preferences = preferences.models.clone();
             snapshot.files.preferred_editor = preferences.editor.preferred;
             snapshot.catalog.ui_language = preferences.language;
+            snapshot.catalog.web_link_target = preferences.web_link_target;
             if let Some(directory) = &conversations {
                 if new_pairing {
                     crate::conversation_cache::clear(directory);

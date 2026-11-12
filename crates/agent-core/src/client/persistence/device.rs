@@ -4,6 +4,7 @@ use crate::{
     client::{AgentError, error},
     localization::UiLanguage,
     persistence::EditorPreferences,
+    presentation::web_links::WebLinkTarget,
     state::{ComposerPreferences, ModelPreferences, ModelSelection},
 };
 use agent_protocol::editors::EditorId;
@@ -19,6 +20,7 @@ pub enum PreferenceKey {
     Language,
     Composer,
     Contrast,
+    WebLinks,
 }
 
 /// Device-wide locations, independent of a Host or window's state file.
@@ -36,6 +38,7 @@ pub(crate) struct Preferences {
     pub composer: ComposerPreferences,
     /// Unset, or unreadable, is the default contrast.
     pub contrast: Option<u32>,
+    pub web_link_target: WebLinkTarget,
 }
 
 #[derive(Clone, Copy)]
@@ -105,10 +108,15 @@ impl DevicePreferences {
         let contrast = read(storage.as_ref(), PreferenceKey::Contrast)
             .ok()
             .flatten();
+        let web_link_target = read(storage.as_ref(), PreferenceKey::WebLinks)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let mut state = DeviceState {
             current: Arc::new(Preferences {
                 language,
                 contrast,
+                web_link_target,
                 ..Default::default()
             }),
             restored: Ok(()),
@@ -122,6 +130,17 @@ impl DevicePreferences {
 
     pub fn language(&self) -> UiLanguage {
         self.state.lock().unwrap().current.language
+    }
+
+    pub fn web_link_target(&self) -> WebLinkTarget {
+        self.state.lock().unwrap().current.web_link_target
+    }
+
+    /// A failed write leaves both the visible destination and disk unchanged.
+    pub fn select_web_link_target(&self, target: WebLinkTarget) -> Result<(), AgentError> {
+        self.write_display(PreferenceKey::WebLinks, &target, |preferences| {
+            preferences.web_link_target = target;
+        })
     }
 
     /// Language becomes visible only after this write succeeds. Native mobile
@@ -349,6 +368,7 @@ impl DeviceState {
             language: self.current.language,
             composer: composer.unwrap_or_default(),
             contrast: self.current.contrast,
+            web_link_target: self.current.web_link_target,
         });
         self.saved_models = models;
         self.saved_editor = editor;

@@ -1,6 +1,60 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "Webリンクを開く場所を選択します。Ctrl／⌘＋クリックでは既定のブラウザで開きます。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose where web links open. Ctrl/Command-click opens your default browser."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Webリンクを開く場所を選択します。Ctrl／⌘＋クリックでは既定のブラウザで開きます。"
+          }
+        }
+      }
+    },
+    "既定のブラウザ": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your default browser"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "既定のブラウザ"
+          }
+        }
+      }
+    },
+    "リンクの開き先": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Open links in" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "リンクの開き先" } }
+      }
+    },
+    "Bexで開く": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open in Bex"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bexで開く"
+          }
+        }
+      }
+    },
     "Fast：オン": {
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Fast: on" } },

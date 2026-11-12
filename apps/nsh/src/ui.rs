@@ -156,7 +156,6 @@ impl Icon {
     pub(crate) const WRENCH: Self = icon!(Wrench);
     pub(crate) const TERMINAL: Self = icon!(SquareTerminal);
     pub(crate) const BRAIN: Self = icon!(Brain);
-    pub(crate) const REPLACE: Self = icon!(Replace);
     #[cfg(desktop)]
     pub(crate) const FOLDER_OPEN: Self = icon!(FolderOpen);
     pub(crate) const FILE_TEXT: Self = icon!(FileText);

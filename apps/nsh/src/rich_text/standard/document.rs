@@ -275,12 +275,19 @@ fn value_content(block: &Value) -> Vec<Inline> {
 
 fn value_inline(run: &Value) -> Inline {
     let label = run["text"].as_str().unwrap_or_default().to_owned();
+    let web_link = run["webMenu"].is_array();
     let file = run.get("file").is_some();
     let decorated =
         run["highlights"].as_array().is_some_and(|r| !r.is_empty()) || run["darkColor"].is_u64();
     let mut node = if file {
         Inline::Custom(
             CustomNode::new("bex:file")
+                .with_text(label.clone())
+                .with_data(run.clone()),
+        )
+    } else if web_link {
+        Inline::Custom(
+            CustomNode::new("bex:link")
                 .with_text(label.clone())
                 .with_data(run.clone()),
         )
@@ -293,7 +300,7 @@ fn value_inline(run: &Value) -> Inline {
     } else {
         Inline::text(label.clone())
     };
-    if run["code"] == true && !file {
+    if run["code"] == true && !file && !web_link {
         // Keep highlights and anchors inside inline-code styling.
         node = if decorated {
             Inline::Custom(
@@ -322,7 +329,7 @@ fn value_inline(run: &Value) -> Inline {
             content: vec![node],
         };
     }
-    if let Some(url) = run["link"].as_str().filter(|_| !file) {
+    if let Some(url) = run["link"].as_str().filter(|_| !file && !web_link) {
         node = Inline::Link {
             url: url.into(),
             title: None,
@@ -428,6 +435,23 @@ mod tests {
             make("next"),
             "navigation must re-render a sole active match"
         );
+    }
+
+    #[test]
+    fn web_link_preserves_literal_text_and_styles_with_its_explicit_menu() {
+        let node = value_inline(&json!({"text":"Read *this*", "strong":true, "code":true,
+            "link":"https://example.com", "webMenu":[{"id":"systemBrowser", "title":"Open externally"}]}));
+        assert_eq!(node.plain_text(), "Read *this*");
+        let Inline::Strong { content } = node else {
+            panic!("strong style")
+        };
+        let Inline::Custom(link) = &content[0] else {
+            panic!("web link with menu")
+        };
+        assert_eq!(link.name, "bex:link");
+        assert_eq!(link.data["link"], "https://example.com");
+        assert_eq!(link.data["code"], true);
+        assert_eq!(link.data["webMenu"][0]["id"], "systemBrowser");
     }
 
     #[test]
