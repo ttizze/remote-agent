@@ -297,7 +297,7 @@ mod tests {
             stop: tokio_util::sync::CancellationToken::new(),
             runtime: runtime.handle().clone(),
             jobs: Default::default(),
-            selection_path,
+            selection_path: Some(selection_path),
             #[cfg(desktop)]
             onboarding_path: std::path::PathBuf::new(),
             explorer_width_path,

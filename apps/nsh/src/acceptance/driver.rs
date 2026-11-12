@@ -1783,10 +1783,20 @@ fn select(tree: &Tree, index: usize, text: &str) -> Result<(), String> {
     let Target::Element(object) = &node.target else {
         return Err(format!("{} has no text to select", node.describe()));
     };
+    // AppKit exposes links as AX elements of their text view; selection
+    // belongs to that owner. Drawn-text AX spans own their range directly.
+    let linked = tree.link(index);
+    let object = match &linked {
+        Some(Target::Link { view, .. }) => view,
+        _ => object,
+    };
     if !responds(object, sel!(setAccessibilitySelectedTextRange:)) {
         return Err(format!("{} takes no selection", node.describe()));
     }
-    let value = self::text(object, sel!(accessibilityValue)).unwrap_or_default();
+    let value = self::text(object, sel!(string))
+        .or_else(|| self::text(object, sel!(accessibilityValue)))
+        .or_else(|| self::text(object, sel!(accessibilityLabel)))
+        .unwrap_or_default();
     let start = value
         .find(text)
         .ok_or_else(|| format!("{} does not contain {text:?}", node.describe()))?;
@@ -1801,6 +1811,10 @@ fn select(tree: &Tree, index: usize, text: &str) -> Result<(), String> {
     {
         window.makeFirstResponder(Some(view));
     }
+    // A new drag first places a caret, including when it selects the same
+    // text again after a toolbar action dismissed the old selection's UI.
+    let caret = NSRange::new(range.location, 0);
+    let _: () = unsafe { msg_send![&**object, setAccessibilitySelectedTextRange: caret] };
     let _: () = unsafe { msg_send![&**object, setAccessibilitySelectedTextRange: range] };
     Ok(())
 }

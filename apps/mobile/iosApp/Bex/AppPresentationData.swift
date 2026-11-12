@@ -19,15 +19,18 @@ struct HostProfile: Codable, Identifiable, Equatable {
     }
 }
 
-final class ConversationItem: Sendable {
-    let source: RenderedItem
-    let data: ItemPresentation
-    let markdown: [ConversationMarkdownContent.Part]
+#if !BEX_NSH_CONVERSATION
+    final class ConversationItem: Sendable {
+        let source: RenderedItem
+        let data: ItemPresentation
+        let markdown: [ConversationMarkdownContent.Part]
 
-    init(_ source: RenderedItem) {
-        self.source = source
-        data = source.presentation()
-        markdown = !data.collapsible ? data.body
-            .map(ConversationMarkdownContent.parse) ?? [] : []
+        init(_ source: RenderedItem) {
+            self.source = source
+            data = source.presentation()
+            markdown = !data.collapsible ? data.body
+                .map(ConversationMarkdownContent.parse) ?? [] : []
+        }
     }
-}
+
+#endif

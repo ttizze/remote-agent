@@ -447,6 +447,23 @@ mod tests {
     use tokio::sync::Notify;
 
     #[tokio::test]
+    async fn a_borrowing_manager_leaves_the_owners_session_open_when_it_ends() {
+        let storage = Arc::new(Storage::default());
+        let session = open(storage.clone());
+        let clients = ClientSessions::new(
+            false,
+            client_build(42),
+            "Fixture device".into(),
+            DevicePreferences::new(storage),
+        );
+        clients.borrow("host".into(), session.clone());
+        clients.release();
+        drop(clients);
+        session.clone().ready().await.unwrap();
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn pending_presentations_use_device_language_before_host_storage_is_read() {
         use crate::localization::UiLanguage;
         let storage = Arc::new(Storage::default());

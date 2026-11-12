@@ -1,237 +1,273 @@
-//! Debug comparison with NSH's own Markdown parser, document layout and selection.
-//! The conversation List remains the sole vertical scroller. This deliberately
-//! uses TextView's default typography/code/table controls. Bex's file chips,
-//! Mermaid rendering and find decorations are not ported into this experiment.
-//! TextView eagerly lays out a whole message, unlike the custom part list.
-//! Acceptance currently exposes link AX-press and code-copy AX-order gaps.
-use super::{MarkdownBlock, MarkdownRun, MarkdownStyle};
-use nsh_base::text_view::{Block, CodeBlock, Document, Image, Inline, Parser};
+//! One standard TextView per message, using Core's shared workspace semantics.
+//! Only application-specific chips, diagrams and search spans use custom nodes;
+//! TextView owns paragraph, code and table layout and the timeline owns scrolling.
+#[cfg(any(
+    feature = "standard-text",
+    test,
+    all(target_os = "macos", debug_assertions)
+))]
+mod document;
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 use {
-    super::{Kind, Surroundings, Target},
-    nsh_base::{MarkdownOptions, TextViewCodeAction, TextViewLinkPressEvent, text_view},
+    super::{Kind, MarkdownBlock, Part, Surroundings, Target},
+    nsh_base::{
+        TextViewLinkPressEvent, text_view,
+        text_view::{CodeBlock, CustomNode},
+    },
     nsh_core::prelude::*,
+    serde_json::Value,
 };
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 pub(super) fn message(
     surroundings: Surroundings,
     source: impl Fn() -> Option<String> + 'static,
     kind: impl Fn() -> Kind + Copy + 'static,
-    streaming: impl Fn() -> bool + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> View {
-    render(
-        text_view()
-            .markdown(move || SharedString::from(source().unwrap_or_default()))
-            .options(move || MarkdownOptions {
-                streaming: streaming(),
-                ..Default::default()
-            }),
-        surroundings,
-        kind,
-        max_width,
-    )
+    let parts = super::message_parts(surroundings, source);
+    render_parts(surroundings, move || parts.get(), kind, max_width)
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 pub(super) fn content(
     surroundings: Surroundings,
     blocks: impl Fn() -> Vec<MarkdownBlock> + 'static,
     kind: impl Fn() -> Kind + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> View {
-    render(
-        text_view().document(move || document(blocks())),
+    render_parts(
         surroundings,
+        move || super::search::indexed(super::parts(blocks(), &[], &|_| None)),
         kind,
         max_width,
     )
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
-fn render(
-    text: nsh_base::TextViewElement,
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+fn render_parts(
     surroundings: Surroundings,
+    parts: impl Fn() -> Vec<Part> + 'static,
     kind: impl Fn() -> Kind + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> View {
     let target = super::target(surroundings.connection);
-    super::selection_actions(
-        view()
+    let wraps = signal(std::collections::HashMap::<String, bool>::new());
+    let owner = Owner::current();
+    let diagrams = stored(std::collections::HashMap::<String, super::CodeControls>::new());
+    let render = move |node: &CustomNode| {
+        let controls = node.attributes.get("document").map(|id| {
+            diagrams.with(|all| {
+                *all.entry(id.clone())
+                    .or_insert_with(|| owner.run(super::CodeControls::new))
+            })
+        });
+        custom(node, surroundings, target, controls)
+    };
+    let document = computed(move || {
+        let row = surroundings
+            .find_row
+            .and_then(|row| row.try_get())
+            .unwrap_or_default();
+        let query = if row.is_empty() {
+            String::new()
+        } else {
+            surroundings.find.highlighted()
+        };
+        let active = surroundings.find.selection(&row);
+        let navigation = active.and_then(|_| surroundings.find.key());
+        document::presentation(parts(), &query, active, navigation.as_deref(), &wraps.get())
+    });
+    let message = view()
+        .w_full()
+        .max_w(move || px(max_width()))
+        .min_w_0()
+        .style_when(move || kind() == Kind::Activity, |s| s.opacity(0.75));
+    #[cfg(desktop)]
+    let message = super::selection_actions(message.selectable(true), target, surroundings);
+    message.child(
+        text_view()
+            .document(move || document.get())
             .w_full()
-            .max_w(move || px(max_width()))
             .min_w_0()
             .selectable(true)
-            .style_when(move || kind() == Kind::Activity, |s| s.opacity(0.75)),
-        target,
-        surroundings,
-    )
-    .child(
-        text.w_full()
-            .min_w_0()
-            .selectable(true)
-            .code_block_actions(vec![
-                TextViewCodeAction::new("copy").with_label(crate::l10n::tr("コピー")),
-            ])
+            .on_selection_change(move |event: &nsh_base::TextViewSelectionEvent| {
+                #[cfg(target_os = "ios")]
+                if let Some(actions) = surroundings.external_actions {
+                    actions.emit(
+                        serde_json::json!({"action":"selection", "text":event.text.to_string()}),
+                    );
+                }
+                #[cfg(not(target_os = "ios"))]
+                let _ = event;
+            })
+            .render_code_block_actions(move |code: &CodeBlock| {
+                code_actions(code, wraps, surroundings.find)
+            })
             .on_link_press(move |event: &TextViewLinkPressEvent| {
                 if event.url.starts_with('#') {
                     return;
                 }
                 if let Ok(target) = serde_json::from_str::<Target>(&target.get_untracked()) {
-                    surroundings.open_link(event.url.to_string(), target, false);
+                    surroundings.open_link(
+                        event.url.to_string(),
+                        target,
+                        crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
+                    );
                 }
             })
-            .render_image(move |image: &Image| {
-                let source = image.src.clone();
-                crate::media::image_view(
-                    surroundings.connection,
-                    surroundings.preview,
-                    move || source.clone(),
-                    crate::media::ImageSize::Natural,
-                    None,
-                )
-            }),
+            .render_custom(render)
+            .render_inline_custom(render),
     )
 }
 
-/// Tool details already arrive as Core's blocks; retain their text and inline
-/// semantics without constructing Bex's custom native/drawn paragraph adapter.
-fn document(blocks: Vec<MarkdownBlock>) -> Document {
-    Document::new(
-        blocks
-            .into_iter()
-            .flat_map(|block| match block {
-                MarkdownBlock::Paragraph { runs, style } => vec![paragraph(runs, style)],
-                MarkdownBlock::Table { source, .. } => Parser::new().markdown(&source).blocks,
-                MarkdownBlock::Visualization { path } => {
-                    vec![Block::paragraph(vec![Inline::Link {
-                        content: vec![Inline::text(&path)],
-                        url: path,
-                        title: None,
-                    }])]
-                }
-            })
-            .collect(),
-    )
-}
-
-fn paragraph(runs: Vec<MarkdownRun>, style: MarkdownStyle) -> Block {
-    if style.rule {
-        return Block::Rule;
-    }
-    if style.code {
-        return Block::CodeBlock(CodeBlock::new(
-            style.language,
-            runs.into_iter().map(|run| run.text).collect::<String>(),
-        ));
-    }
-    let mut content: Vec<_> = runs.into_iter().map(inline).collect();
-    if let Some(marker) = style.marker {
-        content.insert(0, Inline::text(format!("{marker} ")));
-    }
-    let block = match style.header {
-        Some(level) => Block::Heading {
-            level,
-            content,
-            anchor: None,
-        },
-        None => Block::paragraph(content),
-    };
-    if style.quoted {
-        Block::Blockquote {
-            children: vec![block],
-            alert: None,
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+fn custom(
+    node: &CustomNode,
+    surroundings: Surroundings,
+    target: Memo<String>,
+    controls: Option<super::CodeControls>,
+) -> AnyElement {
+    match node.name.as_str() {
+        "bex:image" => {
+            let source = node.data.as_str().unwrap_or_default().to_owned();
+            crate::media::image_view(
+                surroundings.connection,
+                surroundings.preview,
+                move || source.clone(),
+                crate::media::ImageSize::Natural,
+                None,
+            )
+            .into_element()
         }
-    } else {
-        block
-    }
-}
-
-fn inline(run: MarkdownRun) -> Inline {
-    let mut node = if let Some(src) = run.image {
-        let mut image = Image::new(src);
-        image.alt = run.text;
-        Inline::Image(image)
-    } else if run.code {
-        Inline::Code { code: run.text }
-    } else {
-        Inline::text(run.text)
-    };
-    if run.strong {
-        node = Inline::Strong {
-            content: vec![node],
-        };
-    }
-    if run.emphasis {
-        node = Inline::Emphasis {
-            content: vec![node],
-        };
-    }
-    if run.strikethrough {
-        node = Inline::Strikethrough {
-            content: vec![node],
-        };
-    }
-    if let Some(url) = run.link {
-        node = Inline::Link {
-            url,
-            title: None,
-            content: vec![node],
-        };
-    }
-    node
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_code_keeps_literal_characters_and_markdown_tables_stay_tables() {
-        let doc = document(vec![
-            MarkdownBlock::Paragraph {
-                runs: vec![MarkdownRun {
-                    text: "a < b && **literal**\n日本語".into(),
-                    ..Default::default()
-                }],
-                style: MarkdownStyle {
-                    code: true,
-                    language: Some("rust".into()),
-                    ..Default::default()
+        "bex:diagram" => match controls {
+            Some(controls) => diagram(&node.data, surroundings, target, controls),
+            None => view().into_element(),
+        },
+        "bex:file" => {
+            let label = run(&node.data, surroundings);
+            let resolve = move || serde_json::from_str::<Target>(&target.get_untracked()).ok();
+            super::drawn::chip_span(
+                label,
+                &node.data["file"],
+                node.data["link"].as_str().unwrap_or_default().into(),
+                super::drawn::Links {
+                    open: move |link, command| {
+                        if let Some(target) = resolve() {
+                            surroundings.open_link(link, target, command);
+                        }
+                    },
+                    choose: move |link, id: String| {
+                        if let Some(target) = resolve() {
+                            crate::file_actions::choose(
+                                surroundings.connection,
+                                surroundings.files,
+                                target.link(link),
+                                &id,
+                            );
+                        }
+                    },
                 },
-            },
-            MarkdownBlock::Table {
-                source: "| A | B |\n|---|---|\n|日本語|`x`|".into(),
-                columns: vec![],
-                rows: vec![],
-            },
-        ]);
-        assert!(
-            matches!(&doc.blocks[0], Block::CodeBlock(code) if code.code == "a < b && **literal**\n日本語" && code.language.as_deref() == Some("rust"))
-        );
-        assert!(
-            matches!(&doc.blocks[1], Block::Table(table) if table.head.len() == 2 && table.rows.len() == 1)
-        );
-        assert!(doc.plain_text().contains("日本語\tx"));
+            )
+            .into_element()
+        }
+        "bex:code-run" => run(&node.data, surroundings)
+            .font_family(SharedString::from("monospace"))
+            .bg(crate::ui::colors::RAISED)
+            .into_element(),
+        "bex:run" => run(&node.data, surroundings).into_element(),
+        _ => text(node.text.clone()).into_element(),
     }
+}
 
-    #[test]
-    fn linked_emphasized_inline_code_keeps_content_without_reparsing() {
-        let node = inline(MarkdownRun {
-            text: "*literal*".into(),
-            code: true,
-            strong: true,
-            link: Some("hello.txt".into()),
-            ..Default::default()
-        });
-        let Inline::Link { url, content, .. } = node else {
-            panic!("missing link")
-        };
-        assert_eq!(url, "hello.txt");
-        assert!(
-            matches!(&content[0], Inline::Strong { content } if matches!(&content[0], Inline::Code { code } if code == "*literal*"))
-        );
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+fn run(run: &Value, surroundings: Surroundings) -> Text {
+    let text = super::drawn::highlighted_run(run, surroundings.find, None, true);
+    match run["darkColor"]
+        .as_u64()
+        .and_then(|c| u32::try_from(c).ok())
+    {
+        Some(color) => text.text_color(rgb(color)),
+        None => text,
     }
+}
+
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+fn diagram(
+    data: &Value,
+    surroundings: Surroundings,
+    target: Memo<String>,
+    controls: super::CodeControls,
+) -> AnyElement {
+    let Ok(part) = serde_json::from_value::<Part>(data.clone()) else {
+        return view().into_element();
+    };
+    let part = signal((0, part));
+    let selected = computed(move || {
+        let row = surroundings.find_row?.try_get()?;
+        let document = part.with(|(_, part)| match part {
+            Part::Code { blocks, .. } => super::search::document(blocks),
+            _ => 0,
+        });
+        surroundings.find.active(&row, document)?;
+        surroundings.find.key()
+    });
+    super::frame(
+        part.read_only(),
+        surroundings.find_scroll,
+        selected,
+        controls,
+        move |_, scrolls, _| {
+            super::drawn::message(
+                part.read_only(),
+                || false,
+                target,
+                Surroundings {
+                    find_scroll: scrolls,
+                    ..surroundings
+                },
+                None,
+            )
+            .into_element()
+        },
+    )
+}
+
+#[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+fn code_actions(
+    code: &CodeBlock,
+    wraps: Signal<std::collections::HashMap<String, bool>>,
+    find: crate::find::Find,
+) -> View {
+    let id = code.id.clone().unwrap_or_default();
+    let wrap = code.wrap;
+    let source = code.code.clone();
+    view()
+        .flex_row()
+        .gap(px(2.0))
+        .text_color(crate::conversation::look::muted())
+        .child(crate::ui::icon_button_sized(
+            crate::ui::Icon::WRAP,
+            crate::l10n::tr(if wrap {
+                "折り返し解除"
+            } else {
+                "折り返し"
+            }),
+            24.0,
+            12.0,
+            move || {
+                find.reset_anchor();
+                wraps.update(|values| {
+                    values.insert(id.clone(), !wrap);
+                })
+            },
+        ))
+        .child(crate::ui::icon_button_sized(
+            crate::ui::Icon::COPY,
+            crate::l10n::tr("コードをコピー"),
+            24.0,
+            12.0,
+            move || set_clipboard(source.clone()),
+        ))
 }

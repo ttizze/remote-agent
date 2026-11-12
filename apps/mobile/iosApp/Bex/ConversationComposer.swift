@@ -80,6 +80,13 @@ struct ConversationComposer: View {
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("task.diff")
             }
+            #if BEX_NSH_CONVERSATION
+                ConversationQueue(
+                    followUp: controls.followUp,
+                    threadId: model.navigation.threadId,
+                    perform: { model.perform($0) }
+                )
+            #endif
             if let error = model.transferError {
                 AppNotice(text: error)
             }
@@ -243,25 +250,5 @@ struct ConversationComposer: View {
                 || !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             || model.transferring || preparingMedia || dictation.requestingPermission)
         .accessibilityIdentifier("task.send")
-    }
-
-    func startDictation() {
-        composerFocused = false
-        model.transferError = nil
-        model.notice = nil
-        sendRecordedText = false
-        let sendIntent = $sendRecordedText
-        let key = model.draftKey
-        var preparation: DictationPreparation?
-        dictation.start(started: { [weak model] in
-            preparation = model?.prepareDictation()
-        }, completion: { [weak model] result in
-            guard let model, model.draftKey == key else { return }
-            switch result {
-            case let .success(audio): model.transcribe(audio, draftKey: key, sendImmediately: sendIntent.wrappedValue,
-                                                       preparation: preparation)
-            case let .failure(error): model.transferError = error.localizedDescription
-            }
-        })
     }
 }

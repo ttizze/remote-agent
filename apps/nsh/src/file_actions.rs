@@ -29,6 +29,13 @@ use agent_protocol::{
     editors::{EditorId, FileManagerRevealKind},
     file_metadata::FileMetadataKind,
 };
+#[cfg(any(
+    test,
+    feature = "standard-text",
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions)
+))]
+use nsh_core::keymap::Modifiers;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 
@@ -36,6 +43,17 @@ use serde_json::{Value, json};
 /// stays readable on.
 const DARK_SURFACES: [u32; 3] = [0x080808, 0x0f0f0f, 0x141414];
 const LIGHT_SURFACES: [u32; 3] = [0xffffff, 0xfafafa, 0xf4f4f5];
+
+/// The editor-opening modifier follows the platform's primary shortcut key.
+#[cfg(any(
+    test,
+    feature = "standard-text",
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions)
+))]
+pub(crate) fn primary_modifier(modifiers: Modifiers, apple: bool) -> bool {
+    if apple { modifiers.cmd } else { modifiers.ctrl }
+}
 
 /// What a message's chips read from their connection: the workspace, the
 /// Host's editors when it is this PC, and what the Host reported of each file.
@@ -349,6 +367,22 @@ fn act(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_editor_modifier_is_command_on_apple_and_control_elsewhere() {
+        let command = Modifiers {
+            cmd: true,
+            ..Default::default()
+        };
+        let control = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert!(primary_modifier(command, true));
+        assert!(!primary_modifier(control, true));
+        assert!(primary_modifier(control, false));
+        assert!(!primary_modifier(command, false));
+    }
 
     #[test]
     fn menu_ids_round_trip_their_actions_and_submenus_keep_their_items() {

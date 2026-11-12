@@ -13,7 +13,7 @@ type 会話を検索 "見つける"
 expect "Simulator conversation" 10000
 screenshot found
 type 会話を検索 "どこにもない語"
-expect_absent "Simulator conversation" 10000
+expect_absent "Simulator conversation*" 10000
 type 会話を検索 "見つける"
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect "検索で見つける会話" after 右パネルを切り替え 10000

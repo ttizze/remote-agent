@@ -112,6 +112,8 @@ pub(super) fn decorate(
 
 /// Only the paragraph carrying the selected start needs a new drawn anchor.
 #[cfg(any(
+    test,
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]
@@ -130,6 +132,7 @@ pub(super) fn reveals(block: &Value) -> bool {
 
 /// Styled fragments of one run, in UTF-8 bytes; native views convert to UTF-16.
 #[cfg(any(
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]
@@ -142,6 +145,7 @@ pub(super) struct Fragment {
 }
 
 #[cfg(any(
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]

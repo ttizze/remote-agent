@@ -57,22 +57,34 @@ pub(crate) struct Client {
     handed: Arc<HandedKeys>,
     updates: async_channel::Sender<Update>,
     panes: std::sync::Mutex<std::collections::BTreeMap<u64, Arc<panes::Pane>>>,
+    owns_sessions: bool,
 }
+
+pub(crate) struct BorrowedSession {
+    pub host: String,
+    pub session: Arc<ClientSession>,
+    pub pane: Option<Arc<agent_core::client::native::AgentPane>>,
+}
+
+type Started = (
+    tokio::runtime::Runtime,
+    Arc<Client>,
+    async_channel::Receiver<Update>,
+);
 
 pub(crate) const LOCAL: &str = "local";
 
 impl Client {
-    pub fn new(
+    #[cfg(test)]
+    pub fn new(root: PathBuf, local: Option<HostScope>) -> Result<Started, AgentError> {
+        Self::start(root, local, None)
+    }
+
+    pub(super) fn start(
         root: PathBuf,
         local: Option<HostScope>,
-    ) -> Result<
-        (
-            tokio::runtime::Runtime,
-            Arc<Self>,
-            async_channel::Receiver<Update>,
-        ),
-        AgentError,
-    > {
+        borrowed: Option<BorrowedSession>,
+    ) -> Result<Started, AgentError> {
         let runtime = tokio::runtime::Runtime::new().map_err(error)?;
         let (updates, incoming) = async_channel::unbounded();
         let device = DevicePreferences::new(Arc::new(crate::storage::DeviceStorage {
@@ -102,13 +114,33 @@ impl Client {
             handed: Default::default(),
             updates,
             panes: Default::default(),
+            owns_sessions: borrowed.is_none(),
         });
         let owner = client.clone();
-        client.spawn(async move {
-            if let Err(reason) = owner.restore().await {
-                owner.report(reason);
+        if let Some(borrowed) = borrowed {
+            client
+                .sessions
+                .borrow(borrowed.host.clone(), borrowed.session.clone());
+            if let Some(pane) = &borrowed.pane {
+                client.attach_pane(borrowed.host.clone(), pane.clone());
             }
-        });
+            client.spawn(async move {
+                let ready = tokio::select! {
+                    _ = owner.closing.cancelled() => return,
+                    ready = borrowed.session.clone().ready() => ready,
+                };
+                if let Err(reason) = ready {
+                    return owner.report(reason);
+                }
+                owner.observe_surface(borrowed.host, borrowed.session, borrowed.pane);
+            });
+        } else {
+            client.spawn(async move {
+                if let Err(reason) = owner.restore().await {
+                    owner.report(reason);
+                }
+            });
+        }
         Ok((runtime, client, incoming))
     }
 
@@ -296,12 +328,27 @@ impl Client {
     }
 
     fn observe(self: &Arc<Self>, host: String, session: Arc<ClientSession>) {
+        self.observe_surface(host, session, None);
+    }
+
+    fn observe_surface(
+        self: &Arc<Self>,
+        host: String,
+        session: Arc<ClientSession>,
+        pane: Option<Arc<agent_core::client::native::AgentPane>>,
+    ) {
         let owner = self.clone();
         self.spawn(async move {
             let Some(store) = session.store() else {
                 return;
             };
-            let mut value = store.presentation();
+            let mut value = match &pane {
+                Some(pane) => match pane.presentation() {
+                    Ok(value) => value,
+                    Err(reason) => return owner.report(reason),
+                },
+                None => store.presentation(),
+            };
             loop {
                 if owner
                     .updates
@@ -314,7 +361,16 @@ impl Client {
                 {
                     break;
                 }
-                match store.next_presentation(value).await {
+                let next = async {
+                    match &pane {
+                        Some(pane) => pane.next_presentation(value).await,
+                        None => store.next_presentation(value).await,
+                    }
+                };
+                match tokio::select! {
+                    _ = owner.closing.cancelled() => break,
+                    result = next => result,
+                } {
                     Ok(next) => value = next,
                     Err(_) => break,
                 }
@@ -362,9 +418,13 @@ impl Client {
             self.report(reason);
         }
         let (send, receive) = async_channel::bounded(1);
+        let closing = self.closing.clone();
         self.spawn(async move {
             let result = match receipt {
-                Ok(receipt) => receipt.wait().await,
+                Ok(receipt) => tokio::select! {
+                    _ = closing.cancelled() => return,
+                    result = receipt.wait() => result,
+                },
                 Err(reason) => Err(reason),
             };
             let _ = send.send(result).await;
@@ -657,13 +717,23 @@ impl Client {
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
         self.closing.cancel();
-        self.close_panes();
+        // A borrowed session and its pane stay open for their native owner.
+        if self.owns_sessions {
+            self.close_panes();
+        }
         let hosts = self.hosts.lock().await;
-        self.sessions.retire();
+        if self.owns_sessions {
+            self.sessions.retire();
+        }
         drop(hosts);
         self.jobs.close();
         self.jobs.wait().await;
-        self.sessions.shutdown().await
+        if self.owns_sessions {
+            self.sessions.shutdown().await
+        } else {
+            self.sessions.release();
+            Ok(())
+        }
     }
 }
 
@@ -729,6 +799,167 @@ mod tests {
         })
         .await
         .expect("client publication stalled")
+    }
+
+    #[test]
+    fn embedded_conversations_share_updates_and_leave_the_native_owners_sessions_open() {
+        for side_chat in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let host = saved_host(directory.path());
+            let (owner_runtime, owner, incoming) =
+                Client::new(directory.path().into(), None).unwrap();
+            owner_runtime.block_on(publication(&incoming, ""));
+            let session = owner.sessions.session(host.id.clone()).unwrap();
+            let pane = side_chat.then(|| {
+                owner_runtime
+                    .block_on(session.store().unwrap().open_pane("/borrowed".into()))
+                    .unwrap()
+            });
+            let (runtime, embedded, incoming) = Client::start(
+                directory.path().into(),
+                None,
+                Some(BorrowedSession {
+                    host: host.id.clone(),
+                    session: session.clone(),
+                    pane: pane.clone(),
+                }),
+            )
+            .unwrap();
+            runtime.block_on(async {
+                let initial = publication(&incoming, "").await;
+                embedded.dispatch(
+                    &host.id,
+                    side_chat.then_some(1),
+                    Intent::SetDraftText {
+                        thread_id: initial.composer.controls.navigation.draft_key.clone(),
+                        text: "shared native input".into(),
+                    },
+                );
+                publication(&incoming, "shared native input").await;
+                tokio::time::timeout(Duration::from_secs(5), embedded.shutdown())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                session.clone().ready().await.unwrap();
+                let retained = match &pane {
+                    Some(pane) => pane.presentation().unwrap(),
+                    None => session.presentation(),
+                };
+                assert_eq!(retained.composer.draft.text, "shared native input");
+            });
+            let view_directory = tempfile::tempdir().unwrap();
+            let selection = view_directory.path().join("connection-selection.json");
+            std::fs::write(&selection, b"standalone selection remains untouched").unwrap();
+            let (view_runtime, application) = crate::application::Application::embedded(
+                view_directory.path().into(),
+                BorrowedSession {
+                    host: host.id.clone(),
+                    session: session.clone(),
+                    pane: pane.clone(),
+                },
+            )
+            .unwrap();
+            view_runtime.block_on(application.shutdown()).unwrap();
+            assert_eq!(
+                std::fs::read(selection).unwrap(),
+                b"standalone selection remains untouched"
+            );
+            if let Some(pane) = pane {
+                pane.retire();
+            }
+            owner_runtime.block_on(owner.shutdown()).unwrap();
+        }
+    }
+
+    #[test]
+    fn closing_an_embedded_view_does_not_wait_for_native_startup_or_pending_receipts() {
+        struct BlockedPlatform {
+            entered: std::sync::mpsc::SyncSender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl agent_core::client::session::ClientPlatform for BlockedPlatform {
+            fn identity(&self) -> Result<Vec<u8>, AgentError> {
+                Ok(vec![1; 32])
+            }
+            fn diagnostics_directory(&self) -> Result<Option<String>, AgentError> {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                Ok(None)
+            }
+            fn conversation_directory(&self) -> Result<Option<String>, AgentError> {
+                Ok(None)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let host = saved_host(directory.path());
+        let storage = Arc::new(Storage {
+            root: directory.path().into(),
+            host: host.clone(),
+            handed: Default::default(),
+        });
+        let sessions = ClientSessions::new(
+            false,
+            ClientBuild {
+                number: 1,
+                revision: "test".into(),
+            },
+            "native".into(),
+            DevicePreferences::new(Arc::new(crate::storage::DeviceStorage {
+                root: directory.path().into(),
+            })),
+        );
+        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+        let (release, blocked) = std::sync::mpsc::channel();
+        let session = sessions.open(
+            host.id.clone(),
+            storage,
+            Arc::new(BlockedPlatform {
+                entered,
+                release: std::sync::Mutex::new(blocked),
+            }),
+        );
+        let owner_runtime = tokio::runtime::Runtime::new().unwrap();
+        let startup = owner_runtime.spawn(session.clone().ready());
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (runtime, embedded, _) = Client::start(
+            directory.path().into(),
+            None,
+            Some(BorrowedSession {
+                host: host.id.clone(),
+                session: session.clone(),
+                pane: None,
+            }),
+        )
+        .unwrap();
+        let pending = embedded.request(
+            &host.id,
+            None,
+            Intent::SetDraftText {
+                thread_id: session
+                    .presentation()
+                    .composer
+                    .controls
+                    .navigation
+                    .draft_key
+                    .clone(),
+                text: "native queued input".into(),
+            },
+        );
+        let download = embedded.download(host.id.clone(), "/pending-image.png".into());
+        let closed = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), embedded.shutdown()).await
+        });
+        // Unblock the owner's worker even if the bounded shutdown assertion fails.
+        release.send(()).unwrap();
+        closed.unwrap().unwrap();
+        assert!(runtime.block_on(pending.recv()).is_err());
+        assert!(runtime.block_on(download.recv()).is_err());
+        let store = owner_runtime.block_on(startup).unwrap().unwrap();
+        assert_eq!(
+            store.presentation().composer.draft.text,
+            "native queued input"
+        );
+        owner_runtime.block_on(sessions.shutdown()).unwrap();
     }
 
     #[test]

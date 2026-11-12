@@ -7,11 +7,15 @@ case "${1:-simulator}" in
     device) rust_target=aarch64-apple-ios; sdk=iphoneos; swift_target=arm64-apple-ios26.0 ;;
     *) echo "usage: $0 [simulator|device]" >&2; exit 2 ;;
 esac
+features=()
+if [[ ${AGENT_IOS_NSH:-0} == 1 ]]; then
+    features=(--features nsh-conversation)
+fi
 target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
 CC=/usr/bin/clang CXX=/usr/bin/clang++ \
 CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=/usr/bin/clang \
 CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang \
-cargo rustc --locked -p agent-ffi --lib --crate-type staticlib --release --target "$rust_target"
+cargo rustc --locked "${features[@]}" -p agent-ffi --lib --crate-type staticlib --release --target "$rust_target"
 bindings="$PWD/target/agent-bindings"
 output="$target/$rust_target/release"
 # UniFFI reads metadata from static archives without executing target code.

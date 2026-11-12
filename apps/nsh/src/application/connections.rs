@@ -112,7 +112,9 @@ pub(super) async fn save_selection(
 
 impl Application {
     pub(super) fn persist_selection(self: &Arc<Self>, mut previous: ConnectionSelection) {
-        let path = self.selection_path.clone();
+        let Some(path) = self.selection_path.clone() else {
+            return;
+        };
         let mut updates = self.subscribe();
         let owner = Arc::downgrade(self);
         let stop = self.stop.clone();

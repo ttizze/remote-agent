@@ -128,9 +128,7 @@ pub(super) fn record_task_facts(
 ) -> Option<agent_protocol::live_activity::TaskActivityState> {
     // Provider events also contain subagents. Only conversations admitted by
     // the normal list (or created by the Host) have system task state.
-    let Some(previous) = state.tasks.get(target) else {
-        return None;
-    };
+    let previous = state.tasks.get(target)?;
     let previous = previous.facts;
     let task = TaskState {
         status: if timeline.status != agent_protocol::models::SessionStatus::Unknown

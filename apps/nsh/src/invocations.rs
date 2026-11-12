@@ -88,6 +88,7 @@ pub(crate) fn suggestions(focus: impl Fn() + Copy + 'static) -> impl IntoElement
                                     KeyOptions {
                                         when: nsh_core::keymap::When::Always,
                                         repeat,
+                                        ..Default::default()
                                     },
                                     move |_| {
                                         let listed = candidates();

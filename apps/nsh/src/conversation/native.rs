@@ -108,13 +108,13 @@ fn paragraphs(blocks: Vec<MarkdownBlock>) -> Vec<Value> {
                     )
                 })
                 .collect(),
-            MarkdownBlock::Visualization { path } => vec![crate::rich_text::paragraph(
+            MarkdownBlock::Visualization { path, style } => vec![crate::rich_text::paragraph(
                 vec![MarkdownRun {
                     text: path.clone(),
                     link: Some(path),
                     ..Default::default()
                 }],
-                &MarkdownStyle::default(),
+                &style,
                 &|_| None,
             )],
         })

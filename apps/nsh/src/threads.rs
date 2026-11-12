@@ -865,6 +865,7 @@ mod tests {
                 fixture_rows(Some(&list), false, "local", "scope", true, connected.get())
             });
             view()
+                .h_full()
                 .child(
                     nsh_base::button()
                         .accessibility_label("Toggle connection")
@@ -909,7 +910,15 @@ mod tests {
                 let button = buttons
                     .values()
                     .find(|value| value.label.as_deref() == Some(label))
-                    .unwrap();
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing {label} while connected={connected}; labels={:?}",
+                            buttons
+                                .values()
+                                .map(|value| &value.label)
+                                .collect::<Vec<_>>()
+                        )
+                    });
                 assert_eq!(button.state.disabled, !connected, "{label}");
             }
             let toggle = buttons

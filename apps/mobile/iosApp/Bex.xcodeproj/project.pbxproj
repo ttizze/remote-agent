@@ -85,6 +85,8 @@
 		C0DE00000000000000000A05 /* ConversationMediaPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000A06 /* ConversationMediaPicker.swift */; };
 		C0DE00000000000000000A07 /* ConversationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000A08 /* ConversationModel.swift */; };
 		C0DE00000000000000000A09 /* WorkspaceDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000A0A /* WorkspaceDetails.swift */; };
+		A9C1000000000000000000F2 /* NshConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F1 /* NshConversationView.swift */; };
+		A9C1000000000000000000F4 /* ConversationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F3 /* ConversationQueue.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -173,6 +175,8 @@
 		C0DE00000000000000000A06 /* ConversationMediaPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMediaPicker.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000A08 /* ConversationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModel.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000A0A /* WorkspaceDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDetails.swift; sourceTree = "<group>"; };
+		A9C1000000000000000000F1 /* NshConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NshConversationView.swift; sourceTree = "<group>"; };
+		A9C1000000000000000000F3 /* ConversationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationQueue.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -261,6 +265,8 @@
 				C92E660B9BEE4F45B54F9762 /* ConnectionSettings.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
+				A9C1000000000000000000F3 /* ConversationQueue.swift */,
+				A9C1000000000000000000F1 /* NshConversationView.swift */,
                 C30000000000000000000004 /* TerminalScreen.swift */,
                 F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */,
                 C0DE00000000000000000702 /* BrowserScreen.swift */,
@@ -458,6 +464,8 @@
 				CB49F882BDB040D193481C41 /* ConnectionSettings.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
+				A9C1000000000000000000F4 /* ConversationQueue.swift in Sources */,
+				A9C1000000000000000000F2 /* NshConversationView.swift in Sources */,
                 C30000000000000000000003 /* TerminalScreen.swift in Sources */,
                 D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */,
                 C0DE00000000000000000701 /* BrowserScreen.swift in Sources */,

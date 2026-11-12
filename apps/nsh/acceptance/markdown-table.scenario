@@ -16,7 +16,7 @@ expect_clipboard "\"構成\",\"利点\",\"負担\""
 press 新しいチャット
 expect_absent "Codexハーネス＋Claude接続"
 press 検証プロジェクト
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect "Codexハーネス＋Claude接続" 20000
 expect "作業しました"
 expect_absent "./gradlew test"

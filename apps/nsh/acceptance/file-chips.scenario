@@ -13,8 +13,11 @@ screenshot chips
 # Command-click sends a chip's file to the editor, the fixture Host's fake one.
 click cmd "*hello.txt · L2"
 expect_file $AGENT_STATE_DIR/editor/opened contains "/project/hello.txt:2"
-select "*確認したファイルです。*" "hello.txt · L2"
-menu "*確認したファイルです。*"
+activate
+select "*hello.txt · L2" "hello.txt · L2"
+key cmd+c
+expect_clipboard "hello.txt · L2"
+menu "*hello.txt · L2"
 press フルパスをコピー
 expect_clipboard "/project/hello.txt:2"
 press "*hello.txt · L2"

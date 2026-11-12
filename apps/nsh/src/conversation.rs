@@ -30,6 +30,7 @@ impl Renderer {
             Some("native") => Self::Native,
             Some("nsh") => Self::Nsh,
             Some("standard") => Self::Standard,
+            _ if cfg!(feature = "standard-text") => Self::Standard,
             _ => Self::Hybrid,
         }
     }
@@ -813,7 +814,9 @@ fn list(timeline: Timeline) -> impl IntoElement {
             .context
             .with(|p| p.opening().is_none().then(|| p.history()).flatten())
     });
-    let column = view().label(tr("会話の履歴"));
+    let column = view()
+        .role(AccessibilityRole::Group)
+        .label(tr("会話の履歴"));
     #[cfg(desktop)]
     let column = column.child(surroundings.selection_bar());
     column
@@ -1210,7 +1213,6 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             label().map(|text| text.to_string())
                                                         },
                                                         kind,
-                                                        move || row.try_get().flatten().is_some_and(|row| row.streaming),
                                                         move || {
                                                             if user() {
                                                                 (column_width
@@ -1315,6 +1317,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                     rows.with(|rows| rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>())
                 })
                 .element_ref(&list)
+                .role(AccessibilityRole::Group)
                 .label(SharedString::from(tr("この会話")))
                 .estimated_item_size(px(170.0))
                 // While it follows, the list keeps its end as rows grow; a
@@ -1794,7 +1797,6 @@ fn plan_card(
                 surroundings,
                 move || Some(note().to_string()),
                 || Kind::Response,
-                || false,
                 move || (column_width.try_get().unwrap_or_default() - 8.0 - 42.0).max(0.0),
             ))),
     )

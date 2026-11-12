@@ -10,6 +10,6 @@ press 新しいチャット
 press 検証プロジェクト
 expect "完了・未確認" 20000
 screenshot unseen
-press "Simulator conversation" 10000
+press "Simulator conversation*" 10000
 expect "シミュレータで完了しました。" 10000
 expect_absent "完了・未確認" 10000

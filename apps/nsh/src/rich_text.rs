@@ -15,7 +15,11 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 mod search;
-#[cfg(any(all(target_os = "macos", debug_assertions), test))]
+#[cfg(any(
+    feature = "standard-text",
+    all(target_os = "macos", debug_assertions),
+    test
+))]
 mod standard;
 pub(crate) use search::documents as search_documents;
 
@@ -27,17 +31,30 @@ const CELL_INSET: f32 = 24.0;
 /// The widest a table cell grows before its text wraps, T3 Code's `24rem`.
 const CELL_MAX: f32 = 384.0;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Part {
     Text(Vec<Value>),
-    Image(String),
+    Image {
+        source: String,
+        depth: u32,
+        marker: Option<String>,
+    },
     Table {
         source: String,
         csv: String,
         rows: Vec<Vec<Vec<Part>>>,
+        depth: u32,
+        marker: Option<String>,
     },
-    Link(String),
-    Rule,
+    Link {
+        url: String,
+        depth: u32,
+        marker: Option<String>,
+    },
+    Rule {
+        depth: u32,
+        marker: Option<String>,
+    },
     Code {
         label: String,
         source: String,
@@ -48,7 +65,7 @@ enum Part {
 }
 
 /// A Mermaid block as Core draws it.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Diagram {
     svg: String,
     width: f32,
@@ -118,6 +135,8 @@ pub(crate) struct Surroundings {
     pub files: crate::files::Browser,
     pub preview: crate::media::Preview,
     pub workspace: crate::workbench::Workbench,
+    #[cfg(any(desktop, target_os = "ios"))]
+    pub external_actions: Option<crate::native::ExternalActions>,
     pub find: crate::find::Find,
     pub find_row: Option<Memo<String>>,
     pub find_scroll: crate::find::Viewports,
@@ -134,6 +153,8 @@ impl Surroundings {
             files: use_context::<crate::files::Browser>().unwrap(),
             preview: use_context::<crate::media::Preview>().unwrap(),
             workspace: use_context::<crate::workbench::Workbench>().unwrap(),
+            #[cfg(any(desktop, target_os = "ios"))]
+            external_actions: use_context::<crate::native::ExternalActions>(),
             find: use_context::<crate::find::Find>().unwrap(),
             find_row: None,
             find_scroll: None,
@@ -158,6 +179,10 @@ impl Surroundings {
     /// in-app browser with it; on the desktop, a file by its primary action,
     /// which the editor takes with it; anything else as the file browser does.
     fn open_link(self, link: String, target: Target, command: bool) {
+        #[cfg(any(desktop, target_os = "ios"))]
+        if let Some(actions) = self.external_actions {
+            return actions.emit(json!({"action":"link", "text":link}));
+        }
         if command && (link.starts_with("https://") || link.starts_with("http://")) {
             return self.workspace.browse(link);
         }
@@ -173,7 +198,7 @@ pub(crate) fn content(
     kind: impl Fn() -> Kind + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> nsh_core::element::View {
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     if crate::conversation::renderer() == crate::conversation::Renderer::Standard {
         return standard::content(surroundings, blocks, kind, max_width);
     }
@@ -194,14 +219,29 @@ pub(crate) fn message(
     surroundings: Surroundings,
     source: impl Fn() -> Option<String> + 'static,
     kind: impl Fn() -> Kind + Copy + 'static,
-    streaming: impl Fn() -> bool + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> nsh_core::element::View {
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     if crate::conversation::renderer() == crate::conversation::Renderer::Standard {
-        return standard::message(surroundings, source, kind, streaming, max_width);
+        return standard::message(surroundings, source, kind, max_width);
     }
-    let _ = streaming;
+    let content = message_parts(surroundings, source);
+    view_parts(
+        surroundings,
+        move || content.get(),
+        target(surroundings.connection),
+        kind,
+        computed(max_width),
+        None,
+    )
+}
+
+/// Shared document semantics and metadata; adapters only choose how these
+/// parts are laid out, without duplicating file or diagram decisions.
+fn message_parts(
+    surroundings: Surroundings,
+    source: impl Fn() -> Option<String> + 'static,
+) -> Memo<Vec<Part>> {
     let connection = surroundings.connection;
     let document = computed(move || {
         let Some(source) = source() else {
@@ -220,29 +260,15 @@ pub(crate) fn message(
     let chips = computed(move || crate::file_actions::Chips::read(connection));
     let paths = computed(move || document.with(|(blocks, _)| file_paths(blocks)));
     effect(move || crate::file_actions::read_metadata(connection, paths.get()));
-    let content = computed(move || {
+    computed(move || {
         chips.with(|chips| {
             document.with(|(blocks, diagrams)| {
-                search::indexed(parts(
-                    blocks.clone(),
-                    if surroundings.find.highlighted().is_empty() {
-                        diagrams
-                    } else {
-                        &[]
-                    },
-                    &|file| Some(chips.chip(file)),
-                ))
+                search::indexed(parts(blocks.clone(), diagrams, &|file| {
+                    Some(chips.chip(file))
+                }))
             })
         })
-    });
-    view_parts(
-        surroundings,
-        move || content.get(),
-        target(connection),
-        kind,
-        computed(max_width),
-        None,
-    )
+    })
 }
 
 /// Host paths for the document's file metadata, including files in tables.
@@ -286,6 +312,14 @@ pub(crate) fn target(connection: Connection) -> Memo<String> {
 /// in a side chat, a link pressed, or an item of a file chip's menu chosen.
 #[cfg(any(desktop, target_os = "ios"))]
 pub(crate) fn action(surroundings: Surroundings, data: &Value) {
+    if let Some(actions) = surroundings.external_actions
+        && matches!(
+            data["action"].as_str(),
+            Some("quote" | "sideChat" | "explain")
+        )
+    {
+        return actions.emit(data.clone());
+    }
     let connection = surroundings.connection;
     // TextKit's selection changed: where it is, in the window's content.
     #[cfg(target_os = "macos")]
@@ -405,9 +439,13 @@ fn view_parts(
         connection, files, ..
     } = surroundings;
     let parts = computed(move || std::sync::Arc::new(parts()));
+    // A search changes which parts are virtualized. Code controls belong to
+    // the message so closing Find does not reset source/wrap choices.
+    let owner = Owner::current();
+    let controls = stored(std::collections::HashMap::<usize, CodeControls>::new());
     let render = move |part: ReadSignal<(usize, Part)>, _: ReadSignal<usize>| {
-        part.with_untracked(|(_, value)| match value {
-            Part::Rule => view()
+        part.with_untracked(|(index, value)| match value {
+            Part::Rule { .. } => view()
                 .w_full()
                 .h(px(1.0))
                 .bg(crate::ui::colors::border())
@@ -417,7 +455,7 @@ fn view_parts(
                 // for another row; unwrapped code keeps its lines.
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let message = move |wrap: Option<Signal<bool>>, scrolls: crate::find::Viewports, reference: ElementRef| {
-                    #[cfg(all(target_os = "macos", debug_assertions))]
+                    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
                     if crate::conversation::renderer() == crate::conversation::Renderer::Nsh {
                         return drawn::message(part, move || kind() == Kind::Activity, target, surroundings, cell)
                             .element_ref(&reference).w_full().into_element();
@@ -511,17 +549,21 @@ fn view_parts(
                         surroundings.find.active(&row, document)?;
                         surroundings.find.key()
                     });
-                    frame(part, surroundings.find_scroll, selected, message)
+                    let controls = controls.with(|controls| {
+                        *controls.entry(*index).or_insert_with(|| owner.run(CodeControls::new))
+                    });
+                    frame(part, surroundings.find_scroll, selected, controls, message)
                 } else {
                     message(None, surroundings.find_scroll, element_ref())
                 }
             }
-            Part::Image(_) => crate::media::image_view(
+            Part::Image { marker, .. } => {
+                let image = crate::media::image_view(
                 surroundings.connection,
                 surroundings.preview,
                 move || {
                     part.with(|(_, part)| {
-                        if let Part::Image(source) = part {
+                        if let Part::Image { source, .. } = part {
                             source.clone()
                         } else {
                             String::new()
@@ -530,11 +572,20 @@ fn view_parts(
                 },
                 crate::media::ImageSize::Natural,
                 None,
-            )
-            .into_element(),
-            Part::Link(_) => crate::ui::row_text_button(tr("ファイルを開く"), move || {
+                );
+                match marker {
+                    Some(marker) => view()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(text(marker.clone()).text_color(crate::ui::colors::muted()))
+                        .child(image.flex_1().min_w_0())
+                        .into_element(),
+                    None => image.into_element(),
+                }
+            }
+            Part::Link { .. } => crate::ui::row_text_button(tr("ファイルを開く"), move || {
                 let target = serde_json::from_str::<Target>(&target.get_untracked()).unwrap();
-                let Part::Link(path) = part.with_untracked(|(_, part)| part.clone()) else {
+                let Part::Link { url: path, .. } = part.with_untracked(|(_, part)| part.clone()) else {
                     return;
                 };
                 files.open(
@@ -624,6 +675,23 @@ fn view_parts(
     content
 }
 
+#[derive(Clone, Copy)]
+struct CodeControls {
+    wrap: Signal<bool>,
+    source_shown: Signal<bool>,
+    large: Signal<bool>,
+}
+
+impl CodeControls {
+    fn new() -> Self {
+        Self {
+            wrap: signal(true),
+            source_shown: signal(false),
+            large: signal(false),
+        }
+    }
+}
+
 /// A code block in the desktop client's frame: its language
 /// and actions at its top right, its lines wrapped or scrolled sideways. A
 /// Mermaid block shows its drawing, at most its own size, until its source is
@@ -632,6 +700,7 @@ fn frame(
     part: ReadSignal<(usize, Part)>,
     scrolls: crate::find::Viewports,
     selected: Memo<Option<String>>,
+    controls: CodeControls,
     message: impl Fn(Option<Signal<bool>>, crate::find::Viewports, ElementRef) -> AnyElement
     + Copy
     + 'static,
@@ -643,9 +712,11 @@ fn frame(
         })
     });
     // As T3 Code's, a code block wraps its lines until asked not to.
-    let wrap = signal(true);
-    let source_shown = signal(false);
-    let large = signal(false);
+    let CodeControls {
+        wrap,
+        source_shown,
+        large,
+    } = controls;
     let drawn = move || diagram.with(Option::is_some) && !source_shown.get();
     // Find opens a diagram's source just as it opens folded message text.
     // A fresh navigation can reveal it again after the reader hides it.
@@ -986,6 +1057,7 @@ fn table(
 #[cfg(all(
     desktop,
     any(
+        feature = "standard-text",
         not(any(target_os = "macos", target_os = "ios")),
         all(target_os = "macos", debug_assertions)
     )
@@ -1046,6 +1118,7 @@ fn selection_actions(message: View, target: Memo<String>, surroundings: Surround
 /// native document as selectable styled text. Links and selection menus use
 /// the same actions as the TextKit renderer.
 #[cfg(any(
+    feature = "standard-text",
     not(any(target_os = "macos", target_os = "ios")),
     all(target_os = "macos", debug_assertions)
 ))]
@@ -1139,9 +1212,9 @@ mod drawn {
     /// What a paragraph's links do: `open` a link pressed, ⌘ (Ctrl here)
     /// held or not, and `choose` an item of a file chip's menu.
     #[derive(Clone, Copy)]
-    struct Links<O, C> {
-        open: O,
-        choose: C,
+    pub(super) struct Links<O, C> {
+        pub(super) open: O,
+        pub(super) choose: C,
     }
 
     /// One paragraph of the document `rich_text::paragraph` writes, in a
@@ -1185,10 +1258,11 @@ mod drawn {
         };
         if let Some(marker) = block["marker"].as_str() {
             let marker = serde_json::json!({"text": format!("{marker} "), "highlights": block["markerHighlights"]});
-            line = line.child(highlighted_run(&marker, find, scrolls).text_color(colors::muted()));
+            line = line
+                .child(highlighted_run(&marker, find, scrolls, false).text_color(colors::muted()));
         }
         for run in block["runs"].as_array().into_iter().flatten() {
-            let mut span = highlighted_run(run, find, scrolls);
+            let mut span = highlighted_run(run, find, scrolls, false);
             if run["strong"].as_bool().unwrap_or(false) {
                 span = span.font_weight(FontWeight::BOLD);
             }
@@ -1216,10 +1290,14 @@ mod drawn {
                     continue;
                 }
                 let open = links.open;
-                span = span
-                    .text_color(colors::ACCENT)
-                    .underline()
-                    .on_press(move |event: &PressEvent| open(link.clone(), event.modifiers.ctrl));
+                span = span.text_color(colors::ACCENT).underline().on_press(
+                    move |event: &PressEvent| {
+                        open(
+                            link.clone(),
+                            crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
+                        )
+                    },
+                );
             }
             line = line.child(span);
         }
@@ -1235,10 +1313,11 @@ mod drawn {
             .child(line)
     }
 
-    fn highlighted_run(
+    pub(super) fn highlighted_run(
         run: &Value,
         find: crate::find::Find,
         scrolls: crate::find::Viewports,
+        core_reveal: bool,
     ) -> Text {
         if run["highlights"].as_array().is_none_or(Vec::is_empty) {
             return text(run["text"].as_str().unwrap_or_default().to_owned());
@@ -1257,26 +1336,33 @@ mod drawn {
                 },
             );
             if reveal {
-                // A zero-width inline anchor measures the first selected glyph
-                // without changing how the highlighted text wraps.
                 let reference = element_ref();
                 let key = find.key();
-                span = span.child(
-                    view()
-                        .element_ref(&reference)
-                        .w(px(0.0))
-                        .h(px(1.0))
-                        .on_layout(move |_: &Bounds<Points>| {
-                            if let Some(key) = key.clone() {
-                                find.reveal(
-                                    reference,
-                                    Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(1.0))),
-                                    key,
-                                    scrolls,
-                                );
-                            }
-                        }),
-                );
+                let mut anchor = view().element_ref(&reference).w(px(0.0)).h(px(1.0));
+                if core_reveal {
+                    #[cfg(any(
+                        feature = "standard-text",
+                        all(target_os = "macos", debug_assertions)
+                    ))]
+                    spawn(async move {
+                        next_frame().await;
+                        if let Some(key) = key {
+                            find.reveal_anchor(reference, key);
+                        }
+                    });
+                } else {
+                    anchor = anchor.on_layout(move |_: &Bounds<Points>| {
+                        if let Some(key) = key.clone() {
+                            find.reveal(
+                                reference,
+                                Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(1.0))),
+                                key,
+                                scrolls,
+                            );
+                        }
+                    });
+                }
+                span = span.child(anchor);
             }
             span = span.child(fragment);
         }
@@ -1286,7 +1372,12 @@ mod drawn {
     /// A file chip as the desktop client's: its glyph and label in the file's accent, at
     /// medium weight, its full path and size over it, its menu on a secondary
     /// press; a press opens it as a link does.
-    fn chip_span<O, C>(label: Text, chip: &Value, link: String, links: Links<O, C>) -> Text
+    pub(super) fn chip_span<O, C>(
+        label: Text,
+        chip: &Value,
+        link: String,
+        links: Links<O, C>,
+    ) -> Text
     where
         O: Fn(String, bool) + Copy + 'static,
         C: Fn(String, String) + Copy + 'static,
@@ -1318,7 +1409,12 @@ mod drawn {
             .child(glyph)
             .child(text(" "))
             .child(label)
-            .on_press(move |event: &PressEvent| open(pressed.clone(), event.modifiers.ctrl))
+            .on_press(move |event: &PressEvent| {
+                open(
+                    pressed.clone(),
+                    crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
+                )
+            })
             .on_context_menu(move |_: &ContextMenuEvent| {
                 let link = link.clone();
                 crate::ui::popup(&menu, move |id: &str| choose(link.clone(), id.into()));
@@ -1389,21 +1485,29 @@ fn parts(blocks: Vec<MarkdownBlock>, diagrams: &[(String, Diagram)], chip: Chip)
         match block {
             MarkdownBlock::Paragraph { style, .. } if style.rule => {
                 flush(&mut text, &mut result);
-                result.push(Part::Rule);
+                result.push(Part::Rule {
+                    depth: style.list_depth,
+                    marker: style.marker,
+                });
             }
             MarkdownBlock::Paragraph { runs, style } if style.code => {
                 flush(&mut text, &mut result);
                 result.push(code(runs, style, diagrams, chip));
             }
-            MarkdownBlock::Paragraph { runs, style } => {
+            MarkdownBlock::Paragraph { runs, mut style } => {
                 let mut content = Vec::new();
                 for run in runs {
                     if let Some(image) = run.image {
                         if !content.is_empty() {
                             text.push(paragraph(std::mem::take(&mut content), &style, chip));
+                            style.marker = None;
                         }
                         flush(&mut text, &mut result);
-                        result.push(Part::Image(image));
+                        result.push(Part::Image {
+                            source: image,
+                            depth: style.list_depth,
+                            marker: style.marker.take(),
+                        });
                     } else {
                         content.push(run);
                     }
@@ -1412,18 +1516,25 @@ fn parts(blocks: Vec<MarkdownBlock>, diagrams: &[(String, Diagram)], chip: Chip)
                     text.push(paragraph(content, &style, chip));
                 }
             }
-            MarkdownBlock::Visualization { path } => {
+            MarkdownBlock::Visualization { path, style } => {
                 flush(&mut text, &mut result);
-                result.push(Part::Link(path));
+                result.push(Part::Link {
+                    url: path,
+                    depth: style.list_depth,
+                    marker: style.marker,
+                });
             }
             MarkdownBlock::Table {
                 source,
                 columns,
                 rows,
+                style,
             } => {
                 flush(&mut text, &mut result);
                 result.push(Part::Table {
                     source,
+                    depth: style.list_depth,
+                    marker: style.marker,
                     csv: agent_core::presentation::markdown::markdown_table_csv(
                         rows.iter()
                             .map(|row| {
@@ -1470,6 +1581,33 @@ fn parts(blocks: Vec<MarkdownBlock>, diagrams: &[(String, Diagram)], chip: Chip)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splitting_list_images_keeps_exactly_one_marker_on_the_first_part() {
+        for (source, image_first) in [
+            ("1. ![x](y.png) caption", true),
+            ("1. before ![x](y.png) after", false),
+        ] {
+            let parts = parts(
+                agent_core::presentation::markdown::markdown_blocks(source.into()),
+                &[],
+                &|_| None,
+            );
+            let markers: Vec<_> = parts
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Text(blocks) => blocks[0]["marker"].as_str(),
+                    Part::Image { marker, .. } => marker.as_deref(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(markers, ["1."]);
+            assert_eq!(matches!(&parts[0], Part::Image { .. }), image_first);
+            assert!(
+                matches!(parts.last(), Some(Part::Text(blocks)) if blocks[0]["marker"].is_null())
+            );
+        }
+    }
 
     #[test]
     fn file_metadata_covers_workspace_links_code_paths_and_table_cells() {
@@ -1530,11 +1668,14 @@ mod tests {
         );
         assert!(matches!(&parts[0], Part::Text(blocks) if blocks[0]["runs"][1]["strong"] == true));
         assert!(
-            matches!(&parts[1], Part::Image(source) if source == "https://example.invalid/image.png")
+            matches!(&parts[1], Part::Image { source, .. } if source == "https://example.invalid/image.png")
         );
         assert!(matches!(&parts[2], Part::Code { source, .. } if source == "let 日本語 = 1;"));
-        assert!(matches!(&parts[3], Part::Rule));
-        let Part::Table { source, csv, rows } = &parts[4] else {
+        assert!(matches!(&parts[3], Part::Rule { .. }));
+        let Part::Table {
+            source, csv, rows, ..
+        } = &parts[4]
+        else {
             panic!("table is retained");
         };
         assert!(source.starts_with("|名前|値|"));

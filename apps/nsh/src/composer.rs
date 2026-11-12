@@ -17,6 +17,7 @@ pub(crate) fn shortcut(
         KeyOptions {
             when,
             repeat: false,
+            ..Default::default()
         },
         handler,
     );
@@ -806,6 +807,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                 KeyOptions {
                     when: nsh_core::keymap::When::Always,
                     repeat: false,
+                    ..Default::default()
                 },
                 move |_| dictation.cancel(),
             );

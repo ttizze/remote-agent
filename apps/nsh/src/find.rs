@@ -79,6 +79,9 @@ pub(crate) struct Find {
     current: Signal<(usize, u64)>,
     selected: Signal<Option<(u64, Match)>>,
     timeline: Stored<Option<Timeline>>,
+    // Rendering the same hit again must not undo a reader's manual scroll.
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+    last_anchor: Stored<Option<String>>,
 }
 
 impl Find {
@@ -89,6 +92,8 @@ impl Find {
             current: signal((0, 0)),
             selected: signal(None),
             timeline: stored(None),
+            #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+            last_anchor: stored(None),
         }
     }
     pub(crate) fn highlighted(self) -> String {
@@ -108,13 +113,18 @@ impl Find {
         self.query.set(String::new());
         self.reset_position();
     }
-    pub(crate) fn active(self, row: &str, document: usize) -> Option<TextMatch> {
+    pub(crate) fn selection(self, row: &str) -> Option<(usize, TextMatch)> {
         self.selected.with(|selected| {
             selected
                 .as_ref()
-                .filter(|(_, selected)| selected.row == row && selected.document == document)
-                .map(|(_, selected)| selected.range)
+                .filter(|(_, selected)| selected.row == row)
+                .map(|(_, selected)| (selected.document, selected.range))
         })
+    }
+    pub(crate) fn active(self, row: &str, document: usize) -> Option<TextMatch> {
+        self.selection(row)
+            .filter(|(index, _)| *index == document)
+            .map(|(_, range)| range)
     }
     #[cfg(target_os = "macos")]
     pub(crate) fn selected_row(self, row: &str) -> bool {
@@ -147,51 +157,98 @@ impl Find {
         key: String,
         parents: Viewports,
     ) {
+        let parents = parents.map(|parents| parents.get()).unwrap_or_default();
+        spawn(async move {
+            self.reveal_at(view, rect, key, parents).await;
+        });
+    }
+
+    async fn reveal_at(
+        self,
+        view: ElementRef,
+        rect: Bounds<Points>,
+        key: String,
+        parents: Vec<Viewport>,
+    ) -> bool {
         if self.key().as_ref() != Some(&key) {
+            return false;
+        }
+        let Some(timeline) = self.timeline.with(|timeline| *timeline) else {
+            return false;
+        };
+        let Some(bounds) = view.measure().await else {
+            return false;
+        };
+        let x = bounds.page.x.0 + rect.origin.x.0;
+        let mut measured = Vec::new();
+        for parent in parents.into_iter().rev() {
+            let (Some(viewport), Some(content)) =
+                (parent.view.measure().await, parent.content.measure().await)
+            else {
+                continue;
+            };
+            if self.key().as_ref() != Some(&key) {
+                return false;
+            }
+            measured.push((
+                parent.view,
+                viewport.page.x.0..viewport.page.x.0 + viewport.frame.size.width.0,
+                content.page.x.0..content.page.x.0 + content.frame.size.width.0,
+            ));
+        }
+        let offsets = horizontal_offsets(
+            measured
+                .iter()
+                .map(|(_, viewport, content)| (viewport.clone(), content.clone())),
+            x..x + rect.size.width.0,
+        );
+        for ((view, _, _), offset) in measured.into_iter().zip(offsets) {
+            if let Some(offset) = offset {
+                view.scroll_to(point(px(offset), px(0.0)), false);
+            }
+        }
+        if self.key().as_ref() != Some(&key) {
+            return false;
+        }
+        timeline
+            .reveal_text(bounds.page.y.0 + rect.origin.y.0)
+            .await;
+        self.key().as_ref() == Some(&key)
+    }
+
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+    pub(crate) fn reset_anchor(self) {
+        self.last_anchor.replace(None);
+    }
+
+    /// The standard TextView's inline match is revealed by NSH. Remember it
+    /// only after measuring succeeds, so a culled attempt cannot suppress it.
+    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
+    pub(crate) fn reveal_anchor(self, view: ElementRef, key: String) {
+        if self.key().as_ref() != Some(&key)
+            || self.last_anchor.with(|last| last.as_ref() == Some(&key))
+        {
             return;
         }
-        let timeline = self.timeline.with(|timeline| *timeline);
-        let parents = parents.map(|parents| parents.get()).unwrap_or_default();
-        if let Some(timeline) = timeline {
-            spawn(async move {
-                let Some(bounds) = view.measure().await else {
-                    return;
-                };
-                let x = bounds.page.x.0 + rect.origin.x.0;
-                let mut measured = Vec::new();
-                for parent in parents.into_iter().rev() {
-                    let (Some(viewport), Some(content)) =
-                        (parent.view.measure().await, parent.content.measure().await)
-                    else {
-                        continue;
-                    };
-                    if self.key().as_ref() != Some(&key) {
-                        return;
-                    }
-                    measured.push((
-                        parent.view,
-                        viewport.page.x.0..viewport.page.x.0 + viewport.frame.size.width.0,
-                        content.page.x.0..content.page.x.0 + content.frame.size.width.0,
-                    ));
-                }
-                let offsets = horizontal_offsets(
-                    measured
-                        .iter()
-                        .map(|(_, viewport, content)| (viewport.clone(), content.clone())),
-                    x..x + rect.size.width.0,
-                );
-                for ((view, _, _), offset) in measured.into_iter().zip(offsets) {
-                    if let Some(offset) = offset {
-                        view.scroll_to(point(px(offset), px(0.0)), false);
-                    }
-                }
-                if self.key().as_ref() == Some(&key) {
-                    timeline
-                        .reveal_text(bounds.page.y.0 + rect.origin.y.0)
-                        .await;
-                }
-            });
-        }
+        view.reveal(
+            nsh_core::RevealOptions::default()
+                .horizontal(nsh_core::ScrollAlignment::Start)
+                .vertical(nsh_core::ScrollAlignment::Nearest)
+                .animated(false),
+        );
+        spawn(async move {
+            if self
+                .reveal_at(
+                    view,
+                    Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(1.0))),
+                    key.clone(),
+                    Vec::new(),
+                )
+                .await
+            {
+                self.last_anchor.replace(Some(key));
+            }
+        });
     }
 }
 
