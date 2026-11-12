@@ -56,6 +56,7 @@ fn review_existing_workspace(cwd: &Path, base_ref: Option<&str>) -> Result<Works
     }
     Ok(WorkspaceReview {
         controls: controls::inspect(&comparison.root)?,
+        options: None,
         branch: comparison.branch,
         base_ref: comparison.base_ref,
         additions,
@@ -85,6 +86,7 @@ pub(crate) async fn directory_changes(cwds: HashSet<String>) -> Result<HashMap<S
 fn empty_review() -> WorkspaceReview {
     WorkspaceReview {
         controls: Default::default(),
+        options: None,
         branch: String::new(),
         base_ref: None,
         additions: 0,

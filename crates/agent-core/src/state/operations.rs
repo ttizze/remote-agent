@@ -218,6 +218,10 @@ pub enum Intent {
         thread_id: DraftKey,
         draft: Draft,
     },
+    SelectWorkspace {
+        thread_id: DraftKey,
+        workspace: Option<agent_protocol::workspace::WorkspaceStrategy>,
+    },
     EditComposer {
         thread_id: DraftKey,
         text: String,

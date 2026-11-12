@@ -99,6 +99,7 @@ mod tests {
                 worktree_directory: "/fixture/work trees".into(),
                 delete_unchanged: false,
                 project_delete_unchanged: [("project".into(), true)].into(),
+                ..Default::default()
             }),
         };
         let row = Worktree {

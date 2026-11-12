@@ -41,10 +41,11 @@ internal fun TerminalDialog(
     terminals: Terminals,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    handleOverride: String? = null,
     dismiss: () -> Unit,
 ) {
     val language = LocalUiLanguage.current
-    val handle = remember(cwd) { terminalHandle(cwd) }
+    val handle = remember(cwd, handleOverride) { handleOverride ?: terminalHandle(cwd) }
     var terminated by remember { mutableStateOf(false) }
     val currentPerform by rememberUpdatedState(perform)
     DisposableEffect(handle) {

@@ -2074,7 +2074,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let initial = request(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":workspace})).await["response"].clone();
         assert_eq!(initial["thread"]["cwd"], workspace.to_str().unwrap());
         let destination = root.join("worktree storage");
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination,"deleteUnchanged":false,"projectDeleteUnchanged":{}});
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination,"initSubmodules":false,"setupScript":null,"projectSetupScripts":{},"deleteUnchanged":false,"projectDeleteUnchanged":{}});
         assert_eq!(request(&service, &mut session, "host/worktree/settings/update", settings.clone()).await, settings);
         let mut ids = Vec::new();
         let mut paths = Vec::new();
@@ -2987,7 +2987,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
         let listed = local.peer.call(&rpc::ListSessions::new(Default::default())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert!(listed["data"].as_array().unwrap().iter().any(|thread| thread["id"] == json!(id)), "removal must preserve conversation history");
-        let review = local.peer.call(&rpc::ReviewWorkspace { base_ref: None, cwd: path.clone() }).await.unwrap();
+        let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone(), include_options: false, base_ref: None }).await.unwrap();
         assert!(review.files.is_empty());
         assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "advance main"]);

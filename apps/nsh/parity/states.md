@@ -85,7 +85,7 @@ reason). Reasons recur:
 | `context-compaction` row (live compacting label) | `ContextCompactionTimelineRow` | not yet: fixture (`[items]` sends a completed compaction only) |
 | `proposed-plan` card | `ProposedPlanCard.tsx` | not yet: fixture (plan mode) |
 | `html-render` frame | `HtmlRenderFrame.tsx` | not yet: fixture `[visualize]` exists, not mapped |
-| `worktree-setup` card | `WorktreeSetupCard.tsx` | not yet: service (worktree creation) |
+| `worktree-setup` card | `WorktreeSetupCard.tsx` | not yet: fixture |
 | subagent rows and avatars | `SubagentAvatar`, `SubagentElapsed` | not yet: fixture |
 | secret request card | `SecretRequestCard.tsx` | not yet: fixture |
 | question answer history | `QuestionAnswerHistory` | not yet: not mapped (after answering `[request]`) |

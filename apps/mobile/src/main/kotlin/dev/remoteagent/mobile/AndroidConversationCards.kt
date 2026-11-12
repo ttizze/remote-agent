@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -38,18 +41,95 @@ import dev.remoteagent.core.MarkdownFileReference
 import dev.remoteagent.core.OperationPhase
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.PreparationPresentation
+import dev.remoteagent.core.PreparationStep
 import dev.remoteagent.core.RenderedItem
+import dev.remoteagent.core.SetupTerminal
+import dev.remoteagent.core.preparationElapsed
+import kotlinx.coroutines.delay
+
+private const val SETUP_CLOCK_INTERVAL_MS = 1000L
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun PreparationCard(
     preparation: PreparationPresentation,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    openTerminal: (SetupTerminal) -> Unit,
 ) {
     val language = LocalUiLanguage.current
+    var details by remember { mutableStateOf(false) }
+    var now by remember { mutableStateOf(System.currentTimeMillis().toULong()) }
+    LaunchedEffect(preparation.inProgress) {
+        while (preparation.inProgress) {
+            delay(SETUP_CLOCK_INTERVAL_MS)
+            now = System.currentTimeMillis().toULong()
+        }
+    }
+    fun elapsed(start: ULong?, end: ULong?): String =
+        start?.let { preparationElapsed(language, it, end, now) }.orEmpty()
     Column(Modifier.testTag("task.preparation")) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (preparation.inProgress) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
             Text(preparation.text, style = MaterialTheme.typography.bodySmall)
+            Text(elapsed(preparation.startedAtMs, preparation.endedAtMs), style = MaterialTheme.typography.labelSmall)
+        }
+        if (preparation.showSteps) preparation.steps.forEach { step -> PreparationStage(step, now) }
+        preparation.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        PreparationActions(preparation, perform, openTerminal) { details = !details }
+        if (details)
+            preparation.details.forEach { detail ->
+                SelectionContainer {
+                    Text("${detail.label}  ${detail.value}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+    }
+}
+
+@Composable
+private fun PreparationStage(step: PreparationStep, now: ULong) {
+    val language = LocalUiLanguage.current
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (step.state == "running") CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        else
+            Text(
+                when (step.state) {
+                    "done" -> "✓"
+                    "skipped" -> "−"
+                    "failed" -> "×"
+                    "warning" -> "!"
+                    else -> "○"
+                }
+            )
+        Text(step.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        step.detail?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+        if (step.state != "pending" && step.state != "skipped") {
+            val elapsed = step.startedAtMs?.let { preparationElapsed(language, it, step.endedAtMs, now) }.orEmpty()
+            Text(elapsed, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+    if (step.tail.isNotEmpty())
+        SelectionContainer { Text(step.tail.joinToString("\n"), style = MaterialTheme.typography.bodySmall) }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun PreparationActions(
+    preparation: PreparationPresentation,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    openTerminal: (SetupTerminal) -> Unit,
+    toggleDetails: () -> Unit,
+) {
+    val language = LocalUiLanguage.current
+    FlowRow {
+        if (preparation.details.isNotEmpty()) TextButton(onClick = toggleDetails) { Text(language.text("詳細")) }
+        preparation.terminal?.let { terminal ->
+            TextButton(onClick = { openTerminal(terminal) }) { Text(language.text("ターミナルを開く")) }
+        }
+        preparation.workLocally?.let { work ->
+            TextButton(onClick = { perform(Intent.RetryPreparation(work)) {} }) { Text(language.text("ローカルで作業")) }
+        }
+        preparation.cancel?.let { cancel ->
+            TextButton(onClick = { perform(Intent.Interrupt(cancel)) {} }) { Text(language.text("キャンセル")) }
         }
         preparation.retry?.let { retry ->
             TextButton(onClick = { perform(Intent.RetryPreparation(retry)) {} }) { Text(language.text("再試行")) }

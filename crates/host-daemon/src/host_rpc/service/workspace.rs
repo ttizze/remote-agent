@@ -24,6 +24,9 @@ impl HostRpcService {
         .await
         .map_err(|error| Failure::new("workspace_review_failed", error))?
         .map_err(|error| Failure::new("workspace_review_failed", error))?;
+        if params.include_options {
+            review.options = Some(self.workspace_options(&params.cwd).await?);
+        }
         Ok(review)
     }
 

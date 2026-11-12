@@ -285,8 +285,12 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
         }
 
         override func menu(for event: NSEvent) -> NSMenu? {
-            if let chip = chip(at: convert(event.locationInWindow, from: nil)) {
+            let point = convert(event.locationInWindow, from: nil)
+            if let chip = chip(at: point) {
                 return fileMenu(chip.file.menu, link: chip.link)
+            }
+            if let link = attribute(.messageWebLink, at: point) as? MessageWebLink {
+                return fileMenu(link.menu, link: link.link, action: "webLink")
             }
             guard let menu = super.menu(for: event) else { return nil }
             let range = selectedRange()
@@ -325,6 +329,10 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
 
         /// The chip under `point`, in the view's coordinates.
         func chip(at point: CGPoint) -> MessageFileLink? {
+            attribute(.messageFile, at: point) as? MessageFileLink
+        }
+
+        private func attribute(_ key: NSAttributedString.Key, at point: CGPoint) -> Any? {
             guard let manager = layoutManager, let container = textContainer, let storage = textStorage,
                   storage.length > 0 else { return nil }
             var fraction: CGFloat = 0
@@ -333,20 +341,20 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
                 .contains(point) else { return nil }
             let index = manager.characterIndexForGlyph(at: glyph)
             guard index < storage.length else { return nil }
-            return storage.attribute(.messageFile, at: index, effectiveRange: nil) as? MessageFileLink
+            return storage.attribute(key, at: index, effectiveRange: nil)
         }
 
         /// A chip's menu as Core lists it; an item reports its id with the chip's link.
-        func fileMenu(_ items: [MessageMenuItem], link: String) -> NSMenu {
+        func fileMenu(_ items: [MessageMenuItem], link: String, action: String = "file") -> NSMenu {
             let menu = NSMenu()
             for item in items {
                 let entry = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
                 if let children = item.children {
-                    entry.submenu = fileMenu(children, link: link)
+                    entry.submenu = fileMenu(children, link: link, action: action)
                 } else if let id = item.id {
                     entry.action = #selector(quoteSelection(_:))
                     entry.target = self
-                    entry.representedObject = ["action": "file", "text": link, "id": id, "target": document.target]
+                    entry.representedObject = ["action": action, "text": link, "id": id, "target": document.target]
                 }
                 menu.addItem(entry)
             }
@@ -358,8 +366,8 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
             let chip = index < (textStorage?.length ?? 0)
                 ? textStorage?.attribute(.messageFile, at: index, effectiveRange: nil) as? MessageFileLink : nil
             let url = chip?.link ?? (link as? URL)?.absoluteString ?? (link as? String) ?? ""
-            // Command-click sends a file to the editor and a web page to the in-app
-            // browser, as the desktop client's links did.
+            // Core applies the web preference and Command's external override;
+            // files retain their separate editor shortcut.
             action?(["action": "link", "text": url, "target": document.target,
                      "command": clickModifiers.contains(.command)])
             return true

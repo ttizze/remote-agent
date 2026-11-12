@@ -34,6 +34,7 @@ async fn scripts(service: &HostRpcService, cwd: &Path) -> Vec<ProjectScript> {
         .review_workspace(&ReviewWorkspace {
             cwd: cwd.to_string_lossy().into_owned(),
             base_ref: None,
+            include_options: false,
         })
         .await
         .unwrap()
@@ -200,7 +201,8 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
         service
             .review_workspace(&ReviewWorkspace {
                 cwd: directory.path().to_string_lossy().into_owned(),
-                base_ref: None
+                base_ref: None,
+                include_options: false,
             })
             .await
             .is_err()

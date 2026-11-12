@@ -15,6 +15,9 @@
             "config/日本語"
           ],
           "worktreeDirectory": "/fixture/work trees",
+          "initSubmodules": false,
+          "setupScript": null,
+          "projectSetupScripts": {},
           "deleteUnchanged": false,
           "projectDeleteUnchanged": {
             "project": true

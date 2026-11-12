@@ -36,7 +36,8 @@ fn restart(snapshot: &Snapshot) -> Snapshot {
                 PreferenceKey::Editor
                 | PreferenceKey::Language
                 | PreferenceKey::Composer
-                | PreferenceKey::Contrast => Vec::new(),
+                | PreferenceKey::Contrast
+                | PreferenceKey::WebLinks => Vec::new(),
             })
         }
         fn save(&self, _: PreferenceKey, _: Vec<u8>) -> Result<(), crate::client::AgentError> {

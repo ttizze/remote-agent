@@ -29,6 +29,8 @@ pub struct PanelSurface {
     pub kind: PanelKind,
     pub path: Option<String>,
     pub command: Option<String>,
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
+    pub terminal_handle: Option<String>,
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,6 +163,7 @@ impl Panels {
             kind,
             path,
             command: None,
+            terminal_handle: None,
         });
         panel.active = Some(id);
         OpenedPanel {
@@ -205,6 +208,36 @@ impl Panels {
             panels: Arc::new(next),
             activated: true,
         }
+    }
+
+    pub fn open_setup_terminal(
+        self: Arc<Self>,
+        key: PanelScope,
+        terminal: crate::presentation::conversation::SetupTerminal,
+    ) -> OpenedPanel {
+        if let Some(surface) = self
+            .get(key.clone())
+            .surfaces
+            .iter()
+            .find(|surface| surface.terminal_handle.as_deref() == Some(&terminal.handle))
+        {
+            let id = surface.id;
+            return OpenedPanel {
+                panels: self.activate(key, id).panels,
+                id,
+            };
+        }
+        let mut opened = self.open(key.clone(), PanelKind::Terminal, Some(terminal.cwd));
+        Arc::make_mut(&mut opened.panels)
+            .threads
+            .get_mut(&key)
+            .unwrap()
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == opened.id)
+            .unwrap()
+            .terminal_handle = Some(terminal.handle);
+        opened
     }
     pub fn close(self: Arc<Self>, key: PanelScope, id: u64) -> Arc<Self> {
         let Some(index) = self

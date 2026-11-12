@@ -116,6 +116,7 @@
       {
         "method": "host/workspace/review",
         "params": {
+          "baseRef": null,
           "cwd": "/workspace"
         },
         "response": {
@@ -146,6 +147,7 @@
     ],
     "result": {
       "branch": "fixture",
+      "base_ref": "main",
       "additions": 2,
       "deletions": 1,
       "files": [
@@ -184,6 +186,9 @@
               "assets"
             ],
             "worktreeDirectory": "/worktrees",
+            "initSubmodules": false,
+            "setupScript": null,
+            "projectSetupScripts": {},
             "deleteUnchanged": false,
             "projectDeleteUnchanged": {}
           }
@@ -198,6 +203,9 @@
         "assets"
       ],
       "worktreeDirectory": "/worktrees",
+      "initSubmodules": false,
+      "setupScript": null,
+      "projectSetupScripts": {},
       "deleteUnchanged": false,
       "projectDeleteUnchanged": {}
     }
@@ -214,6 +222,9 @@
           "assets"
         ],
         "worktreeDirectory": "/worktrees",
+        "initSubmodules": false,
+        "setupScript": null,
+        "projectSetupScripts": {},
         "deleteUnchanged": true,
         "projectDeleteUnchanged": {
           "project": false
@@ -231,6 +242,9 @@
             "assets"
           ],
           "worktreeDirectory": "/worktrees",
+          "initSubmodules": false,
+          "setupScript": null,
+          "projectSetupScripts": {},
           "deleteUnchanged": true,
           "projectDeleteUnchanged": {
             "project": false
@@ -245,6 +259,9 @@
               "assets"
             ],
             "worktreeDirectory": "/worktrees",
+            "initSubmodules": false,
+            "setupScript": null,
+            "projectSetupScripts": {},
             "deleteUnchanged": true,
             "projectDeleteUnchanged": {
               "project": false
@@ -261,6 +278,9 @@
         "assets"
       ],
       "worktreeDirectory": "/worktrees",
+      "initSubmodules": false,
+      "setupScript": null,
+      "projectSetupScripts": {},
       "deleteUnchanged": true,
       "projectDeleteUnchanged": {
         "project": false

@@ -7,8 +7,13 @@ use agent_protocol::session::{
     SubmissionDelivery,
 };
 
+mod script;
 #[cfg(test)]
 mod tests;
+mod workspace;
+use agent_protocol::workspace::{
+    SetupPhase, SetupStageId, SetupStageStatus, WorkspaceSetup, WorkspaceStrategy,
+};
 
 impl HostRpcService {
     pub(super) async fn admit_task(
@@ -30,6 +35,11 @@ impl HostRpcService {
             .initial_input
             .as_ref()
             .expect("task admission has input");
+        if let Some(workspace) = &initial.workspace {
+            workspace
+                .validate()
+                .map_err(|error| Failure::new("invalid_params", error))?;
+        }
         if initial.client_user_message_id.is_empty() || initial.client_user_message_id.len() > 256 {
             return Err(Failure::new(
                 "invalid_params",
@@ -62,10 +72,42 @@ impl HostRpcService {
             service_tier: initial.service_tier.clone(),
             follow_up: Default::default(),
         };
+        let projects = self.project_snapshot().await?;
+        let settings = self
+            .inner
+            .worktrees
+            .settings(None)
+            .await
+            .map_err(|error| Failure::new("worktree_settings_failed", error))?;
+        let workspace = initial.workspace.clone().or_else(|| {
+            (params.cwd.is_some() && settings.create_on_new_session).then(|| {
+                WorkspaceStrategy::Worktree {
+                    base_ref: String::new(),
+                    start_from_origin: true,
+                }
+            })
+        });
+        let mut setup = match &workspace {
+            Some(WorkspaceStrategy::Worktree { base_ref, .. }) => {
+                Some(WorkspaceSetup::new(Some(base_ref.clone()), now_ms()))
+            }
+            Some(WorkspaceStrategy::ExistingWorktree { .. }) => {
+                Some(WorkspaceSetup::new(None, now_ms()))
+            }
+            _ => None,
+        };
+        if let Some(setup) = &mut setup {
+            setup.script = projects
+                .project_for_workspace(&cwd)
+                .and_then(|id| settings.project_setup_scripts.get(id))
+                .cloned()
+                .or(settings.setup_script)
+                .filter(|script| !script.command.trim().is_empty());
+        }
         let row = Conversation {
             id: id.clone(),
             active: id.clone(),
-            cwd,
+            cwd: cwd.clone(),
             name: None,
             preview: initial.input.iter().find_map(|part| match part {
                 op::Input::Text { text } => Some(agent_protocol::models::compact_title(
@@ -79,6 +121,8 @@ impl HostRpcService {
             segments: Vec::new(),
             handoffs: Vec::new(),
             startup: Some(Startup {
+                project_cwd: cwd,
+                workspace,
                 preparation: SessionPreparation {
                     submission,
                     status: PreparationStatus::Preparing,
@@ -86,8 +130,8 @@ impl HostRpcService {
                 },
                 started_at: now(),
             }),
+            workspace_setup: setup,
         };
-        let projects = self.project_snapshot().await?;
         let response = self.preparation_snapshot(&row, &projects);
         let (row, created) = self.inner.conversations.admit(row)?;
         if !created {
@@ -227,6 +271,12 @@ impl HostRpcService {
         );
         self.inner.router.session_change(
             &row.id,
+            SessionChange::WorkspaceSetup {
+                setup: response.thread.workspace_setup.clone(),
+            },
+        );
+        self.inner.router.session_change(
+            &row.id,
             SessionChange::Status {
                 status: response.thread.status,
             },
@@ -264,7 +314,20 @@ impl HostRpcService {
                 .retain_execution(id.clone())
                 .expect("validated admitted task");
             let _workspace = service.inner.worktree_access.read().await;
-            let result = service.prepare_task(&id).await;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            service
+                .inner
+                .preparations
+                .lock()
+                .unwrap()
+                .insert(id.clone(), cancel.clone());
+            let result = service.prepare_task(&id, cancel.clone()).await;
+            if cancel.is_cancelled()
+                && let Err(error) = service.cleanup_cancelled_workspace(&id).await
+            {
+                let _ = service.setup_update(&id, |setup| setup.error = Some(error.message));
+            }
+            service.inner.preparations.lock().unwrap().remove(&id);
             if let Err(error) = result
                 && let Err(failure) = service.fail_preparation(&id, error).await
             {
@@ -273,7 +336,11 @@ impl HostRpcService {
         });
     }
 
-    async fn prepare_task(&self, id: &SessionRef) -> Result<(), Failure> {
+    async fn prepare_task(
+        &self,
+        id: &SessionRef,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), Failure> {
         if self
             .inner
             .updating
@@ -287,35 +354,29 @@ impl HostRpcService {
         let Some(row) = self.preparing_task(id)? else {
             return Ok(());
         };
-        if row.startup.as_ref().unwrap().preparation.stage != PreparationStage::Provider {
-            let selected = (std::path::Path::new(&row.cwd) != self.inner.projects.chat_directory())
-                .then_some(row.cwd.as_str());
-            let (cwd, created) = self
-                .prepare_directory(selected, || async {
-                    self.change_preparation(id, StartupChange::Worktree)
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| anyhow::anyhow!(error.message))
-                })
-                .await?;
-            // Record the checkout even when interrupted so a retry reuses it;
-            // only a checkout no row refers to is rolled back.
-            if let Err(error) = self
-                .change_preparation(id, StartupChange::Workspace { cwd: cwd.clone() })
-                .await
-            {
-                if created {
-                    self.discard_worktree(&cwd).await;
-                }
-                return Err(error);
-            }
+        if matches!(
+            row.startup.as_ref().unwrap().preparation.stage,
+            PreparationStage::Workspace | PreparationStage::Worktree
+        ) {
+            self.prepare_task_workspace(&row, cancel.clone()).await?;
         } else if row.bindings.is_empty() {
             self.restore_workspace(&row.cwd).await?;
         }
         let Some(row) = self.preparing_task(id)? else {
             return Ok(());
         };
+        if row.startup.as_ref().unwrap().preparation.stage == PreparationStage::SetupScript {
+            self.run_setup_script(&row, cancel.clone()).await?;
+            self.change_preparation(id, StartupChange::Prepared).await?;
+        }
+        let Some(row) = self.preparing_task(id)? else {
+            return Ok(());
+        };
         let input = row.startup.as_ref().unwrap().preparation.submission.clone();
+        self.setup_update(id, |setup| {
+            setup.can_cancel = false;
+            setup.stage(SetupStageId::Agent, SetupStageStatus::Running, now_ms());
+        })?;
         if row.bindings.is_empty() {
             let agent = self.creation_agent(id.provider, input.model.as_ref())?;
             let response = agent
@@ -374,6 +435,10 @@ impl HostRpcService {
         self.change_preparation(id, StartupChange::Finished)
             .await
             .map_err(|error| Failure::unknown("preparation_receipt_failed", error))?;
+        self.setup_update(id, |setup| {
+            setup.stage(SetupStageId::Agent, SetupStageStatus::Done, now_ms())
+        })?;
+        self.finish_setup_if_ready(id)?;
         self.inner.router.session_change(
             id,
             SessionChange::Submission {
@@ -395,6 +460,24 @@ impl HostRpcService {
     }
 
     async fn fail_preparation(&self, id: &SessionRef, error: Failure) -> Result<(), Failure> {
+        let interrupted = self
+            .inner
+            .conversations
+            .get(id)?
+            .and_then(|row| row.startup)
+            .is_some_and(|startup| startup.preparation.status == PreparationStatus::Interrupted);
+        self.setup_update(id, |setup| {
+            setup.finish(
+                if interrupted {
+                    SetupPhase::Cancelled
+                } else {
+                    SetupPhase::Failed
+                },
+                (!interrupted).then(|| error.message.clone()),
+                now_ms(),
+            )
+        })?;
+        self.expire_current_setup(id)?;
         let status = if error.delivery == agent_protocol::error::Delivery::Unknown {
             PreparationStatus::Unknown
         } else {
@@ -415,7 +498,11 @@ impl HostRpcService {
     pub(super) async fn retry_preparation(
         &self,
         id: &SessionRef,
+        work_locally: bool,
     ) -> Result<agent_protocol::models::Empty, Failure> {
+        if work_locally {
+            self.change_preparation(id, StartupChange::UseRoot).await?;
+        }
         let (_, changed) = self
             .change_preparation(id, StartupChange::Retry { started_at: now() })
             .await?;
@@ -437,7 +524,46 @@ impl HostRpcService {
             },
         )
         .await?;
+        if let Some(cancel) = self.inner.preparations.lock().unwrap().get(id) {
+            cancel.cancel();
+        }
+        self.setup_update(id, |setup| {
+            setup.finish(SetupPhase::Cancelled, None, now_ms())
+        })?;
+        self.expire_current_setup(id)?;
         Ok(agent_protocol::models::Empty {})
+    }
+
+    pub(super) async fn preempt_setup(&self, id: &SessionRef) -> Result<(), Failure> {
+        let Some(row) = self.inner.conversations.get(id)? else {
+            return Ok(());
+        };
+        let Some(startup) = row.startup else {
+            return Ok(());
+        };
+        if startup.preparation.status == PreparationStatus::Preparing {
+            if !row
+                .workspace_setup
+                .as_ref()
+                .is_some_and(|setup| setup.can_cancel)
+            {
+                return Err(Failure::new(
+                    "preparation_started",
+                    "The agent has already started",
+                ));
+            }
+            self.interrupt_preparation(
+                id,
+                &startup
+                    .preparation
+                    .submission
+                    .client_user_message_id
+                    .to_string()
+                    .into(),
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -446,4 +572,7 @@ fn now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+fn now_ms() -> u64 {
+    (now() * 1000.) as u64
 }

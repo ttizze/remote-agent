@@ -63,6 +63,7 @@ struct ConversationComposer: View {
             && answering == nil && !dictation.isRecording && !dictation.requestingPermission && !model.transcribing
             && !model.transferring && !preparingMedia
         return VStack(spacing: 12) {
+            ConversationWorkspacePicker(model: model)
             if let review = model.composerReview {
                 Button { openTools?(.diff) } label: {
                     HStack(spacing: 10) {

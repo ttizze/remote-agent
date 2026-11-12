@@ -8,6 +8,7 @@ use agent_protocol::{
     session::{OpenSession, OpenedSession},
 };
 use std::{path::Path, sync::atomic::Ordering, time::Duration};
+mod workspace;
 
 fn request(cwd: &Path) -> Call {
     Call::CreateSession(op::CreateSession {
@@ -23,6 +24,7 @@ fn request(cwd: &Path) -> Call {
             id: "selected".into(),
         }),
         initial_input: Some(op::InitialInput {
+            workspace: None,
             client_user_message_id: "first-input".into(),
             input: vec![
                 op::Input::Text {
@@ -468,6 +470,7 @@ async fn retry_restores_a_removed_workspace_before_creating_the_first_provider_s
         &host,
         client.id(),
         Call::RetryPreparation(op::RetryPreparation {
+            work_locally: false,
             thread_id: opened.session,
         }),
     )
@@ -506,6 +509,7 @@ async fn refused_initial_input_retries_in_the_same_native_binding() {
         &host,
         client.id(),
         Call::RetryPreparation(op::RetryPreparation {
+            work_locally: false,
             thread_id: opened.session.clone(),
         }),
     )
@@ -573,6 +577,7 @@ async fn stopping_during_provider_creation_keeps_the_binding_without_sending() {
         &host,
         client.id(),
         Call::RetryPreparation(op::RetryPreparation {
+            work_locally: false,
             thread_id: opened.session,
         }),
     )
@@ -687,6 +692,7 @@ async fn uncertain_initial_delivery_survives_restart_without_resubmission() {
             &restarted,
             connection.id(),
             Call::RetryPreparation(op::RetryPreparation {
+                work_locally: false,
                 thread_id: opened.session,
             }),
         )

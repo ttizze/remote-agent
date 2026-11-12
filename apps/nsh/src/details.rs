@@ -735,6 +735,7 @@ mod tests {
         Arc::make_mut(&mut pane.workspace).review_cwd = Some(pane.navigation.cwd.clone());
         Arc::make_mut(&mut pane.workspace).review = Some(Arc::new(WorkspaceReview {
             controls: Default::default(),
+            options: None,
             branch: "feature/native".into(),
             base_ref: Some("origin/main".into()),
             additions: 7,
@@ -806,6 +807,7 @@ mod tests {
             let workspace = Arc::make_mut(&mut pane.workspace);
             workspace.review_cwd = Some(cwd.into());
             workspace.review = Some(Arc::new(WorkspaceReview {
+                options: None,
                 branch: "hidden".into(),
                 base_ref: Some("main".into()),
                 additions: 3,

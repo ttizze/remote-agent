@@ -10,6 +10,7 @@ fn workspace() -> Snapshot {
     let workspace = Arc::make_mut(&mut pane.workspace);
     workspace.review_cwd = Some("/project".into());
     workspace.review = Some(Arc::new(crate::models::WorkspaceReview {
+        options: None,
         controls: crate::models::WorkspaceControls {
             can_push: true,
             remotes: vec!["origin".into()],

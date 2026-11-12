@@ -98,15 +98,25 @@ extension ConversationModel {
     }
 
     func closeWorkbench(_ surface: PanelSurface, scope: PanelScope) {
+        let terminalHandle = workbenchTerminalHandle(surface.id)
         panels = panels.close(key: scope, id: surface.id)
         if surface.kind == .terminal {
-            perform(.closeTerminal(handle: workbenchTerminalHandle(surface.id)))
+            perform(.closeTerminal(handle: terminalHandle))
         }
         workbenchSideChats.removeValue(forKey: surface.id)
     }
 
     func workbenchTerminalHandle(_ id: UInt64) -> String {
-        "agent-terminal-\(workbenchInstance)-\(id)"
+        if let scope = panels.scope(id: id),
+           let handle = panels.get(key: scope).surfaces.first(where: { $0.id == id })?.terminalHandle {
+            return handle
+        }
+        return "agent-terminal-\(workbenchInstance)-\(id)"
+    }
+
+    func openSetupTerminal(_ terminal: SetupTerminal) {
+        let scope = snapshot.panelScope(host: host, draft: coreDraftKey)
+        panels = panels.openSetupTerminal(key: scope, terminal: terminal).panels
     }
 }
 

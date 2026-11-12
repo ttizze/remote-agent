@@ -347,10 +347,7 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
     );
     let latest = read_after_status(&mut reader, &writer).await;
     assert_eq!(latest["method"], "host/workspace/review");
-    assert_eq!(
-        latest["params"],
-        json!({"cwd":"/latest/39","base_ref":null})
-    );
+    assert_eq!(latest["params"], json!({"cwd":"/latest/39","baseRef":null}));
     let mut current_review = review();
     current_review["branch"] = "latest".into();
     writer
@@ -402,7 +399,7 @@ async fn comparison_changes_discard_in_flight_reviews_and_refresh_the_selected_b
     let old_request = read(&mut reader).await;
     assert_eq!(
         old_request["params"],
-        json!({"cwd":"/project","base_ref":null})
+        json!({"cwd":"/project","baseRef":null,"includeOptions":true})
     );
     let selecting = store.dispatch(Intent::SetWorkspaceComparison {
         cwd: "/project".into(),
@@ -430,7 +427,7 @@ async fn comparison_changes_discard_in_flight_reviews_and_refresh_the_selected_b
     let selected_request = read_after_status(&mut reader, &writer).await;
     assert_eq!(
         selected_request["params"],
-        json!({"cwd":"/project", "base_ref":"HEAD"})
+        json!({"cwd":"/project", "baseRef":"HEAD","includeOptions":true})
     );
     let mut selected = review();
     selected["base_ref"] = "HEAD".into();
@@ -454,7 +451,7 @@ async fn comparison_changes_discard_in_flight_reviews_and_refresh_the_selected_b
         base_ref: None,
     }));
     let request = read_after_status(&mut reader, &writer).await;
-    assert_eq!(request["params"]["base_ref"], "HEAD");
+    assert_eq!(request["params"]["baseRef"], "HEAD");
     writer
         .reply(&request, json!({"result":selected}))
         .await
@@ -881,7 +878,10 @@ async fn new_chat(
     let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
     let request = read(reader).await;
     assert_eq!(request["method"], "host/workspace/review");
-    assert_eq!(request["params"], json!({"cwd":cwd,"base_ref":null}));
+    assert_eq!(
+        request["params"],
+        json!({"cwd":cwd,"includeOptions":true,"baseRef":null})
+    );
     writer
         .reply(&request, json!({"result":review()}))
         .await
@@ -916,7 +916,7 @@ async fn read_after_reviews(
         if request["method"] != "host/workspace/review" {
             return request;
         }
-        assert_eq!(request["params"], json!({"cwd":"/fixture","base_ref":null}));
+        assert_eq!(request["params"], json!({"cwd":"/fixture","baseRef":null}));
         writer
             .reply(&request, json!({"result":review()}))
             .await
@@ -4336,7 +4336,10 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         );
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/workspace/review");
-        assert_eq!(request["params"], json!({"cwd":"/new","base_ref":null}));
+        assert_eq!(
+            request["params"],
+            json!({"cwd":"/new","includeOptions":true,"baseRef":null})
+        );
         writer
             .reply(&request, json!({"result":review()}))
             .await
@@ -4503,7 +4506,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     }
     assert_eq!(
         requests["host/workspace/review"]["params"],
-        json!({"cwd":"/fixture","base_ref":null})
+        json!({"cwd":"/fixture","includeOptions":true,"baseRef":null})
     );
     assert_eq!(
         requests["host/session/list"]["params"],

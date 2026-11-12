@@ -17,6 +17,8 @@ pub(super) struct Worker {
     pub(super) stop: CancellationToken,
     pub(super) input: mpsc::Receiver<Command>,
     pub(super) ready: Option<Receipt>,
+    pub(super) observer: Option<super::Observer>,
+    pub(super) replay: Option<Arc<Mutex<super::Replay>>>,
 }
 impl Worker {
     fn publish(&self, event: Notification) {
@@ -51,7 +53,12 @@ impl Worker {
                         _ = self.stop.cancelled() => return Ok(()),
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
-                            match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
+                            let event = serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())?;
+                            if let PtyEvent::Exited { code } = &event && let Some(replay) = &self.replay {
+                                *replay.lock().unwrap() = super::Replay { checkpoint: Some(screen.checkpoint()), code: Some(i32::try_from(*code).unwrap_or(1)) };
+                            }
+                            if let Some(observer) = &self.observer { observer(&event); }
+                            match event {
                                 PtyEvent::Started => { let checkpoint = screen.checkpoint(); self.publish(Notification::TerminalRestored { handle: self.handle.clone(), data: checkpoint.data, cols: checkpoint.size.cols, rows: checkpoint.size.rows }); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
                                 PtyEvent::Output { data } => {
                                     // The Host is the sole terminal-query responder, even during disconnects.
@@ -66,7 +73,10 @@ impl Worker {
                                     if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
                                     let _ = complete.send(error.map_or(Ok(()), Err));
                                 }
-                                PtyEvent::Exited { code } => { self.publish(Notification::Exited { handle: self.handle.clone(), code: i32::try_from(code).unwrap_or(1) }); return Ok(()); }
+                                PtyEvent::Exited { code } => {
+                                    let code = i32::try_from(code).unwrap_or(1);
+                                    self.publish(Notification::Exited { handle: self.handle.clone(), code }); return Ok(());
+                                }
                                 PtyEvent::Failed { message } => return Err(message),
                             }
                         }
@@ -112,7 +122,12 @@ impl Worker {
                 if status.success() { Ok(()) } else { Err(format!("terminal cleanup failed: {status}")) }
             });
             cleanup.clone()?;
-            if self.stop.is_cancelled() { self.publish(Notification::Exited { handle: self.handle.clone(), code: 0 }); }
+            if self.stop.is_cancelled() {
+                let code = if self.observer.is_some() { 130 } else { 0 };
+                if let Some(replay) = &self.replay { *replay.lock().unwrap() = super::Replay { checkpoint: Some(screen.checkpoint()), code: Some(code) }; }
+                if let Some(observer) = &self.observer { observer(&PtyEvent::Exited { code: code as u32 }); }
+                self.publish(Notification::Exited { handle: self.handle.clone(), code });
+            }
             interaction
         }.await;
         if let Some(ready) = self.ready.take() {
@@ -125,6 +140,17 @@ impl Worker {
             let _ = complete.send(Err("terminal has exited".into()));
         }
         if let Err(message) = result {
+            if let Some(replay) = &self.replay {
+                *replay.lock().unwrap() = super::Replay {
+                    checkpoint: Some(screen.checkpoint()),
+                    code: Some(1),
+                };
+            }
+            if let Some(observer) = &self.observer {
+                observer(&PtyEvent::Failed {
+                    message: message.clone(),
+                });
+            }
             self.publish(Notification::TerminalFailed {
                 handle: self.handle.clone(),
                 reason: message,

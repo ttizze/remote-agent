@@ -12,6 +12,50 @@ use agent_protocol::{
 };
 use serde_json::json;
 
+#[test]
+fn worktree_progress_stays_after_the_initial_user_when_native_activity_arrives() {
+    let mut thread = source(true);
+    items(&mut thread).insert(0, Arc::new(serde_json::from_value(json!({
+        "id":"user", "status":"completed", "body":{"inline":{"body":{"userMessage":{"text":"first input", "content":[]}}}}
+    })).unwrap()));
+    Arc::make_mut(&mut thread).workspace_setup = Some(
+        agent_protocol::workspace::WorkspaceSetup::new(Some("origin/main".into()), 1000),
+    );
+    let projection = ConversationRows::project(
+        render(thread, None),
+        scope(),
+        HashMap::new(),
+        ConversationRowPolicy {
+            requests: true,
+            progress: ProgressRows::Always,
+        },
+        None,
+    );
+    let rows = projection.rows();
+    assert!(matches!(
+        rows[0].data.content,
+        ConversationRowContent::User { .. }
+    ));
+    assert!(matches!(
+        rows[1].data.content,
+        ConversationRowContent::Preparation { .. }
+    ));
+    assert!(rows[2..].iter().any(|row| matches!(
+        row.data.content,
+        ConversationRowContent::ActivityHeader { .. }
+    )));
+    assert_eq!(
+        projection
+            .turn_rows()
+            .iter()
+            .filter(|row| matches!(row.data.content, ConversationRowContent::Preparation { .. }))
+            .count(),
+        1
+    );
+    assert!(projection.queued_rows().is_empty());
+    assert!(projection.session_rows().is_empty());
+}
+
 fn scope() -> PanelScope {
     PanelScope {
         host: "host".into(),

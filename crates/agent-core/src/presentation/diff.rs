@@ -326,6 +326,7 @@ mod tests {
     fn changes_summary_names_the_actual_base_and_includes_zero_totals() {
         let mut review = WorkspaceReview {
             controls: Default::default(),
+            options: None,
             branch: "feature/work".into(),
             base_ref: Some("origin/main".into()),
             additions: 57,

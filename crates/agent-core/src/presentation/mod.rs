@@ -42,6 +42,7 @@ pub mod markdown;
 pub mod task_activity;
 pub mod terminals;
 pub mod thread_status;
+pub mod web_links;
 pub mod workspace;
 pub mod worktrees;
 

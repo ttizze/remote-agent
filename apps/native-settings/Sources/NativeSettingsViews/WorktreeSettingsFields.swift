@@ -63,7 +63,7 @@ public struct WorktreeSettingsFields: View {
     public var body: some View {
         Group {
             Section {
-                Text(LocalizedStringKey(project == nil ? "この環境に保存し、新しい会話に適用します。" : "プロジェクトごとに変えられるのは自動削除だけです。"))
+                Text(LocalizedStringKey(project == nil ? "この環境に保存し、新しい会話に適用します。" : "このプロジェクトの設定を変更します。"))
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let project {

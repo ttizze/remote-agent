@@ -25,6 +25,7 @@ pub mod providers;
 pub mod requests;
 pub mod session;
 pub mod tool_output;
+pub mod workspace;
 
 #[cfg(test)]
 mod sync_model;

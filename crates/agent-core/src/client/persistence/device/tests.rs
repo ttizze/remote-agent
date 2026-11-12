@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
 struct Disk {
-    bytes: Mutex<[Vec<u8>; 5]>,
+    bytes: Mutex<[Vec<u8>; 6]>,
     fail: AtomicUsize,
     writes: Mutex<Vec<usize>>,
 }
@@ -19,7 +19,91 @@ fn index(key: PreferenceKey) -> usize {
         PreferenceKey::Language => 2,
         PreferenceKey::Composer => 3,
         PreferenceKey::Contrast => 4,
+        PreferenceKey::WebLinks => 5,
     }
+}
+
+#[tokio::test]
+async fn web_destination_is_device_wide_and_survives_reopening_hosts() {
+    let disk = Arc::new(Disk::default());
+    let device = DevicePreferences::new(disk.clone());
+    assert_eq!(device.web_link_target(), WebLinkTarget::SystemBrowser);
+    let first = Store::offline(Snapshot::default(), Some(device.clone()));
+    let second = Store::offline(Snapshot::default(), Some(device.clone()));
+    let mut first_updates = first.subscribe();
+    let mut second_updates = second.subscribe();
+    device
+        .select_web_link_target(WebLinkTarget::InAppBrowser)
+        .unwrap();
+    for updates in [&mut first_updates, &mut second_updates] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            updates.wait_for(|state| state.catalog.web_link_target == WebLinkTarget::InAppBrowser),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    assert_eq!(
+        DevicePreferences::new(disk.clone()).web_link_target(),
+        WebLinkTarget::InAppBrowser
+    );
+    let late = Store::offline(Snapshot::default(), Some(device));
+    assert_eq!(
+        late.snapshot().catalog.web_link_target,
+        WebLinkTarget::InAppBrowser
+    );
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    late.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn web_destination_write_failure_keeps_previous_value_and_retry_recovers() {
+    let disk = Arc::new(Disk::default());
+    let device = DevicePreferences::new(disk.clone());
+    let mut updates = device.subscribe();
+    disk.fail.store(6, Ordering::SeqCst);
+    assert!(
+        device
+            .select_web_link_target(WebLinkTarget::InAppBrowser)
+            .is_err()
+    );
+    assert_eq!(device.web_link_target(), WebLinkTarget::SystemBrowser);
+    assert!(!updates.has_changed().unwrap());
+    assert!(disk.bytes.lock().unwrap()[5].is_empty());
+    disk.fail.store(0, Ordering::SeqCst);
+    device
+        .select_web_link_target(WebLinkTarget::InAppBrowser)
+        .unwrap();
+    assert_eq!(
+        updates.borrow_and_update().web_link_target,
+        WebLinkTarget::InAppBrowser
+    );
+    assert_eq!(
+        DevicePreferences::new(disk).web_link_target(),
+        WebLinkTarget::InAppBrowser
+    );
+}
+
+#[tokio::test]
+async fn damaged_web_destination_uses_default_without_overwriting_the_payload() {
+    let disk = Arc::new(Disk::default());
+    disk.bytes.lock().unwrap()[5] = b"invalid".to_vec();
+    let device = DevicePreferences::new(disk.clone());
+    assert_eq!(device.web_link_target(), WebLinkTarget::SystemBrowser);
+    let store = Store::offline(Snapshot::default(), Some(device.clone()));
+    device.select_language(UiLanguage::English).unwrap();
+    device.flush().await.unwrap();
+    assert_eq!(disk.bytes.lock().unwrap()[5], b"invalid");
+    device
+        .select_web_link_target(WebLinkTarget::InAppBrowser)
+        .unwrap();
+    assert_eq!(
+        DevicePreferences::new(disk).web_link_target(),
+        WebLinkTarget::InAppBrowser
+    );
+    store.close().await.unwrap();
 }
 impl PreferenceStorage for Disk {
     fn load(&self, key: PreferenceKey) -> Result<Vec<u8>, AgentError> {

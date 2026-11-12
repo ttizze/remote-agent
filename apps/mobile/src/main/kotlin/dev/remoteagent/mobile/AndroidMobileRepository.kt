@@ -108,6 +108,7 @@ internal class AndroidPreferenceStorage(context: Context) : PreferenceStorage {
             PreferenceKey.EDITOR -> AtomicFile(File(directory, "editor-preferences.json"))
             PreferenceKey.COMPOSER -> AtomicFile(File(directory, "composer-preferences.json"))
             PreferenceKey.CONTRAST -> AtomicFile(File(directory, "contrast.json"))
+            PreferenceKey.WEB_LINKS -> AtomicFile(File(directory, "web-links.json"))
             PreferenceKey.LANGUAGE -> null
         }
 

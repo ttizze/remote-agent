@@ -15,6 +15,12 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 type Receipt = oneshot::Sender<Result<(), String>>;
+pub(crate) type Observer = Arc<dyn Fn(&agent_process::PtyEvent) + Send + Sync>;
+#[derive(Default)]
+struct Replay {
+    checkpoint: Option<screen::Checkpoint>,
+    code: Option<i32>,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Launch {
@@ -78,6 +84,7 @@ struct Record {
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
     finished: watch::Receiver<Option<Result<(), String>>>,
+    replay: Option<Arc<Mutex<Replay>>>,
 }
 #[derive(Default)]
 pub(crate) struct Terminals {
@@ -96,8 +103,21 @@ impl Terminals {
         router: SessionRouter,
         owner: SessionId,
         handle: String,
+        launch: Launch,
+        size: TerminalSize,
+    ) -> Result<agent_protocol::models::Empty, String> {
+        self.start_observed(router, owner, handle, launch, size, None)
+            .await
+    }
+
+    pub(crate) async fn start_observed(
+        &self,
+        router: SessionRouter,
+        owner: SessionId,
+        handle: String,
         mut launch: Launch,
         size: TerminalSize,
+        observer: Option<Observer>,
     ) -> Result<agent_protocol::models::Empty, String> {
         if handle.is_empty()
             || handle.len() > 256
@@ -145,6 +165,9 @@ impl Terminals {
         let (input, receiver) = mpsc::channel(32);
         let (complete, finished) = watch::channel(None);
         let stop = CancellationToken::new();
+        let replay = observer
+            .as_ref()
+            .map(|_| Arc::new(Mutex::new(Replay::default())));
         {
             let mut records = self.records.lock().unwrap();
             router.ensure_session(owner)?;
@@ -164,6 +187,7 @@ impl Terminals {
                     input,
                     stop: stop.clone(),
                     finished,
+                    replay: replay.clone(),
                 },
             );
         }
@@ -179,9 +203,12 @@ impl Terminals {
                 stop,
                 input: receiver,
                 ready: Some(ready),
+                observer,
+                replay: replay.clone(),
             };
             let cleanup = worker.run(launch, size).await;
             if cleanup.is_ok()
+                && replay.is_none()
                 && let Some(records) = records.upgrade()
             {
                 records.lock().unwrap().remove(&key);
@@ -194,6 +221,123 @@ impl Terminals {
             .map_err(|_| "terminal startup stopped")??;
         cancel_start.disarm();
         Ok(agent_protocol::models::Empty {})
+    }
+
+    /// The service authorizes the conversation before exposing its setup PTY.
+    pub(crate) fn is_setup(&self, handle: &str) -> bool {
+        self.records
+            .lock()
+            .unwrap()
+            .values()
+            .any(|record| record.handle == handle && record.replay.is_some())
+    }
+
+    pub(crate) async fn attach_setup(
+        &self,
+        router: &SessionRouter,
+        owner: SessionId,
+        handle: &str,
+        size: TerminalSize,
+    ) -> Result<(), String> {
+        if size.rows == 0 || size.cols == 0 || size.rows > 250 || size.cols > 500 {
+            return Err("invalid terminal size".into());
+        }
+        if self.restore_setup(router, owner, handle)? {
+            return Ok(());
+        }
+        let input = {
+            let records = self.records.lock().unwrap();
+            let record = records
+                .values()
+                .find(|record| record.handle == handle && record.replay.is_some())
+                .ok_or("setup terminal is unavailable")?;
+            record.input.clone()
+        };
+        let (complete, completed) = oneshot::channel();
+        let attach = async {
+            input
+                .send(Command {
+                    action: Action::Attach(owner, size),
+                    complete,
+                })
+                .await
+                .map_err(|_| "setup terminal has exited")?;
+            completed.await.map_err(|_| "setup terminal has exited")?
+        }
+        .await;
+        // Exiting can close the worker between lookup and attachment. Its final
+        // checkpoint is committed before the receiver closes, so recover it.
+        if attach.is_err() && self.restore_setup(router, owner, handle)? {
+            return Ok(());
+        }
+        attach
+    }
+
+    fn restore_setup(
+        &self,
+        router: &SessionRouter,
+        owner: SessionId,
+        handle: &str,
+    ) -> Result<bool, String> {
+        let records = self.records.lock().unwrap();
+        let record = records
+            .values()
+            .find(|record| record.handle == handle && record.replay.is_some())
+            .ok_or("setup terminal is unavailable")?;
+        let replay = record.replay.as_ref().unwrap().lock().unwrap();
+        let Some(checkpoint) = &replay.checkpoint else {
+            return Ok(false);
+        };
+        router.send(
+            owner,
+            agent_protocol::protocol::Notification::TerminalRestored {
+                handle: handle.into(),
+                data: checkpoint.data.clone(),
+                rows: checkpoint.size.rows,
+                cols: checkpoint.size.cols,
+            },
+        )?;
+        router.send(
+            owner,
+            agent_protocol::protocol::Notification::Exited {
+                handle: handle.into(),
+                code: replay.code.unwrap_or(1),
+            },
+        )?;
+        *record.attached.lock().unwrap() = Some(owner);
+        Ok(true)
+    }
+
+    pub(crate) async fn stop_setup(&self, handle: &str) {
+        let finished = self
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| record.handle == handle && record.replay.is_some())
+            .map(|record| {
+                record.stop.cancel();
+                record.finished.clone()
+            });
+        if let Some(mut finished) = finished {
+            while finished.borrow_and_update().is_none() {
+                if finished.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    pub(crate) fn forget_setup(&self, router: &SessionRouter, handle: &str) {
+        self.records.lock().unwrap().retain(|_, record| {
+            record.handle != handle
+                || record.replay.is_none()
+                || record.finished.borrow().is_none()
+                || record
+                    .attached
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|owner| router.ensure_session(owner).is_ok())
+        });
     }
     pub(crate) async fn request(
         &self,
@@ -264,6 +408,9 @@ impl Terminals {
                     .await
                     .map_err(|_| "terminal cleanup stopped")?;
             }
+            self.records.lock().unwrap().retain(|_, record| {
+                record.handle != handle || *record.attached.lock().unwrap() != Some(owner)
+            });
             return Ok(agent_protocol::models::Empty {});
         }
         let action = action.expect("kill returned above");
@@ -295,11 +442,9 @@ impl Terminals {
         }
     }
     pub(crate) fn in_use(&self, path: &Path) -> bool {
-        self.records
-            .lock()
-            .unwrap()
-            .values()
-            .any(|record| record.launch.directory.starts_with(path))
+        self.records.lock().unwrap().values().any(|record| {
+            record.finished.borrow().is_none() && record.launch.directory.starts_with(path)
+        })
     }
     pub(crate) async fn shutdown(&self) {
         let records: Vec<_> = self

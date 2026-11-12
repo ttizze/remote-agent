@@ -122,6 +122,9 @@ pub enum SessionChange {
     Preparation {
         preparation: Option<SessionPreparation>,
     },
+    WorkspaceSetup {
+        setup: Option<crate::workspace::WorkspaceSetup>,
+    },
     Submission {
         id: crate::ids::ClientInputId,
         delivery: SubmissionDelivery,
@@ -213,6 +216,7 @@ pub struct SessionPreparation {
 pub enum PreparationStage {
     Workspace,
     Worktree,
+    SetupScript,
     Provider,
 }
 
@@ -253,6 +257,7 @@ pub struct Timeline {
     pub queue: crate::operations::InputQueue,
     /// None means no observation; Some(None) explicitly clears preparation.
     pub preparation: Option<Option<SessionPreparation>>,
+    pub workspace_setup: Option<Option<crate::workspace::WorkspaceSetup>>,
     pub background: Vec<crate::execution::BackgroundTask>,
 }
 
@@ -325,6 +330,7 @@ impl SessionChange {
             | Self::Background { .. }
             | Self::Workspace { .. }
             | Self::Preparation { .. }
+            | Self::WorkspaceSetup { .. }
             | Self::Submission { .. }
             | Self::Queue { .. }
             | Self::Request { .. }
@@ -343,6 +349,7 @@ impl SessionChange {
             submissions: next.submissions,
             queue: next.queue,
             preparation: Some(next.preparation),
+            workspace_setup: Some(next.workspace_setup),
             background: next.background,
         });
         result?;
@@ -354,6 +361,7 @@ impl SessionChange {
             submissions: timeline.submissions,
             queue: timeline.queue,
             preparation: timeline.preparation.flatten(),
+            workspace_setup: timeline.workspace_setup.flatten(),
             background: timeline.background,
             ..next
         })
@@ -372,6 +380,10 @@ impl SessionChange {
                 }
                 Self::Preparation { preparation } => {
                     next.preparation = Some(preparation.clone());
+                    return Ok(());
+                }
+                Self::WorkspaceSetup { setup } => {
+                    next.workspace_setup = Some(setup.clone());
                     return Ok(());
                 }
                 Self::Submission { id, delivery } => {
@@ -540,6 +552,7 @@ impl SessionChange {
                 }
                 Self::Workspace { .. }
                 | Self::Preparation { .. }
+                | Self::WorkspaceSetup { .. }
                 | Self::Submission { .. }
                 | Self::Queue { .. }
                 | Self::Status { .. }

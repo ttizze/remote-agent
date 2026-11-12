@@ -170,6 +170,7 @@ impl Operation for StartSubmission {
                 cwd: self.cwd.clone(),
                 model: self.draft.model.clone(),
                 initial_input: Some(rpc::InitialInput {
+                    workspace: self.draft.workspace.clone(),
                     client_user_message_id: self.client_user_message_id.clone(),
                     input: submission_input(
                         &self.draft.text,

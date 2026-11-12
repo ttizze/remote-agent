@@ -225,6 +225,12 @@ extension ThreadScreen {
                 selectedText = text
             case "error":
                 model.notice = text
+            case "setupTerminal":
+                guard let data = text.data(using: .utf8),
+                      let value = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                      let handle = value["handle"], let cwd = value["cwd"] else { return }
+                model.openSetupTerminal(SetupTerminal(handle: handle, cwd: cwd))
+                openTools?(nil)
             case "quote":
                 model.addSelectionToChat(text)
             case "sideChat", "explain":

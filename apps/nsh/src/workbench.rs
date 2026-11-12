@@ -71,6 +71,14 @@ impl Workbench {
         self.application
             .with(|application| application.terminal_handle(id))
     }
+    pub fn open_setup_terminal(
+        self,
+        terminal: agent_core::presentation::conversation::SetupTerminal,
+    ) {
+        self.application.with(|application| {
+            application.open_setup_terminal(self.scope.get_untracked(), terminal)
+        });
+    }
 }
 
 pub(crate) fn title() -> String {
