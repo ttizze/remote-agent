@@ -228,6 +228,10 @@ fn change_startup(
                 .as_str()
                 != input_id
                 || startup.preparation.status != PreparationStatus::Preparing
+                || row
+                    .workspace_setup
+                    .as_ref()
+                    .is_some_and(|setup| !setup.can_cancel)
             {
                 return Err(Failure::new(
                     "invalid_turn",

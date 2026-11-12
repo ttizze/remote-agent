@@ -123,8 +123,10 @@ impl Worker {
             });
             cleanup.clone()?;
             if self.stop.is_cancelled() {
-                if let Some(replay) = &self.replay { *replay.lock().unwrap() = super::Replay { checkpoint: Some(screen.checkpoint()), code: Some(0) }; }
-                self.publish(Notification::Exited { handle: self.handle.clone(), code: 0 });
+                let code = if self.observer.is_some() { 130 } else { 0 };
+                if let Some(replay) = &self.replay { *replay.lock().unwrap() = super::Replay { checkpoint: Some(screen.checkpoint()), code: Some(code) }; }
+                if let Some(observer) = &self.observer { observer(&PtyEvent::Exited { code: code as u32 }); }
+                self.publish(Notification::Exited { handle: self.handle.clone(), code });
             }
             interaction
         }.await;

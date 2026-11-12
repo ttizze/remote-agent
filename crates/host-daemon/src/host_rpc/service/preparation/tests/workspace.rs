@@ -144,6 +144,32 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         "from remote"
     );
     assert!(!repository.join("latest.txt").exists());
+    assert!(
+        call::<Empty>(
+            &fixture.host,
+            client.id(),
+            Call::Interrupt(op::Interrupt {
+                thread_id: opened.session.clone(),
+                turn_id: "first-input".into(),
+            })
+        )
+        .await
+        .is_err(),
+        "agent startup has passed the cancellation boundary"
+    );
+    assert_eq!(
+        crate::git::text(
+            Path::new(running.worktree_path.as_ref().unwrap()),
+            &[
+                "config",
+                "--get",
+                &crate::workspace_review::comparison::base_key(running.branch.as_ref().unwrap())
+            ],
+        )
+        .unwrap()
+        .trim(),
+        "refs/remotes/origin/main"
+    );
     let reopened: OpenedSession = call(
         &fixture.host,
         client.id(),
@@ -368,6 +394,46 @@ async fn asynchronous_failure_does_not_block_or_resend_the_initial_input() {
     assert_eq!(done.stages[2].status, SetupStageStatus::Failed);
     assert_eq!(done.stages[2].exit_code, Some(9));
     assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_the_running_setup_terminal_reports_failure_without_starting_the_agent() {
+    let fixture = Fixture::new(script("printf 'waiting\\n'; sleep 120", false)).await;
+    let client = fixture.host.open_session();
+    let (_, mut updates) = admit(&fixture.host, client.id(), &fixture.request("main", false)).await;
+    let running = setup_until(&mut updates, |setup| {
+        setup.stages[2]
+            .tail
+            .iter()
+            .any(|line| line.contains("waiting"))
+    })
+    .await;
+    let handle = running.terminal_handle.unwrap();
+    let _: Empty = call(
+        &fixture.host,
+        client.id(),
+        Call::StartTerminal(op::StartTerminal {
+            handle: handle.clone(),
+            cwd: running.worktree_path.unwrap(),
+            size: op::TerminalSize { rows: 24, cols: 80 },
+        }),
+    )
+    .await
+    .unwrap();
+    let _: Empty = call(
+        &fixture.host,
+        client.id(),
+        Call::KillTerminal(op::TerminalKill {
+            process_handle: handle,
+        }),
+    )
+    .await
+    .unwrap();
+    let failed = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Failed).await;
+    assert_eq!(failed.stages[2].exit_code, Some(130));
+    assert_eq!(fixture.agent.next.load(Ordering::SeqCst), 0);
+    assert!(Path::new(failed.worktree_path.as_ref().unwrap()).exists());
 }
 
 #[cfg(unix)]

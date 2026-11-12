@@ -98,9 +98,10 @@ extension ConversationModel {
     }
 
     func closeWorkbench(_ surface: PanelSurface, scope: PanelScope) {
+        let terminalHandle = workbenchTerminalHandle(surface.id)
         panels = panels.close(key: scope, id: surface.id)
         if surface.kind == .terminal {
-            perform(.closeTerminal(handle: workbenchTerminalHandle(surface.id)))
+            perform(.closeTerminal(handle: terminalHandle))
         }
         workbenchSideChats.removeValue(forKey: surface.id)
     }

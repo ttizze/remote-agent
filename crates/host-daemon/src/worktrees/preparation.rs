@@ -122,8 +122,10 @@ pub(super) fn start_ref(
     crate::git::text(
         cwd,
         &["rev-parse", "--verify", &format!("{tracking}^{{commit}}")],
-    )
-    .map(|sha| sha.trim().into())
+    )?;
+    // Keep the fetched reference as the worktree's comparison base, so later
+    // upstream updates and the native "vs origin/main" summary use that branch.
+    Ok(tracking)
 }
 
 fn remote_target(cwd: &Path, base: &str) -> Result<Option<(String, String)>> {
