@@ -104,6 +104,7 @@ pub struct Thread {
     #[serde(default)]
     pub queue: crate::operations::InputQueue,
     pub preparation: Option<crate::session::SessionPreparation>,
+    pub workspace_setup: Option<crate::workspace::WorkspaceSetup>,
     pub id: Option<crate::session::SessionRef>,
     /// The public identity remains stable across provider handoffs.
     pub active_provider: Option<crate::session::ProviderKind>,
@@ -470,6 +471,9 @@ pub struct WorktreeSettings {
     pub copy_on_create: bool,
     pub copy_paths: Vec<String>,
     pub worktree_directory: String,
+    pub init_submodules: bool,
+    pub setup_script: Option<crate::workspace::SetupScript>,
+    pub project_setup_scripts: std::collections::HashMap<String, crate::workspace::SetupScript>,
     /// Remove idle checkouts whose HEAD the default branch already contains.
     pub delete_unchanged: bool,
     /// Project IDs that override `delete_unchanged`; other projects inherit it.
@@ -501,6 +505,8 @@ pub struct WorktreeThread {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceReview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<crate::workspace::WorkspaceOptions>,
     pub branch: String,
     pub additions: u64,
     pub deletions: u64,

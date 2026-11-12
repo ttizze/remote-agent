@@ -723,6 +723,7 @@ mod tests {
                         segments: vec![],
                         handoffs: vec![],
                         startup: None,
+                        workspace_setup: None,
                     })
                     .unwrap();
                 let client = service.open_session();

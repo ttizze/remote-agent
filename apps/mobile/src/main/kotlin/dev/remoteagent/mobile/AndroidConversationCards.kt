@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -39,21 +42,84 @@ import dev.remoteagent.core.OperationPhase
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.PreparationPresentation
 import dev.remoteagent.core.RenderedItem
+import dev.remoteagent.core.SetupTerminal
+import dev.remoteagent.core.preparationElapsed
+import kotlinx.coroutines.delay
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun PreparationCard(
     preparation: PreparationPresentation,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    openTerminal: (SetupTerminal) -> Unit,
 ) {
     val language = LocalUiLanguage.current
+    var details by remember { mutableStateOf(false) }
+    var now by remember { mutableStateOf(System.currentTimeMillis().toULong()) }
+    LaunchedEffect(preparation.inProgress) {
+        while (preparation.inProgress) {
+            delay(1000)
+            now = System.currentTimeMillis().toULong()
+        }
+    }
+    fun elapsed(start: ULong?, end: ULong?): String =
+        start?.let { preparationElapsed(language, it, end, now) }.orEmpty()
     Column(Modifier.testTag("task.preparation")) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (preparation.inProgress) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
             Text(preparation.text, style = MaterialTheme.typography.bodySmall)
+            Text(elapsed(preparation.startedAtMs, preparation.endedAtMs), style = MaterialTheme.typography.labelSmall)
         }
-        preparation.retry?.let { retry ->
-            TextButton(onClick = { perform(Intent.RetryPreparation(retry)) {} }) { Text(language.text("再試行")) }
+        if (preparation.showSteps)
+            preparation.steps.forEach { step ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (step.state == "running") CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    else
+                        Text(
+                            when (step.state) {
+                                "done" -> "✓"
+                                "skipped" -> "−"
+                                "failed" -> "×"
+                                "warning" -> "!"
+                                else -> "○"
+                            }
+                        )
+                    Text(step.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    step.detail?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+                    if (step.state != "pending" && step.state != "skipped")
+                        Text(elapsed(step.startedAtMs, step.endedAtMs), style = MaterialTheme.typography.labelSmall)
+                }
+                if (step.tail.isNotEmpty())
+                    SelectionContainer {
+                        Text(step.tail.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+                    }
+            }
+        preparation.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        FlowRow {
+            if (preparation.details.isNotEmpty())
+                TextButton(onClick = { details = !details }) { Text(language.text("詳細")) }
+            preparation.terminal?.let { terminal ->
+                TextButton(onClick = { openTerminal(terminal) }) { Text(language.text("ターミナルを開く")) }
+            }
+            preparation.workLocally?.let { work ->
+                TextButton(onClick = { perform(Intent.RetryPreparation(work)) {} }) { Text(language.text("ローカルで作業")) }
+            }
+            preparation.cancel?.let { cancel ->
+                TextButton(onClick = { perform(Intent.Interrupt(cancel)) {} }) { Text(language.text("キャンセル")) }
+            }
+            preparation.retry?.let { retry ->
+                TextButton(onClick = { perform(Intent.RetryPreparation(retry)) {} }) { Text(language.text("再試行")) }
+            }
         }
+        if (details)
+            preparation.details.forEach { detail ->
+                SelectionContainer {
+                    Text("${detail.label}  ${detail.value}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
     }
 }
 

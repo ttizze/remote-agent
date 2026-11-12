@@ -60,19 +60,26 @@ pub(super) struct Conversation {
     pub segments: Vec<Segment>,
     pub handoffs: Vec<Handoff>,
     pub startup: Option<Startup>,
+    pub workspace_setup: Option<agent_protocol::workspace::WorkspaceSetup>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Startup {
     pub preparation: SessionPreparation,
     pub started_at: f64,
+    pub project_cwd: String,
+    pub workspace: Option<agent_protocol::workspace::WorkspaceStrategy>,
 }
 
 /// Resource results are committed against the latest row, so an interrupt or
 /// rename received during filesystem/provider IO cannot be overwritten.
 pub(super) enum StartupChange {
+    ExpireSetup { ended_at: u64 },
     Worktree,
     Workspace { cwd: String },
+    Prepared,
+    UseRoot,
+    ResetWorkspace,
     Binding { native: SessionRef },
     Sending,
     Failed { status: PreparationStatus },
@@ -86,6 +93,21 @@ fn change_startup(
     change: StartupChange,
 ) -> Result<Option<Conversation>, Failure> {
     let mut row = row.clone();
+    if let StartupChange::ExpireSetup { ended_at } = change {
+        if !row
+            .workspace_setup
+            .as_ref()
+            .is_some_and(|setup| setup.ended_at_ms == Some(ended_at))
+        {
+            return Ok(None);
+        }
+        // Failed preparation still owns its captured script and checkout.
+        // Hide the card after retention, but retain what a later retry needs.
+        if row.startup.is_none() {
+            row.workspace_setup = None;
+        }
+        return Ok(Some(row));
+    }
     if row.startup.is_none()
         && matches!(
             change,
@@ -110,7 +132,32 @@ fn change_startup(
         }
         StartupChange::Workspace { cwd } => {
             row.cwd = cwd;
-            startup.preparation.stage = PreparationStage::Provider;
+            startup.preparation.stage = if row.workspace_setup.is_some() {
+                PreparationStage::SetupScript
+            } else {
+                PreparationStage::Provider
+            };
+        }
+        StartupChange::Prepared => startup.preparation.stage = PreparationStage::Provider,
+        StartupChange::UseRoot => {
+            if !row.bindings.is_empty() {
+                return Err(Failure::new(
+                    "preparation_started",
+                    "The agent has already started",
+                ));
+            }
+            startup.workspace = Some(agent_protocol::workspace::WorkspaceStrategy::Root);
+            row.cwd = startup.project_cwd.clone();
+            row.workspace_setup = None;
+            startup.preparation.stage = PreparationStage::Workspace;
+        }
+        StartupChange::ResetWorkspace => {
+            row.cwd = startup.project_cwd.clone();
+            startup.preparation.stage = PreparationStage::Workspace;
+            if let Some(setup) = &mut row.workspace_setup {
+                setup.worktree_path = None;
+                setup.branch = None;
+            }
         }
         StartupChange::Binding { native } => {
             row.bindings.push(Binding {
@@ -143,6 +190,27 @@ fn change_startup(
             PreparationStatus::Failed { .. } | PreparationStatus::Interrupted => {
                 startup.preparation.status = PreparationStatus::Preparing;
                 startup.started_at = started_at;
+                if let Some(setup) = &mut row.workspace_setup {
+                    setup.phase = agent_protocol::workspace::SetupPhase::Running;
+                    setup.started_at_ms = (started_at * 1000.) as u64;
+                    setup.ended_at_ms = None;
+                    setup.error = None;
+                    setup.can_cancel = startup.preparation.stage != PreparationStage::Provider;
+                    for stage in &mut setup.stages {
+                        if matches!(
+                            stage.status,
+                            agent_protocol::workspace::SetupStageStatus::Failed
+                                | agent_protocol::workspace::SetupStageStatus::Running
+                        ) {
+                            stage.status = agent_protocol::workspace::SetupStageStatus::Pending;
+                            stage.started_at_ms = None;
+                            stage.ended_at_ms = None;
+                            stage.tail.clear();
+                            stage.detail = None;
+                            stage.exit_code = None;
+                        }
+                    }
+                }
             }
             PreparationStatus::Preparing | PreparationStatus::Sending => return Ok(None),
             PreparationStatus::Unknown => {
@@ -169,6 +237,7 @@ fn change_startup(
             startup.preparation.status = PreparationStatus::Interrupted;
         }
         StartupChange::Finished => row.startup = None,
+        StartupChange::ExpireSetup { .. } => unreachable!(),
     }
     Ok(Some(row))
 }
@@ -226,6 +295,7 @@ impl Conversation {
             id,
             handoffs: Vec::new(),
             startup: None,
+            workspace_setup: None,
         })
     }
 
@@ -259,6 +329,16 @@ impl Conversation {
     }
 
     pub fn describe(&self, thread: &mut Thread) {
+        thread.workspace_setup = self.workspace_setup.clone().filter(|setup| {
+            setup.visible_at(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            )
+        });
         thread.id = Some(self.id.clone());
         thread.active_provider = Some(self.active.provider);
         thread.cwd = Some(self.cwd.clone());
@@ -396,6 +476,18 @@ impl Conversations {
             .and_then(|mut rows| {
                 validate(&rows)?;
                 for row in &mut rows {
+                    if let Some(setup) = &mut row.workspace_setup
+                        && setup.phase == agent_protocol::workspace::SetupPhase::Running
+                    {
+                        setup.finish(
+                            agent_protocol::workspace::SetupPhase::Failed,
+                            Some("Host restarted during workspace preparation".into()),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        );
+                    }
                     if let Some(startup) = &mut row.startup {
                         startup.preparation.status = match startup.preparation.status {
                             PreparationStatus::Preparing => PreparationStatus::Failed {
@@ -565,6 +657,32 @@ impl Conversations {
         rows[index] = row.clone();
         self.save_rows(&mut state, rows)?;
         Ok((row, true))
+    }
+
+    pub fn update_setup(
+        &self,
+        id: &SessionRef,
+        update: impl FnOnce(&mut agent_protocol::workspace::WorkspaceSetup),
+    ) -> Result<Option<agent_protocol::workspace::WorkspaceSetup>, Failure> {
+        let mut state = self.state.lock().unwrap();
+        let mut rows = state
+            .as_ref()
+            .cloned()
+            .map_err(|error| Failure::new("conversation_storage_failed", error))?;
+        let row = rows
+            .iter_mut()
+            .find(|row| &row.id == id)
+            .ok_or_else(|| Failure::new("invalid_thread", "task is unavailable"))?;
+        let Some(setup) = &mut row.workspace_setup else {
+            return Ok(None);
+        };
+        let before = setup.clone();
+        update(setup);
+        let setup = setup.clone();
+        if setup != before {
+            self.save_rows(&mut state, rows)?;
+        }
+        Ok(Some(setup))
     }
 
     fn save_rows(
@@ -809,6 +927,8 @@ mod tests {
                     follow_up: Default::default(),
                 };
                 row.startup = Some(Startup {
+                    project_cwd: row.cwd.clone(),
+                    workspace: None,
                     preparation: SessionPreparation {
                         submission: submission.clone(),
                         status: status.clone(),

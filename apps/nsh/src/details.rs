@@ -660,6 +660,7 @@ mod tests {
         let pane = Arc::make_mut(snapshot.panes.primary_mut());
         Arc::make_mut(&mut pane.navigation).cwd = "/fixture/日本語 👋".into();
         Arc::make_mut(&mut pane.workspace).review = Some(Arc::new(WorkspaceReview {
+            options: None,
             branch: "feature/native".into(),
             additions: 7,
             deletions: 2,

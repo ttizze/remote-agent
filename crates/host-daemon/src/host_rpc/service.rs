@@ -59,6 +59,9 @@ struct ServiceInner {
     imports: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, transcripts::Import>>,
     model_selections: model_selections::ModelSelections,
     capacity: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, capacity::Run>>,
+    preparations: std::sync::Mutex<
+        HashMap<agent_protocol::session::SessionRef, tokio_util::sync::CancellationToken>,
+    >,
     history_scope: OnceLock<(std::path::PathBuf, bool)>,
     updating: std::sync::atomic::AtomicBool,
 }
@@ -82,6 +85,7 @@ impl HostRpcService {
                 store: store.clone(),
                 imports: Default::default(),
                 capacity: Default::default(),
+                preparations: Default::default(),
                 model_selections: model_selections::ModelSelections::new(store),
                 browser: OnceLock::new(),
                 provider_settings: crate::providers::Settings::new(
@@ -159,6 +163,9 @@ impl HostRpcService {
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
+        for cancel in self.inner.preparations.lock().unwrap().values() {
+            cancel.cancel();
+        }
         if let Some(browser) = self.inner.browser.get() {
             browser.shutdown().await;
         }
@@ -247,6 +254,11 @@ impl HostRpcService {
             };
         }
         let result = async {
+            if let Call::RetryPreparation(params) = message
+                && params.work_locally
+            {
+                self.preempt_setup(&params.thread_id).await?;
+            }
             let (target, input_id) = session_target(message);
             let target = target.cloned();
             let submission = target.as_ref().zip(input_id);
@@ -460,10 +472,19 @@ impl HostRpcService {
             }
 
             Call::CreateSession(_) => unreachable!("creation owns its subscription"),
-            Call::RetryPreparation(params) => {
-                self.retry_preparation(&params.thread_id).await?.into()
-            }
+            Call::RetryPreparation(params) => self
+                .retry_preparation(&params.thread_id, params.work_locally)
+                .await?
+                .into(),
             Call::StartTerminal(params) => {
+                if self.inner.terminals.is_setup(&params.handle) {
+                    self.inner
+                        .terminals
+                        .attach_setup(&self.inner.router, session, &params.handle, params.size)
+                        .await
+                        .map_err(|error| Failure::new("terminal_start_failed", error))?;
+                    return Ok(agent_protocol::models::Empty {}.into());
+                }
                 let launch = crate::terminals::Launch::shell(params.cwd.clone());
                 (self
                     .inner
@@ -528,10 +549,13 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("dictation_failed", error))?)
             .into(),
             Call::ReviewWorkspace(params) => {
-                (crate::inspect_workspace(params.cwd.clone())
+                let mut review = crate::inspect_workspace(params.cwd.clone())
                     .await
-                    .map_err(|error| Failure::new("workspace_review_failed", error))?)
-                .into()
+                    .map_err(|error| Failure::new("workspace_review_failed", error))?;
+                if params.include_options {
+                    review.options = Some(self.workspace_options(&params.cwd).await?);
+                }
+                review.into()
             }
             Call::ListFiles(_)
             | Call::ListTreeEntries(_)

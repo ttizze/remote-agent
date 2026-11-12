@@ -677,6 +677,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
                 }),
             )])),
             workspace: Arc::new(Workspace {
+                options: Default::default(),
                 file_metadata: Default::default(),
                 file_trees: Default::default(),
                 settings: Some(Arc::default()),

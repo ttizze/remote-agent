@@ -1,5 +1,8 @@
 use agent_protocol::models::{Worktree, WorktreeSettings};
+mod preparation;
 use anyhow::{Context as _, Result, anyhow};
+pub(crate) use preparation::default_base;
+pub(crate) use preparation::{Observer, Progress};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -278,6 +281,34 @@ impl Worktrees {
         cwd: Option<&str>,
         on_create: impl FnOnce() -> F,
     ) -> Result<Option<PathBuf>> {
+        self.prepare_options(cwd, None, on_create, Observer::default())
+            .await
+    }
+
+    pub(crate) async fn prepare_selected(
+        &self,
+        cwd: &str,
+        base: String,
+        fetch: bool,
+        observer: Observer,
+    ) -> Result<PathBuf> {
+        self.prepare_options(
+            Some(cwd),
+            Some((base, fetch)),
+            || async { Ok(()) },
+            observer,
+        )
+        .await?
+        .context("selected worktree was not created")
+    }
+
+    async fn prepare_options<F: std::future::Future<Output = Result<()>>>(
+        &self,
+        cwd: Option<&str>,
+        selection: Option<(String, bool)>,
+        on_create: impl FnOnce() -> F,
+        observer: Observer,
+    ) -> Result<Option<PathBuf>> {
         // Automatic worktrees need an explicitly selected checkout.
         let Some(cwd) = cwd else {
             return Ok(None);
@@ -286,7 +317,7 @@ impl Worktrees {
         let path = self.path.clone();
         let state_path = path.clone();
         let mut state = tokio::task::spawn_blocking(move || read(&state_path)).await??;
-        if !state.settings.create_on_new_session {
+        if selection.is_none() && !state.settings.create_on_new_session {
             return Ok(None);
         }
         on_create().await?;
@@ -297,6 +328,8 @@ impl Worktrees {
                 crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
             )?;
             let relative_cwd = cwd.strip_prefix(&root)?;
+            let (requested, fetch) = selection.unwrap_or_else(|| (String::new(), true));
+            let base = preparation::start_ref(&root, &requested, fetch, &observer)?;
             let original = match state
                 .workspace_roots
                 .get(root.to_str().context("project path is not UTF-8")?)
@@ -351,18 +384,50 @@ impl Worktrees {
                     .context("リポジトリのフォルダ名を取得できません。")?,
             );
             let branch = format!("bex/{}", session.file_name().unwrap().to_string_lossy());
-            let target = create_checkout(
+            observer.send(Progress::Stage(
+                agent_protocol::workspace::SetupStageId::Checkout,
+                agent_protocol::workspace::SetupStageStatus::Running,
+            ))?;
+            let target = create_checkout_observed(
                 &root,
                 &destination,
                 &branch,
-                "HEAD",
+                &base,
                 if state.settings.copy_on_create {
                     &state.settings.copy_paths
                 } else {
                     &[]
                 },
                 relative_cwd,
+                &observer,
             )?;
+            observer
+                .send(Progress::Stage(
+                    agent_protocol::workspace::SetupStageId::Checkout,
+                    agent_protocol::workspace::SetupStageStatus::Done,
+                ))
+                .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+            if state.settings.init_submodules && destination.join(".gitmodules").is_file() {
+                use agent_protocol::workspace::{SetupStageId, SetupStageStatus};
+                observer
+                    .send(Progress::Stage(
+                        SetupStageId::Submodules,
+                        SetupStageStatus::Running,
+                    ))
+                    .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+                preparation::git(
+                    &destination,
+                    &["submodule", "update", "--init", "--recursive", "--progress"],
+                    &observer,
+                )
+                .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+                observer
+                    .send(Progress::Stage(
+                        SetupStageId::Submodules,
+                        SetupStageStatus::Done,
+                    ))
+                    .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+            }
             state.workspace_roots.insert(
                 destination
                     .to_str()
@@ -372,6 +437,15 @@ impl Worktrees {
             );
             save(&path, &state)
                 .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+            let observed = observer.send(Progress::Created {
+                path: target.to_string_lossy().into_owned(),
+                branch: branch.clone(),
+            });
+            if let Err(error) = observed {
+                state.workspace_roots.remove(destination.to_str().unwrap());
+                let _ = save(&path, &state);
+                return Err(discard_checkout(&root, &destination, &branch, error));
+            }
             Ok(Some(target))
         })
         .await?
@@ -479,6 +553,26 @@ fn create_checkout(
     copy_paths: &[String],
     relative_cwd: &Path,
 ) -> Result<PathBuf> {
+    create_checkout_observed(
+        source,
+        destination,
+        branch,
+        base,
+        copy_paths,
+        relative_cwd,
+        &Observer::default(),
+    )
+}
+
+fn create_checkout_observed(
+    source: &Path,
+    destination: &Path,
+    branch: &str,
+    base: &str,
+    copy_paths: &[String],
+    relative_cwd: &Path,
+    observer: &Observer,
+) -> Result<PathBuf> {
     let base = crate::workspace_review::comparison::source_ref(source, base)?;
     let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
     if let Some(parent) = destination.parent() {
@@ -491,9 +585,17 @@ fn create_checkout(
     }
     // Create the branch separately so a locked/missing checkout cannot leak it.
     // One --force replaces a missing registration but continues to respect locks.
-    if let Err(error) = crate::git::text(
+    if let Err(error) = preparation::git(
         source,
-        &["worktree", "add", "--force", destination_text, branch],
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--force",
+            destination_text,
+            branch,
+        ],
+        observer,
     ) {
         let _ = fs::remove_dir(destination);
         return Err(match crate::git::text(source, &["branch", "-D", branch]) {
@@ -502,6 +604,13 @@ fn create_checkout(
         });
     }
     let prepared = (|| {
+        // `worktree add` does not accept --progress. Populate this fresh
+        // registration with checkout, whose stderr reports real file progress.
+        preparation::git(
+            destination,
+            &["checkout", "--force", "--progress", branch, "--"],
+            observer,
+        )?;
         crate::git::text(
             source,
             &[
@@ -1507,7 +1616,7 @@ mod tests {
         fs::set_permissions(root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir(root.join("local")).unwrap();
         fs::write(root.join("local/value"), "local data").unwrap();
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":"","deleteUnchanged":false,"projectDeleteUnchanged":{}});
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":"","initSubmodules":false,"setupScript":null,"projectSetupScripts":{},"deleteUnchanged":false,"projectDeleteUnchanged":{}});
         store.configure(Some(settings.clone())).await.unwrap();
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
@@ -1640,7 +1749,7 @@ mod tests {
     async fn invalid_settings_never_replace_saved_preferences() {
         let directory = repository();
         let store = Worktrees::new(&directory.path().join("projects.json"));
-        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":"","deleteUnchanged":false,"projectDeleteUnchanged":{}});
+        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":"","initSubmodules":false,"setupScript":null,"projectSetupScripts":{},"deleteUnchanged":false,"projectDeleteUnchanged":{}});
         store.configure(Some(valid.clone())).await.unwrap();
         for path in [
             "",

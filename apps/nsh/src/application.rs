@@ -693,6 +693,17 @@ impl Application {
         });
     }
 
+    pub fn open_setup_terminal(
+        &self,
+        scope: PanelScope,
+        terminal: agent_core::presentation::conversation::SetupTerminal,
+    ) {
+        self.state.send_modify(|state| {
+            let opened = state.panels.clone().open_setup_terminal(scope, terminal);
+            Arc::make_mut(state).panels = opened.panels;
+        });
+    }
+
     pub fn activate_panel(&self, scope: PanelScope, id: u64) {
         self.state.send_modify(|state| {
             let panels = state.panels.clone().activate(scope, id).panels;
@@ -701,6 +712,7 @@ impl Application {
     }
 
     pub fn close_panel(&self, scope: PanelScope, id: u64) {
+        let handle = self.terminal_handle(id);
         let mut terminal = false;
         let closed = self.state.send_if_modified(|state| {
             if state.panels.scope(id).as_ref() != Some(&scope) {
@@ -726,18 +738,26 @@ impl Application {
         }
         self.client.close_pane(id);
         if terminal {
-            self.client.dispatch(
-                &scope.host,
-                None,
-                Intent::CloseTerminal {
-                    handle: self.terminal_handle(id),
-                },
-            );
+            self.client
+                .dispatch(&scope.host, None, Intent::CloseTerminal { handle });
         }
     }
 
     pub fn terminal_handle(&self, id: u64) -> String {
-        format!("agent-terminal-{}-{id}", self.instance)
+        let state = self.snapshot();
+        state
+            .panels
+            .scope(id)
+            .and_then(|scope| {
+                state
+                    .panels
+                    .get(scope)
+                    .surfaces
+                    .into_iter()
+                    .find(|surface| surface.id == id)
+            })
+            .and_then(|surface| surface.terminal_handle)
+            .unwrap_or_else(|| format!("agent-terminal-{}-{id}", self.instance))
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {

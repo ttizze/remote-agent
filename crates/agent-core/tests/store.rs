@@ -802,7 +802,7 @@ async fn new_chat(
     let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
     let request = read(reader).await;
     assert_eq!(request["method"], "host/workspace/review");
-    assert_eq!(request["params"], json!({"cwd":cwd}));
+    assert_eq!(request["params"], json!({"cwd":cwd,"includeOptions":true}));
     writer
         .reply(&request, json!({"result":review()}))
         .await
@@ -4251,7 +4251,10 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         );
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/workspace/review");
-        assert_eq!(request["params"], json!({"cwd":"/new"}));
+        assert_eq!(
+            request["params"],
+            json!({"cwd":"/new","includeOptions":true})
+        );
         writer
             .reply(&request, json!({"result":review()}))
             .await
@@ -4418,7 +4421,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     }
     assert_eq!(
         requests["host/workspace/review"]["params"],
-        json!({"cwd":"/fixture"})
+        json!({"cwd":"/fixture","includeOptions":true})
     );
     assert_eq!(
         requests["host/session/list"]["params"],

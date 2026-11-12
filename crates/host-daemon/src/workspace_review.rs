@@ -51,6 +51,7 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
         return Err(anyhow!("working-tree diff exceeds 8 MiB"));
     }
     Ok(WorkspaceReview {
+        options: None,
         branch: comparison.branch,
         additions,
         deletions,
@@ -78,6 +79,7 @@ pub(crate) async fn directory_changes(cwds: HashSet<String>) -> Result<HashMap<S
 
 fn empty_review() -> WorkspaceReview {
     WorkspaceReview {
+        options: None,
         branch: String::new(),
         additions: 0,
         deletions: 0,

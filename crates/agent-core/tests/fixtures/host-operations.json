@@ -169,6 +169,9 @@
               "assets"
             ],
             "worktreeDirectory": "/worktrees",
+            "initSubmodules": false,
+            "setupScript": null,
+            "projectSetupScripts": {},
             "deleteUnchanged": false,
             "projectDeleteUnchanged": {}
           }
@@ -183,6 +186,9 @@
         "assets"
       ],
       "worktreeDirectory": "/worktrees",
+      "initSubmodules": false,
+      "setupScript": null,
+      "projectSetupScripts": {},
       "deleteUnchanged": false,
       "projectDeleteUnchanged": {}
     }
@@ -199,6 +205,9 @@
           "assets"
         ],
         "worktreeDirectory": "/worktrees",
+        "initSubmodules": false,
+        "setupScript": null,
+        "projectSetupScripts": {},
         "deleteUnchanged": true,
         "projectDeleteUnchanged": {
           "project": false
@@ -216,6 +225,9 @@
             "assets"
           ],
           "worktreeDirectory": "/worktrees",
+          "initSubmodules": false,
+          "setupScript": null,
+          "projectSetupScripts": {},
           "deleteUnchanged": true,
           "projectDeleteUnchanged": {
             "project": false
@@ -230,6 +242,9 @@
               "assets"
             ],
             "worktreeDirectory": "/worktrees",
+            "initSubmodules": false,
+            "setupScript": null,
+            "projectSetupScripts": {},
             "deleteUnchanged": true,
             "projectDeleteUnchanged": {
               "project": false
@@ -246,6 +261,9 @@
         "assets"
       ],
       "worktreeDirectory": "/worktrees",
+      "initSubmodules": false,
+      "setupScript": null,
+      "projectSetupScripts": {},
       "deleteUnchanged": true,
       "projectDeleteUnchanged": {
         "project": false

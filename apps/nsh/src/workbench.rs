@@ -66,6 +66,14 @@ impl Workbench {
         self.application
             .with(|application| application.terminal_handle(id))
     }
+    pub fn open_setup_terminal(
+        self,
+        terminal: agent_core::presentation::conversation::SetupTerminal,
+    ) {
+        self.application.with(|application| {
+            application.open_setup_terminal(self.scope.get_untracked(), terminal)
+        });
+    }
 }
 
 pub(crate) fn title() -> String {
@@ -204,7 +212,7 @@ pub(crate) fn screen(leading: Option<AnyElement>) -> impl IntoElement {
             |surface: &PanelSurface| surface.id,
             move |surface, _| {
                 let host = workspace.scope.get_untracked().host;
-                let PanelSurface { id, kind, path } = surface.get_untracked();
+                let PanelSurface { id, kind, path, .. } = surface.get_untracked();
                 match kind {
                     PanelKind::Files => crate::files::screen(id).into_element(),
                     PanelKind::File => file(id),

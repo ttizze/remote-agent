@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 #[cfg(any(all(target_os = "macos", debug_assertions), test))]
 pub(crate) mod native;
+mod preparation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Renderer {
@@ -115,18 +116,25 @@ pub(crate) enum Kind {
 /// What a row draws, as T3 Code's timeline rows.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Shape {
+    Preparation,
     /// A message: the user's, an answer, or text a client shows as it is.
     Message,
     /// Commentary between the work, without an answer's actions.
     Commentary,
     /// A completed turn's "Worked for …".
-    Fold { open: bool },
+    Fold {
+        open: bool,
+    },
     /// A running turn's "Working for …".
     Working,
     /// Work under its summary.
-    Group { open: bool },
+    Group {
+        open: bool,
+    },
     /// A tool's row; a `member` of an open group sits tight in it.
-    Work { member: bool },
+    Work {
+        member: bool,
+    },
     /// The running turn's latest work, Thinking, a retry.
     Live,
     /// The turn's error.
@@ -155,6 +163,7 @@ impl Shape {
 
 #[derive(Clone, PartialEq)]
 struct Row {
+    preparation: Option<agent_core::presentation::conversation::PreparationPresentation>,
     id: String,
     body: SharedString,
     streaming: bool,
@@ -195,6 +204,7 @@ struct Row {
 impl Row {
     fn new(id: String, kind: Kind, shape: Shape, body: impl Into<SharedString>) -> Self {
         Self {
+            preparation: None,
             id,
             body: body.into(),
             streaming: false,
@@ -235,6 +245,7 @@ fn project(
             rows.extend(turn_row(row, &key, turn));
         }
     }
+    let native_end = rows.len();
     rows.extend(conversation.queued.iter().filter_map(|item| {
         source_row(agent_core::presentation::conversation::ConversationRow {
             id: item.data.id.clone(),
@@ -251,6 +262,12 @@ fn project(
             .iter()
             .cloned()
             .filter_map(source_row),
+    );
+    agent_core::presentation::conversation::rows::position_workspace_setup(
+        &mut rows,
+        native_end,
+        |row| row.kind == Kind::User,
+        |row| row.preparation.is_some(),
     );
     let mut previous_steer = false;
     let mut in_group = false;
@@ -459,9 +476,15 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
                 .or_else(|| item.data.title.clone())
                 .unwrap_or_default(),
         ),
-        ConversationRowContent::Preparation { preparation } => {
-            (Kind::Activity, Shape::Message, preparation.text.clone())
-        }
+        ConversationRowContent::Preparation { preparation } => (
+            Kind::Activity,
+            if preparation.steps.is_empty() {
+                Shape::Message
+            } else {
+                Shape::Preparation
+            },
+            preparation.text.clone(),
+        ),
         ConversationRowContent::ProviderHandoff { text } => {
             (Kind::Activity, Shape::Message, text.clone())
         }
@@ -523,8 +546,10 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
             shown.images = item.data.image_sources.clone();
         }
         ConversationRowContent::Preparation { preparation } => {
-            shown.retry = preparation.retry;
-            if preparation.shimmer {
+            shown.retry = preparation.retry.clone();
+            if !preparation.steps.is_empty() {
+                shown.preparation = Some(preparation);
+            } else if preparation.shimmer {
                 shown.status = Some(crate::activity::Status::SettingUp);
             }
         }
@@ -1058,6 +1083,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                 label().unwrap_or_default().to_string()
                                             })
                                         },
+                                    ))
+                                    .child(when(
+                                        move || shape() == Some(Shape::Preparation),
+                                        move || preparation::card(connection, row, clock),
                                     ))
                                     .child(when(
                                         move || matches!(shape(), Some(Shape::Group { .. })),

@@ -455,8 +455,11 @@ pub struct StartAccountTerminal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewWorkspace {
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_options: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +617,7 @@ pub struct CreateSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitialInput {
+    pub workspace: Option<crate::workspace::WorkspaceStrategy>,
     pub client_user_message_id: crate::ids::ClientInputId,
     pub input: Vec<Input>,
     pub effort: Option<String>,
@@ -624,6 +628,7 @@ pub struct InitialInput {
 #[serde(rename_all = "camelCase")]
 pub struct RetryPreparation {
     pub thread_id: crate::session::SessionRef,
+    pub work_locally: bool,
 }
 
 impl RpcMethod for CreateSession {

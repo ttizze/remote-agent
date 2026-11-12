@@ -87,6 +87,9 @@ struct WorktreeSettingsScreen: View {
     let model: AppViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var inputs = WorktreeSettingsInputs()
+    @State private var setupScript: SetupScript?
+    @State private var projectSetupScripts: [String: SetupScript] = [:]
+    @State private var initSubmodules = false
     @State private var project: String?
     @State private var loaded = false
     @State private var busy = false
@@ -107,6 +110,12 @@ struct WorktreeSettingsScreen: View {
             }
             WorktreeSettingsFields(inputs: $inputs, project: project,
                                    enabled: loaded && !busy && model.isConnected)
+            SetupScriptSettings(shared: $setupScript, projects: $projectSetupScripts, project: project)
+                .disabled(!loaded || busy || !model.isConnected)
+            if project == nil {
+                Section { Toggle("サブモジュールを初期化", isOn: $initSubmodules) }
+                    .disabled(!loaded || busy || !model.isConnected)
+            }
             if busy {
                 ProgressView().accessibilityLabel("設定を通信中")
             }
@@ -154,6 +163,9 @@ struct WorktreeSettingsScreen: View {
                 copyPaths: settings.copyPaths, worktreeDirectory: settings.worktreeDirectory,
                 deleteUnchanged: settings.deleteUnchanged, projectDeleteUnchanged: settings.projectDeleteUnchanged
             )
+            setupScript = settings.setupScript
+            initSubmodules = settings.initSubmodules
+            projectSetupScripts = settings.projectSetupScripts
             loaded = true
         }
     }
@@ -163,6 +175,8 @@ struct WorktreeSettingsScreen: View {
         let settings = normalizeWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: inputs.createOnNewSession, copyOnCreate: inputs.copyOnCreate,
             copyPaths: inputs.copyPaths, worktreeDirectory: inputs.worktreeDirectory,
+            initSubmodules: initSubmodules,
+            setupScript: setupScript, projectSetupScripts: projectSetupScripts,
             deleteUnchanged: inputs.deleteUnchanged, projectDeleteUnchanged: inputs.projectDeleteUnchanged
         ))
         model.requestSnapshot(.updateWorktreeSettings(UpdateWorktreeSettings(settings: settings))) { snapshot, result in

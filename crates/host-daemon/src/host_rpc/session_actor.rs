@@ -131,6 +131,9 @@ impl SessionActor {
         if let Some(preparation) = &self.timeline.preparation {
             thread.preparation = preparation.clone();
         }
+        if let Some(setup) = &self.timeline.workspace_setup {
+            thread.workspace_setup = setup.clone();
+        }
         thread
     }
 }

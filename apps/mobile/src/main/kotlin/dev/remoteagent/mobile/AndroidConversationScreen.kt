@@ -67,9 +67,11 @@ internal fun ThreadDetailScreen(
     toggleActivity: (String) -> Unit,
     modifier: Modifier = Modifier,
     scrollToTopRequest: Int = 0,
+    terminals: dev.remoteagent.core.Terminals,
     composer: @Composable (() -> Unit) -> Unit,
 ) {
     val threadId = context.navigation().threadId
+    var setupTerminal by remember(threadId) { mutableStateOf<dev.remoteagent.core.SetupTerminal?>(null) }
     var recoveryExpanded by remember(threadId, context.navigation().draftKey) { mutableStateOf(false) }
     val listState = rememberLazyListState()
     var following by remember(threadId) { mutableStateOf(true) }
@@ -107,6 +109,7 @@ internal fun ThreadDetailScreen(
                         threadId,
                         context.navigation().cwd,
                         perform,
+                        openSetupTerminal = { setupTerminal = it },
                         forkPhase =
                             (row.content as? ConversationRowContent.Response)?.forkTurnId?.let { turn ->
                                 context.forkPhase(turn)
@@ -123,6 +126,9 @@ internal fun ThreadDetailScreen(
             LatestMessageButton(listState) { following = true }
         }
         composer { following = true }
+    }
+    setupTerminal?.let { terminal ->
+        TerminalDialog(terminals, terminal.cwd, perform, terminal.handle) { setupTerminal = null }
     }
 }
 
@@ -167,12 +173,13 @@ private fun ConversationContent(
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     forkPhase: dev.remoteagent.core.OperationPhase? = null,
+    openSetupTerminal: (dev.remoteagent.core.SetupTerminal) -> Unit,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
     val language = LocalUiLanguage.current
     val timestampMs = row.timestampMs
     when (val content = row.content) {
-        is ConversationRowContent.Preparation -> PreparationCard(content.preparation, perform)
+        is ConversationRowContent.Preparation -> PreparationCard(content.preparation, perform, openSetupTerminal)
         is ConversationRowContent.ProviderHandoff ->
             Text(
                 content.text,
@@ -267,6 +274,7 @@ internal fun ThreadComposer(
         Column(Modifier.padding(8.dp)) {
             inputUnavailable?.let { Text(it) }
             DraftAttachments(draft.attachments, navigation.draftKey, perform)
+            WorkspacePicker(controls, perform)
             ComposerTextInput(composer, perform)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 attach { uploading = it }

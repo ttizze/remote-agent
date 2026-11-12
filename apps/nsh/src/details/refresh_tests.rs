@@ -86,6 +86,7 @@ fn publication(
 
 fn review(text: &str) -> Arc<WorkspaceReview> {
     Arc::new(WorkspaceReview {
+        options: None,
         branch: "main".into(),
         additions: 1,
         deletions: 1,
