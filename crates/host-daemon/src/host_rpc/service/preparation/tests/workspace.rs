@@ -12,7 +12,10 @@ struct Fixture {
 impl Fixture {
     async fn new(script: Option<SetupScript>) -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let repository = crate::host_rpc::service::worktrees::tests::repository(directory.path());
+        let repository = dunce::canonicalize(
+            crate::host_rpc::service::worktrees::tests::repository(directory.path()),
+        )
+        .unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
         let host = HostRpcService::new(
             [agent.backend()],
