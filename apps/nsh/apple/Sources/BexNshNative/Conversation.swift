@@ -26,6 +26,7 @@
         let changed: [NativeConversationRow]
         let removed: [String]
         let following: Bool
+        let inset: Double
         let history: History?
         let notice: String?
         let latest: String
@@ -72,6 +73,7 @@
         private var order: [String] = []
         private var scope = ""
         private var following = true
+        private var inset: CGFloat = 0
         private var applying = false
         private var pending = false
         private var restoring = false
@@ -192,6 +194,7 @@
             }
             if let order = update.order { self.order = order }
             following = update.following
+            inset = CGFloat(update.inset)
             history.title = update.history?.title ?? ""
             history.isEnabled = update.history?.enabled ?? false
             history.isHidden = update.history == nil
@@ -293,7 +296,7 @@
                 top += 32
             }
             scroll.frame = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top))
-            scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 16, right: 0)
+            scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: inset + 16, right: 0)
             let width = scroll.contentSize.width
             column.width = width
             let lane = max(40, min(700, width - 48))
@@ -305,7 +308,7 @@
                 table.layoutSubtreeIfNeeded()
                 restore(anchor)
             }
-            latest.frame = NSRect(x: (bounds.width - 44) / 2, y: bounds.height - 50, width: 44, height: 44)
+            latest.frame = NSRect(x: (bounds.width - 44) / 2, y: bounds.height - inset - 50, width: 44, height: 44)
             updateLatest()
         }
 

@@ -9,7 +9,7 @@ final class ConversationScrollTests: UIResponder, UIApplicationDelegate {
     func application(_: UIApplication,
                      didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         Task {
-            await checkComposerSeparation()
+            await checkComposerUnderlay()
             await checkRecyclingAndAnchoring()
             await checkDetachedTail()
             await checkFollowingTallRows()
@@ -358,13 +358,16 @@ extension ConversationScrollTests {
 }
 
 extension ConversationScrollTests {
-    private func checkComposerSeparation() async {
+    private func checkComposerUnderlay() async {
         for height: CGFloat in [60, 100 + 1.0 / 3, 180] { // Dictation sizes fall between pixels.
             let scroll = ConversationScrollState()
             let controller = UIHostingController(rootView:
-                ConversationList(ids: [.message("long")], scroll: scroll, following: true,
-                                 accessibilityValue: "") { _ in
-                    AnyView(Text("Scrollable conversation").frame(height: 1200))
+                GeometryReader { geometry in
+                    ConversationList(ids: [.message("long")], scroll: scroll, following: true,
+                                     accessibilityValue: "", viewportHeight: geometry.size.height) { _ in
+                        AnyView(Text("Scrollable conversation").frame(height: 1200))
+                    }
+                    .ignoresSafeArea(.container, edges: .bottom)
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Text("Composer").frame(maxWidth: .infinity).frame(height: height)
@@ -373,11 +376,14 @@ extension ConversationScrollTests {
             mount(controller)
             await layout(controller)
             let view = collection(in: controller.view)!
-            let composerTop = controller.view.bounds.maxY - height - controller.view.safeAreaInsets.bottom
-            check(abs(view.convert(view.bounds, to: controller.view).maxY - composerTop) < 1,
-                  "Conversation must end above the unfilled composer: \(geometry(view))")
+            check(abs(view.convert(view.bounds, to: controller.view).maxY - controller.view.bounds.maxY) < 1,
+                  "Conversation must draw behind the composer and home indicator")
+            check(abs(view.adjustedContentInset.bottom - height - controller.view.safeAreaInsets.bottom) < 1,
+                  "Native insets must reserve the composer and home indicator once: \(geometry(view))")
             check(view.hitTest(CGPoint(x: view.bounds.midX, y: view.bounds.minY + 20), with: nil) != nil,
                   "Visible conversation content must retain its taps")
+            check(view.hitTest(CGPoint(x: view.bounds.midX, y: view.bounds.maxY - height / 2), with: nil) == nil,
+                  "Drawing beneath the composer must not receive its taps")
             let last = view.layoutAttributesForItem(at: IndexPath(item: 0, section: 0))!
             check(abs(view.contentOffset.y + view.bounds.height - view.adjustedContentInset.bottom
                       - last.frame.maxY - 6) < 1,

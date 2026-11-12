@@ -569,6 +569,13 @@ pub(crate) struct Timeline {
     viewable: Signal<Option<(usize, usize)>>,
     /// The timeline's width, its lane centred in it.
     width: Signal<f32>,
+    /// The space the timeline's end keeps clear of what lies over it (the
+    /// composer): as T3 Code's reservation, the tallest it was in this
+    /// conversation, so that it shrinking never pulls a reader to the end.
+    inset: Signal<f32>,
+    /// The composer's current height positions the latest-message button and
+    /// starts the next conversation's scroll reservation.
+    covered: Signal<f32>,
     position: Stored<Option<agent_core::presentation::conversation::ScrollPosition>>,
 }
 
@@ -661,7 +668,20 @@ impl Timeline {
             rows,
             viewable: signal(None),
             width: signal(0.0),
+            inset: signal(0.0),
+            covered: signal(0.0),
             position: stored(None),
+        }
+    }
+
+    /// As T3 Code's composer overlay: what lies over the timeline's end,
+    /// `height` tall, which the timeline's end and its way back clear.
+    pub(crate) fn cover(self, height: f32) {
+        if self.covered.get_untracked() != height {
+            self.covered.set(height);
+        }
+        if self.inset.get_untracked() < height {
+            self.inset.set(height);
         }
     }
 
@@ -697,6 +717,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
         rows,
         viewable,
         width,
+        inset,
+        covered,
         position,
     } = timeline;
     let surroundings = crate::rich_text::Surroundings::current();
@@ -764,6 +786,8 @@ fn list(timeline: Timeline) -> impl IntoElement {
         expanded_items.set(HashSet::new());
         unfolded.set(HashSet::new());
         surroundings.find.reset_position();
+        // A reservation held for another conversation's draft is not this one's.
+        inset.set(covered.get_untracked());
     });
     // A conversation opening or changing rows goes to its end while it
     // follows. A reader who scrolls back to the end is there already.
@@ -955,10 +979,11 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                 })
                             })
                             .pb(move || {
-                                // Leave a footer gap above the separate composer.
+                                // The last row ends clear of what lies over the
+                                // end, and T3 Code's footer (`sm:h-4`) below it.
                                 let last = at.index() + 1 == rows.with(|rows| rows.len());
                                 px(row.with(|row| row.as_ref().map_or(0.0, |row| row.gap))
-                                    + if last { 16.0 } else { 0.0 })
+                                    + if last { inset.get() + 16.0 } else { 0.0 })
                             })
                             .child(
                                 view()
@@ -1299,7 +1324,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                     .accessibility_label(Some(SharedString::from(label)))
                     .absolute()
                     .self_center()
-                    .bottom(px(6.0))
+                    .bottom(move || px(6.0 + covered.get()))
                     .w(px(44.0))
                     .h(px(44.0))
                     .items_center()

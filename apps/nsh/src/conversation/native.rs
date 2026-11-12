@@ -238,7 +238,7 @@ pub(crate) fn changes(
         "scope": next_scope, "reset": reset,
         "order": (reset || ids != order).then_some(ids),
         "changed": changed, "removed": removed,
-        "following": next["following"],
+        "following": next["following"], "inset": next["inset"],
         "history": next["history"], "notice": next["notice"], "latest": next["latest"]
     })
 }
@@ -265,6 +265,7 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
         timeline.position.replace(None);
         timeline.expanded.set(HashMap::new());
         timeline.groups.set(HashSet::new());
+        timeline.inset.set(timeline.covered.get_untracked());
         opened.set(HashSet::new());
         surroundings.find.reset_position();
     });
@@ -280,7 +281,7 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                     p.context.history(), p.context.thread_error()));
                 let rows = timeline.rows.with(|rows| opened.with(|opened| documents.with(|cache| cache.project(rows, opened, &target, &cwd, home.as_deref()))));
                 json!({"scope": scope.get(), "rows": rows, "following": timeline.following.get(),
-                    "notice": notice,
+                    "inset": timeline.inset.get(), "notice": notice,
                     "history": history.map(|history| json!({"title": history.load_label, "enabled": !history.loading})),
                     "latest": tr("最新のメッセージへ")})
             })
@@ -448,7 +449,7 @@ mod tests {
         let first = json!({"id":"first", "text":"complete"});
         let second = json!({"id":"second", "text":"stream"});
         let delivered = [("first".into(), first.clone()), ("second".into(), second)].into();
-        let next = json!({"scope":"a", "rows":[first, {"id":"second", "text":"streaming"}], "following":false});
+        let next = json!({"scope":"a", "rows":[first, {"id":"second", "text":"streaming"}], "following":false, "inset":40});
         let update = changes("a", &["first".into(), "second".into()], &delivered, &next);
         assert_eq!(
             update["changed"],
@@ -456,6 +457,7 @@ mod tests {
         );
         assert!(update["order"].is_null());
         assert_eq!(update["following"], false);
+        assert_eq!(update["inset"], 40);
         let switched = changes("b", &[], &delivered, &next);
         assert_eq!(switched["reset"], true);
         assert_eq!(switched["changed"], next["rows"]);

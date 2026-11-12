@@ -19,6 +19,7 @@
         let scroll: ConversationScrollState
         let following: Bool
         let accessibilityValue: String
+        let viewportHeight: CGFloat
         let row: (Int) -> AnyView
 
         func makeUIViewController(context _: Context) -> ConversationListController {
@@ -26,6 +27,7 @@
         }
 
         func updateUIViewController(_ controller: ConversationListController, context _: Context) {
+            controller.viewportHeight = viewportHeight
             controller.update(ids: ids, following: following, accessibilityValue: accessibilityValue, row: row)
         }
 
@@ -37,6 +39,11 @@
     /// Observe the collection's actual layout, including inset changes that do not resize its controller.
     private final class ConversationCollectionView: UICollectionView {
         var didLayout: (() -> Void)?
+
+        /// Content remains visible beneath the composer, but its controls own those touches.
+        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            super.point(inside: point, with: event) && bounds.inset(by: adjustedContentInset).contains(point)
+        }
 
         override func layoutSubviews() {
             super.layoutSubviews()
@@ -66,6 +73,7 @@
         private let scroll: ConversationScrollState
         private let layout: ConversationListLayout
         let collectionView: UICollectionView
+        var viewportHeight: CGFloat?
         private var source = Source(ids: [], row: { _ in AnyView(EmptyView()) })
         private var indices: [ConversationList.RowID: Int] = [:]
         private var pending: Source?
@@ -193,10 +201,22 @@
 
         private func didLayoutCollectionView() {
             guard active else { return }
+            updateViewportInsets()
             applyPending()
             guard !applying else { return }
             positionViewport()
             publishVisibility()
+        }
+
+        /// SwiftUI lays out the composer; only the collection extends beneath its safe-area inset.
+        /// Content insets keep the composer out of the safe area this calculation reads.
+        private func updateViewportInsets() {
+            guard let viewportHeight else { return }
+            let bottom = max(0, collectionView.bounds.height - viewportHeight - collectionView.safeAreaInsets.bottom)
+            if collectionView.contentInset.bottom != bottom {
+                collectionView.contentInset.bottom = bottom
+                collectionView.verticalScrollIndicatorInsets.bottom = bottom
+            }
         }
 
         private var geometry: Geometry {

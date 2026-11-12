@@ -410,8 +410,9 @@ fn app_content(
                 && connection.conversation.with(Option::is_none)
                 && connection.context.with(|p| p.opening().is_none())
         });
-        // A new conversation centers its composer. Existing messages and the
-        // unfilled composer occupy separate regions so their text cannot overlap.
+        // As T3 Code's draft hero, a new conversation centers its composer;
+        // a conversation's composer lies over the timeline's end, which
+        // scrolls under it.
         view()
             .flex_1()
             .min_w_0()
@@ -419,7 +420,7 @@ fn app_content(
             .style_when(move || welcome.get(), |s| s.justify_center())
             .child(when(move || !welcome.get(), move || timeline.list()))
             .child(when(move || welcome.get(), hero))
-            // The minimap overlays the conversation canvas.
+            // Under the composer, as T3 Code's overlay lies over the timeline.
             .child(when(
                 move || !welcome.get(),
                 move || timeline.minimap(canvas),
@@ -428,7 +429,17 @@ fn app_content(
                 move || is_desktop() && !welcome.get(),
                 move || find::bar(use_context::<find::Find>().unwrap(), timeline),
             ))
-            .child(composer::composer(following))
+            .child(
+                view()
+                    .style_when(
+                        move || !welcome.get(),
+                        |s| s.absolute().left(px(0.0)).right(px(0.0)).bottom(px(0.0)),
+                    )
+                    .on_layout(move |bounds: &nsh_core::Bounds<nsh_core::Points>| {
+                        timeline.cover(bounds.size.height.0)
+                    })
+                    .child(composer::composer(following)),
+            )
     };
     let notices = move || {
         view()
