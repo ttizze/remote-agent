@@ -679,7 +679,10 @@ mod tests {
                 false,
             )
         };
-        let error = load().await.err().expect("invalid registry must be rejected");
+        let error = load()
+            .await
+            .err()
+            .expect("invalid registry must be rejected");
         assert!(error.is::<serde_json::Error>());
         std::fs::write(&registry, r#"{"accounts":[],"selectedId":null}"#).unwrap();
         let accounts = load().await.unwrap();

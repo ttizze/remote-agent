@@ -104,6 +104,7 @@ pub struct Thread {
     #[serde(default)]
     pub queue: crate::operations::InputQueue,
     pub preparation: Option<crate::session::SessionPreparation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_setup: Option<crate::workspace::WorkspaceSetup>,
     pub id: Option<crate::session::SessionRef>,
     /// The public identity remains stable across provider handoffs.

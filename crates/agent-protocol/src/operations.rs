@@ -459,6 +459,7 @@ pub struct StartAccountTerminal {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewWorkspace {
     pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_options: bool,
