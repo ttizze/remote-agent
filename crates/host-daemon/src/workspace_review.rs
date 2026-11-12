@@ -1,4 +1,5 @@
 pub(crate) mod comparison;
+pub(crate) mod controls;
 
 use agent_protocol::models::{ChangedFile, WorkspaceReview};
 use anyhow::{Context as _, Result, anyhow};
@@ -8,15 +9,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
-    tokio::task::spawn_blocking(move || collect_workspace_review(PathBuf::from(cwd)))
-        .await
-        .context("failed to inspect workspace")?
+pub async fn inspect_workspace(cwd: String, base_ref: Option<String>) -> Result<WorkspaceReview> {
+    tokio::task::spawn_blocking(move || {
+        collect_workspace_review(PathBuf::from(cwd), base_ref.as_deref())
+    })
+    .await
+    .context("failed to inspect workspace")?
 }
 
-fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
+fn collect_workspace_review(cwd: PathBuf, base_ref: Option<&str>) -> Result<WorkspaceReview> {
     // A submission can replace a deleted worktree between Git commands.
-    let review = review_existing_workspace(&cwd).or_else(|_| review_existing_workspace(&cwd));
+    let review = review_existing_workspace(&cwd, base_ref)
+        .or_else(|_| review_existing_workspace(&cwd, base_ref));
     if review.is_err()
         && matches!(std::fs::metadata(&cwd), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
     {
@@ -25,8 +29,8 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
     review
 }
 
-fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
-    let Some(comparison) = Comparison::open(cwd)? else {
+fn review_existing_workspace(cwd: &Path, base_ref: Option<&str>) -> Result<WorkspaceReview> {
+    let Some(comparison) = Comparison::open_with_base(cwd, base_ref)? else {
         return Ok(empty_review());
     };
     let mut files = parse_files(&comparison.diff("--name-status")?);
@@ -51,6 +55,7 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
         return Err(anyhow!("working-tree diff exceeds 8 MiB"));
     }
     Ok(WorkspaceReview {
+        controls: controls::inspect(&comparison.root)?,
         options: None,
         branch: comparison.branch,
         base_ref: comparison.base_ref,
@@ -80,6 +85,7 @@ pub(crate) async fn directory_changes(cwds: HashSet<String>) -> Result<HashMap<S
 
 fn empty_review() -> WorkspaceReview {
     WorkspaceReview {
+        controls: Default::default(),
         options: None,
         branch: String::new(),
         base_ref: None,
@@ -157,7 +163,7 @@ fn parse_numstat(
 mod tests {
     use super::*;
 
-    fn git(cwd: &Path, args: &[&str]) -> String {
+    pub(super) fn git(cwd: &Path, args: &[&str]) -> String {
         let mut configured = vec![
             "-c",
             "user.name=Fixture",
@@ -172,7 +178,7 @@ mod tests {
 
     async fn assert_changes(cwd: &Path, paths: &[&str], lines: (u64, u64)) -> WorkspaceReview {
         let cwd_text = cwd.to_str().unwrap().to_owned();
-        let review = inspect_workspace(cwd_text.clone()).await.unwrap();
+        let review = inspect_workspace(cwd_text.clone(), None).await.unwrap();
         assert_eq!((review.additions, review.deletions), lines);
         let actual: std::collections::BTreeSet<_> =
             review.files.iter().map(|file| file.path.as_str()).collect();
@@ -467,7 +473,7 @@ mod tests {
         // T3's resolveReviewMergeBase errors when an existing comparison ref
         // shares no ancestor; falling back to HEAD would conceal committed work.
         let cwd_text = cwd.to_str().unwrap().to_owned();
-        assert!(inspect_workspace(cwd_text.clone()).await.is_err());
+        assert!(inspect_workspace(cwd_text.clone(), None).await.is_err());
         let marks = directory_changes([cwd_text.clone()].into()).await.unwrap();
         assert_eq!(marks.get(&cwd_text), None, "unknown is not a clean result");
     }
@@ -515,7 +521,7 @@ mod tests {
         git(&repo, &["switch", "-c", "task"]);
         std::fs::write(repo.join("sub/tracked.txt"), "pending\n").unwrap();
         let cwd = repo.to_str().unwrap().to_owned();
-        let review = inspect_workspace(cwd.clone()).await.unwrap();
+        let review = inspect_workspace(cwd.clone(), None).await.unwrap();
         assert_eq!(
             review
                 .files
@@ -541,7 +547,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            let review = collect_workspace_review(directory.path().into()).unwrap();
+            let review = collect_workspace_review(directory.path().into(), None).unwrap();
             assert!(review.branch.is_empty());
             assert!(review.base_ref.is_none());
             assert_eq!((review.additions, review.deletions), (0, 0));
@@ -554,16 +560,16 @@ mod tests {
     fn deleted_workspaces_have_no_changes_but_invalid_workspaces_remain_errors() {
         let directory = tempfile::tempdir().unwrap();
         assert!(
-            collect_workspace_review(directory.path().join("missing"))
+            collect_workspace_review(directory.path().join("missing"), None)
                 .unwrap()
                 .files
                 .is_empty()
         );
         let file = directory.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
-        assert!(collect_workspace_review(file).is_err());
+        assert!(collect_workspace_review(file, None).is_err());
         std::fs::write(directory.path().join(".git"), b"gitdir: missing\n").unwrap();
-        assert!(collect_workspace_review(directory.path().into()).is_err());
+        assert!(collect_workspace_review(directory.path().into(), None).is_err());
     }
 
     #[test]
@@ -609,7 +615,7 @@ mod tests {
         let cwd = directory.path();
         crate::git::text(cwd, &["init", "--initial-branch=main"]).unwrap();
         std::fs::write(cwd.join("notes.txt"), "first\nsecond\n").unwrap();
-        let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+        let review = collect_workspace_review(cwd.to_path_buf(), None).unwrap();
         assert!(
             review.base_ref.is_none(),
             "an unborn branch has no comparison ref"
@@ -643,7 +649,7 @@ mod tests {
         std::fs::write(cwd.join(renamed), "first\nsecond\nthird\nfourth\n").unwrap();
         std::fs::remove_file(cwd.join(deleted)).unwrap();
         std::fs::write(cwd.join("binary.dat"), b"after\0").unwrap();
-        let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+        let review = collect_workspace_review(cwd.to_path_buf(), None).unwrap();
         assert_eq!((review.additions, review.deletions), (1, 2));
         assert_eq!(review.files.len(), 3);
         for (path, status, additions, deletions) in [
@@ -659,7 +665,7 @@ mod tests {
         }
         assert!(!review.files.iter().any(|file| file.path == "old.txt"));
         std::fs::remove_file(cwd.join(renamed)).unwrap();
-        let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+        let review = collect_workspace_review(cwd.to_path_buf(), None).unwrap();
         assert_eq!(
             review.files.len(),
             3,
@@ -677,3 +683,6 @@ mod tests {
         assert_eq!((review.additions, review.deletions), (0, 5));
     }
 }
+
+#[cfg(test)]
+mod action_tests;

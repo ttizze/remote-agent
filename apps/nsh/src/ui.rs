@@ -7,6 +7,8 @@ use nsh_core::{
 };
 use serde_json::Value;
 
+pub(crate) mod form;
+
 pub(crate) mod colors {
     use super::{Rgba, rgb, rgba};
     use agent_core::presentation::appearance::{DEFAULT_CONTRAST, contrast_border, contrast_text};
@@ -135,6 +137,8 @@ impl Icon {
     pub(crate) const GIT_FORK: Self = icon!(GitFork);
     #[cfg(desktop)]
     pub(crate) const GIT_BRANCH: Self = icon!(GitBranch);
+    #[cfg(desktop)]
+    pub(crate) const PUSH: Self = icon!(CloudUpload);
     pub(crate) const WRAP: Self = icon!(TextWrap);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);

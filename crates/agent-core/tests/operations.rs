@@ -158,6 +158,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             text: text(command, "text").to_owned()
         }),
         "reviewWorkspace" => call!(ReviewWorkspace {
+            base_ref: None,
             cwd: text(command, "cwd").to_owned()
         }),
         "worktreeSettings" => call!(ReadWorktreeSettings {}),

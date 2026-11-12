@@ -5,7 +5,6 @@ node_modules/
 /tmp*-IMG_*.png
 /tmp*-ScreenRecording_*.mp4
 /.gradle/
-/.zig-cache/
 /.kotlin/
 /.idea/
 **/build/

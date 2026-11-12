@@ -30,6 +30,10 @@ pub(crate) fn source_ref(cwd: &Path, source: &str) -> Result<String> {
 
 impl Comparison {
     pub fn open(cwd: &Path) -> Result<Option<Self>> {
+        Self::open_with_base(cwd, None)
+    }
+
+    pub fn open_with_base(cwd: &Path, requested: Option<&str>) -> Result<Option<Self>> {
         match std::fs::metadata(cwd) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -58,10 +62,28 @@ impl Comparison {
         }
         let root = crate::git::text(cwd, &["rev-parse", "--show-toplevel"])?;
         let root = dunce::canonicalize(root.trim_end())?;
-        let branch = crate::git::text(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        let branch = super::controls::branch(&root)
             .ok()
             .map(|branch| branch.trim().to_owned());
-        let (base, base_ref) = comparison_base(&root, branch.as_deref())?;
+        let (base, base_ref) = match requested {
+            Some(reference) => {
+                let commit = crate::git::text(
+                    &root,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        &format!("{reference}^{{commit}}"),
+                    ],
+                )?;
+                let base = crate::git::text(
+                    &root,
+                    &["merge-base", "--end-of-options", commit.trim(), "HEAD"],
+                )?;
+                (base.trim().into(), Some(reference.into()))
+            }
+            None => comparison_base(&root, branch.as_deref())?,
+        };
         let branch = match branch {
             Some(branch) => branch,
             None => crate::git::text(&root, &["rev-parse", "--short", "HEAD"])?

@@ -232,7 +232,7 @@ private struct WorkspaceToolsScreen: View {
             TerminalScreen(model: model, cwd: directory, handle: model.workbenchTerminalHandle(surface.id))
         case .files, .file:
             WorkspaceScreen(model: model, root: directory, draft: scope.draft, close: close)
-                .onDisappear { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: directory))) }
+                .onDisappear { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: directory, baseRef: nil))) }
         case .diff:
             WorkspaceDiffScreen(model: model, root: directory)
         case .agents:

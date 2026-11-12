@@ -34,6 +34,11 @@ impl Workbench {
         });
     }
 
+    pub fn run_script(self, cwd: String, command: String) {
+        self.application
+            .with(|application| application.open_script(self.scope.get_untracked(), cwd, command));
+    }
+
     /// Opens `url` in the in-app browser.
     pub fn browse(self, url: String) {
         self.open(PanelKind::Browser, None, None);

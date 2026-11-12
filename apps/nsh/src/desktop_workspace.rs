@@ -13,6 +13,8 @@ use nsh_core::{
     prelude::*,
 };
 use serde_json::json;
+mod actions;
+mod card;
 
 /// Starts a new conversation in a folder the user picks: in a WSL distro's
 /// folder on that distro's Host, from which the dialog starts while it is chosen.
@@ -111,7 +113,7 @@ pub(crate) fn card() -> impl IntoElement {
             (
                 connection.host.get(),
                 p.controls.connected,
-                p.controls.navigation.cwd.clone(),
+                connection.context.with(|p| p.selected_directory()),
             )
         })
     });
@@ -119,7 +121,10 @@ pub(crate) fn card() -> impl IntoElement {
         let (host, connected, cwd) = target.get();
         if connected {
             if !cwd.is_empty() {
-                connection.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd }));
+                connection.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+                    cwd,
+                    base_ref: None,
+                }));
             }
             if host == "local"
                 && !connection
@@ -137,15 +142,25 @@ pub(crate) fn card() -> impl IntoElement {
             .publication
             .with(|p| crate::details::workspace_summary(p, connection.host.with(|h| h == "local")))
     });
+    let actions = actions::Actions::new(connection, summary);
     let act = move |action: Action| {
         let (cwd, home) = connection
             .publication
-            .with_untracked(|p| (p.composer.controls.navigation.cwd.clone(), p.context.home()));
+            .with_untracked(|p| (p.context.selected_directory(), p.context.home()));
         match action {
-            Action::Refresh => {
-                connection.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd }))
+            Action::Branch => actions.branch(),
+            Action::Push => actions.push(),
+            Action::AddScript => actions.add_script(),
+            Action::ManageScript(script) => actions.script_menu(script),
+            Action::RunScript(command) if !cwd.is_empty() => workspace.run_script(cwd, command),
+            Action::Refresh if !cwd.is_empty() => {
+                connection.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+                    cwd,
+                    base_ref: None,
+                }))
             }
-            Action::Diff => workspace.open(PanelKind::Diff, Some(cwd), None),
+            Action::Diff if !cwd.is_empty() => workspace.open(PanelKind::Diff, Some(cwd), None),
+            Action::RunScript(_) | Action::Refresh | Action::Diff => {}
             Action::Files if !cwd.is_empty() => workspace.open(PanelKind::Files, Some(cwd), None),
             Action::Files => choose_folder(connection),
             Action::Attach => crate::composer::pick_files(
@@ -196,11 +211,17 @@ pub(crate) fn card() -> impl IntoElement {
                             .max(0.0),
                     )
                 })
-                .child(summary_card(summary, act)),
+                .child(card::summary_card(summary, act)),
         )
+        .child(actions.view())
 }
 
 enum Action {
+    Branch,
+    Push,
+    AddScript,
+    ManageScript(agent_protocol::models::ProjectScript),
+    RunScript(String),
     Refresh,
     Diff,
     Files,
@@ -208,186 +229,6 @@ enum Action {
     Source(String),
     OpenEditor(EditorId),
     PreferEditor(EditorId),
-}
-
-/// T3's details sections: 8 pt outer padding and 32 pt controls, with a
-/// separator between the workspace and version control. Sources retain the
-/// conversation's existing attachment actions.
-fn summary_card(
-    summary: Memo<WorkspaceSummary>,
-    act: impl Fn(Action) + Copy + 'static,
-) -> impl IntoElement {
-    use crate::ui::{self, Enabled, Icon, colors};
-    let enabled = move || summary.with(|s| s.enabled);
-    let has_directory = move || summary.with(|s| s.has_directory);
-    view()
-        .py_2()
-        .text_color(colors::t3_foreground().opacity(0.8))
-        .child(
-            row(Icon::FOLDER_OPEN, text(move || summary.with(|s| s.directory.clone())))
-                .mx_2()
-                .text_color(colors::t3_muted())
-                .on_press(move || act(Action::Files))
-                .disabled(move || !enabled()),
-        )
-        .child(when(
-            move || summary.with(|s| !s.editors.is_empty()),
-            move || {
-                view()
-                    .mx_2()
-                    .flex_row()
-                    .items_center()
-                    .child(
-                        row(
-                            Icon::EXTERNAL_LINK,
-                            text(move || summary.with(|s| s.editor_label.clone()))
-                                .test_id("thread-details-editor"),
-                        )
-                        .flex_1()
-                        .on_press(move || {
-                            if let Some(editor) = summary.with_untracked(|s| s.editor) {
-                                act(Action::OpenEditor(editor));
-                            }
-                        })
-                        .disabled(move || !has_directory() || summary.with(|s| s.editor.is_none())),
-                    )
-                    .child(
-                        ui::icon_button(Icon::CHEVRON_DOWN, tr("エディターを選択"), move || {
-                            let editors = summary.with_untracked(|s| {
-                                s.editors
-                                    .iter()
-                                    .map(|(id, title)| {
-                                        json!({"id": id, "title": title, "selected": Some(*id) == s.editor})
-                                    })
-                                    .collect::<Vec<_>>()
-                            });
-                            ui::popup(&json!(editors), move |id: &str| {
-                                if let Ok(editor) = serde_json::from_value(json!(id)) {
-                                    act(Action::PreferEditor(editor));
-                                }
-                            })
-                        })
-                        .w(px(32.0))
-                        .h(px(32.0))
-                        .enabled(has_directory),
-                    )
-            },
-        ))
-        .child(separator())
-        .child(when(
-            move || summary.with(|s| !s.branch.is_empty()),
-            move || {
-                view()
-                    .mx_2()
-                    .h(px(32.0))
-                    .px(px(10.0))
-                    .gap(px(10.0))
-                    .flex_row()
-                    .items_center()
-                    .text_color(colors::t3_muted())
-                    .child(ui::icon(Icon::GIT_BRANCH, 16.0))
-                    .child(
-                        text(move || summary.with(|s| s.branch.clone()))
-                            .flex_1()
-                            .min_w_0()
-                            .number_of_lines(1)
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM),
-                    )
-            },
-        ))
-        .child(
-            view()
-                .mx_2()
-                .flex_row()
-                .items_center()
-                .child(
-                    nsh_base::Button::element(nsh_base::ButtonProps {
-                        accessibility_label: tr("変更を表示").into(),
-                        disabled: Prop::bind(move || !enabled() || !has_directory()),
-                        ..nsh_base::ButtonProps::initial()
-                    })
-                        .test_id("thread-details-changes")
-                        .flex_1()
-                        .min_w_0()
-                        .min_h(px(48.0))
-                        .px(px(10.0))
-                        .py_2()
-                        .gap(px(10.0))
-                        .flex_row()
-                        .items_center()
-                        .rounded(px(8.0))
-                        .hover(|s| s.bg(nsh_core::element::rgba(0xffffff14)))
-                        .disabled_style(|s| s.opacity(0.64))
-                        .on_event(move |event: &nsh_base::ButtonEvent| {
-                            if matches!(event, nsh_base::ButtonEvent::Press) {
-                                act(Action::Diff);
-                            }
-                        })
-                        .child(
-                            view()
-                                .text_color(colors::t3_muted())
-                                .child(ui::icon(Icon::DIFF, 16.0)),
-                        )
-                        .child(
-                            crate::details::change_heading(move || summary.with(|s| s.changes.comparison.clone()))
-                                .flex_1()
-                                .min_w_0(),
-                        )
-                        .child(crate::details::line_counts(move || summary.with(|s| s.changes.counts))),
-                )
-                .child(
-                    ui::icon_button(Icon::REFRESH, tr("変更を更新"), move || act(Action::Refresh))
-                        .w(px(32.0))
-                        .h(px(32.0))
-                        .enabled(move || enabled() && has_directory()),
-                ),
-        )
-        .child(separator())
-        .child(
-            view()
-                .mx_2()
-                .flex_row()
-                .items_center()
-                .child(
-                    text(tr("ソース"))
-                        .flex_1()
-                        .pl(px(10.0))
-                        .text_size(px(12.0))
-                        .text_color(colors::t3_muted()),
-                )
-                .child(
-                    ui::icon_button(Icon::PLUS, tr("ソースを追加"), move || act(Action::Attach))
-                        .enabled(enabled),
-                ),
-        )
-        .child(when(
-            move || summary.with(|s| s.sources.is_empty()),
-            || {
-                text(tr("添付ファイルがここに表示されます"))
-                    .py_2()
-                    .px(px(18.0))
-                    .text_size(px(13.0))
-                    .line_height(px(20.0))
-                    .text_color(colors::muted())
-            },
-        ))
-        .child(each(
-            move || summary.with(|s| s.sources.clone()),
-            |(path, _): &(String, String)| path.clone(),
-            move |source, _| {
-                let (path, title) = source.get_untracked();
-                row(Icon::FILE_TEXT, text(move || title.clone()))
-                    .mx_2()
-                    .on_press(move || act(Action::Source(path.clone())))
-            },
-        ))
-        .child(
-            row(Icon::FOLDER, text(tr("すべてのファイル")))
-                .mx_2()
-                .on_press(move || act(Action::Files))
-                .disabled(move || !enabled()),
-        )
 }
 
 fn separator() -> View {

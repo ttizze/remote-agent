@@ -107,7 +107,7 @@ private fun TerminalBody(
                                 val size = TerminalSize(columns.toUShort(), rows.toUShort())
                                 if (!started) {
                                     started = true
-                                    currentPerform(Intent.StartTerminal(StartTerminal(handle, cwd, size))) {}
+                                    currentPerform(Intent.StartTerminal(StartTerminal(null, handle, cwd, size))) {}
                                 } else currentPerform(Intent.ResizeTerminal(ResizeTerminal(handle, size))) {}
                             }
                         },

@@ -11,6 +11,7 @@ mod sessions;
 mod titles;
 mod transcripts;
 mod update;
+mod workspace;
 mod worktrees;
 
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
@@ -50,6 +51,7 @@ struct ServiceInner {
     editors: crate::editors::Editors,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
+    workspace_access: tokio::sync::Mutex<()>,
     worktree_cleanup: tokio::sync::Notify,
     permission_settings_access: tokio::sync::Mutex<()>,
     terminals: crate::terminals::Terminals,
@@ -95,6 +97,7 @@ impl HostRpcService {
                 dictation,
                 worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
+                workspace_access: Default::default(),
                 worktree_cleanup: tokio::sync::Notify::new(),
                 permission_settings_access: Default::default(),
                 terminals: Default::default(),
@@ -296,6 +299,7 @@ impl HostRpcService {
                     | Call::WriteFile(_)
                     | Call::WriteWorkspaceFile(_)
                     | Call::Upload(_)
+                    | Call::ChangeWorkspace(_)
                     | Call::ReviewWorkspace(_)
             ) {
                 Some(self.inner.worktree_access.read().await)
@@ -485,7 +489,11 @@ impl HostRpcService {
                         .map_err(|error| Failure::new("terminal_start_failed", error))?;
                     return Ok(agent_protocol::models::Empty {}.into());
                 }
-                let launch = crate::terminals::Launch::shell(params.cwd.clone());
+                let launch = crate::terminals::Launch::command(
+                    params.cwd.clone(),
+                    params.command.as_deref(),
+                )
+                .map_err(|error| Failure::new("terminal_start_failed", error))?;
                 (self
                     .inner
                     .terminals
@@ -548,15 +556,8 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("dictation_failed", error))?)
             .into(),
-            Call::ReviewWorkspace(params) => {
-                let mut review = crate::inspect_workspace(params.cwd.clone())
-                    .await
-                    .map_err(|error| Failure::new("workspace_review_failed", error))?;
-                if params.include_options {
-                    review.options = Some(self.workspace_options(&params.cwd).await?);
-                }
-                review.into()
-            }
+            Call::ReviewWorkspace(params) => self.review_workspace(params).await?.into(),
+            Call::ChangeWorkspace(params) => self.change_workspace(params).await?.into(),
             Call::ListFiles(_)
             | Call::ListTreeEntries(_)
             | Call::SearchTreeEntries(_)
@@ -1082,36 +1083,23 @@ mod tests {
 
     #[tokio::test]
     async fn successful_configuration_clears_the_provider_startup_error() {
+        use super::conversations::tests::NativeAgent;
         use super::*;
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("claude");
-        let registry = directory.join("accounts/accounts.json");
-        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
-        std::fs::write(&registry, "invalid registry").unwrap();
-        let program = root.path().join("native-cli.exe");
-        std::fs::write(&program, []).unwrap();
-        let configure = || {
-            crate::providers::Claude::load(
-                program.clone(),
-                directory.clone(),
-                Some(root.path().join("native")),
-            )
-        };
-        let error = match configure().await {
-            Err(error) => error,
-            Ok(_) => panic!("invalid registry was accepted"),
-        };
         let service = HostRpcService::new(
-            [Backend::unavailable(ProviderKind::Claude, error)],
+            [Backend::unavailable(
+                ProviderKind::Claude,
+                "invalid provider configuration",
+            )],
             ProjectStore::new(root.path().join("worktrees.json")),
         );
         assert_eq!(
             service.provider_errors()["claude"]["code"],
             "provider_unavailable"
         );
-        std::fs::write(&registry, r#"{"accounts":[],"selectedId":null}"#).unwrap();
+        let agent = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
         let service = HostRpcService::new(
-            [configure().await.unwrap().into()],
+            [agent.backend()],
             ProjectStore::new(root.path().join("worktrees.json")),
         );
         assert!(service.provider_errors().get("claude").is_none());

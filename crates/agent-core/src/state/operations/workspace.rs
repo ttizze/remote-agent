@@ -197,15 +197,41 @@ impl Operation for WriteWorkspaceFile {
     }
 }
 
+pub use agent_protocol::operations::ChangeWorkspace;
+
+impl Operation for ChangeWorkspace {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::WorkspaceAction {
+            pane: String::new(),
+        })
+    }
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Control
+    }
+    rpc_operation!();
+    const REPORT_ERROR: bool = false;
+    fn prepare(&mut self, snapshot: &mut Snapshot, pane_id: &str) -> Result<(), String> {
+        let pane = snapshot.panes.get(pane_id).ok_or("pane is closed")?;
+        if self.cwd.is_empty() || snapshot.selected_directory(pane) != self.cwd {
+            return Err("The workspace changed. Refresh and try again.".into());
+        }
+        Ok(())
+    }
+    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, _: Self::Output) -> Vec<Effect> {
+        review_workspace(snapshot, pane_id).into_iter().collect()
+    }
+}
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewWorkspace {
     pub cwd: String,
+    pub base_ref: Option<String>,
 }
 rpc::rpc_method!(ReviewWorkspace, ReviewWorkspace, |self| {
     rpc::ReviewWorkspace {
         cwd: self.cwd.clone(),
         include_options: false,
+        base_ref: self.base_ref.clone(),
     }
 });
 
@@ -233,6 +259,7 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot, pane_id: &str)
         return None;
     }
     let mut operation = ReviewWorkspace {
+        base_ref: None,
         cwd: pane.navigation.cwd.clone(),
     };
     operation
@@ -267,15 +294,20 @@ impl Operation for ReviewWorkspace {
         context
             .call(&rpc::ReviewWorkspace {
                 cwd: self.cwd.clone(),
+                base_ref: self.base_ref.clone(),
                 include_options,
             })
             .await
     }
     fn prepare(&mut self, snapshot: &mut Snapshot, pane_id: &str) -> Result<(), String> {
         let pane = snapshot.panes.get_mut(pane_id).ok_or("pane is closed")?;
+        let current_directory = pane.navigation.cwd == self.cwd;
         let workspace = Arc::make_mut(&mut Arc::make_mut(pane).workspace);
         if workspace.review_cwd.as_ref() != Some(&self.cwd) {
             workspace.review = None;
+        }
+        if current_directory {
+            self.base_ref = workspace.comparison.clone();
         }
         workspace.review_cwd = Some(self.cwd.clone());
         Ok(())
@@ -530,6 +562,7 @@ mod path_tests {
     fn draft_review_loads_choices_once_and_running_conversation_reviews_only_read_changes() {
         let mut snapshot = Snapshot::default();
         let operation = ReviewWorkspace {
+            base_ref: None,
             cwd: "/project".into(),
         };
         Arc::make_mut(&mut Arc::make_mut(snapshot.panes.get_mut("").unwrap()).navigation).cwd =
@@ -539,6 +572,7 @@ mod path_tests {
             &mut snapshot,
             "",
             crate::models::WorkspaceReview {
+                controls: Default::default(),
                 options: Some(agent_protocol::workspace::WorkspaceOptions {
                     is_repository: true,
                     default_worktree: true,

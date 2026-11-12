@@ -664,6 +664,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn loading_recovers_after_an_invalid_registry_is_corrected() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("accounts");
+        std::fs::create_dir(&directory).unwrap();
+        let registry = directory.join("accounts.json");
+        std::fs::write(&registry, "invalid registry").unwrap();
+        let load = || {
+            Accounts::load(
+                root.path().join("missing-cli"),
+                directory.clone(),
+                root.path().join("native"),
+                false,
+            )
+        };
+        let error = load()
+            .await
+            .err()
+            .expect("invalid registry must be rejected");
+        assert!(error.is::<serde_json::Error>());
+        std::fs::write(&registry, r#"{"accounts":[],"selectedId":null}"#).unwrap();
+        let accounts = load().await.unwrap();
+        assert!(accounts.registry.accounts.is_empty());
+        assert_eq!(accounts.selected_home().unwrap(), None);
+    }
+
     #[test]
     fn cli_status_requires_a_logged_in_subscription_and_explicit_logout() {
         for (value, subscribed, logged_out) in [
