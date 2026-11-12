@@ -277,6 +277,27 @@ fn app_content(
     let failure = computed(move || state.with(|state| state.failure.clone().map(l10n::localized)));
     #[cfg(target_os = "ios")]
     if matches!(area, Area::Conversation { .. }) {
+        use nsh_base::text_view::{TextViewPart, TextViewParts};
+
+        // SwiftUI's .body is 17pt before Dynamic Type scaling. Let the system
+        // font supply its line height, as the native composer does; NSH's iOS
+        // environment already applies the user's body-text scale. Small bold
+        // headings match .headline so they never become smaller than the body.
+        let typography = [
+            TextViewPart::Root,
+            TextViewPart::Heading4,
+            TextViewPart::Heading5,
+            TextViewPart::Heading6,
+        ]
+        .into_iter()
+        .fold(TextViewParts::new(), |parts, part| {
+            parts.part(part, |style| {
+                style
+                    .text_size(px(17.0))
+                    .line_height(nsh_core::LineHeight::Normal)
+            })
+        });
+        provide_context(typography);
         if let Some(actions) = use_context::<native::ExternalActions>() {
             effect(move || {
                 if let Some(error) = failure.get() {
