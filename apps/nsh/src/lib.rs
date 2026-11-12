@@ -306,6 +306,8 @@ fn app_content(
             });
         }
         let timeline = conversation::Timeline::new(signal(true));
+        let inset = use_context::<root::ComposerInset>().unwrap().0;
+        effect(move || timeline.cover(inset.get()));
         return view()
             .flex_1()
             .child(media::preview())

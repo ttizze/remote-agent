@@ -137,12 +137,18 @@ struct ThreadScreen: View {
 
     @ViewBuilder private var conversationBody: some View {
         #if BEX_NSH_CONVERSATION
-            NshConversationView(host: model.host, session: model.session, pane: model.pane,
-                                perform: messageAction, preview: mediaAccess.presentation.openPreview)
-                .id(ObjectIdentifier(model))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task.detail")
+            GeometryReader { viewport in
+                GeometryReader { canvas in
+                    NshConversationView(host: model.host, session: model.session, pane: model.pane,
+                                        composerInset: max(0, canvas.size.height - viewport.size.height),
+                                        perform: messageAction, preview: mediaAccess.presentation.openPreview)
+                        .id(ObjectIdentifier(model))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("task.detail")
+                }
+                .ignoresSafeArea(.container, edges: .bottom)
+            }
         #else
             let history = model.history
             if let thread = conversation {

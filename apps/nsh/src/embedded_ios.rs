@@ -39,6 +39,7 @@ struct Conversation {
     view: Option<AppView>,
     application: Arc<Application>,
     runtime: tokio::runtime::Runtime,
+    composer_inset: tokio::sync::watch::Sender<f32>,
 }
 impl Drop for Conversation {
     fn drop(&mut self) {
@@ -106,15 +107,18 @@ pub unsafe extern "C" fn bex_nsh_conversation_create(
             options,
         );
         view.set_error_handler(move |error| events.emit(json!({"action":"error", "text":error})));
+        let (composer_inset, inset) = tokio::sync::watch::channel(0.0);
         view.run(crate::root::root(
             application.clone(),
             area,
             Some(Arc::new(move |event| events.emit(event))),
+            inset,
         ));
         Ok(Conversation {
             view: Some(view),
             runtime,
             application,
+            composer_inset,
         })
     };
     match create() {
@@ -137,6 +141,24 @@ pub unsafe extern "C" fn bex_nsh_conversation_view(handle: *mut c_void) -> *mut 
         .as_ref()
         .expect("a live conversation owns its view")
         .view() as *const UIView as *mut UIView
+}
+
+/// Updates the space covered by the native composer, in points. Content
+/// extends behind its glass while the last row ends above the controls.
+///
+/// # Safety
+/// Call on the main thread with a live conversation handle and a finite,
+/// nonnegative inset measured by the embedding view.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bex_nsh_conversation_set_composer_inset(handle: *mut c_void, inset: f32) {
+    let owner = unsafe { &*handle.cast::<Conversation>() };
+    owner.composer_inset.send_if_modified(|previous| {
+        if *previous == inset {
+            return false;
+        }
+        *previous = inset;
+        true
+    });
 }
 
 /// # Safety

@@ -82,10 +82,12 @@ struct WorkspaceDiffCard: View {
                     }
                     .font(.system(.footnote, design: .monospaced))
                     .padding(.vertical, 3).padding(.horizontal, 8)
-                    .foregroundStyle(row.kind == "+" ? Color.green :
-                        row.kind == "-" ? Color.red : row.kind == "@" ? Color.secondary : Color.primary)
+                    .background(row.kind == "+" ? Color.green.opacity(0.18) :
+                        row.kind == "-" ? Color.red.opacity(0.18) :
+                        row.kind == "@" ? Color.secondary.opacity(0.12) : Color.clear)
                 }
             }
+            .background(Color(uiColor: .systemBackground))
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
@@ -101,6 +103,7 @@ struct WorkspaceDiffCard: View {
             .accessibilityIdentifier("diff.file.\(file.path)")
         }
         .padding(12)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

@@ -16,12 +16,16 @@
     @_silgen_name("bex_nsh_conversation_release")
     private func releaseConversation(_ handle: UnsafeMutableRawPointer)
 
+    @_silgen_name("bex_nsh_conversation_set_composer_inset")
+    private func setComposerInset(_ handle: UnsafeMutableRawPointer, _ inset: Float)
+
     /// The conversation's rows drawn by the NSH client the Mac uses, on this
     /// screen's session. The composer and navigation around it stay native.
     struct NshConversationView: UIViewRepresentable {
         let host: String
         let session: ClientSession
         let pane: AgentPane?
+        let composerInset: CGFloat
         /// What the message text asks for: an `action` (`quote`, `sideChat`,
         /// `explain`, `link`) and its `text`.
         let perform: (_ action: String, _ text: String) -> Void
@@ -79,12 +83,16 @@
                 return failure
             }
             coordinator.handle = handle
+            setComposerInset(handle, Float(composerInset))
             return conversationView(handle).takeUnretainedValue()
         }
 
         func updateUIView(_: UIView, context: Context) {
             context.coordinator.perform = perform
             context.coordinator.preview = preview
+            if let handle = context.coordinator.handle {
+                setComposerInset(handle, Float(composerInset))
+            }
         }
 
         static func dismantleUIView(_: UIView, coordinator: Coordinator) {
