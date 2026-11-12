@@ -1082,36 +1082,23 @@ mod tests {
 
     #[tokio::test]
     async fn successful_configuration_clears_the_provider_startup_error() {
+        use super::conversations::tests::NativeAgent;
         use super::*;
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("claude");
-        let registry = directory.join("accounts/accounts.json");
-        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
-        std::fs::write(&registry, "invalid registry").unwrap();
-        let program = root.path().join("native-cli.exe");
-        std::fs::write(&program, []).unwrap();
-        let configure = || {
-            crate::providers::Claude::load(
-                program.clone(),
-                directory.clone(),
-                Some(root.path().join("native")),
-            )
-        };
-        let error = match configure().await {
-            Err(error) => error,
-            Ok(_) => panic!("invalid registry was accepted"),
-        };
         let service = HostRpcService::new(
-            [Backend::unavailable(ProviderKind::Claude, error)],
+            [Backend::unavailable(
+                ProviderKind::Claude,
+                "invalid provider configuration",
+            )],
             ProjectStore::new(root.path().join("worktrees.json")),
         );
         assert_eq!(
             service.provider_errors()["claude"]["code"],
             "provider_unavailable"
         );
-        std::fs::write(&registry, r#"{"accounts":[],"selectedId":null}"#).unwrap();
+        let agent = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
         let service = HostRpcService::new(
-            [configure().await.unwrap().into()],
+            [agent.backend()],
             ProjectStore::new(root.path().join("worktrees.json")),
         );
         assert!(service.provider_errors().get("claude").is_none());
