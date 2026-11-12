@@ -4,10 +4,10 @@ use crate::{
     Connection,
     l10n::tr,
     native,
-    ui::{self, Enabled, colors},
+    ui::{self, colors, form::Submission},
 };
 use agent_core::{
-    presentation::conversation::{ActionTone, plan_export},
+    presentation::conversation::plan_export,
     state::{Intent, operations as op},
 };
 use nsh_core::prelude::*;
@@ -22,9 +22,7 @@ struct WorkspacePlan {
 #[derive(Clone, Copy)]
 pub(crate) struct Saver {
     plan: Signal<Option<WorkspacePlan>>,
-    busy: Signal<bool>,
-    failure: Signal<String>,
-    owner: Owner,
+    submission: Submission,
     #[cfg(target_os = "ios")]
     exported: Signal<Option<crate::shared::Shared<crate::client::LocalFile>>>,
 }
@@ -33,19 +31,17 @@ impl Saver {
     pub fn new() -> Self {
         Self {
             plan: signal(None),
-            busy: signal(false),
-            failure: signal(String::new()),
-            owner: Owner::current(),
+            submission: Submission::new(),
             #[cfg(target_os = "ios")]
             exported: signal(None),
         }
     }
 
     fn open(self, host: String, cwd: String, markdown: String) {
-        if self.busy.get_untracked() {
+        if self.submission.busy.get_untracked() {
             return;
         }
-        self.failure.set(String::new());
+        self.submission.failure.set(String::new());
         self.plan.set(Some(WorkspacePlan {
             host,
             cwd,
@@ -54,7 +50,7 @@ impl Saver {
     }
 
     fn cancel(self) {
-        if self.busy.try_get() == Some(false) {
+        if self.submission.busy.try_get() == Some(false) {
             self.plan.set(None);
         }
     }
@@ -63,33 +59,22 @@ impl Saver {
         let Some(plan) = self.plan.try_get().flatten() else {
             return;
         };
-        if self.busy.get_untracked() || path.trim().is_empty() {
+        if path.trim().is_empty() {
             return;
         }
-        self.busy.set(true);
-        self.failure.set(String::new());
-        let response = connection.client.with(|client| {
-            client.request(
-                &plan.host,
-                connection.pane,
-                Intent::WriteWorkspaceFile(op::WriteWorkspaceFile {
-                    cwd: plan.cwd,
-                    relative_path: path,
-                    text: plan.markdown,
-                }),
-            )
-        });
-        self.owner.run(move || {
-            spawn(async move {
-                let result = response.recv().await;
-                self.busy.set(false);
-                match result {
-                    Ok(Ok(_)) => self.plan.set(None),
-                    Ok(Err(reason)) => self.failure.set(reason.to_string()),
-                    Err(reason) => self.failure.set(reason.to_string()),
-                }
-            })
-        });
+        self.submission.submit(
+            connection,
+            &plan.host,
+            Intent::WriteWorkspaceFile(op::WriteWorkspaceFile {
+                cwd: plan.cwd,
+                relative_path: path,
+                text: plan.markdown,
+            }),
+            move |result| match result {
+                Ok(()) => self.plan.set(None),
+                Err(reason) => self.submission.failure.set(reason),
+            },
+        );
     }
 
     pub fn view(self, connection: Connection) -> View {
@@ -116,28 +101,12 @@ impl Saver {
             move || {
                 let plan = stored(self.plan.get_untracked().unwrap());
                 let path = signal(plan_export(&plan.get().markdown).0);
-                nsh_base::dialog()
-                    .presentation(ModalPresentation::FormSheet)
-                    .close_on_swipe(move || !self.busy.get())
-                    .close_on_escape(move || !self.busy.get())
-                    .close_on_backdrop_press(move || !self.busy.get())
-                    .on_cancel(move || self.cancel())
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
+                let save = move || self.save(connection, path.get_untracked());
+                self.submission
+                    .dialog(move || self.cancel())
+                    .close_on_swipe(move || !self.submission.busy.get())
                     .child(
-                        view()
-                            .p_5()
-                            .gap_3()
-                            .w_full()
-                            .max_w(px(480.0))
-                            .bg(colors::SURFACE)
-                            .rounded(px(12.0))
-                            .child(
-                                text(tr("ワークスペースに保存…"))
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            )
+                        ui::form::panel(tr("ワークスペースに保存…"), 480.0, 12.0)
                             .child(
                                 text(move || plan.get().cwd)
                                     .text_size(px(12.0))
@@ -146,47 +115,17 @@ impl Saver {
                             )
                             .child(text(tr("ワークスペース内のパス")).text_size(px(13.0)))
                             .child(
-                                ui::field()
-                                    .value(path)
-                                    .on_change(move |value: &str| path.set(value.into()))
-                                    .on_submit(move |_: &str| {
-                                        self.save(connection, path.get_untracked())
-                                    })
-                                    .disabled(self.busy)
+                                self.submission
+                                    .field(path, save)
                                     .label(tr("ワークスペース内のパス")),
                             )
-                            .child(when(
-                                move || !self.failure.get().is_empty(),
-                                move || {
-                                    text(move || self.failure.get())
-                                        .text_color(crate::conversation::look::DESTRUCTIVE)
-                                        .selectable(true)
-                                },
-                            ))
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        ui::text_button(tr("キャンセル"), move || {
-                                            self.cancel()
-                                        })
-                                        .enabled(move || !self.busy.get()),
-                                    )
-                                    .child(
-                                        ui::action_button(
-                                            tr("保存"),
-                                            ActionTone::Primary,
-                                            move || self.save(connection, path.get_untracked()),
-                                        )
-                                        .enabled(
-                                            move || {
-                                                !self.busy.get() && !path.get().trim().is_empty()
-                                            },
-                                        ),
-                                    ),
-                            ),
+                            .child(self.submission.error())
+                            .child(self.submission.buttons(
+                                tr("保存"),
+                                move || !path.get().trim().is_empty(),
+                                move || self.cancel(),
+                                save,
+                            )),
                     )
             },
         )
@@ -194,7 +133,7 @@ impl Saver {
     }
 
     fn download(self, filename: String, text: String) {
-        self.owner.run(move || {
+        self.submission.owner.run(move || {
             #[cfg(not(target_os = "ios"))]
             download(filename, text);
             #[cfg(target_os = "ios")]
@@ -223,7 +162,7 @@ pub(crate) fn actions(
         "ellipsis",
         tr("計画の操作"),
         move || {
-            let enabled = saver.busy.try_get() == Some(false)
+            let enabled = saver.submission.busy.try_get() == Some(false)
                 && connection
                     .composer
                     .try_get()

@@ -7,6 +7,8 @@ use nsh_core::{
 };
 use serde_json::Value;
 
+pub(crate) mod form;
+
 pub(crate) mod colors {
     use super::{Rgba, rgb, rgba};
     use agent_core::presentation::appearance::{DEFAULT_CONTRAST, contrast_border, contrast_text};
