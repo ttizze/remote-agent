@@ -105,6 +105,7 @@ impl DeviceStorage {
             PreferenceKey::Composer => "composer-preferences.json",
             PreferenceKey::Language => "language.json",
             PreferenceKey::Contrast => "contrast.json",
+            PreferenceKey::WebLinks => "web-links.json",
         })
     }
 }

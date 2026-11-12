@@ -426,6 +426,7 @@ impl Store {
                 language: snapshot.catalog.ui_language,
                 contrast: None,
                 composer: snapshot.input.composer_preferences,
+                web_link_target: snapshot.catalog.web_link_target,
             })
         });
         let mut device_updates = preferences.subscribe();
@@ -1060,6 +1061,7 @@ fn adopt_preferences(snapshot: &mut Arc<Snapshot>, preferences: &Preferences) ->
         && snapshot.files.preferred_editor == preferences.editor.preferred
         && snapshot.catalog.ui_language == preferences.language
         && snapshot.input.composer_preferences == preferences.composer
+        && snapshot.catalog.web_link_target == preferences.web_link_target
     {
         return false;
     }
@@ -1068,6 +1070,7 @@ fn adopt_preferences(snapshot: &mut Arc<Snapshot>, preferences: &Preferences) ->
     snapshot.files.preferred_editor = preferences.editor.preferred;
     snapshot.catalog.ui_language = preferences.language;
     snapshot.input.composer_preferences = preferences.composer;
+    snapshot.catalog.web_link_target = preferences.web_link_target;
     true
 }
 

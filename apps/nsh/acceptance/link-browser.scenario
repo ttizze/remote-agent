@@ -1,13 +1,22 @@
-# Command-click on a web link in an answer opens it in the in-app browser
-# rather than the default browser, which loads it: the answer links to the
-# fixture Host's loopback page, whose title the browser's tab menu lists.
+# The device's link destination opens a web page in Bex; Command-click is
+# reserved for the system browser. Core tests cover the destination decision.
 expect "検証プロジェクト" 30000
+press 設定を開く
+expect リンクの開き先
+press 既定のブラウザ
+press Bex
+press 閉じる
 press このプロジェクトで新しいチャット
 type "AI に依頼する" "[web-link] [immediate] $AGENT_FIXTURE_ORIGIN/browser-page を開きます"
 press 送信
 expect "ページへのリンクです。" 30000
 expect_absent "ブラウザの URL"
-click cmd 検証ページを開く
+menu 検証ページを開く
+expect 既定のブラウザで開く
+expect Bexで開く
+press リンクをコピー
+expect_clipboard "$AGENT_FIXTURE_ORIGIN/browser-page"
+press 検証ページを開く
 expect "ブラウザの URL" after ツールを追加 10000
 expect "/browser-page" after "ブラウザの URL" 10000
 # The page's own address comes with the Host's frame, as does its button for

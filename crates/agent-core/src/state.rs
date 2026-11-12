@@ -291,6 +291,7 @@ same_by_eq!(
     String,
     ModelPreferences,
     crate::localization::UiLanguage,
+    crate::presentation::web_links::WebLinkTarget,
     follow_up::ComposerPreferences,
     agent_protocol::editors::EditorId,
     crate::session::SessionRef,
@@ -359,6 +360,8 @@ group! {
         pub model_preferences: ModelPreferences,
         #[serde(default)]
         pub ui_language: crate::localization::UiLanguage,
+        #[serde(skip)]
+        pub web_link_target: crate::presentation::web_links::WebLinkTarget,
         #[serde(default)]
         pub account: Arc<AccountState>,
         #[serde(skip)]
