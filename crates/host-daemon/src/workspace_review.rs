@@ -567,6 +567,43 @@ mod tests {
     }
 
     #[test]
+    fn review_preserves_staging_and_removes_private_indexes_after_success_and_failure() {
+        for staged in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let cwd = directory.path();
+            git(cwd, &["init", "--initial-branch=main"]);
+            let git_directory = cwd.join(".git");
+            let original_index = git_directory.join("index");
+            let private_indexes = || {
+                std::fs::read_dir(&git_directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name.to_string_lossy().starts_with("bex-review-index-"))
+                    .collect::<Vec<_>>()
+            };
+            std::fs::write(cwd.join("tracked.txt"), "staged\n").unwrap();
+            if staged {
+                git(cwd, &["add", "tracked.txt"]);
+            }
+            let before = staged.then(|| std::fs::read(&original_index).unwrap());
+            std::fs::write(cwd.join("tracked.txt"), "working\n").unwrap();
+            let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+            assert_eq!((review.additions, review.deletions), (1, 0));
+            assert!(review.diff.contains("+working\n"));
+            assert!(private_indexes().is_empty());
+            match before {
+                Some(before) => assert_eq!(std::fs::read(&original_index).unwrap(), before),
+                None => assert!(!original_index.exists()),
+            }
+
+            std::fs::write(&original_index, b"invalid index").unwrap();
+            assert!(collect_workspace_review(cwd.to_path_buf()).is_err());
+            assert_eq!(std::fs::read(&original_index).unwrap(), b"invalid index");
+            assert!(private_indexes().is_empty());
+        }
+    }
+
+    #[test]
     fn untracked_files_contribute_to_patch_and_line_counts() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path();

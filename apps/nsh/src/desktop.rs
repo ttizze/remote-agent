@@ -13,7 +13,7 @@ pub(crate) fn quit() {
     nsh_platform_macos::quit_app();
     // Windows' app ends with its only window.
     #[cfg(windows)]
-    nsh_core::element::desktop::close_window();
+    nsh_core::element::desktop::main_window().close();
 }
 
 pub fn run() -> std::process::ExitCode {

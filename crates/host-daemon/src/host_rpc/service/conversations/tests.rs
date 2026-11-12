@@ -746,6 +746,66 @@ async fn history(
     .response
 }
 
+#[tokio::test]
+async fn unavailable_project_does_not_block_listing_or_opening_saved_conversations() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let root = codex
+        .create(directory.path().to_str().unwrap(), None, None)
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let host = service(directory.path(), &codex, &claude);
+    let client = host.open_session();
+    send(
+        &host,
+        client.id(),
+        &root,
+        ProviderKind::Codex,
+        "first",
+        "saved task",
+    )
+    .await
+    .unwrap();
+    #[cfg(unix)]
+    let unavailable = {
+        let path = directory.path().join("unavailable");
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        path
+    };
+    #[cfg(windows)]
+    let unavailable = PathBuf::from(r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project");
+    let projects = serde_json::json!([
+        {"id":"offline","name":"Offline","roots":[{"path":unavailable}]}
+    ]);
+    std::fs::write(
+        directory.path().join("bex-projects.json"),
+        serde_json::to_vec(&projects).unwrap(),
+    )
+    .unwrap();
+    let listed: agent_protocol::models::ThreadList = call(
+        &host,
+        client.id(),
+        Call::ListSessions(op::ListSessions {
+            query: Default::default(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        listed
+            .data
+            .iter()
+            .any(|thread| thread.id.as_ref() == Some(&root))
+    );
+    let opened = history(&host, client.id(), &root).await;
+    assert_eq!(opened.thread.id.as_ref(), Some(&root));
+    assert_eq!(message_texts(&opened), ["saved task"]);
+}
+
 struct HandoffFixture {
     codex: Arc<NativeAgent>,
     claude: Arc<NativeAgent>,

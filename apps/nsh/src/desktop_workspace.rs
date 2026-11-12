@@ -302,9 +302,12 @@ fn summary_card(
                 .flex_row()
                 .items_center()
                 .child(
-                    nsh_base::button()
+                    nsh_base::Button::element(nsh_base::ButtonProps {
+                        accessibility_label: tr("変更を表示").into(),
+                        disabled: Prop::bind(move || !enabled() || !has_directory()),
+                        ..nsh_base::ButtonProps::initial()
+                    })
                         .test_id("thread-details-changes")
-                        .accessibility_label(tr("変更を表示"))
                         .flex_1()
                         .min_w_0()
                         .min_h(px(48.0))
@@ -316,8 +319,11 @@ fn summary_card(
                         .rounded(px(8.0))
                         .hover(|s| s.bg(nsh_core::element::rgba(0xffffff14)))
                         .disabled_style(|s| s.opacity(0.64))
-                        .on_press(move || act(Action::Diff))
-                        .disabled(move || !enabled() || !has_directory())
+                        .on_event(move |event: &nsh_base::ButtonEvent| {
+                            if matches!(event, nsh_base::ButtonEvent::Press) {
+                                act(Action::Diff);
+                            }
+                        })
                         .child(
                             view()
                                 .text_color(colors::t3_muted())
