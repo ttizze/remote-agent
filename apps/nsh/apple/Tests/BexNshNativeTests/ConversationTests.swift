@@ -90,7 +90,7 @@
         private func apply(_ view: NativeConversationView, scope: String, order: [String],
                            changed: [NativeConversationRow], reset: Bool, following: Bool = false) {
             view.update(NativeConversationUpdate(scope: scope, reset: reset, order: order, changed: changed,
-                                                 removed: [], following: following, inset: 60, history: nil,
+                                                 removed: [], following: following, history: nil,
                                                  notice: nil, latest: "Latest"))
             let deadline = Date().addingTimeInterval(3)
             while view.table.numberOfRows != order.count || view.table.isHidden, Date() < deadline {

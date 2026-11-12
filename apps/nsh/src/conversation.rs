@@ -89,6 +89,8 @@ pub(crate) mod look {
     /// `text-sm leading-relaxed`, in rows that are not Markdown.
     pub(crate) const TEXT: f32 = 14.0;
     pub(crate) const LINE: f32 = 22.75;
+    /// Touchscreens keep message actions visible; desktops reveal them on hover.
+    pub(crate) const IDLE_ACTION_OPACITY: f32 = if cfg!(target_os = "ios") { 1.0 } else { 0.0 };
     /// A work log row's icon box (`size-6`), its icon (`size-4`) and the gap
     /// to its label (`gap-1.5`).
     pub(crate) const ICON_BOX: f32 = 24.0;
@@ -567,13 +569,6 @@ pub(crate) struct Timeline {
     viewable: Signal<Option<(usize, usize)>>,
     /// The timeline's width, its lane centred in it.
     width: Signal<f32>,
-    /// The space the timeline's end keeps clear of what lies over it (the
-    /// composer): as T3 Code's reservation, the tallest it was in this
-    /// conversation, so that it shrinking never pulls a reader to the end.
-    inset: Signal<f32>,
-    /// The composer's current height positions the latest-message button and
-    /// starts the next conversation's scroll reservation.
-    covered: Signal<f32>,
     position: Stored<Option<agent_core::presentation::conversation::ScrollPosition>>,
 }
 
@@ -666,20 +661,7 @@ impl Timeline {
             rows,
             viewable: signal(None),
             width: signal(0.0),
-            inset: signal(0.0),
-            covered: signal(0.0),
             position: stored(None),
-        }
-    }
-
-    /// As T3 Code's composer overlay: what lies over the timeline's end,
-    /// `height` tall, which the timeline's end and its way back clear.
-    pub(crate) fn cover(self, height: f32) {
-        if self.covered.get_untracked() != height {
-            self.covered.set(height);
-        }
-        if self.inset.get_untracked() < height {
-            self.inset.set(height);
         }
     }
 
@@ -715,8 +697,6 @@ fn list(timeline: Timeline) -> impl IntoElement {
         rows,
         viewable,
         width,
-        inset,
-        covered,
         position,
     } = timeline;
     let surroundings = crate::rich_text::Surroundings::current();
@@ -784,8 +764,6 @@ fn list(timeline: Timeline) -> impl IntoElement {
         expanded_items.set(HashSet::new());
         unfolded.set(HashSet::new());
         surroundings.find.reset_position();
-        // A reservation held for another conversation's draft is not this one's.
-        inset.set(covered.get_untracked());
     });
     // A conversation opening or changing rows goes to its end while it
     // follows. A reader who scrolls back to the end is there already.
@@ -814,6 +792,13 @@ fn list(timeline: Timeline) -> impl IntoElement {
             .context
             .with(|p| p.opening().is_none().then(|| p.history()).flatten())
     });
+    let notice = computed(move || {
+        connection.conversation.with(|conversation| {
+            conversation
+                .as_ref()
+                .and_then(|conversation| conversation.history_notice())
+        })
+    });
     let column = view()
         .role(AccessibilityRole::Group)
         .label(tr("会話の履歴"));
@@ -825,63 +810,15 @@ fn list(timeline: Timeline) -> impl IntoElement {
         .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
         .child(saver.view(connection))
         .child(opening(connection))
-        .child(when(
-            move || history.get().is_some(),
-            move || {
-                view()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        crate::ui::text_button(
-                            move || {
-                                SharedString::from(history.with(|history| {
-                                    history
-                                        .as_ref()
-                                        .map(|history| history.load_label.clone())
-                                        .unwrap_or_default()
-                                }))
-                            },
-                            move || {
-                                following.set(false);
-                                if let Some(thread_id) = connection
-                                    .context
-                                    .with_untracked(|p| p.navigation().thread_id)
-                                {
-                                    connection.dispatch(Intent::ReadOlder { thread_id });
-                                }
-                            },
-                        )
-                        .enabled(move || {
-                            history.with(|history| {
-                                history.as_ref().is_some_and(|history| !history.loading)
-                            })
-                        }),
-                    )
-                    .child(text(move || {
-                        history.with(|history| {
-                            history
-                                .as_ref()
-                                .and_then(|history| history.error.as_ref())
-                                .map(|error| error.to_string())
-                                .unwrap_or_default()
-                        })
-                    }))
-            },
-        ))
-        .child(text(move || {
-            connection.conversation.with(|conversation| {
-                conversation
-                    .as_ref()
-                    .and_then(|conversation| conversation.history_notice())
-                    .unwrap_or_default()
-            })
-        }))
         // Cell measurements and native text views belong to this conversation.
         // Reusing the list across tasks carries their heights and scroll offset
         // into an unrelated history before its native measurements arrive.
         .child(each(
             move || {
-                (column_width.get() > 0.0 && rows.with(|rows| !rows.is_empty()))
+                let has_content = rows.with(|rows| !rows.is_empty())
+                    || history.get().is_some()
+                    || notice.get().is_some();
+                (column_width.get() > 0.0 && has_content)
                     .then(|| target.get())
                     .into_iter()
                     .collect::<Vec<_>>()
@@ -1018,11 +955,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                 })
                             })
                             .pb(move || {
-                                // The last row ends clear of what lies over the
-                                // end, and T3 Code's footer (`sm:h-4`) below it.
+                                // Leave a footer gap above the separate composer.
                                 let last = at.index() + 1 == rows.with(|rows| rows.len());
                                 px(row.with(|row| row.as_ref().map_or(0.0, |row| row.gap))
-                                    + if last { inset.get() + 16.0 } else { 0.0 })
+                                    + if last { 16.0 } else { 0.0 })
                             })
                             .child(
                                 view()
@@ -1309,6 +1245,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             ))
                     },
                 )
+                .header(history_header(connection, following, history, notice))
                 // Start with the latest row in the first layout. Creating an empty
                 // list and jumping after its first commit first mounts older cells
                 // at placeholder heights and measures content the reader never sees.
@@ -1362,7 +1299,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                     .accessibility_label(Some(SharedString::from(label)))
                     .absolute()
                     .self_center()
-                    .bottom(move || px(6.0 + covered.get()))
+                    .bottom(px(6.0))
                     .w(px(44.0))
                     .h(px(44.0))
                     .items_center()
@@ -1607,7 +1544,7 @@ fn fold_row(
                 .child(when(move || !open(), || icon(Icon::CHEVRON_RIGHT, 14.0))),
         )
         .child(view().flex_1())
-        .child(hover_time(time))
+        .child(row_time(time))
 }
 
 /// A running turn's header, as T3 Code's: how long it has worked, ruled below.
@@ -1680,14 +1617,13 @@ fn group_row(
                 .line_height(px(look::LINE))
                 .text_color(look::muted()),
         ))
-        .child(hover_time(time))
+        .child(row_time(time))
 }
 
-/// A row's time, shown while the pointer is over the row (T3 Code's
-/// `TimelineRowTimestamp`).
-fn hover_time(time: impl Fn() -> String + 'static) -> View {
+/// A row's time, visible on touchscreens and on hover on the desktop.
+fn row_time(time: impl Fn() -> String + 'static) -> View {
     view()
-        .opacity(0.0)
+        .opacity(look::IDLE_ACTION_OPACITY)
         .group_hover(|s| s.opacity(1.0))
         .child(text(time).text_size(px(12.0)).text_color(look::muted()))
 }
@@ -2034,8 +1970,61 @@ fn work_load_failure(
     ))
 }
 
-/// A selected conversation whose history has not arrived: it is loading, or
-/// its read failed and can be retried.
+/// The history controls scroll with the messages without changing row indices.
+fn history_header(
+    connection: Connection,
+    following: Signal<bool>,
+    history: Memo<Option<agent_core::presentation::conversation::HistoryControl>>,
+    notice: Memo<Option<String>>,
+) -> View {
+    view()
+        .child(when(
+            move || history.get().is_some(),
+            move || {
+                view()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        crate::ui::text_button(
+                            move || {
+                                SharedString::from(history.with(|history| {
+                                    history
+                                        .as_ref()
+                                        .map(|history| history.load_label.clone())
+                                        .unwrap_or_default()
+                                }))
+                            },
+                            move || {
+                                following.set(false);
+                                if let Some(thread_id) = connection
+                                    .context
+                                    .with_untracked(|p| p.navigation().thread_id)
+                                {
+                                    connection.dispatch(Intent::ReadOlder { thread_id });
+                                }
+                            },
+                        )
+                        .enabled(move || {
+                            history.with(|history| {
+                                history.as_ref().is_some_and(|history| !history.loading)
+                            })
+                        }),
+                    )
+                    .child(text(move || {
+                        history.with(|history| {
+                            history
+                                .as_ref()
+                                .and_then(|history| history.error.as_ref())
+                                .map(|error| error.to_string())
+                                .unwrap_or_default()
+                        })
+                    }))
+            },
+        ))
+        .child(text(move || notice.get().unwrap_or_default()))
+}
+
+/// A selected conversation whose history is loading or can be retried.
 fn opening(connection: Connection) -> View {
     use crate::ui::{self, colors};
     use agent_core::presentation::context::ConversationOpening;
@@ -2126,24 +2115,27 @@ fn error_row(
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(tone),
                 ))
-                .child(view().opacity(0.0).group_hover(|s| s.opacity(1.0)).child(
-                    ui::icon_button_sized(
-                        Icon::COPY,
-                        tr("エラーの詳細をコピー"),
-                        24.0,
-                        12.0,
-                        move || {
-                            if let Some(error) = error.get_untracked() {
-                                set_clipboard(format!(
-                                    "{}\n{}\n{}",
-                                    error.title,
-                                    error.message,
-                                    error.details.unwrap_or_default()
-                                ));
-                            }
-                        },
-                    ),
-                ))
+                .child(
+                    view()
+                        .opacity(look::IDLE_ACTION_OPACITY)
+                        .group_hover(|s| s.opacity(1.0))
+                        .child(ui::icon_button_sized(
+                            Icon::COPY,
+                            tr("エラーの詳細をコピー"),
+                            24.0,
+                            12.0,
+                            move || {
+                                if let Some(error) = error.get_untracked() {
+                                    set_clipboard(format!(
+                                        "{}\n{}\n{}",
+                                        error.title,
+                                        error.message,
+                                        error.details.unwrap_or_default()
+                                    ));
+                                }
+                            },
+                        )),
+                )
                 .child(
                     text(time)
                         .ml_2()
@@ -2236,7 +2228,11 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
         .flex_row()
         .items_center()
         .gap_2()
-        .opacity(if trailing { 1.0 } else { 0.0 })
+        .opacity(if trailing {
+            1.0
+        } else {
+            look::IDLE_ACTION_OPACITY
+        })
         .group_hover(|s| s.opacity(1.0))
         .child(when(
             move || fork().is_some(),
@@ -2292,7 +2288,7 @@ fn user_actions(connection: Connection, row: Memo<Option<Row>>) -> View {
         .flex_row()
         .items_center()
         .gap_2()
-        .opacity(0.0)
+        .opacity(look::IDLE_ACTION_OPACITY)
         .group_hover(|s| s.opacity(1.0))
         .child(time(row))
         .child(

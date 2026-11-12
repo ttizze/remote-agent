@@ -127,6 +127,20 @@ struct Target {
     provider: Option<agent_protocol::session::ProviderKind>,
 }
 
+#[cfg(any(
+    feature = "standard-text",
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions),
+    test
+))]
+/// Preserve both appearances when Core supplies an annotated run's colors.
+fn run_color(run: &Value) -> Option<AdaptiveColor> {
+    let color = |key: &str| run[key].as_u64().and_then(|c| u32::try_from(c).ok());
+    let light = color("lightColor");
+    let dark = color("darkColor");
+    Some(AdaptiveColor::rgb(light.or(dark)?, dark.or(light)?))
+}
+
 /// What message content reaches. List rows are made outside the context
 /// their list was made in, so they receive these rather than look them up.
 #[derive(Clone, Copy)]
@@ -1277,12 +1291,8 @@ mod drawn {
                     .font_family(SharedString::from("monospace"))
                     .bg(colors::RAISED);
             }
-            // The app's look is dark: a run's own color is its dark variant.
-            if let Some(color) = run["darkColor"]
-                .as_u64()
-                .and_then(|c| u32::try_from(c).ok())
-            {
-                span = span.text_color(rgb(color));
+            if let Some(color) = super::run_color(run) {
+                span = span.text_color(color);
             }
             if let Some(link) = run["link"].as_str().map(str::to_owned) {
                 if let Some(chip) = run.get("file") {
@@ -1382,10 +1392,7 @@ mod drawn {
         O: Fn(String, bool) + Copy + 'static,
         C: Fn(String, String) + Copy + 'static,
     {
-        let color = chip["darkColor"]
-            .as_u64()
-            .and_then(|c| u32::try_from(c).ok())
-            .map_or(colors::ACCENT, rgb);
+        let color = super::run_color(chip).unwrap_or_else(|| colors::ACCENT.into());
         let glyph = if chip["folder"].as_bool().unwrap_or(false) {
             crate::ui::icon(crate::ui::Icon::FOLDER, 14.0).into_element()
         } else {
@@ -1624,6 +1631,24 @@ mod tests {
                 "/repo/src/日本語.rs"
             ]
         );
+    }
+
+    #[test]
+    fn annotated_colors_keep_both_appearances_and_use_the_available_variant() {
+        for (run, expected) in [
+            (
+                json!({"lightColor":0x112233, "darkColor":0xaabbcc}),
+                [0x112233ff, 0xaabbccff],
+            ),
+            (json!({"lightColor":0x112233}), [0x112233ff, 0x112233ff]),
+            (json!({"darkColor":0xaabbcc}), [0xaabbccff, 0xaabbccff]),
+        ] {
+            let color = run_color(&run).unwrap();
+            assert_eq!(nsh_core::Color::from(color.light).0, expected[0]);
+            assert_eq!(nsh_core::Color::from(color.dark).0, expected[1]);
+        }
+        assert!(run_color(&json!({})).is_none());
+        assert!(run_color(&json!({"lightColor":u64::MAX, "darkColor":"bad"})).is_none());
     }
 
     #[test]

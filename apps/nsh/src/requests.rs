@@ -22,9 +22,6 @@ use nsh_core::{
 };
 
 const ERROR: Rgba = rgb(0xff8e86);
-/// How far the banner runs under the composer, which is drawn over it (T3's
-/// `--chat-composer-attachment-overlap`, 1rem and a pixel).
-const OVERLAP: f32 = 17.0;
 /// How far in from the composer's sides the banner stands (T3's 1.375rem
 /// `--chat-composer-drawer-inset`, measured from inside the composer's outline).
 const INSET: f32 = 21.0;
@@ -39,7 +36,7 @@ const ICON_COLUMN: f32 = 24.0;
 
 /// The banner waiting on the composer: an approval or input request first, as
 /// T3 Code's top drawer, else the question the composer answers. Placed right
-/// above the composer, which overlaps its foot.
+/// above the composer without overlapping its input.
 pub(crate) fn panels(following: Signal<bool>) -> impl IntoElement {
     let connection = use_context::<Connection>().unwrap();
     let docked = move || connection.context.with(|p| p.docked_request().is_some());
@@ -67,13 +64,11 @@ pub(crate) fn panels(following: Signal<bool>) -> impl IntoElement {
         ))
 }
 
-/// T3's attached banner surface: inset from the composer's sides, rounded
-/// above, with its foot under the composer.
+/// A banner inset from the composer's sides, with its whole surface above it.
 fn attached(fill: Rgba, outline: Rgba) -> View {
     view()
         .mx(px(INSET))
-        .mb(px(-OVERLAP))
-        .rounded_t(px(18.0))
+        .rounded(px(18.0))
         .border_1()
         .border_color(outline)
         .bg(fill)
@@ -156,7 +151,7 @@ fn request_banner(
     attached(WARNING_SURFACE, WARNING_OUTLINE)
         .px_3()
         .pt_3()
-        .pb(px(12.0 + OVERLAP))
+        .pb(px(12.0))
         .gap_3()
         .child(
             view()
@@ -428,7 +423,7 @@ fn question_banner(
     let collapsed = signal(false);
     attached(SURFACE, NEUTRAL_OUTLINE)
         .p_1()
-        .pb(px(4.0 + OVERLAP))
+        .pb(px(4.0))
         .child(question_header(prompt, collapsed, busy, move || {
             following.set(true);
             connection.dispatch(Intent::Respond(op::Respond {

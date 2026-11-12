@@ -24,6 +24,8 @@ struct SettingsScreen: View {
                     .disabled(model.profiles.isEmpty)
             }
             LanguageSettings(language: model.language, select: model.selectLanguage)
+            FollowUpSettings(preferences: model.composerPreferences, select: model.selectComposerPreferences)
+                .disabled(model.profiles.isEmpty)
             Section("プロジェクトと会話") {
                 NavigationLink {
                     WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
@@ -55,6 +57,28 @@ struct LanguageSettings: View {
                 Text(verbatim: "日本語").tag(UiLanguage.japanese)
             }
             .accessibilityIdentifier("settings.language")
+        }
+    }
+}
+
+/// What a message sent while the agent works does, as the Mac's general settings choose.
+struct FollowUpSettings: View {
+    let preferences: ComposerPreferences
+    let select: (ComposerPreferences) -> Void
+
+    var body: some View {
+        Section {
+            Picker("フォローアップの動作", selection: Binding(get: { preferences.followUp }, set: { value in
+                var next = preferences
+                next.followUp = value
+                select(next)
+            })) {
+                Text("キュー").tag(FollowUp.queue)
+                Text("追加の指示").tag(FollowUp.steer)
+            }
+            .accessibilityIdentifier("settings.followUp")
+        } footer: {
+            Text("エージェントの実行中に送るメッセージを、キューに追加するか実行中の作業に追加で指示するかを選択します。")
         }
     }
 }

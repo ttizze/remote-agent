@@ -13,6 +13,8 @@ use std::{rc::Rc, sync::Arc};
 #[derive(Clone, Copy)]
 pub(crate) struct Preview {
     state: Signal<PreviewState>,
+    #[cfg(target_os = "ios")]
+    external_actions: Option<native::ExternalActions>,
     /// The sent message's images or the conversation's generated images,
     /// beside the image the desktop viewer shows.
     #[cfg(desktop)]
@@ -43,6 +45,8 @@ impl Preview {
     pub fn new() -> Self {
         Self {
             state: signal(PreviewState::Closed),
+            #[cfg(target_os = "ios")]
+            external_actions: use_context::<native::ExternalActions>(),
             #[cfg(desktop)]
             gallery: signal(None),
             owner: Owner::current(),
@@ -50,6 +54,14 @@ impl Preview {
     }
 
     fn show(self, file: Shared<LocalFile>) {
+        #[cfg(target_os = "ios")]
+        if let Some(actions) = self.external_actions {
+            // The embedding owner copies the borrowed file before this callback returns.
+            actions
+                .emit(serde_json::json!({"action":"preview", "text":file.path.to_string_lossy()}));
+            self.state.set(PreviewState::Closed);
+            return;
+        }
         self.state.set(PreviewState::Ready(file));
     }
 
@@ -186,8 +198,14 @@ pub(crate) fn preview() -> impl Element {
     ));
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     let root = root.child(opened_file(preview));
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "macos")]
     let root = root.child(quick_look(preview));
+    #[cfg(target_os = "ios")]
+    let root = if preview.external_actions.is_none() {
+        root.child(quick_look(preview))
+    } else {
+        root
+    };
     root.child(when(
         move || matches!(preview.state.get(), PreviewState::Loading(_)),
         || text(tr("ファイルを読み込み中…")),

@@ -25,15 +25,18 @@
         /// What the message text asks for: an `action` (`quote`, `sideChat`,
         /// `explain`, `link`) and its `text`.
         let perform: (_ action: String, _ text: String) -> Void
+        let preview: (Result<SharedFile, Error>) -> Void
 
         final class Coordinator {
             var handle: UnsafeMutableRawPointer?
             var perform: (String, String) -> Void = { _, _ in }
+            var preview: (Result<SharedFile, Error>) -> Void = { _ in }
         }
 
         func makeCoordinator() -> Coordinator {
             let coordinator = Coordinator()
             coordinator.perform = perform
+            coordinator.preview = preview
             return coordinator
         }
 
@@ -48,8 +51,20 @@
                 else { return }
                 let coordinator = Unmanaged<Coordinator>.fromOpaque(context).takeUnretainedValue()
                 let text = event["text"] as? String ?? ""
-                DispatchQueue.main.async { [weak coordinator] in
-                    coordinator?.perform(action, text)
+                if action == "preview" {
+                    // NSH lends its download only during the callback. Copy it before
+                    // crossing queues; the Swift presentation owns the new directory.
+                    let file = Result {
+                        guard !text.isEmpty else { throw URLError(.badURL) }
+                        return try SharedFile(url: retainChatMedia(URL(fileURLWithPath: text)))
+                    }
+                    DispatchQueue.main.async { [weak coordinator] in
+                        coordinator?.preview(file)
+                    }
+                } else {
+                    DispatchQueue.main.async { [weak coordinator] in
+                        coordinator?.perform(action, text)
+                    }
                 }
             }
             let handle = host.withCString {
@@ -69,6 +84,7 @@
 
         func updateUIView(_: UIView, context: Context) {
             context.coordinator.perform = perform
+            context.coordinator.preview = preview
         }
 
         static func dismantleUIView(_: UIView, coordinator: Coordinator) {
@@ -77,6 +93,7 @@
                 coordinator.handle = nil
             }
             coordinator.perform = { _, _ in }
+            coordinator.preview = { _ in }
         }
     }
 

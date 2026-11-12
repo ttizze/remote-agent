@@ -275,29 +275,28 @@ fn app_content(
     provide_context(terminal::Focus::new());
     provide_context(find::Find::new());
     let failure = computed(move || state.with(|state| state.failure.clone().map(l10n::localized)));
+    use nsh_base::text_view::{TextViewPart, TextViewParts};
+    // Native composers use 17pt on iOS (scaled once by its NSH environment)
+    // and 14pt on desktop. Use the system font's natural line metrics in both;
+    // small headings must not become smaller than the body.
+    let body_size = if cfg!(target_os = "ios") { 17.0 } else { 14.0 };
+    let typography = [
+        TextViewPart::Root,
+        TextViewPart::Heading4,
+        TextViewPart::Heading5,
+        TextViewPart::Heading6,
+    ]
+    .into_iter()
+    .fold(TextViewParts::new(), |parts, part| {
+        parts.part(part, move |style| {
+            style
+                .text_size(px(body_size))
+                .line_height(nsh_core::LineHeight::Normal)
+        })
+    });
+    provide_context(typography);
     #[cfg(target_os = "ios")]
     if matches!(area, Area::Conversation { .. }) {
-        use nsh_base::text_view::{TextViewPart, TextViewParts};
-
-        // SwiftUI's .body is 17pt before Dynamic Type scaling. Let the system
-        // font supply its line height, as the native composer does; NSH's iOS
-        // environment already applies the user's body-text scale. Small bold
-        // headings match .headline so they never become smaller than the body.
-        let typography = [
-            TextViewPart::Root,
-            TextViewPart::Heading4,
-            TextViewPart::Heading5,
-            TextViewPart::Heading6,
-        ]
-        .into_iter()
-        .fold(TextViewParts::new(), |parts, part| {
-            parts.part(part, |style| {
-                style
-                    .text_size(px(17.0))
-                    .line_height(nsh_core::LineHeight::Normal)
-            })
-        });
-        provide_context(typography);
         if let Some(actions) = use_context::<native::ExternalActions>() {
             effect(move || {
                 if let Some(error) = failure.get() {
@@ -411,9 +410,8 @@ fn app_content(
                 && connection.conversation.with(Option::is_none)
                 && connection.context.with(|p| p.opening().is_none())
         });
-        // As T3 Code's draft hero, a new conversation centers its composer;
-        // a conversation's composer lies over the timeline's end, which
-        // scrolls under it.
+        // A new conversation centers its composer. Existing messages and the
+        // unfilled composer occupy separate regions so their text cannot overlap.
         view()
             .flex_1()
             .min_w_0()
@@ -421,7 +419,7 @@ fn app_content(
             .style_when(move || welcome.get(), |s| s.justify_center())
             .child(when(move || !welcome.get(), move || timeline.list()))
             .child(when(move || welcome.get(), hero))
-            // Under the composer, as T3 Code's overlay lies over the timeline.
+            // The minimap overlays the conversation canvas.
             .child(when(
                 move || !welcome.get(),
                 move || timeline.minimap(canvas),
@@ -430,17 +428,7 @@ fn app_content(
                 move || is_desktop() && !welcome.get(),
                 move || find::bar(use_context::<find::Find>().unwrap(), timeline),
             ))
-            .child(
-                view()
-                    .style_when(
-                        move || !welcome.get(),
-                        |s| s.absolute().left(px(0.0)).right(px(0.0)).bottom(px(0.0)),
-                    )
-                    .on_layout(move |bounds: &nsh_core::Bounds<nsh_core::Points>| {
-                        timeline.cover(bounds.size.height.0)
-                    })
-                    .child(composer::composer(following)),
-            )
+            .child(composer::composer(following))
     };
     let notices = move || {
         view()

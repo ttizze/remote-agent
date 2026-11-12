@@ -914,8 +914,8 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             move || follow_up.with(|f| !f.queue.is_empty()),
             move || crate::queue::queued(connection),
         ))
-        // A waiting request's banner sits on the composer's top edge, its foot
-        // under the composer drawn after it.
+        // A waiting request's banner sits above the composer without painting
+        // behind its transparent input.
         .child(
             view()
                 .child(crate::requests::panels(following))
@@ -928,7 +928,6 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                         .p(px(7.0))
                         .gap_2()
                         .rounded(px(22.0))
-                        .bg(colors::SURFACE)
                         .border_1()
                         .border_color(colors::border())
                         .child(when(move || !dictating(), desktop_box));

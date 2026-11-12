@@ -138,7 +138,7 @@ struct ThreadScreen: View {
     @ViewBuilder private var conversationBody: some View {
         #if BEX_NSH_CONVERSATION
             NshConversationView(host: model.host, session: model.session, pane: model.pane,
-                                perform: messageAction)
+                                perform: messageAction, preview: mediaAccess.presentation.openPreview)
                 .id(ObjectIdentifier(model))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityElement(children: .contain)
@@ -150,26 +150,22 @@ struct ThreadScreen: View {
                 let hasHistory = thread.id != nil && history != nil
                 let ids: [ConversationList.RowID] = (hasHistory ? [.history] : []) + rows.map { .message($0.id) }
                 let showLatest = !scroll.latestVisible && !rows.isEmpty
-                GeometryReader { geometry in
-                    ConversationList(ids: ids, scroll: scroll, following: scroll.following,
-                                     accessibilityValue: threadAccessibilityValue(
-                                         thread,
-                                         itemCount: thread.projection.sourceItemCount()
-                                     ),
-                                     viewportHeight: geometry.size.height) { index in
-                        let row = index - (hasHistory ? 1 : 0)
-                        return AnyView(Group {
-                            if row < 0, let session = thread.id, let history {
-                                historyControl(history, session: session)
-                            } else if rows.indices.contains(row) {
-                                conversationRow(rows[row])
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
+                ConversationList(ids: ids, scroll: scroll, following: scroll.following,
+                                 accessibilityValue: threadAccessibilityValue(
+                                     thread,
+                                     itemCount: thread.projection.sourceItemCount()
+                                 )) { index in
+                    let row = index - (hasHistory ? 1 : 0)
+                    return AnyView(Group {
+                        if row < 0, let session = thread.id, let history {
+                            historyControl(history, session: session)
+                        } else if rows.indices.contains(row) {
+                            conversationRow(rows[row])
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .buttonStyle(.plain)
-                        .environment(\.locale, locale))
                     }
-                    .ignoresSafeArea(.container, edges: .bottom)
+                    .buttonStyle(.plain)
+                    .environment(\.locale, locale))
                 }
                 .id(model.draftKey)
                 .overlay(alignment: .bottom) { latestButton(visible: showLatest).padding(.bottom, 6) }

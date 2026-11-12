@@ -393,7 +393,6 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
                 .border_l_1()
                 .border_r_1()
                 .border_color(colors::border())
-                .bg(colors::SURFACE)
                 .overflow_hidden()
                 .style_when(header, |s| s.border_t_1().rounded_t(px(ui::RADIUS)))
                 .style_when(
@@ -410,7 +409,6 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
                         .gap_2()
                         .h(px(32.0))
                         .px_2()
-                        .bg(colors::RAISED)
                         .hover(|s| s.bg(colors::SELECTED))
                         .child(
                             view()
@@ -465,12 +463,12 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
 /// A line of a hunk: its number and text, in the desktop client's tints for what
 /// happened to it.
 fn diff_line(line: Memo<Option<DiffRow>>) -> View {
-    let tint = move || {
+    let foreground = move || {
         line.with(|line| match line.as_ref().map(|line| line.kind.as_str()) {
-            Some("+") => (rgb(0x14291d), rgb(0x9be9a8)),
-            Some("-") => (rgb(0x321c20), rgb(0xffa2a2)),
-            Some("@") => (rgb(0x232b38), rgb(0x9cc7f5)),
-            _ => (colors::SURFACE, rgb(0xd0d0d0)),
+            Some("+") => rgb(0x9be9a8),
+            Some("-") => rgb(0xffa2a2),
+            Some("@") => rgb(0x9cc7f5),
+            _ => rgb(0xd0d0d0),
         })
     };
     let code = |content: Text| {
@@ -482,7 +480,6 @@ fn diff_line(line: Memo<Option<DiffRow>>) -> View {
     view()
         .flex_row()
         .items_start()
-        .bg(move || tint().0)
         .child(
             code(text(move || {
                 line.with(|line| {
@@ -509,7 +506,7 @@ fn diff_line(line: Memo<Option<DiffRow>>) -> View {
             .flex_1()
             .min_w_0()
             .pr_2()
-            .text_color(move || tint().1)
+            .text_color(foreground)
             .selectable(true),
         )
 }

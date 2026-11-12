@@ -151,7 +151,6 @@ struct ConversationComposer: View {
             }
             .buttonStyle(.plain)
             .padding(7)
-            .glassEffect(.regular, in: .rect(cornerRadius: 26))
         }
         .padding(.horizontal, 12)
     }

@@ -184,11 +184,8 @@ fn custom(
 #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn run(run: &Value, surroundings: Surroundings) -> Text {
     let text = super::drawn::highlighted_run(run, surroundings.find, None, true);
-    match run["darkColor"]
-        .as_u64()
-        .and_then(|c| u32::try_from(c).ok())
-    {
-        Some(color) => text.text_color(rgb(color)),
+    match super::run_color(run) {
+        Some(color) => text.text_color(color),
         None => text,
     }
 }
