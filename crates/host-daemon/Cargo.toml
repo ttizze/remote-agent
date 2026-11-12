@@ -46,7 +46,7 @@ libc = "0.2"
 which = "8.0.6"
 alacritty_terminal = "=0.26.0"
 # T3's fff-node 0.11.0 uses this release of the Rust search engine.
-fff-search = { git = "https://github.com/dmtrKovalenko/fff", rev = "95fd777c2529fc7b4d7572dabff64cc07268f2c5", default-features = false, features = ["zlob"] }
+fff-search = { git = "https://github.com/dmtrKovalenko/fff", rev = "95fd777c2529fc7b4d7572dabff64cc07268f2c5", default-features = false, features = ["ripgrep"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 cap-std = "=4.0.3"
 
