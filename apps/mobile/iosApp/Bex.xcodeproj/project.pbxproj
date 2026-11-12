@@ -6,6 +6,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		77623E97F556B8A188764521 /* SetupScriptSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15F39D62BA30B219DA0F3078 /* SetupScriptSettings.swift */; };
+		A266D440CA3F8D62688B1CE7 /* SetupProgressCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0124BF56F05791E4DAC9C225 /* SetupProgressCard.swift */; };
+		A1CBE54A5FAD2AF27E1C78F9 /* ConversationWorkspacePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFCCED37E111DD8C6D47DED3 /* ConversationWorkspacePicker.swift */; };
         B805E2000000000000000003 /* SettingsScopeFields.swift in Sources */ = {isa = PBXBuildFile; fileRef = B805E2000000000000000004; };
         B805E2000000000000000001 /* WorktreeSettingsFields.swift in Sources */ = {isa = PBXBuildFile; fileRef = B805E2000000000000000002; };
         B805E1000000000000000003 /* BrowserCredentialsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B805E1000000000000000004; };
@@ -94,6 +97,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		15F39D62BA30B219DA0F3078 /* SetupScriptSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupScriptSettings.swift; sourceTree = "<group>"; };
+		0124BF56F05791E4DAC9C225 /* SetupProgressCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupProgressCard.swift; sourceTree = "<group>"; };
+		EFCCED37E111DD8C6D47DED3 /* ConversationWorkspacePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationWorkspacePicker.swift; sourceTree = "<group>"; };
         B805E2000000000000000004 /* SettingsScopeFields.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-settings/Sources/NativeSettingsViews/SettingsScopeFields.swift; sourceTree = SOURCE_ROOT; };
         B805E2000000000000000002 /* WorktreeSettingsFields.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-settings/Sources/NativeSettingsViews/WorktreeSettingsFields.swift; sourceTree = SOURCE_ROOT; };
         B805E1000000000000000004 /* BrowserCredentialsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-browser/apple-views/Sources/NativeBrowserViews/BrowserCredentialsView.swift; sourceTree = SOURCE_ROOT; };
@@ -264,6 +270,9 @@
 				C566DFC61A2F26347BE616E6 /* TaskConnections.swift */,
 				C92E660B9BEE4F45B54F9762 /* ConnectionSettings.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
+				15F39D62BA30B219DA0F3078 /* SetupScriptSettings.swift */,
+				0124BF56F05791E4DAC9C225 /* SetupProgressCard.swift */,
+				EFCCED37E111DD8C6D47DED3 /* ConversationWorkspacePicker.swift */,
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
 				A9C1000000000000000000F3 /* ConversationQueue.swift */,
 				A9C1000000000000000000F1 /* NshConversationView.swift */,
@@ -463,6 +472,9 @@
 				665D9C527D3738090B08598A /* TaskConnections.swift in Sources */,
 				CB49F882BDB040D193481C41 /* ConnectionSettings.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
+				77623E97F556B8A188764521 /* SetupScriptSettings.swift in Sources */,
+				A266D440CA3F8D62688B1CE7 /* SetupProgressCard.swift in Sources */,
+				A1CBE54A5FAD2AF27E1C78F9 /* ConversationWorkspacePicker.swift in Sources */,
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
 				A9C1000000000000000000F4 /* ConversationQueue.swift in Sources */,
 				A9C1000000000000000000F2 /* NshConversationView.swift in Sources */,

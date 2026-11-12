@@ -63,13 +63,12 @@ import kotlinx.coroutines.launch
 internal fun ThreadDetailScreen(
     context: ConversationContext,
     projection: ConversationRows?,
-    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    toggleActivity: (String) -> Unit,
+    actions: ConversationActions,
     modifier: Modifier = Modifier,
     scrollToTopRequest: Int = 0,
-    terminals: dev.remoteagent.core.Terminals,
     composer: @Composable (() -> Unit) -> Unit,
 ) {
+    val perform = actions.perform
     val threadId = context.navigation().threadId
     var setupTerminal by remember(threadId) { mutableStateOf<dev.remoteagent.core.SetupTerminal?>(null) }
     var recoveryExpanded by remember(threadId, context.navigation().draftKey) { mutableStateOf(false) }
@@ -106,16 +105,11 @@ internal fun ThreadDetailScreen(
                     val row = remember(projected) { projected.data() }
                     ConversationContent(
                         row,
-                        threadId,
-                        context.navigation().cwd,
+                        context,
                         perform,
                         openSetupTerminal = { setupTerminal = it },
-                        forkPhase =
-                            (row.content as? ConversationRowContent.Response)?.forkTurnId?.let { turn ->
-                                context.forkPhase(turn)
-                            },
                         activityHeader = { activity ->
-                            ActivityHeader(activity, projected.expanded()) { toggleActivity(projected.id()) }
+                            ActivityHeader(activity, projected.expanded()) { actions.toggleActivity(projected.id()) }
                         },
                     )
                 }
@@ -128,7 +122,7 @@ internal fun ThreadDetailScreen(
         composer { following = true }
     }
     setupTerminal?.let { terminal ->
-        TerminalDialog(terminals, terminal.cwd, perform, terminal.handle) { setupTerminal = null }
+        TerminalDialog(actions.terminals, terminal.cwd, perform, terminal.handle) { setupTerminal = null }
     }
 }
 
@@ -169,13 +163,13 @@ private fun LazyListScope.conversationRows(
 @Composable
 private fun ConversationContent(
     row: ConversationRow,
-    threadId: dev.remoteagent.core.SessionRef?,
-    cwd: String,
+    context: ConversationContext,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    forkPhase: dev.remoteagent.core.OperationPhase? = null,
     openSetupTerminal: (dev.remoteagent.core.SetupTerminal) -> Unit,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
+    val threadId = context.navigation().threadId
+    val cwd = context.navigation().cwd
     val language = LocalUiLanguage.current
     val timestampMs = row.timestampMs
     when (val content = row.content) {
@@ -193,24 +187,7 @@ private fun ConversationContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true, cwd, perform, timestampMs)
-        is ConversationRowContent.Response ->
-            ThreadMessageCard(
-                content.item,
-                false,
-                cwd,
-                perform,
-                timestampMs,
-                showActions = content.showActions,
-                fork =
-                    if (threadId != null && content.forkTurnId != null)
-                        ({
-                            perform(
-                                Intent.ForkSession(dev.remoteagent.core.ForkSession(threadId, content.forkTurnId))
-                            ) {}
-                        })
-                    else null,
-                forkPhase = forkPhase,
-            )
+        is ConversationRowContent.Response -> ConversationResponse(content, context, perform, timestampMs)
         is ConversationRowContent.Activity ->
             ThreadActivityCard(content.item, cwd, perform) { itemId ->
                 if (threadId != null) perform(Intent.ReadItem(ReadItem(threadId, content.turnId, itemId))) {}
@@ -225,6 +202,30 @@ private fun ConversationContent(
         is ConversationRowContent.Error -> TurnErrorCard(content.error)
         is ConversationRowContent.InProgress -> TurnStopButton(threadId, content.turnId, perform)
     }
+}
+
+@Composable
+private fun ConversationResponse(
+    content: ConversationRowContent.Response,
+    context: ConversationContext,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    timestampMs: ULong?,
+) {
+    val threadId = context.navigation().threadId
+    val turnId = content.forkTurnId
+    ThreadMessageCard(
+        content.item,
+        false,
+        context.navigation().cwd,
+        perform,
+        timestampMs,
+        showActions = content.showActions,
+        fork =
+            if (threadId != null && turnId != null)
+                ({ perform(Intent.ForkSession(dev.remoteagent.core.ForkSession(threadId, turnId))) {} })
+            else null,
+        forkPhase = turnId?.let { context.forkPhase(it) },
+    )
 }
 
 @Composable

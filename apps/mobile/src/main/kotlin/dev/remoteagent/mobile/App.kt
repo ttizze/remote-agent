@@ -711,11 +711,9 @@ private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(mode
         ThreadDetailScreen(
             model.conversationContext,
             model.conversation,
-            model::perform,
-            model::toggleActivity,
+            ConversationActions(model::perform, model::toggleActivity, model.terminals),
             Modifier.weight(1f),
             scrollToTopRequest = scrollToTopRequest,
-            terminals = model.terminals,
         ) { onSend ->
             ThreadComposer(
                 model.composer,

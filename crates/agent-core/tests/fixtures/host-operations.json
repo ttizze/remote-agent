@@ -139,6 +139,7 @@
     ],
     "result": {
       "branch": "fixture",
+      "base_ref": "main",
       "additions": 2,
       "deletions": 1,
       "files": [
