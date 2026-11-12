@@ -593,7 +593,7 @@ mod tests {
             }
             let before = staged.then(|| std::fs::read(&original_index).unwrap());
             std::fs::write(cwd.join("tracked.txt"), "working\n").unwrap();
-            let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+            let review = collect_workspace_review(cwd.to_path_buf(), None).unwrap();
             assert_eq!((review.additions, review.deletions), (1, 0));
             assert!(review.diff.contains("+working\n"));
             assert!(private_indexes().is_empty());
@@ -603,7 +603,7 @@ mod tests {
             }
 
             std::fs::write(&original_index, b"invalid index").unwrap();
-            assert!(collect_workspace_review(cwd.to_path_buf()).is_err());
+            assert!(collect_workspace_review(cwd.to_path_buf(), None).is_err());
             assert_eq!(std::fs::read(&original_index).unwrap(), b"invalid index");
             assert!(private_indexes().is_empty());
         }
