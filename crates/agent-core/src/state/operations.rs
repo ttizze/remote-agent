@@ -105,6 +105,11 @@ pub enum Intent {
     SaveFile(SaveFile),
     WriteWorkspaceFile(WriteWorkspaceFile),
     ReviewWorkspace(ReviewWorkspace),
+    ChangeWorkspace(ChangeWorkspace),
+    SetWorkspaceComparison {
+        cwd: String,
+        base_ref: Option<String>,
+    },
     ReadWorktreeSettings(ReadWorktreeSettings),
     UpdateWorktreeSettings(UpdateWorktreeSettings),
     ListWorktrees(ListWorktrees),
@@ -333,6 +338,9 @@ pub enum OperationKey {
     WorkspaceReview {
         pane: String,
     },
+    WorkspaceAction {
+        pane: String,
+    },
     CodexCli,
     ProviderSettings,
     HostSoftware,
@@ -397,7 +405,10 @@ pub struct OperationState {
 impl OperationKey {
     pub(crate) fn in_pane(mut self, id: &str) -> Self {
         match &mut self {
-            Self::Directory { pane } | Self::File { pane } | Self::WorkspaceReview { pane } => {
+            Self::Directory { pane }
+            | Self::File { pane }
+            | Self::WorkspaceReview { pane }
+            | Self::WorkspaceAction { pane } => {
                 *pane = id.into();
             }
             _ => (),
@@ -407,9 +418,10 @@ impl OperationKey {
 
     pub(crate) fn pane(&self) -> Option<&str> {
         match self {
-            Self::Directory { pane } | Self::File { pane } | Self::WorkspaceReview { pane } => {
-                Some(pane)
-            }
+            Self::Directory { pane }
+            | Self::File { pane }
+            | Self::WorkspaceReview { pane }
+            | Self::WorkspaceAction { pane } => Some(pane),
             _ => None,
         }
     }

@@ -11,6 +11,7 @@ mod sessions;
 mod titles;
 mod transcripts;
 mod update;
+mod workspace;
 mod worktrees;
 
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
@@ -50,6 +51,7 @@ struct ServiceInner {
     editors: crate::editors::Editors,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
+    workspace_access: tokio::sync::Mutex<()>,
     worktree_cleanup: tokio::sync::Notify,
     permission_settings_access: tokio::sync::Mutex<()>,
     terminals: crate::terminals::Terminals,
@@ -91,6 +93,7 @@ impl HostRpcService {
                 dictation,
                 worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
+                workspace_access: Default::default(),
                 worktree_cleanup: tokio::sync::Notify::new(),
                 permission_settings_access: Default::default(),
                 terminals: Default::default(),
@@ -284,6 +287,7 @@ impl HostRpcService {
                     | Call::WriteFile(_)
                     | Call::WriteWorkspaceFile(_)
                     | Call::Upload(_)
+                    | Call::ChangeWorkspace(_)
                     | Call::ReviewWorkspace(_)
             ) {
                 Some(self.inner.worktree_access.read().await)
@@ -464,7 +468,11 @@ impl HostRpcService {
                 self.retry_preparation(&params.thread_id).await?.into()
             }
             Call::StartTerminal(params) => {
-                let launch = crate::terminals::Launch::shell(params.cwd.clone());
+                let launch = crate::terminals::Launch::command(
+                    params.cwd.clone(),
+                    params.command.as_deref(),
+                )
+                .map_err(|error| Failure::new("terminal_start_failed", error))?;
                 (self
                     .inner
                     .terminals
@@ -527,12 +535,8 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("dictation_failed", error))?)
             .into(),
-            Call::ReviewWorkspace(params) => {
-                (crate::inspect_workspace(params.cwd.clone())
-                    .await
-                    .map_err(|error| Failure::new("workspace_review_failed", error))?)
-                .into()
-            }
+            Call::ReviewWorkspace(params) => self.review_workspace(params).await?.into(),
+            Call::ChangeWorkspace(params) => self.change_workspace(params).await?.into(),
             Call::ListFiles(_)
             | Call::ListTreeEntries(_)
             | Call::SearchTreeEntries(_)

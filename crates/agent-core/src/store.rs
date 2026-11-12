@@ -2013,6 +2013,7 @@ mod tests {
             });
         let scheduled = Scheduled::new(
             Effect::execute(op::StartTerminal {
+                command: None,
                 handle: "terminal".into(),
                 cwd: "/fixture".into(),
                 size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
@@ -2076,6 +2077,7 @@ mod tests {
                     discard_draft: false,
                 }),
                 Effect::execute(op::ReviewWorkspace {
+                    base_ref: None,
                     cwd: "/fixture".into(),
                 }),
             ] {

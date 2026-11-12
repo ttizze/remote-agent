@@ -663,7 +663,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     );
     let review: Arc<agent_protocol::models::WorkspaceReview> = Arc::new(
         serde_json::from_value(json!({
-            "branch":"main", "base_ref":"origin/main", "additions":1, "deletions":0, "files":[], "diff":"old"
+            "controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main", "base_ref":"origin/main", "additions":1, "deletions":0, "files":[], "diff":"old"
         }))
         .unwrap(),
     );
@@ -1130,6 +1130,7 @@ fn terminal_presentation_only_shows_loading_or_exceptional_status() {
             "test".into(),
             std::sync::Arc::new(Terminal {
                 target: agent_core::state::TerminalTarget::Shell {
+                    command: None,
                     cwd: "/fixture".into(),
                 },
                 size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },

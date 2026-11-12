@@ -12,6 +12,7 @@ pub(crate) fn screen(surface: PanelSurface, host: String) -> impl IntoElement {
     let workspace = use_context::<Workbench>().unwrap();
     let host = stored(host);
     let cwd = stored(surface.path.unwrap_or_default());
+    let command = stored(surface.command);
     #[cfg(target_os = "macos")]
     let id = surface.id;
     let handle = stored(workspace.terminal_handle(surface.id));
@@ -61,6 +62,7 @@ pub(crate) fn screen(surface: PanelSurface, host: String) -> impl IntoElement {
     let start = move |started: &std::cell::Cell<bool>, size| {
         started.set(true);
         send(Intent::StartTerminal(op::StartTerminal {
+            command: command.get(),
             handle: handle.get(),
             cwd: cwd.get(),
             size,

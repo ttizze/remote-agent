@@ -18,6 +18,7 @@ impl Operation for StartTerminal {
             snapshot,
             &self.handle,
             crate::state::TerminalTarget::Shell {
+                command: self.command.clone(),
                 cwd: self.cwd.clone(),
             },
             self.size,
@@ -233,6 +234,7 @@ mod tests {
         ] {
             let terminal = Arc::new(Terminal {
                 target: crate::state::TerminalTarget::Shell {
+                    command: None,
                     cwd: "/fixture".into(),
                 },
                 size: agent_protocol::operations::TerminalSize { rows: 24, cols: 80 },

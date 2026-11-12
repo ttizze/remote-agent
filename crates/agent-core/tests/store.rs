@@ -308,6 +308,7 @@ async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navig
 async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_available() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+        base_ref: None,
         cwd: "/old".into(),
     }));
     let first_request = read(&mut reader).await;
@@ -315,6 +316,7 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
     let mut receipts = Vec::new();
     for index in 0..40 {
         receipts.push(store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+            base_ref: None,
             cwd: format!("/latest/{index}"),
         })));
     }
@@ -345,7 +347,10 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
     );
     let latest = read_after_status(&mut reader, &writer).await;
     assert_eq!(latest["method"], "host/workspace/review");
-    assert_eq!(latest["params"], json!({"cwd":"/latest/39"}));
+    assert_eq!(
+        latest["params"],
+        json!({"cwd":"/latest/39","base_ref":null})
+    );
     let mut current_review = review();
     current_review["branch"] = "latest".into();
     writer
@@ -381,6 +386,80 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
             .branch,
         "latest"
     );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn comparison_changes_discard_in_flight_reviews_and_refresh_the_selected_base() {
+    let mut snapshot = Snapshot::default();
+    Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).cwd =
+        "/project".into();
+    let (store, mut reader, writer) = setup(snapshot).await;
+    let first = store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+        cwd: "/project".into(),
+        base_ref: None,
+    }));
+    let old_request = read(&mut reader).await;
+    assert_eq!(
+        old_request["params"],
+        json!({"cwd":"/project","base_ref":null})
+    );
+    let selecting = store.dispatch(Intent::SetWorkspaceComparison {
+        cwd: "/project".into(),
+        base_ref: Some("HEAD".into()),
+    });
+    let mut obsolete = review();
+    obsolete["additions"] = 999.into();
+    writer
+        .reply(&old_request, json!({"result":obsolete}))
+        .await
+        .unwrap();
+    first.await.unwrap();
+    assert_ne!(
+        store
+            .snapshot()
+            .panes
+            .primary()
+            .workspace
+            .review
+            .as_ref()
+            .unwrap()
+            .additions,
+        999
+    );
+    let selected_request = read_after_status(&mut reader, &writer).await;
+    assert_eq!(
+        selected_request["params"],
+        json!({"cwd":"/project", "base_ref":"HEAD"})
+    );
+    let mut selected = review();
+    selected["base_ref"] = "HEAD".into();
+    selected["additions"] = 7.into();
+    selected["deletions"] = 2.into();
+    selected["diff"] = "selected diff".into();
+    writer
+        .reply(&selected_request, json!({"result":selected}))
+        .await
+        .unwrap();
+    selecting.await.unwrap();
+    let snapshot = store.snapshot();
+    let workspace = &snapshot.panes.primary().workspace;
+    assert_eq!(workspace.comparison.as_deref(), Some("HEAD"));
+    let review = workspace.review.as_ref().unwrap();
+    assert_eq!(review.base_ref.as_deref(), Some("HEAD"));
+    assert_eq!((review.additions, review.deletions), (7, 2));
+    assert_eq!(review.diff, "selected diff");
+    let refresh = store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+        cwd: "/project".into(),
+        base_ref: None,
+    }));
+    let request = read_after_status(&mut reader, &writer).await;
+    assert_eq!(request["params"]["base_ref"], "HEAD");
+    writer
+        .reply(&request, json!({"result":selected}))
+        .await
+        .unwrap();
+    refresh.await.unwrap();
     store.close().await.unwrap();
 }
 
@@ -791,7 +870,7 @@ async fn read_after_status(
     }
 }
 fn review() -> Value {
-    json!({"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":""})
+    json!({"controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":""})
 }
 async fn new_chat(
     store: &Store,
@@ -802,7 +881,7 @@ async fn new_chat(
     let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
     let request = read(reader).await;
     assert_eq!(request["method"], "host/workspace/review");
-    assert_eq!(request["params"], json!({"cwd":cwd}));
+    assert_eq!(request["params"], json!({"cwd":cwd,"base_ref":null}));
     writer
         .reply(&request, json!({"result":review()}))
         .await
@@ -837,7 +916,7 @@ async fn read_after_reviews(
         if request["method"] != "host/workspace/review" {
             return request;
         }
-        assert_eq!(request["params"], json!({"cwd":"/fixture"}));
+        assert_eq!(request["params"], json!({"cwd":"/fixture","base_ref":null}));
         writer
             .reply(&request, json!({"result":review()}))
             .await
@@ -2594,6 +2673,7 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         assert!(reader.read_request().await.unwrap().is_none());
     });
     let start = store.dispatch(Intent::StartTerminal(op::StartTerminal {
+        command: None,
         handle: "terminal".into(),
         cwd: "/fixture".into(),
         size: TerminalSize { cols: 80, rows: 24 },
@@ -2662,6 +2742,7 @@ async fn disconnect_does_not_wait_for_a_terminal_start_reply(
 ) {
     let (store, mut reader, _writer) = setup(Snapshot::default()).await;
     let starting = store.dispatch(Intent::StartTerminal(op::StartTerminal {
+        command: None,
         handle: "starting".into(),
         cwd: "/fixture".into(),
         size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
@@ -2703,6 +2784,7 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
     });
     store
         .dispatch(Intent::StartTerminal(op::StartTerminal {
+            command: None,
             handle: "terminal".into(),
             cwd: "/fixture".into(),
             size: TerminalSize { cols: 80, rows: 24 },
@@ -4229,8 +4311,11 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
             json!({"path":directory,"entries":[],"truncated":false}),
         ),
         (
-            Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: "/old".into() }),
-            json!({"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":"old"}),
+            Intent::ReviewWorkspace(op::ReviewWorkspace {
+                base_ref: None,
+                cwd: "/old".into(),
+            }),
+            json!({"controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":"old"}),
         ),
     ] {
         let (store, mut reader, writer) = setup(Snapshot::default()).await;
@@ -4251,7 +4336,7 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         );
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/workspace/review");
-        assert_eq!(request["params"], json!({"cwd":"/new"}));
+        assert_eq!(request["params"], json!({"cwd":"/new","base_ref":null}));
         writer
             .reply(&request, json!({"result":review()}))
             .await
@@ -4418,7 +4503,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     }
     assert_eq!(
         requests["host/workspace/review"]["params"],
-        json!({"cwd":"/fixture"})
+        json!({"cwd":"/fixture","base_ref":null})
     );
     assert_eq!(
         requests["host/session/list"]["params"],
@@ -4428,7 +4513,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     for (method, result) in [
         (
             "host/workspace/review",
-            json!({"branch":"main","base_ref":"origin/main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
+            json!({"controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main","base_ref":"origin/main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
         ),
         ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
@@ -5545,6 +5630,7 @@ async fn independent_view_operations_complete_without_invalidating_each_other() 
     }));
     let file_request = read(&mut reader).await;
     let reviewing = store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+        base_ref: None,
         cwd: "/selected".into(),
     }));
     let review_request = read(&mut reader).await;
@@ -5559,7 +5645,7 @@ async fn independent_view_operations_complete_without_invalidating_each_other() 
                 pane: ("").to_owned()
             })
     );
-    writer.reply(&review_request, json!({"result":{"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":"review"}})).await.unwrap();
+    writer.reply(&review_request, json!({"result":{"controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":"review"}})).await.unwrap();
     reviewing.await.unwrap();
     assert!(
         !store
@@ -5604,6 +5690,7 @@ async fn terminal_queue_overload_preserves_live_terminal_and_finishes_rejected_s
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let start = |handle: &str| {
         store.dispatch(Intent::StartTerminal(op::StartTerminal {
+            command: None,
             handle: handle.into(),
             cwd: "/fixture".into(),
             size: TerminalSize { cols: 80, rows: 24 },
@@ -5650,6 +5737,7 @@ async fn terminal_handles_progress_independently_while_each_keeps_input_order() 
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let start = |handle: &str| {
         store.dispatch(Intent::StartTerminal(op::StartTerminal {
+            command: None,
             handle: handle.into(),
             cwd: "/fixture".into(),
             size: TerminalSize { cols: 80, rows: 24 },

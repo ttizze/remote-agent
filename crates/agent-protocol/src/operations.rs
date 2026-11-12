@@ -440,6 +440,7 @@ pub struct OpenRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTerminal {
+    pub command: Option<String>,
     #[serde(rename = "processHandle")]
     pub handle: String,
     pub cwd: String,
@@ -457,6 +458,34 @@ pub struct StartAccountTerminal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewWorkspace {
     pub cwd: String,
+    pub base_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeWorkspace {
+    pub cwd: String,
+    pub branch: String,
+    pub action: WorkspaceAction,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkspaceAction {
+    SwitchBranch {
+        name: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    Push {
+        remote: String,
+    },
+    SaveScript {
+        previous_name: Option<String>,
+        name: String,
+        command: String,
+    },
+    RemoveScript {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

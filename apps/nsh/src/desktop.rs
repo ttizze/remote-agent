@@ -11,9 +11,8 @@ use platform::{AppOptions, AppSource, run_app};
 pub(crate) fn quit() {
     #[cfg(target_os = "macos")]
     nsh_platform_macos::quit_app();
-    // Windows' app ends with its only window.
     #[cfg(windows)]
-    nsh_core::element::desktop::close_window();
+    nsh_core::element::desktop::quit();
 }
 
 pub fn run() -> std::process::ExitCode {

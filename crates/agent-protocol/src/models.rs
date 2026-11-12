@@ -501,6 +501,7 @@ pub struct WorktreeThread {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceReview {
+    pub controls: WorkspaceControls,
     pub branch: String,
     /// The reference whose merge base produced the diff, for example `origin/main`.
     pub base_ref: Option<String>,
@@ -508,6 +509,19 @@ pub struct WorkspaceReview {
     pub deletions: u64,
     pub files: Vec<ChangedFile>,
     pub diff: String,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceControls {
+    pub branches: Vec<String>,
+    pub references: Vec<String>,
+    pub remotes: Vec<String>,
+    pub can_push: bool,
+    pub scripts: Vec<ProjectScript>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScript {
+    pub name: String,
+    pub command: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangedFile {

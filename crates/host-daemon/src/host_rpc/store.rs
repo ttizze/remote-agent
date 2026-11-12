@@ -174,6 +174,33 @@ impl ConversationStore {
         })
     }
 
+    pub(super) fn update_state<T: DeserializeOwned + Default + Serialize>(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut T) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.write(|transaction| {
+            let bytes: Option<Vec<u8>> = transaction
+                .query_row(
+                    "SELECT body FROM host_state WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let mut value: T = bytes
+                .map(|bytes| serde_json::from_slice(&bytes).map_err(failure))
+                .transpose()?
+                .unwrap_or_default();
+            change(&mut value)?;
+            write_state(
+                transaction,
+                name,
+                &serde_json::to_vec(&value).map_err(failure)?,
+            )
+        })
+    }
+
     pub(super) fn save_state(&self, name: &str, value: &impl Serialize) -> Result<(), String> {
         let bytes = serde_json::to_vec(value).map_err(failure)?;
         self.write(|transaction| write_state(transaction, name, &bytes))

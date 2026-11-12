@@ -34,6 +34,11 @@ impl Workbench {
         });
     }
 
+    pub fn run_script(self, cwd: String, command: String) {
+        self.application
+            .with(|application| application.open_script(self.scope.get_untracked(), cwd, command));
+    }
+
     /// Opens `url` in the in-app browser.
     pub fn browse(self, url: String) {
         self.open(PanelKind::Browser, None, None);
@@ -204,7 +209,7 @@ pub(crate) fn screen(leading: Option<AnyElement>) -> impl IntoElement {
             |surface: &PanelSurface| surface.id,
             move |surface, _| {
                 let host = workspace.scope.get_untracked().host;
-                let PanelSurface { id, kind, path } = surface.get_untracked();
+                let PanelSurface { id, kind, path, .. } = surface.get_untracked();
                 match kind {
                     PanelKind::Files => crate::files::screen(id).into_element(),
                     PanelKind::File => file(id),

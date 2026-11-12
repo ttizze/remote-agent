@@ -27,6 +27,8 @@ use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WorkspaceSummary {
     pub directory: String,
+    pub host: String,
+    pub actions: agent_core::presentation::workspace::WorkspaceActions,
     pub enabled: bool,
     pub has_directory: bool,
     pub branch: String,
@@ -46,8 +48,13 @@ pub(crate) fn workspace_summary(
 ) -> WorkspaceSummary {
     use agent_core::presentation::{editors, markdown::file_basename};
     use agent_protocol::editors::FileManagerRevealKind;
-    let cwd = &p.composer.controls.navigation.cwd;
-    let review = p.pane().workspace.review.as_ref();
+    let cwd = p.context.selected_directory();
+    let review = p
+        .pane()
+        .workspace
+        .review
+        .as_ref()
+        .filter(|_| !cwd.is_empty() && p.pane().workspace.review_cwd.as_ref() == Some(&cwd));
     let capabilities = p.snapshot.files.file_open_capabilities.as_ref();
     let available = capabilities
         .map(|c| c.editors.as_slice())
@@ -64,13 +71,18 @@ pub(crate) fn workspace_summary(
         .chain(p.composer.draft.attachments.iter().map(|a| &a.path))
         .collect::<std::collections::BTreeSet<_>>();
     WorkspaceSummary {
+        host: p
+            .settings
+            .host_name()
+            .unwrap_or_else(|| tr("接続先").into()),
+        actions: agent_core::presentation::workspace::workspace_actions(&p.snapshot, &p.pane_id),
         directory: if cwd.is_empty() {
             tr("フォルダを選択").into()
         } else {
-            file_basename(cwd).into()
+            file_basename(&cwd).into()
         },
         enabled: p.composer.controls.connected,
-        has_directory: !cwd.is_empty() && !p.context.selected_directory().is_empty(),
+        has_directory: !cwd.is_empty(),
         branch: review.map(|r| r.branch.clone()).unwrap_or_default(),
         changes: review
             .map(|r| workspace_diff_summary(r))
@@ -138,8 +150,11 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
         connection.client.with(|client| {
             client.dispatch(
                 &host.get(),
-                None,
-                Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: cwd.get() }),
+                connection.pane,
+                Intent::ReviewWorkspace(op::ReviewWorkspace {
+                    base_ref: None,
+                    cwd: cwd.get(),
+                }),
             )
         })
     };
@@ -225,6 +240,7 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                         .flex_1()
                         .min_w_0(),
                 )
+                .child(comparison_menu(connection, move || cwd.get(), review))
                 .child(line_counts(move || summary.with(|s| s.counts)))
                 .child(when(
                     move || body.get() == DiffBody::Files,
@@ -320,6 +336,32 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                 .min_h_0()
             },
         ))
+}
+
+fn comparison_menu(
+    connection: Connection,
+    cwd: impl Fn() -> String + Copy + 'static,
+    review: Memo<Option<Shared<agent_protocol::models::WorkspaceReview>>>,
+) -> impl IntoElement {
+    ui::icon_button(Icon::CHEVRON_DOWN, tr("比較先を変更"), move || {
+        let target = cwd();
+        let host = connection.host.get_untracked();
+        let selected = connection.publication.with_untracked(|p| p.pane().workspace.comparison.clone());
+        let references = review.with_untracked(|review| {
+            agent_core::presentation::workspace::comparison_references(
+                &review.as_ref().map(|r| r.controls.clone()).unwrap_or_default(), selected.as_deref())
+        });
+        let mut items = vec![serde_json::json!({"id": "automatic", "title": tr("自動（既定の比較先）"), "selected": selected.is_none()})];
+        items.extend(references.iter().enumerate().map(|(i, reference)| serde_json::json!({"id": i.to_string(), "title": reference, "selected": selected.as_ref() == Some(reference)})));
+        ui::popup(&serde_json::json!(items), move |id| {
+            if connection.host.get_untracked() != host { return; }
+            let base_ref = if id == "automatic" { None } else {
+                let Some(reference) = id.parse::<usize>().ok().and_then(|i| references.get(i)).cloned() else { return; };
+                Some(reference)
+            };
+            connection.dispatch(Intent::SetWorkspaceComparison { cwd: target.clone(), base_ref });
+        });
+    }).enabled(move || review.with(|review| review.is_some()) && connection.composer.with(|p| p.controls.connected) && connection.context.with(|p| p.selected_directory() == cwd()))
 }
 
 /// What the Diff panel shows under its header: nothing on a workspace error (its
@@ -690,7 +732,9 @@ mod tests {
         snapshot.connection.connected = true;
         let pane = Arc::make_mut(snapshot.panes.primary_mut());
         Arc::make_mut(&mut pane.navigation).cwd = "/fixture/日本語 👋".into();
+        Arc::make_mut(&mut pane.workspace).review_cwd = Some(pane.navigation.cwd.clone());
         Arc::make_mut(&mut pane.workspace).review = Some(Arc::new(WorkspaceReview {
+            controls: Default::default(),
             branch: "feature/native".into(),
             base_ref: Some("origin/main".into()),
             additions: 7,
@@ -718,6 +762,11 @@ mod tests {
         assert_eq!(
             workspace_summary(&p, true),
             WorkspaceSummary {
+                host: "接続先".into(),
+                actions: agent_core::presentation::workspace::WorkspaceActions {
+                    can_change: true,
+                    ..Default::default()
+                },
                 directory: "日本語 👋".into(),
                 enabled: true,
                 has_directory: true,
@@ -736,5 +785,57 @@ mod tests {
             }
         );
         assert!(workspace_summary(&p, false).editors.is_empty());
+    }
+
+    #[test]
+    fn unselected_project_never_exposes_execution_folder_review_or_scripts() {
+        use agent_core::{presentation::view::Presentation, state::Snapshot};
+        use agent_protocol::{
+            models::{
+                ProjectMembership, ProjectScript, Thread, WorkspaceControls, WorkspaceReview,
+            },
+            session::{ProviderKind, SessionRef},
+        };
+        for cwd in ["", "/execution"] {
+            let mut snapshot = Snapshot::default();
+            snapshot.connection.connected = true;
+            let id = SessionRef::new(ProviderKind::Codex, "no-project".into()).unwrap();
+            let pane = Arc::make_mut(snapshot.panes.primary_mut());
+            Arc::make_mut(&mut pane.navigation).cwd = cwd.into();
+            Arc::make_mut(&mut pane.navigation).thread_id = Some(id.clone());
+            let workspace = Arc::make_mut(&mut pane.workspace);
+            workspace.review_cwd = Some(cwd.into());
+            workspace.review = Some(Arc::new(WorkspaceReview {
+                branch: "hidden".into(),
+                base_ref: Some("main".into()),
+                additions: 3,
+                deletions: 1,
+                controls: WorkspaceControls {
+                    scripts: vec![ProjectScript {
+                        name: "hidden".into(),
+                        command: "echo hidden".into(),
+                    }],
+                    ..Default::default()
+                },
+                files: Vec::new(),
+                diff: String::new(),
+            }));
+            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+                id.clone(),
+                Arc::new(Thread {
+                    id: Some(id),
+                    cwd: Some(cwd.into()),
+                    project_id: ProjectMembership::Unassigned {},
+                    ..Default::default()
+                }),
+            );
+            let p = Presentation::project(Arc::new(snapshot), "", None).unwrap();
+            let summary = workspace_summary(&p, true);
+            assert!(!summary.has_directory);
+            assert_eq!(summary.directory, tr("フォルダを選択"));
+            assert!(summary.branch.is_empty());
+            assert_eq!(summary.changes, Default::default());
+            assert_eq!(summary.actions, Default::default());
+        }
     }
 }

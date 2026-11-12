@@ -686,6 +686,13 @@ impl Application {
         });
     }
 
+    pub fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
+        self.state.send_modify(|state| {
+            let next = state.panels.clone().open_script(scope, cwd, command);
+            Arc::make_mut(state).panels = next.panels;
+        });
+    }
+
     pub fn set_panel_open(&self, scope: PanelScope, open: bool) {
         self.state.send_modify(|state| {
             let panels = state.panels.clone().set_open(scope, open);
