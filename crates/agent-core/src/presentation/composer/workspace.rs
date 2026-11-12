@@ -14,57 +14,6 @@ pub struct WorkspaceSelection {
     pub is_repository: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn per_draft_choices_override_host_defaults_and_are_hidden_for_existing_conversations() {
-        let mut snapshot = Snapshot::default();
-        let mut pane = crate::state::PaneState::default();
-        Arc::make_mut(&mut pane.navigation).cwd = "/project".into();
-        Arc::make_mut(&mut snapshot.files.workspace).options.insert(
-            "/project".into(),
-            Arc::new(agent_protocol::workspace::WorkspaceOptions {
-                is_repository: true,
-                default_worktree: true,
-                default_base: "origin/main".into(),
-                refs: vec!["origin/main".into(), "feature/local".into()],
-                worktrees: vec!["/existing".into()],
-            }),
-        );
-        let mut draft = Draft::default();
-        let automatic = project(&snapshot, &pane, &draft).unwrap();
-        assert_eq!(automatic.mode, "worktree");
-        assert_eq!(automatic.base_ref, "origin/main");
-        assert!(automatic.start_from_origin);
-        draft.workspace = Some(WorkspaceStrategy::Root);
-        assert_eq!(project(&snapshot, &pane, &draft).unwrap().mode, "root");
-        draft.workspace = Some(WorkspaceStrategy::Worktree {
-            base_ref: "feature/local".into(),
-            start_from_origin: false,
-        });
-        let local = project(&snapshot, &pane, &draft).unwrap();
-        assert_eq!(local.base_ref, "feature/local");
-        assert!(!local.start_from_origin);
-        draft.workspace = Some(WorkspaceStrategy::ExistingWorktree {
-            path: "/existing".into(),
-        });
-        assert_eq!(
-            project(&snapshot, &pane, &draft).unwrap().existing_path,
-            "/existing"
-        );
-        Arc::make_mut(&mut pane.navigation).thread_id = Some(
-            crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "existing".into())
-                .unwrap(),
-        );
-        assert!(project(&snapshot, &pane, &draft).is_none());
-        Arc::make_mut(&mut pane.navigation).thread_id = None;
-        Arc::make_mut(&mut pane.navigation).cwd.clear();
-        assert!(project(&snapshot, &pane, &draft).is_none());
-    }
-}
-
 pub(super) fn project(
     snapshot: &Snapshot,
     pane: &crate::state::PaneState,
@@ -134,4 +83,55 @@ pub(super) fn project(
             .unwrap_or_default(),
         is_repository: options.is_none_or(|options| options.is_repository),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_draft_choices_override_host_defaults_and_are_hidden_for_existing_conversations() {
+        let mut snapshot = Snapshot::default();
+        let mut pane = crate::state::PaneState::default();
+        Arc::make_mut(&mut pane.navigation).cwd = "/project".into();
+        Arc::make_mut(&mut snapshot.files.workspace).options.insert(
+            "/project".into(),
+            Arc::new(agent_protocol::workspace::WorkspaceOptions {
+                is_repository: true,
+                default_worktree: true,
+                default_base: "origin/main".into(),
+                refs: vec!["origin/main".into(), "feature/local".into()],
+                worktrees: vec!["/existing".into()],
+            }),
+        );
+        let mut draft = Draft::default();
+        let automatic = project(&snapshot, &pane, &draft).unwrap();
+        assert_eq!(automatic.mode, "worktree");
+        assert_eq!(automatic.base_ref, "origin/main");
+        assert!(automatic.start_from_origin);
+        draft.workspace = Some(WorkspaceStrategy::Root);
+        assert_eq!(project(&snapshot, &pane, &draft).unwrap().mode, "root");
+        draft.workspace = Some(WorkspaceStrategy::Worktree {
+            base_ref: "feature/local".into(),
+            start_from_origin: false,
+        });
+        let local = project(&snapshot, &pane, &draft).unwrap();
+        assert_eq!(local.base_ref, "feature/local");
+        assert!(!local.start_from_origin);
+        draft.workspace = Some(WorkspaceStrategy::ExistingWorktree {
+            path: "/existing".into(),
+        });
+        assert_eq!(
+            project(&snapshot, &pane, &draft).unwrap().existing_path,
+            "/existing"
+        );
+        Arc::make_mut(&mut pane.navigation).thread_id = Some(
+            crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "existing".into())
+                .unwrap(),
+        );
+        assert!(project(&snapshot, &pane, &draft).is_none());
+        Arc::make_mut(&mut pane.navigation).thread_id = None;
+        Arc::make_mut(&mut pane.navigation).cwd.clear();
+        assert!(project(&snapshot, &pane, &draft).is_none());
+    }
 }
