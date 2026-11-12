@@ -57,7 +57,7 @@ extension PanelKind {
         case .browser: "globe"
         case .terminal: "terminal"
         case .files, .file: "folder"
-        case .diff: "arrow.left.arrow.right"
+        case .diff: "plus.forwardslash.minus"
         case .sideChat: "bubble.left.and.bubble.right"
         case .agents: "network"
         case .home: "plus"

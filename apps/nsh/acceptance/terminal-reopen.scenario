@@ -14,7 +14,7 @@ expect "/project" after ツールを追加 10000
 type ターミナル "AGENT_NATIVE=17" after 終了
 key return
 press ツールを追加
-press 差分
+press 変更
 expect "new file mode" after ツールを追加 10000
 press ツールを閉じる
 expect_absent "new file mode"

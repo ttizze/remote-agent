@@ -296,7 +296,7 @@ extension LaunchUITests {
     func workbenchTab(_ app: XCUIApplication, _ kind: String) -> XCUIElement {
         // UIKit's title menu keeps the native labels and selection traits, but drops custom identifiers.
         let titles = ["terminal": "ターミナル", "files": "ファイル", "browser": "ブラウザ",
-                      "diff": "差分", "sideChat": "サイドチャット", "agents": "エージェント"]
+                      "diff": "変更", "sideChat": "サイドチャット", "agents": "エージェント"]
         let tabs = app.collectionViews.buttons.matching(NSPredicate(
             format: "label == %@ AND identifier == ''", titles[kind] ?? kind
         ))

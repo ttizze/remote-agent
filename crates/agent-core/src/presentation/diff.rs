@@ -1,6 +1,36 @@
 use crate::models::WorkspaceReview;
 use std::collections::HashMap;
 
+/// The workspace card and Changes panel describe the same comparison and omit
+/// zero counts. Binary-only changes can therefore have neither count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceDiffSummary {
+    pub comparison: Option<String>,
+    pub counts: DiffCounts,
+}
+
+pub fn workspace_diff_summary(review: &WorkspaceReview) -> WorkspaceDiffSummary {
+    WorkspaceDiffSummary {
+        comparison: review.base_ref.as_ref().map(|base| format!("vs {base}")),
+        counts: DiffCounts::new(review.additions, review.deletions),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffCounts {
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+}
+
+impl DiffCounts {
+    pub fn new(additions: u64, deletions: u64) -> Self {
+        Self {
+            additions: (additions > 0).then_some(additions),
+            deletions: (deletions > 0).then_some(deletions),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DiffRow {
@@ -290,6 +320,47 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn changes_summary_names_the_actual_base_and_omits_zero_counts() {
+        let mut review = WorkspaceReview {
+            branch: "feature/work".into(),
+            base_ref: Some("origin/main".into()),
+            additions: 57,
+            deletions: 0,
+            files: Vec::new(),
+            diff: String::new(),
+        };
+        assert_eq!(
+            workspace_diff_summary(&review),
+            WorkspaceDiffSummary {
+                comparison: Some("vs origin/main".into()),
+                counts: DiffCounts {
+                    additions: Some(57),
+                    deletions: None
+                },
+            }
+        );
+        review.base_ref = Some("release/日本語".into());
+        review.additions = 0;
+        review.deletions = 2;
+        assert_eq!(
+            workspace_diff_summary(&review),
+            WorkspaceDiffSummary {
+                comparison: Some("vs release/日本語".into()),
+                counts: DiffCounts {
+                    additions: None,
+                    deletions: Some(2)
+                },
+            }
+        );
+        review.base_ref = None;
+        review.deletions = 0;
+        assert_eq!(
+            workspace_diff_summary(&review),
+            WorkspaceDiffSummary::default()
+        );
+    }
+
     proptest! {
         #[test]
         fn generated_hunks_preserve_text_kind_and_line_numbers(
@@ -453,7 +524,7 @@ mod tests {
     #[test]
     fn review_groups_rows_and_keeps_binary_and_deleted_files() {
         let review: crate::models::WorkspaceReview = serde_json::from_value(serde_json::json!({
-            "branch":"main", "additions":1, "deletions":1,
+            "branch":"main", "base_ref":"origin/main", "additions":1, "deletions":1,
             "files":[{"path":"removed.txt","status":"D","additions":0,"deletions":1},
                      {"path":"new.txt","status":"?","additions":1,"deletions":0},
                      {"path":"binary.dat","status":"M","additions":null,"deletions":null}],
@@ -561,7 +632,7 @@ mod tests {
     #[test]
     fn a_binary_file_reads_as_changed_rather_than_gits_marker() {
         let review: crate::models::WorkspaceReview = serde_json::from_value(serde_json::json!({
-            "branch":"main", "additions":1, "deletions":0,
+            "branch":"main", "base_ref":"origin/main", "additions":1, "deletions":0,
             "files":[{"path":"image.png","status":"M","additions":null,"deletions":null},
                      {"path":"Binary files.txt","status":"?","additions":1,"deletions":0}],
             "diff":"diff --git a/image.png b/image.png\nindex 1..2 100644\nBinary files a/image.png and b/image.png differ\ndiff --git a/Binary files.txt b/Binary files.txt\n--- /dev/null\n+++ b/Binary files.txt\n@@ -0,0 +1 @@\n+Binary files are mentioned here\n"

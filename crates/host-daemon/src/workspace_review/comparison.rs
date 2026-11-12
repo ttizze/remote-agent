@@ -8,6 +8,7 @@ pub(super) struct Comparison {
     pub root: PathBuf,
     pub branch: String,
     pub base: String,
+    pub base_ref: Option<String>,
     index: tempfile::NamedTempFile,
 }
 
@@ -60,7 +61,7 @@ impl Comparison {
         let branch = crate::git::text(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .ok()
             .map(|branch| branch.trim().to_owned());
-        let base = comparison_base(&root, branch.as_deref())?;
+        let (base, base_ref) = comparison_base(&root, branch.as_deref())?;
         let branch = match branch {
             Some(branch) => branch,
             None => crate::git::text(&root, &["rev-parse", "--short", "HEAD"])?
@@ -72,6 +73,7 @@ impl Comparison {
             root,
             branch,
             base,
+            base_ref,
             index,
         }))
     }
@@ -98,17 +100,18 @@ impl Comparison {
     }
 }
 
-fn comparison_base(cwd: &Path, branch: Option<&str>) -> Result<String> {
+fn comparison_base(cwd: &Path, branch: Option<&str>) -> Result<(String, Option<String>)> {
     let Ok(head) = crate::git::text(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"]) else {
-        return Ok(
+        return Ok((
             crate::git::text(cwd, &["hash-object", "-t", "tree", "--stdin"])?
                 .trim()
                 .into(),
-        );
+            None,
+        ));
     };
     let head = head.trim().to_owned();
     let Some(branch) = branch else {
-        return Ok(head);
+        return Ok((head, Some("HEAD".into())));
     };
     let configured = crate::git::text(cwd, &["config", "--get", &base_key(branch)])
         .ok()
@@ -119,13 +122,19 @@ fn comparison_base(cwd: &Path, branch: Option<&str>) -> Result<String> {
     // already-integrated work visible forever on branches created from HEAD.
     let base = match configured {
         Some(base) => base,
-        None => default_base(cwd, branch)?.unwrap_or_else(|| head.clone()),
+        None => default_base(cwd, branch)?.unwrap_or_else(|| "HEAD".into()),
     };
-    Ok(
+    let base_ref = base
+        .strip_prefix("refs/heads/")
+        .or_else(|| base.strip_prefix("refs/remotes/"))
+        .unwrap_or(&base)
+        .to_owned();
+    Ok((
         crate::git::text(cwd, &["merge-base", "--end-of-options", &base, &head])?
             .trim()
             .into(),
-    )
+        Some(base_ref),
+    ))
 }
 
 fn default_base(cwd: &Path, branch: &str) -> Result<Option<String>> {

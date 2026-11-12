@@ -64,7 +64,7 @@ pub fn panel_tools(connected: bool, has_directory: bool) -> Vec<PanelTool> {
         (PanelKind::Browser, "browser", "ブラウザ", "B"),
         (PanelKind::Terminal, "terminal", "ターミナル", "T"),
         (PanelKind::Files, "files", "ファイル", "F"),
-        (PanelKind::Diff, "diff", "差分", "D"),
+        (PanelKind::Diff, "diff", "変更", "D"),
         (PanelKind::SideChat, "sideChat", "サイドチャット", "S"),
         (PanelKind::Agents, "agents", "エージェント", "A"),
     ]

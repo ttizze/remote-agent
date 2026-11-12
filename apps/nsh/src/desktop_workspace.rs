@@ -302,20 +302,33 @@ fn summary_card(
                 .flex_row()
                 .items_center()
                 .child(
-                    row(Icon::DIFF, text(tr("変更")).test_id("thread-details-changes"))
+                    nsh_base::button()
+                        .test_id("thread-details-changes")
+                        .accessibility_label(tr("変更を表示"))
                         .flex_1()
+                        .min_w_0()
+                        .min_h(px(48.0))
+                        .px(px(10.0))
+                        .py_2()
+                        .gap(px(10.0))
+                        .flex_row()
+                        .items_center()
+                        .rounded(px(8.0))
+                        .hover(|s| s.bg(nsh_core::element::rgba(0xffffff14)))
+                        .disabled_style(|s| s.opacity(0.64))
                         .on_press(move || act(Action::Diff))
                         .disabled(move || !enabled() || !has_directory())
                         .child(
-                            text(move || format!("+{}", summary.with(|s| s.additions)))
-                                .text_size(px(12.0))
-                                .text_color(nsh_core::element::rgb(0x22c55e)),
+                            view()
+                                .text_color(colors::t3_muted())
+                                .child(ui::icon(Icon::DIFF, 16.0)),
                         )
                         .child(
-                            text(move || format!("−{}", summary.with(|s| s.deletions)))
-                                .text_size(px(12.0))
-                                .text_color(nsh_core::element::rgb(0xef4444)),
-                        ),
+                            crate::details::change_heading(move || summary.with(|s| s.changes.comparison.clone()))
+                                .flex_1()
+                                .min_w_0(),
+                        )
+                        .child(crate::details::line_counts(move || summary.with(|s| s.changes.counts))),
                 )
                 .child(
                     ui::icon_button(Icon::REFRESH, tr("変更を更新"), move || act(Action::Refresh))

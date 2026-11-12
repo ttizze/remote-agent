@@ -4,12 +4,14 @@ use crate::{
     shared::Shared,
     ui::{self, Enabled, Icon, colors},
 };
+#[cfg(any(desktop, test))]
+use agent_core::presentation::diff::WorkspaceDiffSummary;
 use agent_core::{
     presentation::{
         agents::AgentSummary,
         diff::{
-            DiffPanelRow, DiffRow, WorkspaceDiffFile, diff_files, diff_panel_file_row,
-            diff_panel_row_ends_card, diff_panel_rows,
+            DiffCounts, DiffPanelRow, DiffRow, WorkspaceDiffFile, diff_files, diff_panel_file_row,
+            diff_panel_row_ends_card, diff_panel_rows, workspace_diff_summary,
         },
     },
     state::{Intent, operations as op},
@@ -28,8 +30,7 @@ pub(crate) struct WorkspaceSummary {
     pub enabled: bool,
     pub has_directory: bool,
     pub branch: String,
-    pub additions: u64,
-    pub deletions: u64,
+    pub changes: WorkspaceDiffSummary,
     /// The Host's editors and their labels; only the local Host's open here.
     pub editors: Vec<(agent_protocol::editors::EditorId, String)>,
     pub editor: Option<agent_protocol::editors::EditorId>,
@@ -71,8 +72,9 @@ pub(crate) fn workspace_summary(
         enabled: p.composer.controls.connected,
         has_directory: !cwd.is_empty() && !p.context.selected_directory().is_empty(),
         branch: review.map(|r| r.branch.clone()).unwrap_or_default(),
-        additions: review.map_or(0, |r| r.additions),
-        deletions: review.map_or(0, |r| r.deletions),
+        changes: review
+            .map(|r| workspace_diff_summary(r))
+            .unwrap_or_default(),
         editors: if local {
             available
                 .iter()
@@ -151,11 +153,12 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
         })
     });
     let failed = computed(move || connection.context.with(|p| p.workspace_error().is_some()));
-    let totals = computed(move || {
+    let summary = computed(move || {
         review.with(|review| {
             review
                 .as_ref()
-                .map_or((0, 0), |review| (review.additions, review.deletions))
+                .map(|r| workspace_diff_summary(r))
+                .unwrap_or_default()
         })
     });
     let files = computed(move || projected.with(|files| files.clone().and_then(Result::ok)));
@@ -212,20 +215,17 @@ pub(crate) fn diff(cwd: String, host: String) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .h(px(40.0))
+                .min_h(px(56.0))
+                .py_2()
                 .px_3()
                 .border_b_1()
                 .border_b_color(colors::border())
                 .child(
-                    text(move || cwd.get())
-                        .text_size(px(12.0))
-                        .text_color(colors::muted())
-                        .truncate()
-                        .selectable(true)
+                    change_heading(move || summary.with(|s| s.comparison.clone()))
                         .flex_1()
                         .min_w_0(),
                 )
-                .child(line_counts(move || totals.get()))
+                .child(line_counts(move || summary.with(|s| s.counts)))
                 .child(when(
                     move || body.get() == DiffBody::Files,
                     move || {
@@ -348,21 +348,47 @@ const ADDED: Rgba = rgb(0x22c55e);
 const REMOVED: Rgba = rgb(0xef4444);
 
 /// Added and removed line counts, in the desktop client's colors.
-fn line_counts(counts: impl Fn() -> (u64, u64) + Copy + 'static) -> View {
+pub(crate) fn line_counts(counts: impl Fn() -> DiffCounts + Copy + 'static) -> View {
     view()
         .flex_row()
         .gap_1()
         .flex_shrink_0()
+        .child(when(
+            move || counts().additions.is_some(),
+            move || {
+                text(move || format!("+{}", counts().additions.unwrap_or_default()))
+                    .text_size(px(12.0))
+                    .text_color(ADDED)
+            },
+        ))
+        .child(when(
+            move || counts().deletions.is_some(),
+            move || {
+                text(move || format!("−{}", counts().deletions.unwrap_or_default()))
+                    .text_size(px(12.0))
+                    .text_color(REMOVED)
+            },
+        ))
+}
+
+/// The same compact title and comparison in the workspace card and panel.
+pub(crate) fn change_heading(comparison: impl Fn() -> Option<String> + Copy + 'static) -> View {
+    view()
+        .gap(px(2.0))
         .child(
-            text(move || format!("+{}", counts().0))
-                .text_size(px(12.0))
-                .text_color(ADDED),
+            text(tr("変更"))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::MEDIUM),
         )
-        .child(
-            text(move || format!("−{}", counts().1))
-                .text_size(px(12.0))
-                .text_color(REMOVED),
-        )
+        .child(when(
+            move || comparison().is_some(),
+            move || {
+                text(move || comparison().unwrap_or_default())
+                    .text_size(px(11.0))
+                    .text_color(colors::t3_muted())
+                    .number_of_lines(1)
+            },
+        ))
 }
 
 /// A row of a file's card: the header, which folds the card, a line of a hunk, or
@@ -431,7 +457,12 @@ fn diff_row(row: Memo<Option<DisplayRow>>, toggle: impl Fn(String) + Copy + 'sta
                         )
                         .child(when(
                             move || counts().is_some(),
-                            move || line_counts(move || counts().unwrap_or_default()),
+                            move || {
+                                line_counts(move || {
+                                    let (additions, deletions) = counts().unwrap_or_default();
+                                    DiffCounts::new(additions, deletions)
+                                })
+                            },
                         ))
                         .on_press(move || toggle(path()))
                 }))
@@ -661,6 +692,7 @@ mod tests {
         Arc::make_mut(&mut pane.navigation).cwd = "/fixture/日本語 👋".into();
         Arc::make_mut(&mut pane.workspace).review = Some(Arc::new(WorkspaceReview {
             branch: "feature/native".into(),
+            base_ref: Some("origin/main".into()),
             additions: 7,
             deletions: 2,
             files: Vec::new(),
@@ -690,8 +722,10 @@ mod tests {
                 enabled: true,
                 has_directory: true,
                 branch: "feature/native".into(),
-                additions: 7,
-                deletions: 2,
+                changes: WorkspaceDiffSummary {
+                    comparison: Some("vs origin/main".into()),
+                    counts: DiffCounts::new(7, 2),
+                },
                 editors: vec![
                     (EditorId::Cursor, "Cursor".into()),
                     (EditorId::FileManager, "Finder".into()),

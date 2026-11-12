@@ -87,6 +87,7 @@ fn publication(
 fn review(text: &str) -> Arc<WorkspaceReview> {
     Arc::new(WorkspaceReview {
         branch: "main".into(),
+        base_ref: Some(format!("source/{text}")),
         additions: 1,
         deletions: 1,
         files: vec![ChangedFile {
@@ -188,6 +189,7 @@ fn refresh_keeps_the_diff_list_mounted_until_replacement_and_clears_invalidated_
     }));
     let mut mounted = Mounted::default();
     mounted.until_text(&mut core, "+First", None);
+    assert!(mounted.texts.values().any(|text| text == "vs source/First"));
     assert_eq!(mounted.lists.len(), 1);
     let list = *mounted.lists.first().unwrap();
 
@@ -208,12 +210,19 @@ fn refresh_keeps_the_diff_list_mounted_until_replacement_and_clears_invalidated_
     release.send(()).unwrap();
     runtime.block_on(held).unwrap();
     mounted.until_text(&mut core, "+Second", Some(list));
+    assert!(
+        mounted
+            .texts
+            .values()
+            .any(|text| text == "vs source/Second")
+    );
     assert_eq!(mounted.lists, [list].into());
 
     mounted.advance(&mut core);
     mounted.commit(&mut core, None);
     assert!(mounted.lists.is_empty());
     assert!(!mounted.texts.values().any(|text| text == "+Second"));
+    assert!(!mounted.texts.values().any(|text| text.starts_with("vs ")));
     mounted.advance(&mut core);
     mounted.until_text(&mut core, "+Second", None);
     assert_eq!(mounted.lists.len(), 1);

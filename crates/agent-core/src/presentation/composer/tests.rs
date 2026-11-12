@@ -258,6 +258,7 @@ fn the_review_summary_needs_a_conversation_with_changes() {
         let mut snapshot = snapshot();
         Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).workspace).review =
             Some(Arc::new(WorkspaceReview {
+                base_ref: Some("origin/main".into()),
                 branch: "main".into(),
                 additions: 7,
                 deletions: 2,
