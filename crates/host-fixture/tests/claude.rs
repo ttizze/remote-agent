@@ -1432,13 +1432,13 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
         assert!(snapshot.sessions.pending_submissions[&agent_protocol::ids::ClientInputId::from("auth-failure")].accepted);
         assert!(snapshot.sessions.conversations[&id].turns.as_ref().is_none_or(|turns| turns.is_empty()));
         std::fs::write(&config, json!({"initializeError":true}).to_string()).unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone() })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), work_locally: false })).await.unwrap();
         let snapshot = until(&store, |snapshot| {
             snapshot.sessions.conversations[&id].preparation.as_ref().is_some_and(|preparation| matches!(&preparation.status, agent_protocol::session::PreparationStatus::Failed { error } if error.message.contains("fixture initialization failed")))
         }).await;
         assert!(snapshot.sessions.conversations[&id].turns.as_ref().is_none_or(|turns| turns.is_empty()));
         std::fs::write(&config, json!({"resultError":true}).to_string()).unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone() })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), work_locally: false })).await.unwrap();
         let snapshot = completed(&store, &id, 1, "failed").await;
         assert_eq!(
             snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]

@@ -110,8 +110,7 @@ class VisualizationTest {
                         ThreadDetailScreen(
                             model.conversationContext,
                             model.conversation,
-                            model::perform,
-                            model::toggleActivity,
+                            ConversationActions(model::perform, model::toggleActivity, model.terminals),
                             composer = {},
                         )
                 }

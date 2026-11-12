@@ -991,7 +991,7 @@ async fn chat_preparation_recovers_in_the_same_conversation_after_reconnecting()
         std::fs::remove_file(&blocked).unwrap();
         store.disconnect().await.unwrap();
         store.reconnect(&endpoint, &fixture.ticket, None, "Fixture device").await.unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone() })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), work_locally: false })).await.unwrap();
         loop {
             let snapshot = updates.borrow_and_update().clone();
             if snapshot.sessions.conversations[&id].preparation.is_none() && snapshot.sessions.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 1 && turns[0].status == agent_protocol::execution::TurnStatus::Completed) {
