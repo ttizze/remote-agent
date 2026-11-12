@@ -1,6 +1,79 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "ワークスペースが変わりました。更新して再試行してください。": {"localizations":{"en":{"stringUnit":{"state":"translated","value":"The workspace changed. Refresh and try again."}},"ja":{"stringUnit":{"state":"translated","value":"ワークスペースが変わりました。更新して再試行してください。"}}}},
+    "比較先を変更": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Change comparison" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "比較先を変更" } }
+      }
+    },
+    "自動（既定の比較先）": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Automatic (default base)" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "自動（既定の比較先）" } }
+      }
+    },
+    "プロジェクトスクリプトを追加": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Add project script" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "プロジェクトスクリプトを追加" } }
+      }
+    },
+    "ワークスペースの操作": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Workspace actions" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの操作" } }
+      }
+    },
+    "ブランチを作成…": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Create branch…" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ブランチを作成…" } }
+      }
+    },
+    "プロジェクトスクリプト": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Project script" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "プロジェクトスクリプト" } }
+      }
+    },
+    "ブランチ名": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Branch name" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ブランチ名" } }
+      }
+    },
+    "スクリプト名": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Script name" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "スクリプト名" } }
+      }
+    },
+    "スクリプトの操作": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Script actions" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "スクリプトの操作" } }
+      }
+    },
+    "プッシュ": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Push" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "プッシュ" } }
+      }
+    },
+    "ワークスペースの操作に失敗しました": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Workspace operation failed" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの操作に失敗しました" } }
+      }
+    },
+    "作成": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Create" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "作成" } }
+      }
+    },
     "Webリンクを開く場所を選択します。Ctrl／⌘＋クリックでは既定のブラウザで開きます。": {
       "localizations": {
         "en": {

@@ -116,6 +116,7 @@
       {
         "method": "host/workspace/review",
         "params": {
+          "baseRef": null,
           "cwd": "/workspace"
         },
         "response": {
@@ -132,7 +133,14 @@
                 "deletions": 1
               }
             ],
-            "diff": "fixture diff"
+            "diff": "fixture diff",
+            "controls": {
+              "branches": [],
+              "references": [],
+              "remotes": [],
+              "can_push": false,
+              "scripts": []
+            }
           }
         }
       }
@@ -150,7 +158,14 @@
           "deletions": 1
         }
       ],
-      "diff": "fixture diff"
+      "diff": "fixture diff",
+      "controls": {
+        "branches": [],
+        "references": [],
+        "remotes": [],
+        "can_push": false,
+        "scripts": []
+      }
     }
   },
   {

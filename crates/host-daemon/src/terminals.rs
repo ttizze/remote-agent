@@ -30,6 +30,31 @@ pub(crate) struct Launch {
 }
 
 impl Launch {
+    pub(crate) fn command(directory: String, command: Option<&str>) -> Result<Self, String> {
+        let Some(command) = command else {
+            return Ok(Self::shell(directory));
+        };
+        if command.trim().is_empty() || command.len() > 16384 || command.contains('\0') {
+            return Err("invalid terminal command".into());
+        }
+        let arguments = if cfg!(windows) {
+            vec![
+                "cmd.exe".into(),
+                "/d".into(),
+                "/s".into(),
+                "/c".into(),
+                command.into(),
+            ]
+        } else {
+            vec!["/bin/sh".into(), "-lc".into(), command.into()]
+        };
+        Ok(Self {
+            directory: directory.into(),
+            arguments,
+            environment: Vec::new(),
+        })
+    }
+
     pub(crate) fn shell(directory: String) -> Self {
         Self {
             directory: directory.into(),
@@ -445,6 +470,110 @@ impl Terminals {
 mod tests {
     use super::*;
     use agent_protocol::protocol::Notification;
+
+    #[test]
+    fn command_launch_preserves_shell_input_and_rejects_invalid_commands() {
+        for command in ["", " ", "a\0b"] {
+            assert!(Launch::command("/project".into(), Some(command)).is_err());
+        }
+        assert!(Launch::command("/project".into(), Some(&"a".repeat(16385))).is_err());
+        let command = "echo \"a b\" && echo $value";
+        let launch = Launch::command("/project".into(), Some(command)).unwrap();
+        assert_eq!(launch.arguments.last().unwrap(), command);
+        assert_eq!(
+            Launch::command("/project".into(), None).unwrap().arguments,
+            Launch::shell("/project".into()).arguments
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_runs_once_and_reattachment_keeps_its_identity() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let directory = tempfile::tempdir().unwrap();
+            let cwd = directory.path().to_string_lossy().into_owned();
+            let launch = Launch::command(
+                cwd.clone(),
+                Some("printf 'started\\n' >> runs; read line; printf '%s' \"$line\" > reply"),
+            )
+            .unwrap();
+            let size = TerminalSize { cols: 80, rows: 24 };
+            let router = SessionRouter::new();
+            let terminals = Terminals::default();
+            let first = router.open_authenticated_session(Some("phone".into()));
+            terminals
+                .start(
+                    router.clone(),
+                    first.id(),
+                    "script".into(),
+                    launch.clone(),
+                    size,
+                )
+                .await
+                .unwrap();
+            loop {
+                if directory.path().join("runs").exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            router.close_session(first.id());
+            terminals.close_session(first.id());
+            let mut second = router.open_authenticated_session(Some("phone".into()));
+            assert!(
+                terminals
+                    .start(
+                        router.clone(),
+                        second.id(),
+                        "script".into(),
+                        Launch::shell(cwd),
+                        size
+                    )
+                    .await
+                    .is_err()
+            );
+            terminals
+                .start(router.clone(), second.id(), "script".into(), launch, size)
+                .await
+                .unwrap();
+            loop {
+                let line = second.recv().await.unwrap();
+                if matches!(
+                    agent_protocol::protocol::decode::<Notification>(&line).unwrap(),
+                    Notification::TerminalRestored { .. }
+                ) {
+                    break;
+                }
+            }
+            terminals
+                .request(
+                    second.id(),
+                    &Call::WriteTerminal(agent_protocol::operations::TerminalWrite {
+                        process_handle: "script".into(),
+                        data: b"continued\n".to_vec(),
+                    }),
+                )
+                .await
+                .unwrap();
+            loop {
+                if std::fs::read_to_string(directory.path().join("reply"))
+                    .ok()
+                    .as_deref()
+                    == Some("continued")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("runs")).unwrap(),
+                "started\n"
+            );
+            terminals.shutdown().await;
+        })
+        .await
+        .expect("script reattachment stalled");
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn reattach_retains_shell_and_detach_only_releases_one_terminal() {

@@ -1,8 +1,7 @@
 use crate::models::WorkspaceReview;
 use std::collections::HashMap;
 
-/// The workspace card and Changes panel describe the same comparison and omit
-/// zero counts. Binary-only changes can therefore have neither count.
+/// The workspace card and Changes panel describe the same comparison and totals.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceDiffSummary {
     pub comparison: Option<String>,
@@ -12,7 +11,10 @@ pub struct WorkspaceDiffSummary {
 pub fn workspace_diff_summary(review: &WorkspaceReview) -> WorkspaceDiffSummary {
     WorkspaceDiffSummary {
         comparison: review.base_ref.as_ref().map(|base| format!("vs {base}")),
-        counts: DiffCounts::new(review.additions, review.deletions),
+        counts: DiffCounts {
+            additions: Some(review.additions),
+            deletions: Some(review.deletions),
+        },
     }
 }
 
@@ -321,8 +323,9 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn changes_summary_names_the_actual_base_and_omits_zero_counts() {
+    fn changes_summary_names_the_actual_base_and_includes_zero_totals() {
         let mut review = WorkspaceReview {
+            controls: Default::default(),
             options: None,
             branch: "feature/work".into(),
             base_ref: Some("origin/main".into()),
@@ -337,7 +340,7 @@ mod tests {
                 comparison: Some("vs origin/main".into()),
                 counts: DiffCounts {
                     additions: Some(57),
-                    deletions: None
+                    deletions: Some(0)
                 },
             }
         );
@@ -349,7 +352,7 @@ mod tests {
             WorkspaceDiffSummary {
                 comparison: Some("vs release/日本語".into()),
                 counts: DiffCounts {
-                    additions: None,
+                    additions: Some(0),
                     deletions: Some(2)
                 },
             }
@@ -358,7 +361,13 @@ mod tests {
         review.deletions = 0;
         assert_eq!(
             workspace_diff_summary(&review),
-            WorkspaceDiffSummary::default()
+            WorkspaceDiffSummary {
+                comparison: None,
+                counts: DiffCounts {
+                    additions: Some(0),
+                    deletions: Some(0)
+                }
+            }
         );
     }
 
@@ -525,7 +534,7 @@ mod tests {
     #[test]
     fn review_groups_rows_and_keeps_binary_and_deleted_files() {
         let review: crate::models::WorkspaceReview = serde_json::from_value(serde_json::json!({
-            "branch":"main", "base_ref":"origin/main", "additions":1, "deletions":1,
+            "controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main", "base_ref":"origin/main", "additions":1, "deletions":1,
             "files":[{"path":"removed.txt","status":"D","additions":0,"deletions":1},
                      {"path":"new.txt","status":"?","additions":1,"deletions":0},
                      {"path":"binary.dat","status":"M","additions":null,"deletions":null}],
@@ -633,7 +642,7 @@ mod tests {
     #[test]
     fn a_binary_file_reads_as_changed_rather_than_gits_marker() {
         let review: crate::models::WorkspaceReview = serde_json::from_value(serde_json::json!({
-            "branch":"main", "base_ref":"origin/main", "additions":1, "deletions":0,
+            "controls":{"branches":[],"references":[],"remotes":[],"can_push":false,"scripts":[]},"branch":"main", "base_ref":"origin/main", "additions":1, "deletions":0,
             "files":[{"path":"image.png","status":"M","additions":null,"deletions":null},
                      {"path":"Binary files.txt","status":"?","additions":1,"deletions":0}],
             "diff":"diff --git a/image.png b/image.png\nindex 1..2 100644\nBinary files a/image.png and b/image.png differ\ndiff --git a/Binary files.txt b/Binary files.txt\n--- /dev/null\n+++ b/Binary files.txt\n@@ -0,0 +1 @@\n+Binary files are mentioned here\n"

@@ -32,7 +32,7 @@ struct ConversationDirectorySheet: View {
             .onDisappear {
                 guard model.host == destination.scope.host,
                       model.coreDraftKey == destination.scope.draft else { return }
-                model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd)))
+                model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd, baseRef: nil)))
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

@@ -808,6 +808,7 @@ struct OpenRequest {
 }
 #[uniffi::remote(Record)]
 struct StartTerminal {
+    pub command: Option<String>,
     pub handle: String,
     pub cwd: String,
     pub size: TerminalSize,
@@ -818,6 +819,32 @@ struct StartAccountTerminal {
     pub provider: ProviderKind,
     pub id: String,
     pub size: TerminalSize,
+}
+#[uniffi::remote(Enum)]
+enum WorkspaceAction {
+    SwitchBranch {
+        name: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    Push {
+        remote: String,
+    },
+    SaveScript {
+        previous_name: Option<String>,
+        name: String,
+        command: String,
+    },
+    RemoveScript {
+        name: String,
+    },
+}
+#[uniffi::remote(Record)]
+struct ChangeWorkspace {
+    pub cwd: String,
+    pub branch: String,
+    pub action: agent_protocol::operations::WorkspaceAction,
 }
 #[uniffi::remote(Record)]
 struct WriteWorkspaceFile {

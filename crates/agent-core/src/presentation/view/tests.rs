@@ -71,6 +71,7 @@ fn workspace_review_publications_refresh_the_native_composer_summary() {
     for (additions, deletions) in [(7, 2), (19, 5)] {
         Arc::make_mut(&mut Arc::make_mut(state.panes.primary_mut()).workspace).review =
             Some(Arc::new(WorkspaceReview {
+                controls: Default::default(),
                 options: None,
                 base_ref: Some("origin/main".into()),
                 branch: "main".into(),

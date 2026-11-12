@@ -94,6 +94,7 @@ pub struct WorkspaceLocation {
     pub cwd: String,
     pub file: Option<Arc<FileContent>>,
     pub review_cwd: Option<String>,
+    pub comparison: Option<String>,
     pub review: Option<Arc<WorkspaceReview>>,
 }
 impl WorkspaceLocation {
@@ -230,6 +231,7 @@ pub struct TerminalOutput {
 )]
 pub enum TerminalTarget {
     Shell {
+        command: Option<String>,
         cwd: String,
     },
     Account {
@@ -656,6 +658,7 @@ fn clear_workspace_location(workspace: &mut WorkspaceLocation) {
     workspace.file = None;
     workspace.review = None;
     workspace.review_cwd = None;
+    workspace.comparison = None;
 }
 
 pub fn reduce(previous: &Snapshot, pane_id: &str, event: Event) -> (Snapshot, Vec<Effect>) {
@@ -728,7 +731,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         StartTerminal, StartAccountTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ResolveFile, ResolveFileReference, ReadFile,
         ReadFileOpenCapabilities, OpenInEditor,
-        SaveFile, WriteWorkspaceFile, ReviewWorkspace, ReadWorktreeSettings,
+        SaveFile, WriteWorkspaceFile, ReviewWorkspace, ChangeWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListProjectSessions,
         ListAgents, AddProject, ScanProjects, ImportProjects, CreateSession, RetryPreparation,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
@@ -911,6 +914,15 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             }
             let mut effects = vec![Effect::execute(operation)];
             if refresh && next.connection.connected { effects.push(Effect::execute(op::ReadTaskActivity {})); }
+            return (next, effects);
+        }
+        Intent::SetWorkspaceComparison { cwd, base_ref } => {
+            if cwd.is_empty() || next.selected_directory(next.panes.get(pane_id).expect("admitted pane exists")) != cwd {
+                return (next, Vec::new());
+            }
+            let pane = Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists"));
+            Arc::make_mut(&mut pane.workspace).comparison = base_ref;
+            let effects = op::review_workspace(&mut next, pane_id).into_iter().collect();
             return (next, effects);
         }
         Intent::RefreshProject { project_id } => {
@@ -1247,6 +1259,7 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
         let workspace = Arc::make_mut(&mut pane.workspace);
         workspace.file = location.file;
         workspace.review_cwd = location.review_cwd;
+        workspace.comparison = location.comparison;
         workspace.review = location.review;
     } else if pane.navigation.cwd != navigation.cwd || navigation.draft_key.is_empty() {
         clear_workspace_location(Arc::make_mut(&mut pane.workspace));
@@ -1531,7 +1544,8 @@ impl Snapshot {
         for (handle, terminal) in self.terminals.iter() {
             if terminal.phase == TerminalPhase::Suspended {
                 effects.push(match &terminal.target {
-                    TerminalTarget::Shell { cwd } => Effect::execute(op::StartTerminal {
+                    TerminalTarget::Shell { cwd, command } => Effect::execute(op::StartTerminal {
+                        command: command.clone(),
                         handle: handle.clone(),
                         cwd: cwd.clone(),
                         size: terminal.size,
@@ -2353,3 +2367,7 @@ mod history_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "state/workspace_tests.rs"]
+mod workspace_tests;

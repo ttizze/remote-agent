@@ -292,6 +292,7 @@ async fn project_script_failure_has_real_terminal_output_and_retries_in_the_same
         Call::StartTerminal(op::StartTerminal {
             handle: handle.clone(),
             cwd: failed.worktree_path.clone().unwrap(),
+            command: None,
             size: op::TerminalSize { cols: 80, rows: 24 },
         }),
     )
@@ -345,6 +346,7 @@ async fn workspace_options_share_the_review_and_existing_worktrees_must_belong_t
         Call::ReviewWorkspace(op::ReviewWorkspace {
             cwd: fixture.repository.to_string_lossy().into_owned(),
             include_options: true,
+            base_ref: None,
         }),
     )
     .await
@@ -416,6 +418,7 @@ async fn closing_the_running_setup_terminal_reports_failure_without_starting_the
         Call::StartTerminal(op::StartTerminal {
             handle: handle.clone(),
             cwd: running.worktree_path.unwrap(),
+            command: None,
             size: op::TerminalSize { rows: 24, cols: 80 },
         }),
     )

@@ -505,6 +505,7 @@ pub struct WorktreeThread {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceReview {
+    pub controls: WorkspaceControls,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<crate::workspace::WorkspaceOptions>,
     pub branch: String,
@@ -514,6 +515,19 @@ pub struct WorkspaceReview {
     pub deletions: u64,
     pub files: Vec<ChangedFile>,
     pub diff: String,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceControls {
+    pub branches: Vec<String>,
+    pub references: Vec<String>,
+    pub remotes: Vec<String>,
+    pub can_push: bool,
+    pub scripts: Vec<ProjectScript>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScript {
+    pub name: String,
+    pub command: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangedFile {

@@ -42,7 +42,7 @@ struct WorkspaceDiffScreen: View {
 
     private func loadDiff() {
         files = nil
-        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root)))
+        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root, baseRef: nil)))
     }
 }
 

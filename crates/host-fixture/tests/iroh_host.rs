@@ -542,6 +542,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         assert!(store.snapshot().connection.connected);
         store
             .dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+                base_ref: None,
                 cwd: directory.path().to_str().unwrap().into(),
             }))
             .await
@@ -1102,7 +1103,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
             }
             store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
             if project {
-                store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: cwd.clone() })).await.unwrap();
+                store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { base_ref: None, cwd: cwd.clone() })).await.unwrap();
             } else {
                 assert!(store.snapshot().panes.primary().workspace.review_cwd.is_none());
                 assert!(store.snapshot().panes.primary().workspace.review.is_none());
@@ -2971,7 +2972,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         // Detach retains the PTY and its worktree lease; canonical-path reattach succeeds.
         local.peer.call(&op::DetachTerminal { handle: "managed-terminal".into() }).await.unwrap();
         assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
-        local.peer.call(&rpc::StartTerminal { handle: "managed-terminal".into(), cwd: path.clone(), size: rpc::TerminalSize { rows: 24, cols: 80 } }).await.unwrap();
+        local.peer.call(&rpc::StartTerminal { command: None, handle: "managed-terminal".into(), cwd: path.clone(), size: rpc::TerminalSize { rows: 24, cols: 80 } }).await.unwrap();
         assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
         local.peer.request::<models::Empty>(&agent_protocol::protocol::Call::KillTerminal(serde_json::from_value::<rpc::TerminalKill>(json!({"processHandle":"managed-terminal"})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
@@ -2986,7 +2987,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
         let listed = local.peer.call(&rpc::ListSessions::new(Default::default())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert!(listed["data"].as_array().unwrap().iter().any(|thread| thread["id"] == json!(id)), "removal must preserve conversation history");
-        let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone(), include_options: false }).await.unwrap();
+        let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone(), include_options: false, base_ref: None }).await.unwrap();
         assert!(review.files.is_empty());
         assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "advance main"]);
@@ -3137,6 +3138,7 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         local
             .peer
             .call(&rpc::StartTerminal {
+                command: None,
                 handle: "cleanup-terminal".into(),
                 cwd: terminal_path.to_str().unwrap().into(),
                 size: rpc::TerminalSize { rows: 24, cols: 80 },
@@ -3189,6 +3191,7 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         local
             .peer
             .call(&rpc::StartTerminal {
+                command: None,
                 handle: "cleanup-terminal".into(),
                 cwd: terminal_path.to_str().unwrap().into(),
                 size: rpc::TerminalSize { rows: 24, cols: 80 },

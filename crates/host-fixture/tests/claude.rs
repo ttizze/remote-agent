@@ -1675,6 +1675,7 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
         owner
             .peer
             .call(&rpc::StartTerminal {
+                command: None,
                 handle: "owned".into(),
                 cwd: root.path().to_str().unwrap().into(),
                 size: rpc::TerminalSize { rows: 24, cols: 80 },

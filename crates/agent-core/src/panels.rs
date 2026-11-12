@@ -28,6 +28,7 @@ pub struct PanelSurface {
     pub id: u64,
     pub kind: PanelKind,
     pub path: Option<String>,
+    pub command: Option<String>,
     #[cfg_attr(feature = "bindings", uniffi(default = None))]
     pub terminal_handle: Option<String>,
 }
@@ -161,6 +162,7 @@ impl Panels {
             id,
             kind,
             path,
+            command: None,
             terminal_handle: None,
         });
         panel.active = Some(id);
@@ -168,6 +170,24 @@ impl Panels {
             panels: Arc::new(next),
             id,
         }
+    }
+    pub fn open_script(
+        self: Arc<Self>,
+        key: PanelScope,
+        cwd: String,
+        command: String,
+    ) -> OpenedPanel {
+        let mut opened = self.open(key.clone(), PanelKind::Terminal, Some(cwd));
+        let panels = Arc::make_mut(&mut opened.panels);
+        let surface = panels
+            .threads
+            .get_mut(&key)
+            .unwrap()
+            .surfaces
+            .last_mut()
+            .unwrap();
+        surface.command = Some(command);
+        opened
     }
     pub fn activate(self: Arc<Self>, key: PanelScope, id: u64) -> ActivatedPanel {
         if self
@@ -330,6 +350,31 @@ mod tests {
             draft: draft.into(),
         }
     }
+    #[test]
+    fn scripts_open_independent_terminals_and_preserve_the_shell() {
+        let key = scope("chat");
+        let shell = Panels::new().open(key.clone(), PanelKind::Terminal, Some("/project".into()));
+        let first =
+            shell
+                .panels
+                .clone()
+                .open_script(key.clone(), "/project".into(), "npm test".into());
+        let second =
+            first
+                .panels
+                .clone()
+                .open_script(key.clone(), "/project".into(), "npm test".into());
+        let panel = second.panels.get(key.clone());
+        assert_eq!(panel.surfaces.len(), 3);
+        assert_eq!(panel.surfaces[0].command, None);
+        assert_eq!(panel.surfaces[1].command.as_deref(), Some("npm test"));
+        assert_eq!(panel.selected().unwrap().id, second.id);
+        assert_ne!(first.id, second.id);
+        assert_eq!(second.panels.scope(second.id), Some(key));
+        assert_eq!(shell.panels.get(scope("chat")).surfaces.len(), 1);
+        assert!(second.panels.get(scope("other")).surfaces.is_empty());
+    }
+
     #[test]
     fn a_new_conversation_starts_at_the_launcher_without_starting_a_tool() {
         let mut panels = Panels::new();

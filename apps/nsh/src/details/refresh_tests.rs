@@ -86,6 +86,7 @@ fn publication(
 
 fn review(text: &str) -> Arc<WorkspaceReview> {
     Arc::new(WorkspaceReview {
+        controls: Default::default(),
         options: None,
         branch: "main".into(),
         base_ref: Some(format!("source/{text}")),
