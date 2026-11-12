@@ -82,21 +82,29 @@ public struct WorktreeSettingsFields: View {
             TextField("この環境の絶対パス（空欄で既定）", text: $inputs.worktreeDirectory)
                 .hostPathInput()
                 .accessibilityLabel("ワークツリーの保存先").accessibilityIdentifier("worktree.directory")
-        } header: { Text("作成と保存先") }
-            footer: { Text("保存先に「セッション名/リポジトリ名」の構成で作ります。空欄なら元のリポジトリ内の .worktree に保存します。既存のワークツリーは移動しません。") }
+        } header: {
+            Text("作成と保存先")
+        } footer: {
+            Text("保存先に「セッション名/リポジトリ名」の構成で作ります。空欄なら元のリポジトリ内の .worktree に保存します。既存のワークツリーは移動しません。")
+        }
         Section {
             Toggle("作成時にファイルをコピー", isOn: $inputs.copyOnCreate)
                 .accessibilityIdentifier("worktree.copy")
             TextEditor(text: $inputs.copyPathsText).frame(minHeight: 88).hostPathInput()
                 .accessibilityLabel("コピー対象").accessibilityIdentifier("worktree.paths")
-        } header: { Text("コピー対象") }
-            footer: { Text("リポジトリからの相対パスを1行に1つ指定します（例: .env、config/local）。存在しないパスはスキップします。") }
+        } header: {
+            Text("コピー対象")
+        } footer: {
+            Text("リポジトリからの相対パスを1行に1つ指定します（例: .env、config/local）。存在しないパスはスキップします。")
+        }
         Section {
             Toggle("取り込み済みを自動削除", isOn: $inputs.deleteUnchanged)
                 .accessibilityIdentifier("worktree.deleteUnchanged")
-        } header: { Text("自動削除") }
-            footer: { Text("既定ブランチより先のコミットがない作業場所を1時間ごとに削除します。実行中・回答待ち・ターミナル使用中・ローカル変更ありの場合は保留します。ブランチと会話履歴は残ります。")
-            }
+        } header: {
+            Text("自動削除")
+        } footer: {
+            Text("既定ブランチより先のコミットがない作業場所を1時間ごとに削除します。実行中・回答待ち・ターミナル使用中・ローカル変更ありの場合は保留します。ブランチと会話履歴は残ります。")
+        }
     }
 
     private func projectCleanup(_ project: String) -> some View {
@@ -110,8 +118,11 @@ public struct WorktreeSettingsFields: View {
                 Text("オン").tag(Optional(true))
                 Text("オフ").tag(Optional(false))
             }.accessibilityIdentifier("worktree.projectDeleteUnchanged")
-        } header: { Text("自動削除") }
-            footer: { Text("このプロジェクトの作業場所に適用します。") }
+        } header: {
+            Text("自動削除")
+        } footer: {
+            Text("このプロジェクトの作業場所に適用します。")
+        }
     }
 }
 

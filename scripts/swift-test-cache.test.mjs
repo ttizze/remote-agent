@@ -16,6 +16,8 @@ function fixture(t) {
   copyFileSync('scripts/test-ios-scroll.sh', join(root, 'scripts/test-ios-scroll.sh'));
   for (const path of [
     'apps/mobile/iosApp/Bex/NavigationAppearance.swift',
+    'apps/mobile/iosApp/Bex/NshSelectionMenuController.swift',
+    'apps/mobile/iosApp/UITests/Fixtures/nsh-selection-menu-tests.swift',
     'apps/mobile/iosApp/Bex/ConversationList.swift',
     'apps/mobile/iosApp/Bex/ConversationListLayout.swift',
     'apps/mobile/iosApp/Bex/ConversationTextLayout.swift',
@@ -77,13 +79,13 @@ function successfulRun(build, compileCount, overrides) {
   const result = build.run(overrides);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.commands.filter(command => command === 'compile').length, compileCount);
-  assert.equal(result.commands.filter(command => command === 'run').length, 5);
+  assert.equal(result.commands.filter(command => command === 'run').length, 6);
 }
 
 test('unchanged Swift tests reuse compilation and always execute all fixtures', (t) => {
   const build = fixture(t);
   const directory = join(build.target, 'qa/ios-scroll/builds/scroll-tests');
-  successfulRun(build, 5);
+  successfulRun(build, 6);
   const firstBuild = readdirSync(directory)[0];
   successfulRun(build, 0);
   writeFileSync(join(build.root, 'apps/mobile/iosApp/Bex/ConversationList.swift'), '// changed source\n');
@@ -100,7 +102,7 @@ test('unchanged Swift tests reuse compilation and always execute all fixtures', 
     { SWIFT_FIXTURE_SDK_BUILD: '26B' },
     { SWIFT_FIXTURE_SDK: join(build.root, 'Other SDK') },
     { SWIFT_FIXTURE_ARCH: 'x86_64' },
-  ]) successfulRun(build, 5, overrides);
+  ]) successfulRun(build, 6, overrides);
   const app = join(directory, currentBuild, 'Contents');
   assert.match(readFileSync(join(app, 'Info.plist'), 'utf8'), /<key>CFBundleIdentifier<\/key><string>app\.bex\.tests\.scroll-tests<\/string>/);
   chmodSync(join(app, 'MacOS/scroll-tests'), 0o644);
@@ -118,7 +120,7 @@ test('failed compilations are retried and cached test failures still fail verifi
   const signing = build.run({ SWIFT_FIXTURE_SIGN_STATUS: '1' });
   assert.equal(signing.status, 1);
   assert.deepEqual(signing.commands, ['compile', 'sign']);
-  successfulRun(build, 5);
+  successfulRun(build, 6);
   const failure = build.run({ SWIFT_FIXTURE_TEST_STATUS: '7' });
   assert.equal(failure.status, 7);
   assert.deepEqual(failure.commands, ['run']);
@@ -127,7 +129,7 @@ test('failed compilations are retried and cached test failures still fail verifi
 
 test('Dev and non-Dev diagnostic symbol boundaries are checked even for cached executables', (t) => {
   const build = fixture(t);
-  successfulRun(build, 5);
+  successfulRun(build, 6);
   assert.equal(build.run({ SWIFT_FIXTURE_NON_DEV_SYMBOLS: '1' }).status, 1);
   assert.equal(build.run({ SWIFT_FIXTURE_MISSING_DEV_SYMBOLS: '1' }).status, 1);
   successfulRun(build, 0);
