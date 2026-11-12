@@ -57,7 +57,7 @@ internal fun ThreadDetailFixture(
                     }
                 }
             },
-            dev.remoteagent.core.Presentation.fromSnapshot(snapshot, "").terminals(),
+            snapshot.terminals(),
         ),
         modifier,
         scrollToTopRequest,
