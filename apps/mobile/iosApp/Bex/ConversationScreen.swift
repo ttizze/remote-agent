@@ -238,18 +238,22 @@ extension ThreadScreen {
                 model.askSelectionInSideChat(text)
                 openTools?(.sideChat)
             case "link":
-                guard let url = URL(string: text) else { return }
-                if url.scheme == "https" || url.scheme == "http" ||
-                    markdownFileTarget(source: text, cwd: mediaAccess.cwd, surface: .mobile) == nil {
-                    UIApplication.shared.open(url)
-                } else {
-                    mediaAccess.presentation.openLink(text, resolve: mediaAccess.resolve,
-                                                      download: mediaAccess.download,
-                                                      openDirectory: mediaAccess.openDirectory,
-                                                      openFile: mediaAccess.openFile)
-                }
+                openMessageLink(text)
             default:
                 break
+            }
+        }
+
+        private func openMessageLink(_ text: String) {
+            guard let url = URL(string: text) else { return }
+            if url.scheme == "https" || url.scheme == "http" ||
+                markdownFileTarget(source: text, cwd: mediaAccess.cwd, surface: .mobile) == nil {
+                UIApplication.shared.open(url)
+            } else {
+                mediaAccess.presentation.openLink(text, resolve: mediaAccess.resolve,
+                                                  download: mediaAccess.download,
+                                                  openDirectory: mediaAccess.openDirectory,
+                                                  openFile: mediaAccess.openFile)
             }
         }
 

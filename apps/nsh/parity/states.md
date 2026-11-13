@@ -135,13 +135,18 @@ reason). Reasons recur:
 | Confirm dialogs (delete, discard) | `ConfirmDialogHost.tsx` | not yet: not mapped |
 | Automations panel | `chat/ThreadAutomationsPanel.tsx` | not yet: service (scheduled tasks) |
 
+## Sidebar header (compared with T3 Code)
+
+| State | T3 source | Status |
+|---|---|---|
+| Search field and icon, project filter, add project and new thread buttons | `sidebar/SidebarThreadHeader.tsx` | covered: `sidebar-header` |
+
 ## Sidebar (compared with the GPUI client, `b539d6069^:apps/desktop`)
 
 | State | GPUI source | Status |
 |---|---|---|
 | Width | `app/view.rs:426` | covered: `sidebar` |
-| Search field and its icon's centre line | `app/view/sidebar.rs:741-747`, gpui-component `input/input.rs`, `sizing.rs` | covered: `sidebar` |
-| New chat, settings buttons | `sidebar.rs:750, 778` | covered: `sidebar` (presence) |
+| Settings button | `sidebar.rs:778` | covered: `sidebar` (presence) |
 | Project row height and icon | `sidebar.rs:176-186, 268` | covered: `sidebar` |
 | Chat rows (active spinner, unread dot, worktree badges), section headers, "show more", errors | `sidebar.rs:88-130, 880-950` | not yet: not mapped |
 | Connection menu | `sidebar.rs:808` | not yet: NSH has no connection menu above the search field |

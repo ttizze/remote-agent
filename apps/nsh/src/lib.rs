@@ -351,7 +351,7 @@ fn app_content(
     #[cfg(desktop)]
     let project = computed(move || connection.context.with(|p| p.workspace_project()));
     let list = move || {
-        threads::list(query, move || {
+        threads::List::new(query).view(move || {
             dismiss_keyboard();
             if !is_desktop() {
                 routes.set(vec![0, 1]);
@@ -466,6 +466,7 @@ fn app_content(
     match area {
         #[cfg(desktop)]
         Area::Shell => {
+            let list = threads::List::new(query);
             use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
             let mut bar = TitleBarOptions::default();
             bar.style = TitleBarStyle::Hidden;
@@ -601,6 +602,7 @@ fn app_content(
                         .flex_1()
                         .min_w_0()
                         .accessibility_elements_hidden(move || settings.get())
+                        .child(list.projects.view())
                         .child(
                             nsh_base::h_resizable()
                                 .handle_class("bg-border group-hover:bg-primary group-active:bg-primary")
@@ -617,7 +619,7 @@ fn app_content(
                                             view()
                                                 .size_full()
                                                 .accessibility_elements_hidden(move || !sidebar.get() || setup.get())
-                                                .child(sidebar::sidebar(hosts, move || toolbar_action("compose"))),
+                                                .child(sidebar::sidebar(hosts, list, move || toolbar_action("compose"))),
                                         ),
                                 )
                                 .child(
@@ -647,6 +649,7 @@ fn app_content(
                                                     move || {
                                                         sidebar::sheet(
                                                             hosts,
+                                                            list,
                                                             move || toolbar_action("compose"),
                                                             move || navigate(Navigation::DismissSidebarSheet),
                                                         )

@@ -13,6 +13,8 @@ use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod copy_tests;
 #[cfg(any(all(target_os = "macos", debug_assertions), test))]
 pub(crate) mod native;
 mod preparation;
@@ -2256,6 +2258,50 @@ fn action(
     crate::ui::icon_button_sized(icon, tr(label), 24.0, 12.0, press).text_color(look::muted())
 }
 
+fn copy_action(
+    label: &'static str,
+    body: impl Fn() -> Option<String> + 'static,
+) -> nsh_base::ButtonElement {
+    use crate::ui::{self, Icon};
+    let copied = signal_with(false, SignalEquals::Never);
+    effect(move || {
+        if copied.get() {
+            // The effect owns the timeout, so another copy restarts it and
+            // removing the message cancels it.
+            set_timeout(std::time::Duration::from_secs(2), move || copied.set(false));
+        }
+    });
+    let label = move || {
+        SharedString::from(tr(if copied.get() {
+            "コピーしました"
+        } else {
+            label
+        }))
+    };
+    ui::ghost(
+        label,
+        view().tooltip(ui::tooltip(label)).child(dynamic(move || {
+            ui::icon(
+                if copied.get() {
+                    Icon::CHECK
+                } else {
+                    Icon::COPY
+                },
+                12.0,
+            )
+        })),
+    )
+    .w(px(24.0))
+    .h(px(24.0))
+    .text_color(look::muted())
+    .on_press(move || {
+        if let Some(body) = body() {
+            set_clipboard(body);
+            copied.set(true);
+        }
+    })
+}
+
 /// An answer's actions, as T3 Code's meta row under it while the pointer is
 /// over the answer: fork from here, copy, its time. `trailing` the work that
 /// ends its turn, they stay in view, closer to that work.
@@ -2304,10 +2350,8 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
                 .enabled(move || !forking())
             },
         ))
-        .child(action(Icon::COPY, "回答をコピー", move || {
-            if let Some(row) = row.get_untracked() {
-                set_clipboard(row.body.to_string());
-            }
+        .child(copy_action("回答をコピー", move || {
+            row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
         }))
         .child(when(forking, || {
             text(tr("分岐を作成中…"))
@@ -2366,12 +2410,8 @@ fn user_actions(connection: Connection, row: Memo<Option<Row>>) -> View {
                         })
                     },
                 ))
-                .child(action(Icon::COPY, "発言をコピー", move || {
-                    if let Some(text) =
-                        row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
-                    {
-                        set_clipboard(text);
-                    }
+                .child(copy_action("発言をコピー", move || {
+                    row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
                 })),
         )
 }

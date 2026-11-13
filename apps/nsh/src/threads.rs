@@ -121,16 +121,14 @@ fn rows(
     list: Option<&ThreadList>,
     dark: bool,
     sources: &[ListSource],
-    selected_host: &str,
+    sections: &[String],
     desktop: bool,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     if desktop {
         rows.push(Row {
-            menu: crate::projects::header_menu(
+            menu: crate::projects::restore_menu(
                 list.map_or(&[], |list| list.hidden_projects.as_slice()),
-                desktop,
-                selected_host,
                 sources,
             ),
             ..Row::new(tr("プロジェクト").into(), Action::ProjectHeader, None)
@@ -151,11 +149,6 @@ fn rows(
             None,
         ));
     }
-    let sections = list
-        .projects
-        .iter()
-        .filter_map(|project| project.section.clone())
-        .collect::<Vec<_>>();
     let headings = agent_core::presentation::list::project_headings(
         list.projects
             .iter()
@@ -201,7 +194,7 @@ fn rows(
             }),
             menu: crate::projects::menu(
                 project,
-                &sections,
+                sections,
                 &source.scope,
                 desktop && source.scope.host == "local",
             ),
@@ -215,7 +208,7 @@ fn rows(
             rows.extend(project_children(project, &source.scope, more_title));
         }
     }
-    if list.projects.is_empty() {
+    if list.projects.is_empty() && !list.has_more_projects {
         let (title, action) = if list.loading_projects {
             (
                 tr("プロジェクトを読み込み中…"),
@@ -316,149 +309,240 @@ fn project_children(
     rows
 }
 
-pub(crate) fn list(query: Signal<String>, open: impl Fn() + Copy + 'static) -> AnyElement {
-    let connection = use_context::<Connection>().unwrap();
-    let sources = computed(move || connection.state.with(|state| state.list_sources()));
-    let inputs = computed(move || connection.state.with(|state| state.list_inputs()));
-    let list = computed(move || {
-        inputs.with(|inputs| {
-            agent_core::presentation::connection_list::combine_connection_lists(
-                inputs
-                    .iter()
-                    .map(|(host, value)| (host.clone(), (**value).clone())),
-            )
-            .map(|list| Shared(std::sync::Arc::new(list)))
-        })
-    });
-    let projects =
-        crate::projects::Projects::new(connection.application, connection.host, sources, list);
-    effect(move || {
-        let search_term = query.get();
-        sources.with(|_| ());
-        connection
-            .application
-            .with(|application| application.search_list(&search_term));
-    });
-    let entries = computed(move || {
-        let host = connection.host.get();
-        list.with(|list| rows(list.as_deref(), dark(), &sources.get(), &host, is_desktop()))
-    });
-    let activate = move |name: &str, id: &str, expanded: Option<bool>| {
-        if name == "menu" {
-            match copied(id) {
-                Some(value) => set_clipboard(value),
-                None => projects.select(id),
-            }
-            return;
-        }
-        let Some((action, was_expanded, scope)) = entries.with_untracked(|rows| {
-            rows.iter().filter(|row| row.enabled).find_map(|row| {
-                let action = if name == "compose" {
-                    row.compose.as_ref()
-                } else {
-                    Some(&row.action)
-                }?;
-                (row_id(row.scope.as_ref(), action) == id)
-                    .then(|| (action.clone(), row.expanded, row.scope.clone()))
+#[derive(Clone, Copy)]
+pub(crate) struct List {
+    #[cfg(desktop)]
+    pub query: Signal<String>,
+    pub sources: Memo<Vec<ListSource>>,
+    pub content: Memo<Option<Shared<ThreadList>>>,
+    pub projects: crate::projects::Projects,
+    #[cfg(desktop)]
+    pub selected: Memo<Vec<agent_core::presentation::sidebar::ProjectKey>>,
+    pub sections: Memo<Vec<String>>,
+}
+
+impl List {
+    pub fn new(query: Signal<String>) -> Self {
+        let connection = use_context::<Connection>().unwrap();
+        let sources = computed(move || connection.state.with(|state| state.list_sources()));
+        let inputs = computed(move || connection.state.with(|state| state.list_inputs()));
+        let list = computed(move || {
+            inputs.with(|inputs| {
+                agent_core::presentation::connection_list::combine_connection_lists(
+                    inputs
+                        .iter()
+                        .map(|(host, value)| (host.clone(), (**value).clone())),
+                )
+                .map(|list| Shared(std::sync::Arc::new(list)))
             })
-        }) else {
-            return;
-        };
-        let global = match &action {
-            Action::Projects => Some(ListRequest::MoreProjects),
-            Action::More(None) => Some(ListRequest::MoreChats),
-            _ => None,
-        };
-        if let Some(request) = global {
+        });
+        let projects = crate::projects::Projects::new(connection.application, list);
+        let sections = computed(move || {
+            list.with(|list| {
+                list.as_ref()
+                    .map(|list| {
+                        list.projects
+                            .iter()
+                            .filter_map(|project| project.section.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+        });
+        #[cfg(desktop)]
+        let saved = computed(move || {
+            connection
+                .state
+                .with(|state| state.sidebar_projects.clone())
+        });
+        #[cfg(desktop)]
+        let ready = computed(move || connection.state.with(|state| state.sidebar_catalog_ready()));
+        #[cfg(desktop)]
+        let selected = computed(move || {
+            inputs.with(|inputs| {
+                let catalogs = inputs
+                    .iter()
+                    .map(|(host, list)| (host.as_str(), &**list))
+                    .collect::<Vec<_>>();
+                agent_core::presentation::sidebar::resolve_projects(
+                    &saved.get(),
+                    &catalogs,
+                    ready.get() && query.with(|query| query.trim().is_empty()),
+                )
+            })
+        });
+        effect(move || {
+            let search_term = query.get();
+            sources.with(|_| ());
             connection
                 .application
-                .with(|application| application.request_list(request));
-            return;
-        }
-        let Some(scope) = scope.as_ref() else {
-            return;
-        };
-        let navigate = matches!(&action, Action::Open { .. } | Action::New { .. });
-        let intent = match action {
-            Action::Open { thread, .. } => Intent::ReadThread(op::ReadThread::open(thread)),
-            Action::Expand(id) => Intent::SetProjectExpanded {
-                project_id: id,
-                expanded: expanded.unwrap_or(!was_expanded),
-            },
-            Action::New { cwd, .. } => Intent::NewChat { cwd },
-            Action::More(project_id) => Intent::ExpandThreadList { project_id },
-            Action::Retry(project_id) => Intent::RefreshProject { project_id },
-            Action::Projects
-            | Action::Heading(_)
-            | Action::ProjectHeader
-            | Action::Notice(_)
-            | Action::Loading(_) => return,
-        };
-        let accepted = connection
-            .application
-            .with(|application| application.list_action(scope, intent, navigate));
-        if navigate && accepted {
-            open();
-        }
-    };
-    if is_desktop() {
-        let selected = computed(move || {
-            let scope = ListScope {
-                host: connection.host.get(),
-                storage: connection.scope.with(|scope| scope.storage.clone()),
-            };
-            let thread = connection
-                .composer
-                .with(|c| c.controls.navigation.thread_id.clone());
-            entries.with(|rows| selected_rows(rows, &scope, thread.as_ref()))
+                .with(|application| application.search_list(&search_term));
         });
-        return view()
-            .flex_1()
-            .min_h_0()
-            .child(desktop_rows(entries, sources, selected, activate))
-            .child(projects.view())
-            .into_element();
+        Self {
+            #[cfg(desktop)]
+            query,
+            sources,
+            content: list,
+            projects,
+            #[cfg(desktop)]
+            selected,
+            sections,
+        }
     }
-    let table = native("bex.details")
-        .prop("data", move || {
-            let menu = list.with(|list| {
-                crate::projects::header_menu(
-                    list.as_ref()
-                        .map_or(&[], |list| list.hidden_projects.as_slice()),
-                    false,
-                    &connection.host.get(),
+
+    pub fn view(self, open: impl Fn() + Copy + 'static) -> AnyElement {
+        let connection = use_context::<Connection>().unwrap();
+        #[cfg(desktop)]
+        let selected = self.selected;
+        let Self {
+            sources,
+            content: list,
+            projects,
+            sections,
+            ..
+        } = self;
+        #[cfg(desktop)]
+        let visible = computed(move || {
+            let selected = selected.get();
+            list.with(|list| {
+                list.as_ref().map(|list| {
+                    if selected.is_empty() {
+                        list.clone()
+                    } else {
+                        Shared(std::sync::Arc::new(
+                            agent_core::presentation::sidebar::scoped_list(list, &selected),
+                        ))
+                    }
+                })
+            })
+        });
+        #[cfg(not(desktop))]
+        let visible = list;
+        let entries = computed(move || {
+            visible.with(|list| {
+                rows(
+                    list.as_deref(),
+                    dark(),
                     &sources.get(),
+                    &sections.get(),
+                    is_desktop(),
                 )
-            });
-            entries.with(|entries| task_list_data(entries, &sources.get(), menu))
-        })
-        .on_native_event(move |event: &NativeEvent| {
-            let name = if &*event.name == "action" {
-                event.data["action"].as_str().unwrap_or_default()
-            } else {
-                &*event.name
-            };
-            let Some(id) = event.data.as_str().or_else(|| event.data["id"].as_str()) else {
+            })
+        });
+        let activate = move |name: &str, id: &str, expanded: Option<bool>| {
+            if name == "menu" {
+                match copied(id) {
+                    Some(value) => set_clipboard(value),
+                    None => projects.select(id),
+                }
+                return;
+            }
+            let Some((action, was_expanded, scope)) = entries.with_untracked(|rows| {
+                rows.iter().filter(|row| row.enabled).find_map(|row| {
+                    let action = if name == "compose" {
+                        row.compose.as_ref()
+                    } else {
+                        Some(&row.action)
+                    }?;
+                    (row_id(row.scope.as_ref(), action) == id)
+                        .then(|| (action.clone(), row.expanded, row.scope.clone()))
+                })
+            }) else {
                 return;
             };
-            if matches!(name, "menu" | "select" | "expand" | "compose") {
-                let expanded = event
-                    .data
-                    .get("expanded")
-                    .and_then(|value| value.as_bool().or_else(|| value.as_str()?.parse().ok()));
-                activate(name, id, expanded);
+            let global = match &action {
+                Action::Projects => Some(ListRequest::MoreProjects),
+                Action::More(None) => Some(ListRequest::MoreChats),
+                _ => None,
+            };
+            if let Some(request) = global {
+                connection
+                    .application
+                    .with(|application| application.request_list(request));
+                return;
             }
-        })
-        .flex_1();
-    view()
-        .flex_1()
-        .child(table)
-        .child(projects.view())
-        .into_element()
+            let Some(scope) = scope.as_ref() else {
+                return;
+            };
+            let navigate = matches!(&action, Action::Open { .. } | Action::New { .. });
+            let intent = match action {
+                Action::Open { thread, .. } => Intent::ReadThread(op::ReadThread::open(thread)),
+                Action::Expand(id) => Intent::SetProjectExpanded {
+                    project_id: id,
+                    expanded: expanded.unwrap_or(!was_expanded),
+                },
+                Action::New { cwd, .. } => Intent::NewChat { cwd },
+                Action::More(project_id) => Intent::ExpandThreadList { project_id },
+                Action::Retry(project_id) => Intent::RefreshProject { project_id },
+                Action::Projects
+                | Action::Heading(_)
+                | Action::ProjectHeader
+                | Action::Notice(_)
+                | Action::Loading(_) => return,
+            };
+            let accepted = connection
+                .application
+                .with(|application| application.list_action(scope, intent, navigate));
+            if navigate && accepted {
+                open();
+            }
+        };
+        if is_desktop() {
+            let selected = computed(move || {
+                let scope = ListScope {
+                    host: connection.host.get(),
+                    storage: connection.scope.with(|scope| scope.storage.clone()),
+                };
+                let thread = connection
+                    .composer
+                    .with(|c| c.controls.navigation.thread_id.clone());
+                entries.with(|rows| selected_rows(rows, &scope, thread.as_ref()))
+            });
+            return view()
+                .flex_1()
+                .min_h_0()
+                .child(desktop_rows(entries, sources, selected, activate))
+                .into_element();
+        }
+        let table = native("bex.details")
+            .prop("data", move || {
+                let menu = list.with(|list| {
+                    crate::projects::restore_menu(
+                        list.as_ref()
+                            .map_or(&[], |list| list.hidden_projects.as_slice()),
+                        &sources.get(),
+                    )
+                });
+                entries.with(|entries| task_list_data(entries, &sources.get(), menu))
+            })
+            .on_native_event(move |event: &NativeEvent| {
+                let name = if &*event.name == "action" {
+                    event.data["action"].as_str().unwrap_or_default()
+                } else {
+                    &*event.name
+                };
+                let Some(id) = event.data.as_str().or_else(|| event.data["id"].as_str()) else {
+                    return;
+                };
+                if matches!(name, "menu" | "select" | "expand" | "compose") {
+                    let expanded = event
+                        .data
+                        .get("expanded")
+                        .and_then(|value| value.as_bool().or_else(|| value.as_str()?.parse().ok()));
+                    activate(name, id, expanded);
+                }
+            })
+            .flex_1();
+        view()
+            .flex_1()
+            .child(table)
+            .child(projects.view())
+            .into_element()
+    }
 }
 
 /// The desktop sidebar's rows in the existing desktop client's layout. The project
-/// header's menu supplies folder addition and the hidden projects' restore rows.
+/// header's menu supplies the hidden projects' restore rows.
 fn desktop_rows(
     entries: Memo<Vec<Row>>,
     sources: Memo<Vec<ListSource>>,
@@ -542,23 +626,7 @@ fn desktop_row(
     use crate::ui::{self, Enabled, Icon, colors};
     let id = row_id(row.scope.as_ref(), &row.action);
     match &row.action {
-        Action::ProjectHeader => {
-            let add = row
-                .menu
-                .as_array()
-                .and_then(|items| items.iter().find(|item| item["id"] == "add"))
-                .map(|item| item["enabled"].as_bool().unwrap_or(false));
-            section(row.title.clone())
-                .child(add.map(|enabled| {
-                    ui::icon_button(
-                        Icon::FOLDER_PLUS,
-                        tr("プロジェクトを追加"),
-                        move || activate("menu", "add", None),
-                    )
-                    .enabled(move || enabled)
-                }))
-                .into_element()
-        }
+        Action::ProjectHeader => section(row.title.clone()).into_element(),
         Action::Heading(None) => section(row.title.clone()).into_element(),
         Action::Heading(Some(_)) => text(row.title.clone())
             .px_3()
@@ -844,11 +912,20 @@ mod tests {
 
     struct ConnectionList;
 
+    #[derive(Clone, PartialEq, Props)]
+    struct ConnectionListProps {
+        directory: String,
+    }
+
     impl Component for ConnectionList {
-        type Props = ();
+        type Props = ConnectionListProps;
         type Event = NoEvent;
 
-        fn view(_: (), _: Scope<NoEvent>) -> impl IntoElement {
+        fn view(props: ConnectionListProps, _: Scope<NoEvent>) -> impl IntoElement {
+            let (runtime, application) =
+                crate::application::Application::new(props.directory.into(), None).unwrap();
+            let service = application.clone();
+            cleanup(move || runtime.block_on(service.shutdown()).unwrap());
             let connected = signal(false);
             let sources = computed(move || {
                 vec![ListSource {
@@ -871,6 +948,11 @@ mod tests {
                         .accessibility_label("Toggle connection")
                         .on_press(move || connected.update(|value| *value = !*value)),
                 )
+                .child(crate::projects::folder_button(
+                    stored(application),
+                    computed(|| "local".into()),
+                    sources,
+                ))
                 .child(desktop_rows(
                     entries,
                     sources,
@@ -883,12 +965,16 @@ mod tests {
     #[test]
     fn desktop_new_chat_and_add_project_follow_connection_without_reopening_projects() {
         use nsh_core::{ApproxTextEngine, Core, EventKind, EventPayload, MountItem, element::Root};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_string_lossy().into_owned();
         let mut core = Core::new(
             ApproxTextEngine,
             nsh_core::geometry::size(px(900.0), px(700.0)),
         );
         core.set_components(nsh_base::registry());
-        core.mount_root(&Root::new::<ConnectionList>(|| ()));
+        core.mount_root(&Root::new::<ConnectionList>(move || ConnectionListProps {
+            directory: root.clone(),
+        }));
         let mut buttons = std::collections::BTreeMap::new();
         for connected in [false, true, false, true] {
             let batch = core.commit().unwrap();
@@ -948,6 +1034,15 @@ mod tests {
         let list = agent_core::presentation::connection_list::combine_connection_lists(
             list.into_iter().map(|list| (host.into(), list.clone())),
         );
+        let sections = list
+            .as_ref()
+            .map(|list| {
+                list.projects
+                    .iter()
+                    .filter_map(|project| project.section.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         super::rows(
             list.as_ref(),
             dark,
@@ -955,25 +1050,78 @@ mod tests {
                 scope: scope(host, storage),
                 connected,
             }],
-            host,
+            &sections,
             desktop,
         )
     }
 
     #[test]
-    fn desktop_header_keeps_folder_addition_local_and_available_without_a_loaded_list() {
-        for (host, connected, enabled) in [
-            ("local", false, false),
-            ("local", true, true),
-            ("remote", true, false),
-        ] {
-            let rows = fixture_rows(None, false, host, "scope", true, connected);
-            assert_eq!(rows.len(), 1);
-            assert!(matches!(rows[0].action, Action::ProjectHeader));
-            assert_eq!(rows[0].menu[0]["id"], "add");
-            assert_eq!(rows[0].menu[0]["enabled"], enabled);
-        }
+    fn desktop_keeps_the_projects_heading_without_a_loaded_list() {
+        let rows = fixture_rows(None, false, "local", "scope", true, true);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].action, Action::ProjectHeader));
         assert!(fixture_rows(None, false, "local", "scope", false, true).is_empty());
+    }
+
+    #[test]
+    fn a_scoped_project_keeps_section_choices_from_the_rest_of_the_catalog() {
+        let list = fixture_list();
+        let scoped = agent_core::presentation::sidebar::scoped_list(
+            &list,
+            &[agent_core::presentation::sidebar::ProjectKey {
+                host_id: "host".into(),
+                project_id: "project".into(),
+            }],
+        );
+        let rows = rows(
+            Some(&scoped),
+            false,
+            &[ListSource {
+                scope: scope("host", "scope"),
+                connected: true,
+            }],
+            &["Other section".into()],
+            true,
+        );
+        let project = rows.iter().find(|row| row.disclosure).unwrap();
+        assert!(
+            project
+                .menu
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item["children"].as_array())
+                .flatten()
+                .any(|item| item["title"] == "Other section")
+        );
+    }
+
+    #[test]
+    fn an_unloaded_scoped_project_offers_more_pages_without_claiming_the_catalog_is_empty() {
+        let mut list = fixture_list();
+        list.has_more_projects = true;
+        let mut scoped = agent_core::presentation::sidebar::scoped_list(
+            &list,
+            &[agent_core::presentation::sidebar::ProjectKey {
+                host_id: "host".into(),
+                project_id: "later".into(),
+            }],
+        );
+        for loading in [false, true] {
+            scoped.loading_projects = loading;
+            let rows = fixture_rows(Some(&scoped), false, "host", "scope", true, true);
+            let more = rows
+                .iter()
+                .find(|row| row.action == Action::Projects)
+                .unwrap();
+            assert_eq!(more.loading, loading);
+            assert_eq!(more.enabled, !loading);
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| matches!(&row.action, Action::Notice(id) if id == "projects"))
+            );
+        }
     }
 
     fn fixture_list() -> ThreadList {
@@ -1441,7 +1589,7 @@ mod tests {
                 connected: false,
             },
         ];
-        let rendered = rows(Some(&combined), false, &sources, "one", true);
+        let rendered = rows(Some(&combined), false, &sources, &[], true);
         let native = native_rows(&rendered, &sources);
         let ids: std::collections::HashSet<_> = rendered
             .iter()
@@ -1479,9 +1627,13 @@ mod tests {
         assert_eq!(selected_one.len(), 2);
         assert_eq!(selected_two.len(), 2);
         assert!(selected_one.iter().all(|id| !selected_two.contains(id)));
-        let hidden = rendered[0].menu[1]["children"].as_array().unwrap();
-        let owners: Vec<_> = hidden
+        let owners: Vec<_> = rendered[0]
+            .menu
+            .as_array()
+            .unwrap()
             .iter()
+            .filter_map(|item| item["children"].as_array())
+            .flatten()
             .map(|item| {
                 let command: serde_json::Value =
                     serde_json::from_str(item["id"].as_str().unwrap()).unwrap();
@@ -1500,7 +1652,7 @@ mod tests {
         );
         let mut replaced = sources.clone();
         replaced[0].scope.storage = "new-account".into();
-        let new_rows = rows(Some(&combined), false, &replaced, "one", true);
+        let new_rows = rows(Some(&combined), false, &replaced, &[], true);
         let new_selection =
             selected_rows(&new_rows, &replaced[0].scope, Some(&combined.threads[0].id));
         assert!(selected_one.iter().all(|id| !new_selection.contains(id)));
