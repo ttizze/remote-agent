@@ -69,6 +69,7 @@ PLIST
     fi
 }
 run_test apps/mobile/iosApp/UITests/Fixtures/navigation-tests.swift apps/mobile/iosApp/Bex/NavigationAppearance.swift
+run_test apps/mobile/iosApp/UITests/Fixtures/nsh-selection-menu-tests.swift apps/mobile/iosApp/Bex/NshSelectionMenuController.swift
 run_test apps/mobile/iosApp/UITests/Fixtures/scroll-tests.swift apps/mobile/iosApp/Bex/ConversationList.swift apps/mobile/iosApp/Bex/ConversationListLayout.swift
 run_test apps/mobile/iosApp/UITests/Fixtures/text-view-tests.swift apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
 run_test apps/mobile/iosApp/UITests/Fixtures/text-view-tests.swift --dev apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift

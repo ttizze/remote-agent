@@ -14,9 +14,7 @@ struct ThreadScreen: View {
     @Environment(\.locale) private var locale
     let model: ConversationModel
     let environment: ConversationEnvironment
-    #if BEX_NSH_CONVERSATION
-        @State private var selectedText = ""
-    #else
+    #if !BEX_NSH_CONVERSATION
         var conversation: ConversationPresentation? {
             model.conversation
         }
@@ -35,9 +33,7 @@ struct ThreadScreen: View {
             .modifier(ConversationMediaPresenter(presentation: mediaPresentation))
             .onDisappear(perform: mediaPresentation.cancelPending)
             .onChange(of: model.draftKey) {
-                #if BEX_NSH_CONVERSATION
-                    selectedText = ""
-                #else
+                #if !BEX_NSH_CONVERSATION
                     expandedItemIds.removeAll()
                     scroll.following = true
                 #endif
@@ -53,22 +49,6 @@ struct ThreadScreen: View {
             .navigationSubtitle(ifPresent: isSideChat ? nil : conversationSubtitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                #if BEX_NSH_CONVERSATION
-                    if !selectedText.isEmpty {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Menu {
-                                Button("コピー") { UIPasteboard.general.string = selectedText }
-                                Button("チャットに追加") { messageAction("quote", selectedText) }
-                                if !isSideChat {
-                                    Button("詳細を表示") { messageAction("explain", selectedText) }
-                                    Button("サイドチャットで質問") { messageAction("sideChat", selectedText) }
-                                }
-                            } label: {
-                                Label("チャットに追加", systemImage: "text.quote")
-                            }
-                        }
-                    }
-                #endif
                 if !isSideChat {
                     ToolbarItemGroup(placement: .navigationBarTrailing) {
                         Button {
@@ -141,6 +121,7 @@ struct ThreadScreen: View {
                 GeometryReader { canvas in
                     NshConversationView(host: model.host, session: model.session, pane: model.pane,
                                         composerInset: max(0, canvas.size.height - viewport.size.height),
+                                        selectionKey: model.draftKey, allowsSideChat: !isSideChat,
                                         perform: messageAction, preview: mediaAccess.presentation.openPreview)
                         .id(ObjectIdentifier(model))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -221,8 +202,6 @@ extension ThreadScreen {
         /// about in a side chat, or a link opened.
         func messageAction(_ action: String, _ text: String) {
             switch action {
-            case "selection":
-                selectedText = text
             case "error":
                 model.notice = text
             case "setupTerminal":

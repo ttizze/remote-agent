@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 
+test('the NSH preview imports its C bridge only into the app target', () => {
+  const config = readFileSync(new URL('../apps/mobile/iosApp/Config/NshPreview.xcconfig', import.meta.url), 'utf8');
+  const settings = new Map([...config.matchAll(/^([A-Z_a-z0-9]+) = (.+)$/gm)]
+    .map(([, name, value]) => [name, value.trim()]));
+  assert.equal(settings.get('SWIFT_OBJC_BRIDGING_HEADER'), '$(AGENT_NSH_BRIDGING_HEADER_$(TARGET_NAME))');
+  assert.equal(settings.get('AGENT_NSH_BRIDGING_HEADER_Bex'), '$(SRCROOT)/Bex/NshConversationBridge.h');
+  assert.equal(settings.has('AGENT_NSH_BRIDGING_HEADER_TaskActivityExtension'), false);
+  assert.equal(settings.has('AGENT_NSH_BRIDGING_HEADER_UITests'), false);
+  const header = readFileSync(new URL('../apps/mobile/iosApp/Bex/NshConversationBridge.h', import.meta.url), 'utf8');
+  assert(header.includes('bex_nsh_conversation_create)('));
+  assert(header.includes('bex_nsh_conversation_view('));
+  assert(header.includes('bex_nsh_conversation_release('));
+  assert(header.includes('bex_nsh_conversation_set_composer_inset('));
+});
+
 test('the iPhone app compiles every Swift source once with unique Xcode objects', () => {
   const project = readFileSync(new URL('../apps/mobile/iosApp/Bex.xcodeproj/project.pbxproj', import.meta.url), 'utf8');
   const swiftSources = readdirSync(new URL('../apps/mobile/iosApp/Bex/', import.meta.url), { recursive: true })
