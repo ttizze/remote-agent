@@ -148,6 +148,9 @@ impl HostRpcService {
 }
 
 fn workspace(cwd: &str, chat_directory: &Path) -> Option<(PathBuf, bool)> {
+    if agent_local_host::wsl::folder(cwd).ok()?.is_some() {
+        return None;
+    }
     let cwd = Path::new(cwd);
     if !cwd.is_absolute() {
         return None;

@@ -76,11 +76,7 @@ impl ProjectStore {
             .map_err(anyhow::Error::msg)
     }
     pub(crate) async fn register(&self, root: &Path) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            root.is_absolute(),
-            "プロジェクトのフォルダは絶対パスで指定してください。"
-        );
-        let root = tokio::fs::canonicalize(root).await?;
+        let root = resolve_root(root).await?;
         let root = dunce::simplified(&root);
         anyhow::ensure!(
             tokio::fs::metadata(root).await?.is_dir(),
@@ -95,7 +91,7 @@ impl ProjectStore {
         let projects = self.read_projects().await?;
         for registered in projects.iter().flat_map(|project| &project.roots) {
             if registered.path == path
-                || tokio::fs::canonicalize(&registered.path)
+                || resolve_root(Path::new(&registered.path))
                     .await
                     .ok()
                     .is_some_and(|path| dunce::simplified(&path) == root)
@@ -128,24 +124,14 @@ impl ProjectStore {
         };
         for mut project in self.read_projects().await? {
             for root in std::mem::take(&mut project.roots) {
-                if Path::new(&root.path).is_absolute() {
-                    match tokio::fs::canonicalize(&root.path).await {
-                        Ok(path) => {
-                            let path = dunce::simplified(&path);
-                            if snapshot.chat_directories.contains(path) {
-                                continue;
-                            }
-                            snapshot
-                                .resolved_roots
-                                .insert(root.path.clone(), path.to_owned());
-                        }
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                            ) => {}
-                        Err(error) => return Err(error.into()),
+                if let Ok(path) = resolve_root(Path::new(&root.path)).await {
+                    let path = dunce::simplified(&path);
+                    if snapshot.chat_directories.contains(path) {
+                        continue;
                     }
+                    snapshot
+                        .resolved_roots
+                        .insert(root.path.clone(), path.to_owned());
                 }
                 project.roots.push(root);
             }
@@ -158,9 +144,99 @@ impl ProjectStore {
     }
 }
 
+async fn resolve_root(root: &Path) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        root.is_absolute(),
+        "プロジェクトのフォルダは絶対パスで指定してください。"
+    );
+    if let Some(folder) = agent_local_host::wsl::folder(&root.to_string_lossy())? {
+        anyhow::bail!(
+            "WSL ({}) のプロジェクトは、その WSL Host で開いてください。",
+            folder.distro
+        );
+    }
+    Ok(tokio::fs::canonicalize(root).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_root_keeps_saved_membership_and_other_projects_readable() {
+        use agent_protocol::models::ProjectMembership;
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let unavailable = root.join("unavailable");
+        std::os::unix::fs::symlink(&unavailable, &unavailable).unwrap();
+        assert!(tokio::fs::canonicalize(&unavailable).await.is_err());
+        let store = ProjectStore::new(root.join("bex-worktrees.json"));
+        let projects = serde_json::json!([
+            {"id":"offline","name":"Offline","roots":[{"path":unavailable}]},
+            {"id":"local","name":"Local","roots":[{"path":root}]}
+        ]);
+        let projects: Vec<Project> = serde_json::from_value(projects).unwrap();
+        store.storage.replace_projects(&projects).unwrap();
+        let snapshot = store.load().await.unwrap();
+        assert_eq!(snapshot.projects.len(), 2);
+        assert!(
+            !snapshot
+                .resolved_roots
+                .contains_key(unavailable.to_str().unwrap())
+        );
+        assert_eq!(
+            snapshot.project_membership(unavailable.join("src").to_str()),
+            ProjectMembership::Assigned("offline".into())
+        );
+        assert_eq!(
+            snapshot.project_membership(root.to_str()),
+            ProjectMembership::Assigned("local".into())
+        );
+        assert!(store.register(&unavailable).await.is_err());
+        std::fs::remove_file(&unavailable).unwrap();
+        std::fs::create_dir(&unavailable).unwrap();
+        assert!(
+            store
+                .load()
+                .await
+                .unwrap()
+                .resolved_roots
+                .contains_key(unavailable.to_str().unwrap())
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wsl_roots_remain_readable_without_accessing_windows_shares() {
+        use agent_protocol::models::ProjectMembership;
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+        let path = r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project";
+        let projects = serde_json::json!([
+            {"id":"wsl","name":"WSL project","roots":[{"path":path}]}
+        ]);
+        let projects: Vec<Project> = serde_json::from_value(projects).unwrap();
+        store.storage.replace_projects(&projects).unwrap();
+        let snapshot = store.load().await.unwrap();
+        assert_eq!(snapshot.projects.len(), 1);
+        assert!(snapshot.resolved_roots.is_empty());
+        assert_eq!(
+            snapshot.project_membership(Some(path)),
+            ProjectMembership::Assigned("wsl".into())
+        );
+        let error = store.register(Path::new(path)).await.unwrap_err();
+        assert!(error.to_string().contains("WSL (Ubuntu)"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn corrupt_project_state_is_still_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+        let connection = rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+        connection.execute("INSERT INTO projects(id,seq,body) VALUES ('broken',1,?1)", [vec![0xc1]]).unwrap();
+        assert!(store.load().await.is_err());
+    }
 
     #[tokio::test]
     async fn reserved_chat_directory_is_unassigned_before_and_after_creation() {

@@ -9,7 +9,7 @@ pub(super) struct Comparison {
     pub branch: String,
     pub base: String,
     pub base_ref: Option<String>,
-    index: tempfile::NamedTempFile,
+    index: tempfile::TempPath,
 }
 
 pub(crate) fn base_key(branch: &str) -> String {
@@ -105,7 +105,7 @@ impl Comparison {
         // represented by writing its parent repository's index to a tree.
         index_output(
             &self.root,
-            self.index.path(),
+            &self.index,
             &[
                 "diff",
                 "--no-ext-diff",
@@ -218,29 +218,32 @@ fn has_commit(cwd: &Path, reference: &str) -> bool {
     .is_ok()
 }
 
-fn working_index(cwd: &Path) -> Result<tempfile::NamedTempFile> {
+fn working_index(cwd: &Path) -> Result<tempfile::TempPath> {
     let git_dir = crate::git::text(cwd, &["rev-parse", "--absolute-git-dir"])?;
     let mut index = tempfile::Builder::new()
         .prefix("bex-review-index-")
         .tempfile_in(git_dir.trim_end())?;
     let original = crate::git::text(cwd, &["rev-parse", "--git-path", "index"])?;
     let original = cwd.join(original.trim_end());
-    match std::fs::File::open(original) {
+    let index = match std::fs::File::open(original) {
         Ok(mut source) => {
             // Git uses the index timestamp to detect same-stat edits. A newer
             // copy would make a racy entry appear clean and hide changed bytes.
             let modified = source.metadata()?.modified()?;
             std::io::copy(&mut source, index.as_file_mut())?;
             index.as_file().set_modified(modified)?;
+            index.into_temp_path()
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            index_output(cwd, index.path(), &["read-tree", "--empty"])?;
+            let index = index.into_temp_path();
+            index_output(cwd, &index, &["read-tree", "--empty"])?;
+            index
         }
         Err(error) => return Err(error.into()),
-    }
+    };
     // A private index includes untracked files and their content in the same
     // comparison as committed/staged edits, without changing the user's staging.
-    index_output(cwd, index.path(), &["add", "-A", "--", "."])?;
+    index_output(cwd, &index, &["add", "-A", "--", "."])?;
     Ok(index)
 }
 
