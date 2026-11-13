@@ -84,7 +84,14 @@ impl Runtime {
             let item = Self::read_native_body(service, &native.request).await?;
             runtime
                 .owners
-                .hydrate(target, id.clone(), native.version, item.body().clone())
+                .write(
+                    target,
+                    Write::Hydrate {
+                        id: id.clone(),
+                        version: native.version,
+                        body: item.body().clone(),
+                    },
+                )
                 .await
                 .map_err(storage_failure)?;
         }

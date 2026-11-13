@@ -866,6 +866,90 @@ fn repeated_qualified_native_turns_keep_each_deferred_item_address() {
     }
 }
 
+#[test]
+fn first_upgrade_without_a_recovery_journal_interrupts_the_old_running_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("bex-transcripts.sqlite");
+    previous(&old, false);
+    let connection = Connection::open(&old).unwrap();
+    let mut turn: Turn = protocol::decode(
+        &connection
+            .query_row("SELECT body FROM turns", [], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap(),
+    )
+    .unwrap();
+    turn.status = TurnStatus::Running;
+    connection
+        .execute(
+            "UPDATE turns SET body=?1",
+            [protocol::encode(turn).unwrap()],
+        )
+        .unwrap();
+    // No queued/preparing input is involved in this ordinary restart.
+    connection.execute("DELETE FROM queues", []).unwrap();
+    connection.execute("UPDATE host_state SET body=?1 WHERE name='bindings'", [serde_json::to_vec(&serde_json::json!([{"id":address(),"active":address(),"cwd":"/kept/workspace","bindings":[{"session":address()}],"handoffs":[],"startup":null}])).unwrap()]).unwrap();
+    drop(connection);
+    let storage = Storage::open(&directory.path().join("bex-conversations.sqlite"));
+    storage.check_ready().unwrap();
+    assert!(!storage.updating().unwrap());
+    let context = Context {
+        now: 1000,
+        seed: Uuid::new_v4(),
+        steers: true,
+        preparation: None,
+        rewind_binding: None,
+        imported_turns: &[],
+        external_busy: false,
+        steer_ready: true,
+    };
+    let restarted = storage
+        .decide(
+            &address(),
+            Event::Restart {
+                updating: false,
+                continue_after_restart: true,
+            },
+            context,
+            None,
+        )
+        .unwrap();
+    assert!(restarted.step.continuations.is_empty());
+    assert!(matches!(
+        storage.state(&address()).unwrap().turns["original-turn"].state,
+        decision::TurnState::Interrupted
+    ));
+    let operation = Uuid::new_v4();
+    let submitted = storage
+        .decide(
+            &address(),
+            Event::Command {
+                id: decision::OperationId::Client(operation),
+                receipt: None,
+                command: decision::Command::Submit {
+                    id: operation.to_string().into(),
+                    content: decision::InputContent {
+                        parts: input(Uuid::new_v4()).input,
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: FollowUp::Queue,
+                    },
+                },
+            },
+            context,
+            None,
+        )
+        .unwrap();
+    assert_eq!(submitted.step.outcome, Outcome::Accepted);
+    assert!(
+        submitted
+            .step
+            .actions
+            .iter()
+            .any(|action| matches!(action, decision::Action::Deliver { .. }))
+    );
+}
+
 #[tokio::test]
 async fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recovery_once() {
     for sending in [false, true] {

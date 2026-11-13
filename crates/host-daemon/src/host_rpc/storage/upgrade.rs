@@ -84,7 +84,7 @@ pub(super) struct Previous {
     projects: Vec<agent_protocol::models::Project>,
     workspace_scripts: BTreeMap<String, Vec<agent_protocol::models::ProjectScript>>,
     backup: tempfile::TempDir,
-    recovery: Option<agent_local_host::update::Recovery>,
+    recovery_pending: bool,
 }
 
 fn file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
@@ -284,9 +284,14 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
         projects,
         workspace_scripts,
         backup,
-        recovery: file::<agent_local_host::update::Recovery>(
+        recovery_pending: file::<agent_local_host::update::Recovery>(
             &path.with_file_name(agent_local_host::update::RECOVERY_FILE),
-        )?,
+        )?
+        .is_some_and(|report| {
+            report.tasks.iter().any(|task| {
+                task.delivery == agent_local_host::update::ContinuationDelivery::Pending
+            })
+        }),
     }))
 }
 
@@ -342,11 +347,7 @@ impl Previous {
 
     pub(super) fn write(&self, transaction: &Transaction<'_>, process: Uuid) -> Result<(), String> {
         let now = super::super::runtime::now();
-        if self.recovery.as_ref().is_some_and(|report| {
-            report.tasks.iter().any(|task| {
-                task.delivery == agent_local_host::update::ContinuationDelivery::Pending
-            })
-        }) {
+        if self.recovery_pending {
             transaction
                 .execute("UPDATE store SET updating=1", [])
                 .map_err(failure)?;
@@ -498,20 +499,9 @@ impl Previous {
         for row in &self.conversations {
             row.restore(transaction, sequence, process, now)?;
         }
-        // The old updater recorded only work in a Host-owned process. Retain
-        // that ownership when its native history is installed as old rows.
-        for task in self.recovery.iter().flat_map(|report| &report.tasks) {
-            let (Some(key), Some(turn)) = (
-                existing_key(transaction, &task.submission.thread_id)?,
-                &task.last_turn,
-            ) else {
-                continue;
-            };
-            let canonical =
-                canonical_native_turn(transaction, key, &task.native_session, turn.as_str())?
-                    .unwrap_or_else(|| turn.clone());
-            transaction.execute("UPDATE executions SET process=?1 WHERE thread=?2 AND turn_id=?3 AND process=?4", params![process.to_string(),key,canonical.as_str(),Uuid::nil().to_string()]).map_err(failure)?;
-        }
+        // Main interrupted every saved Running turn on startup, even without
+        // an updater journal. Preserve that boundary for the first upgrade.
+        transaction.execute("UPDATE executions SET process=?1 WHERE EXISTS (SELECT 1 FROM turns t WHERE t.thread=executions.thread AND t.id=executions.turn_id AND t.state='running')", [process.to_string()]).map_err(failure)?;
         for id in &self.unimported {
             let source = self
                 .conversations

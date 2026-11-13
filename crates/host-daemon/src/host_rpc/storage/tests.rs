@@ -38,6 +38,181 @@ fn header() -> Header {
 }
 
 #[test]
+fn forks_settle_copied_background_work_and_allow_the_next_input() {
+    use agent_protocol::{
+        conversation::{Turn, Wait},
+        execution::{BackgroundTask, BackgroundTaskKind},
+    };
+    for (later, answering) in [(false, false), (true, false), (false, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("state.sqlite"));
+        let source = address("background-source");
+        storage
+            .import(
+                &source,
+                &agent_protocol::models::ThreadResponse {
+                    thread: agent_protocol::models::Thread {
+                        id: Some(source.clone()),
+                        cwd: Some("/project".into()),
+                        turns: Some(vec![Arc::new(agent_protocol::models::Turn {
+                            id: "answered".into(),
+                            ..Default::default()
+                        })]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Some(&source),
+                100,
+            )
+            .unwrap();
+        storage
+            .with(|connection| {
+                let transaction = connection.transaction().map_err(failure)?;
+                let key = thread_key(&transaction, &source)?;
+                let scope = rows::WriteScope {
+                    key,
+                    id: &source,
+                    sequence: 1,
+                    at: 100,
+                    process: storage.process,
+                };
+                let background = Turn {
+                    id: "answered".into(),
+                    ordinal: 1,
+                    provider: ProviderKind::Claude,
+                    state: if answering {
+                        TurnState::Running { interrupt: None }
+                    } else {
+                        TurnState::Waiting(Wait::Background {
+                            tasks: vec![BackgroundTask {
+                                id: "shell".into(),
+                                kind: BackgroundTaskKind::Command,
+                                description: None,
+                            }],
+                        })
+                    },
+                    queued: false,
+                    observed: true,
+                    started_at: Some(10),
+                    completed_at: None,
+                    duration_ms: None,
+                    retry_count: 0,
+                    compaction: false,
+                    error: None,
+                };
+                let mut changes = vec![
+                    Change::Turn(background.clone()),
+                    Change::Item(decision::Item {
+                        id: "command".into(),
+                        turn: background.id.clone(),
+                        position: 1,
+                        status: ItemStatus::Running,
+                        deferred: false,
+                        input: None,
+                        body: ItemBody::CommandExecution {
+                            command: "sleep 1".into(),
+                            cwd: None,
+                            output: "kept background output".into(),
+                            exit_code: None,
+                            output_omitted: false,
+                        },
+                    }),
+                ];
+                if later {
+                    changes.push(Change::Turn(Turn {
+                        id: "later".into(),
+                        ordinal: 2,
+                        state: TurnState::Completed,
+                        ..background
+                    }));
+                }
+                let state = State::new(header().state).apply(&changes);
+                for change in changes {
+                    rows::write(
+                        &transaction,
+                        &scope,
+                        &change,
+                        &state.turns,
+                        &mut Vec::new(),
+                        &mut Vec::new(),
+                    )?;
+                }
+                transaction.commit().map_err(failure)
+            })
+            .unwrap();
+        let before = storage.history(&source, 0).unwrap();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let forked = storage.fork(
+            &source,
+            &target,
+            &if later { "later" } else { "answered" }.into(),
+            200,
+        );
+        if answering {
+            assert_eq!(
+                forked.unwrap_err(),
+                "finish the selected turn before forking"
+            );
+            assert!(storage.lookup(&target).unwrap().is_none());
+            continue;
+        }
+        forked.unwrap();
+        let copied = storage.state(&target).unwrap();
+        assert!(copied.active_turn().is_none());
+        assert!(copied.bindings.is_empty());
+        let history = storage.history(&target, 0).unwrap();
+        let turns = history.thread.turns.unwrap();
+        assert_eq!(turns.len(), if later { 2 } else { 1 });
+        assert!(
+            turns
+                .iter()
+                .all(|turn| turn.status == agent_protocol::execution::TurnStatus::Completed)
+        );
+        let item = &turns[0].items.as_ref().unwrap()[0];
+        assert_eq!(item.status, ItemStatus::Completed);
+        assert!(
+            matches!(item.body(), ItemBody::CommandExecution { output, .. } if output == "kept background output")
+        );
+        assert_eq!(
+            storage.history(&source, 0).unwrap().thread.turns,
+            before.thread.turns
+        );
+        let operation = Uuid::new_v4();
+        let next = storage
+            .decide(
+                &target,
+                Event::Command {
+                    id: OperationId::Client(operation),
+                    receipt: None,
+                    command: Command::Submit {
+                        id: operation.to_string().into(),
+                        content: InputContent {
+                            parts: vec![Input::Text {
+                                text: "continue the copy".into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: FollowUp::Queue,
+                        },
+                    },
+                },
+                context(1000),
+                None,
+            )
+            .unwrap();
+        assert_eq!(next.step.outcome, Outcome::Accepted);
+        assert!(
+            next.step
+                .actions
+                .iter()
+                .any(|action| matches!(action, decision::Action::Prepare { .. }))
+        );
+    }
+}
+
+#[test]
 fn unknown_native_activity_stays_unknown_until_the_current_source_confirms_idle() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));

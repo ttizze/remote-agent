@@ -710,7 +710,7 @@ fn archive_filters_apply_with_only_a_timestamp_or_only_explicit_ids() {
 }
 
 #[test]
-fn expanded_projects_keep_connection_and_operation_errors_without_affecting_collapsed_headers() {
+fn project_decorations_preserve_the_loaded_rows_and_connection_notice() {
     use crate::state::operations::{OperationKey, OperationPhase, OperationState};
     for connected in [false, true] {
         for cached in [false, true] {
@@ -764,7 +764,7 @@ fn expanded_projects_keep_connection_and_operation_errors_without_affecting_coll
                     .into_iter()
                     .find(|project| project.id == "destination")
                     .unwrap();
-                assert_eq!(project.loading, expanded);
+                assert!(!project.loading);
                 assert_eq!(
                     project.error.as_ref().map(|error| error.message.as_str()),
                     expected
@@ -783,12 +783,9 @@ fn expanded_projects_keep_connection_and_operation_errors_without_affecting_coll
                     .find(|project| project.id == "destination")
                     .unwrap();
                 assert!(!project.loading);
-                assert!(
-                    project.error
-                        == expanded.then(|| crate::presentation::error::error_text(
-                            crate::localization::UiLanguage::Japanese,
-                            "read failed"
-                        ))
+                assert_eq!(
+                    project.error.as_ref().map(|error| error.message.as_str()),
+                    expected
                 );
             }
         }

@@ -91,14 +91,21 @@ impl HostRpcService {
         generation: Uuid,
         update: SetupChange,
     ) -> Result<(), Failure> {
-        let changed = self
+        let (outcome, _) = self
             .inner
             .conversation
             .owners
-            .setup(id, generation, update, now())
+            .write(
+                id,
+                Write::Setup {
+                    generation,
+                    update,
+                    now: now(),
+                },
+            )
             .await
             .map_err(super::super::runtime::storage_failure)?;
-        if !changed {
+        if outcome != agent_protocol::conversation::Outcome::Accepted {
             return Ok(());
         }
         let workspace = self
@@ -138,11 +145,13 @@ impl HostRpcService {
                 if let Err(error) = inner
                     .conversation
                     .owners
-                    .setup(
+                    .write(
                         &id,
-                        workspace.generation,
-                        SetupChange::Expire { ended_at },
-                        now(),
+                        Write::Setup {
+                            generation: workspace.generation,
+                            update: SetupChange::Expire { ended_at },
+                            now: now(),
+                        },
                     )
                     .await
                 {
@@ -248,8 +257,16 @@ impl HostRpcService {
                 notify: Arc::new(move |progress| {
                     anyhow::ensure!(!cancelled.is_cancelled(), "workspace preparation cancelled");
                     owners
-                        .setup_progress(&id, action, SetupChange::Progress(progress), now())
+                        .enqueue(
+                            &id,
+                            Write::Setup {
+                                generation: action,
+                                update: SetupChange::Progress(progress),
+                                now: now(),
+                            },
+                        )
                         .map_err(anyhow::Error::msg)
+                        .map(drop)
                 }),
             }
         };

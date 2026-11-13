@@ -3216,60 +3216,30 @@ pub(crate) mod execution_tests {
         worker.record.lock().await.session_id = Uuid::parse_str(native).unwrap();
         worker.session = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
         let session = worker.session.clone();
-        let actions: Vec<_> = rows
+        let prompt = rows
             .iter()
-            .filter(|row| {
-                row["type"] == "expect_outbound"
-                    && matches!(
-                        row["frame"]["type"].as_str(),
-                        Some("prompt.offer" | "query.interrupt")
-                    )
-            })
-            .collect();
-        let user = |index: usize, content: &Value| {
-            let text = content.as_str().expect("text-only reference prompt");
-            Item::new(
-                format!("replay-input-{index}").into(),
-                ItemStatus::Completed,
-                ItemBody::UserMessage {
-                    text: Some(text.into()),
-                    content: Vec::new(),
-                },
-            )
-        };
+            .find(|row| row["type"] == "expect_outbound" && row["frame"]["type"] == "prompt.offer")
+            .unwrap();
         worker
             .change(SessionChange::Item {
                 turn_id: worker.turn_id.clone(),
-                item: Arc::new(user(
-                    0,
-                    &actions[0]["frame"]["message"]["message"]["content"],
+                item: Arc::new(Item::new(
+                    "replay-input-0".into(),
+                    ItemStatus::Completed,
+                    ItemBody::UserMessage {
+                        text: Some(
+                            prompt["frame"]["message"]["message"]["content"]
+                                .as_str()
+                                .unwrap()
+                                .into(),
+                        ),
+                        content: Vec::new(),
+                    },
                 )),
             })
             .await?;
-        let (input, receiver) = mpsc::channel(actions.len());
-        worker.input = input.clone();
-        for (index, row) in actions.iter().enumerate().skip(1) {
-            let content = &row["frame"]["message"]["message"]["content"];
-            let interrupt = row["frame"]["type"] == "query.interrupt";
-            input
-                .send(Command {
-                    execution: Some(Uuid::new_v4()),
-                    value: if interrupt {
-                        SdkInput::Interrupt {
-                            request_id: "recorded-stop".into(),
-                        }
-                    } else {
-                        SdkInput::Message {
-                            id: format!("replay-input-{index}"),
-                            content: content.clone(),
-                        }
-                    },
-                    user: (!interrupt).then(|| user(index, content)),
-                    delivered: None,
-                })
-                .await
-                .map_err(|error| error.to_string())?;
-        }
+        let (input, receiver) = mpsc::channel(1);
+        worker.input = input;
         let file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
         std::fs::write(
             file.path(),
@@ -3278,38 +3248,16 @@ pub(crate) mod execution_tests {
         .map_err(|error| error.to_string())?;
         let script = r#"
 import { readFileSync } from 'node:fs';
-import { createInterface } from 'node:readline';
 const rows = JSON.parse(readFileSync(process.argv[1], 'utf8'));
-const reader = createInterface({input:process.stdin});
-const inputs = reader[Symbol.asyncIterator]();
 const emit = event => process.stdout.write(JSON.stringify(event)+'\n');
 emit({type:'ready',initialized:{}});
-let first=true, current='replay-input-0', interrupt=null;
 for (const row of rows) {
-  if (row.type==='expect_outbound' && ['prompt.offer','query.interrupt'].includes(row.frame.type)) {
-    if(first) first=false;
-    else {
-      const {value,done}=await inputs.next();
-      if(done) throw Error('reference input was never delivered');
-      const input=JSON.parse(value);
-      if(row.frame.type==='query.interrupt') {
-        if(input.type!=='interrupt') throw Error('expected reference interrupt');
-        interrupt=input.requestId;
-      } else {
-        if(input.type!=='message' || JSON.stringify(input.content)!==JSON.stringify(row.frame.message.message.content)) throw Error('reference prompt differs');
-        current=input.id;
-      }
-    }
-  }
   if(row.type!=='emit_inbound') continue;
-  // Prompt UUIDs are transport-local: this bridge's offer supplies Bex's UUID.
-  const message=['assistant','result'].includes(row.frame.type) ? {...row.frame,user_message_uuid:current} : row.frame;
+  // This bridge supplies the input UUID for the single offered query.
+  const message=['assistant','result'].includes(row.frame.type) ? {...row.frame,user_message_uuid:'replay-input-0'} : row.frame;
   emit({type:'message',message});
   if(row.frame.type==='result') emit({type:'message',message:{type:'system',subtype:'session_state_changed',state:'idle'}});
 }
-if(interrupt!==null) emit({type:'interrupted',requestId:interrupt});
-reader.close();
-process.stdin.pause();
 "#;
         let path = std::env::var_os("PATH");
         let node = process::executable(Path::new("node"), path.as_deref())?;

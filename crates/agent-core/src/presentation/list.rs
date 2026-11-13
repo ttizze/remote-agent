@@ -603,23 +603,6 @@ impl ListSource<'_> {
                                 details: None,
                             });
                         }
-                        if let Some(operation) = self.operations.get(
-                            &crate::state::operations::OperationKey::ListDecorations {
-                                scope: agent_protocol::operations::ListDecorationScope::Project {
-                                    project_id: project.id.clone(),
-                                },
-                            },
-                        ) {
-                            match &operation.phase {
-                                crate::state::operations::OperationPhase::Running => {
-                                    summary.loading = true
-                                }
-                                crate::state::operations::OperationPhase::Failed { message } => {
-                                    summary.error =
-                                        Some(super::error::error_text(self.language, message))
-                                }
-                            }
-                        }
                         if let Some(page) = page {
                             let data = page.data.iter().filter(|thread| {
                                 thread
@@ -818,14 +801,6 @@ impl ListSource<'_> {
                     .get(project)
                     .map(|project| (*project).to_owned());
             }
-        }
-        for project in &source.projects {
-            let key = crate::state::operations::OperationKey::ListDecorations {
-                scope: agent_protocol::operations::ListDecorationScope::Project {
-                    project_id: project.id.clone(),
-                },
-            };
-            list.loading_chats |= self.operation_running(key);
         }
         Some(list)
     }

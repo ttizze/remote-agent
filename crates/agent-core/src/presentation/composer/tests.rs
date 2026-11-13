@@ -481,6 +481,7 @@ fn an_interrupted_turn_or_a_usage_limit_can_be_resumed() {
 #[test]
 fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
     let mut snapshot = snapshot();
+    snapshot.input.composer_preferences.follow_up = FollowUp::Steer;
     for (name, capability, allowed) in [
         ("stopping or retrying", true, false),
         ("compaction", false, true),
@@ -502,9 +503,15 @@ fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
                 ..Default::default()
             }),
         );
+        let controls = &presentation(&snapshot).controls.follow_up;
+        assert_eq!(controls.can_steer, allowed, "{name}");
         assert_eq!(
-            presentation(&snapshot).controls.follow_up.can_steer,
-            allowed,
+            controls.default_action,
+            if allowed {
+                FollowUp::Steer
+            } else {
+                FollowUp::Queue
+            },
             "{name}"
         );
     }

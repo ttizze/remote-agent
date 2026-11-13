@@ -3,7 +3,6 @@ use agent_protocol::{
     execution::{BackgroundTask, BackgroundTaskKind, ItemStatus, TurnStatus},
     items::{Item, ItemBody},
     models::Turn,
-    session::{ReasoningField, TextField},
 };
 
 fn background(turn: &Turn) -> Vec<BackgroundTask> {
@@ -175,42 +174,26 @@ impl Runtime {
             } => {
                 Self::request(service, session, origin, request, execution).await?;
             }
-            AgentChange::Resolved {
-                instance,
-                native_id,
-            } => {
+            change @ (AgentChange::Resolved { .. } | AgentChange::SourceClosed(_)) => {
+                let (instance, native_id) = match change {
+                    AgentChange::Resolved {
+                        instance,
+                        native_id,
+                    } => (instance, Some(native_id)),
+                    AgentChange::SourceClosed(instance) => (instance, None),
+                    _ => unreachable!(),
+                };
                 let requests: Vec<_> = runtime
                     .requests
                     .lock()
                     .unwrap()
                     .iter()
                     .filter(|(_, request)| {
-                        request.origin.instance == instance && request.origin.native_id == native_id
+                        request.origin.instance == instance
+                            && native_id
+                                .as_ref()
+                                .is_none_or(|id| &request.origin.native_id == id)
                     })
-                    .map(|(id, request)| (id.clone(), request.target.clone(), request.attempt.id))
-                    .collect();
-                for (id, target, attempt) in requests {
-                    runtime.requests.lock().unwrap().remove(&id);
-                    Self::event(
-                        service,
-                        &target,
-                        Event::Provider {
-                            native_items: Vec::new(),
-                            native_turn: None,
-                            attempt,
-                            observation: Observation::RequestResolved(id),
-                        },
-                    )
-                    .await?;
-                }
-            }
-            AgentChange::SourceClosed(instance) => {
-                let requests: Vec<_> = runtime
-                    .requests
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(_, request)| request.origin.instance == instance)
                     .map(|(id, request)| (id.clone(), request.target.clone(), request.attempt.id))
                     .collect();
                 for (id, target, attempt) in requests {
@@ -278,11 +261,16 @@ impl Runtime {
                             // no committed parent mutation awaiting a second writer.
                             runtime
                                 .owners
-                                .discover(
+                                .write(
                                     &child,
-                                    session.clone(),
-                                    super::super::storage::history::header(&response, now()),
-                                    now(),
+                                    Write::Discover {
+                                        source: session.clone(),
+                                        header: super::super::storage::history::header(
+                                            &response,
+                                            now(),
+                                        ),
+                                        now: now(),
+                                    },
                                 )
                                 .await?;
                             runtime.register_native(&child, &session);
@@ -431,18 +419,6 @@ impl Runtime {
             } => {
                 Self::text_delta(service, &source, &attempt, item_id.as_str(), field, &delta)?;
             }
-            SessionChange::ReasoningPart {
-                item_id,
-                field,
-                index,
-                ..
-            } => {
-                let field = match field {
-                    ReasoningField::Content => TextField::ReasoningContent { index },
-                    ReasoningField::Summary => TextField::ReasoningSummary { index },
-                };
-                Self::text_delta(service, &source, &attempt, item_id.as_str(), field, "")?;
-            }
             SessionChange::Background { tasks } => {
                 let state = service.inner.conversation.storage.state(&source.target)?;
                 for (owner, tasks, native_ended) in source.roster(execution, tasks) {
@@ -499,6 +475,7 @@ impl Runtime {
             SessionChange::Error { error, .. } => observations.push(Observation::Notice(error)),
             SessionChange::Status { .. }
             | SessionChange::Workspace { .. }
+            | SessionChange::ReasoningPart { .. }
             | SessionChange::Unsupported => {}
             SessionChange::RemoveItem { item_id, .. } => observations.push(
                 Observation::RemoveItem(decision::provider_item_id(attempt.id, item_id.as_str())),

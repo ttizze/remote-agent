@@ -1,5 +1,6 @@
 //! The Host's RPC entry point. Dispatch admits each call, then routes it to the
 //! owner of its resource; workflows that span owners live in the domain files.
+use super::owners::Write;
 mod activity;
 mod project_import;
 mod sessions;
@@ -298,16 +299,6 @@ impl HostRpcService {
         }
         let response = match request {
             Call::SearchList(params) => self.search_list(params).await?.into(),
-            Call::SubscribeList(_)
-            | Call::SubscribeConversation(_)
-            | Call::CreateConversation(_)
-            | Call::ChangeConversation(_)
-            | Call::ExtendConversation(_)
-            | Call::HydrateConversation(_)
-            | Call::CheckConversationCommands(_)
-            | Call::ForkConversation(_) => {
-                unreachable!("conversation owner dispatches its contracts")
-            }
             Call::ReadFileOpenCapabilities(_) => self
                 .inner
                 .editors
@@ -334,7 +325,7 @@ impl HostRpcService {
                 self.inner
                     .conversation
                     .owners
-                    .mark_read(&params.session, params.turn_id.clone())
+                    .write(&params.session, Write::Read(params.turn_id.clone()))
                     .await
                     .map_err(super::runtime::storage_failure)?;
                 agent_protocol::models::Empty {}.into()

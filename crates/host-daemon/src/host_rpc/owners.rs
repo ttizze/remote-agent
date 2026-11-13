@@ -62,7 +62,7 @@ enum Input {
     Shutdown,
 }
 
-enum Write {
+pub(super) enum Write {
     Setup {
         generation: Uuid,
         update: super::storage::workspace::SetupChange,
@@ -110,9 +110,23 @@ struct Subscriber {
     session: u64,
     cursor: Cursor,
     window: Window,
-    messages: mpsc::Sender<Vec<u8>>,
+    messages: mpsc::Sender<(Vec<u8>, Credit)>,
     bytes: Arc<AtomicUsize>,
     queued_bytes: Arc<AtomicUsize>,
+}
+
+// The queued frame owns its charge, including sends already in flight when
+// the receiver closes. Dropping a channel message releases both budgets.
+struct Credit {
+    cost: usize,
+    bytes: Arc<AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
+}
+impl Drop for Credit {
+    fn drop(&mut self) {
+        self.bytes.fetch_sub(self.cost, Relaxed);
+        self.queued_bytes.fetch_sub(self.cost, Relaxed);
+    }
 }
 
 pub(super) struct Read {
@@ -128,74 +142,47 @@ pub(super) struct Opened {
 pub struct Subscription {
     pub id: Uuid,
     owner: mpsc::UnboundedSender<Input>,
-    receiver: mpsc::Receiver<Vec<u8>>,
-    bytes: Arc<AtomicUsize>,
-    queued_bytes: Arc<AtomicUsize>,
+    receiver: mpsc::Receiver<(Vec<u8>, Credit)>,
 }
 impl Subscription {
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
-        let frame = self.receiver.recv().await?;
-        self.bytes.fetch_sub(frame_cost(frame.capacity()), Relaxed);
-        self.queued_bytes
-            .fetch_sub(frame_cost(frame.capacity()), Relaxed);
+        let (frame, _credit) = self.receiver.recv().await?;
         Some(frame)
     }
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
+        self.receiver.close();
         let _ = self.owner.send(Input::Unsubscribe(self.id));
-        while let Ok(frame) = self.receiver.try_recv() {
-            self.bytes.fetch_sub(frame_cost(frame.capacity()), Relaxed);
-            self.queued_bytes
-                .fetch_sub(frame_cost(frame.capacity()), Relaxed);
-        }
     }
 }
 
 impl Owners {
-    pub(super) async fn discover(
+    pub(super) async fn write(
         self: &Arc<Self>,
         target: &SessionRef,
-        source: SessionRef,
-        header: agent_protocol::conversation::records::Header,
-        now: i64,
-    ) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Discover {
-                    source,
-                    header,
-                    now,
-                }),
-                reply,
-            },
-        )?;
-        result
+        write: Write,
+    ) -> Result<(Outcome, Cursor), String> {
+        self.enqueue(target, write)?
             .await
-            .map_err(|_| "conversation owner stopped during discovery".to_owned())??;
-        Ok(())
+            .map_err(|_| "conversation owner stopped before replying".to_owned())?
     }
-    pub(super) async fn hydrate(
+
+    /// Queue a write synchronously; dropping its acknowledgement does not cancel it.
+    pub(super) fn enqueue(
         self: &Arc<Self>,
         target: &SessionRef,
-        id: agent_protocol::ids::ItemId,
-        version: u64,
-        body: agent_protocol::items::ItemBody,
-    ) -> Result<(), String> {
+        write: Write,
+    ) -> Result<oneshot::Receiver<Result<(Outcome, Cursor), String>>, String> {
         let (reply, result) = oneshot::channel();
         self.send(
             target,
             Input::Write {
-                write: Box::new(Write::Hydrate { id, version, body }),
+                write: Box::new(write),
                 reply,
             },
         )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped during hydration".to_owned())??;
-        Ok(())
+        Ok(result)
     }
 
     pub(super) fn new(storage: Arc<Storage>) -> (Arc<Self>, mpsc::UnboundedReceiver<Effect>) {
@@ -241,181 +228,6 @@ impl Owners {
                 }
             }
         }
-    }
-
-    pub(super) async fn input(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        event: Event,
-        context: Context<'static>,
-        create: Option<agent_protocol::conversation::records::Header>,
-    ) -> Result<(Outcome, Cursor), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Event(event, context, create)),
-                reply,
-            },
-        )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped before replying".to_owned())?
-    }
-
-    pub(super) async fn setup(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        generation: Uuid,
-        update: super::storage::workspace::SetupChange,
-        now: i64,
-    ) -> Result<bool, String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Setup {
-                    generation,
-                    update,
-                    now,
-                }),
-                reply,
-            },
-        )?;
-        let (outcome, _) = result
-            .await
-            .map_err(|_| "conversation owner stopped".to_owned())??;
-        Ok(outcome == Outcome::Accepted)
-    }
-    pub(super) fn setup_progress(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        generation: Uuid,
-        update: super::storage::workspace::SetupChange,
-        now: i64,
-    ) -> Result<(), String> {
-        let (reply, _) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Setup {
-                    generation,
-                    update,
-                    now,
-                }),
-                reply,
-            },
-        )
-    }
-
-    pub(super) async fn import_status(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        error: Option<String>,
-        now: i64,
-    ) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::ImportStatus { error, now }),
-                reply,
-            },
-        )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped during import".to_owned())??;
-        Ok(())
-    }
-
-    pub(super) async fn import(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        source: SessionRef,
-        operation: Uuid,
-        claim: u64,
-        response: agent_protocol::models::ThreadResponse,
-        now: i64,
-    ) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Import {
-                    source,
-                    operation,
-                    claim,
-                    response,
-                    now,
-                }),
-                reply,
-            },
-        )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped during import".to_owned())??;
-        Ok(())
-    }
-    pub(super) async fn import_failed(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        operation: Uuid,
-        claim: u64,
-        error: String,
-    ) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::ImportFailure {
-                    operation,
-                    claim,
-                    error,
-                }),
-                reply,
-            },
-        )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped during import".to_owned())??;
-        Ok(())
-    }
-    pub(super) async fn workspace(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        cwd: String,
-        membership: agent_protocol::models::ProjectMembership,
-    ) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Workspace { cwd, membership }),
-                reply,
-            },
-        )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped during workspace update".to_owned())??;
-        Ok(())
-    }
-    pub(super) async fn mark_read(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        turn: agent_protocol::ids::TurnId,
-    ) -> Result<(), String> {
-        let (reply, result) = oneshot::channel();
-        self.send(
-            target,
-            Input::Write {
-                write: Box::new(Write::Read(turn)),
-                reply,
-            },
-        )?;
-        result
-            .await
-            .map_err(|_| "conversation owner stopped before recording read receipt".to_owned())??;
-        Ok(())
     }
 
     pub(super) async fn subscribe(
@@ -614,8 +426,8 @@ async fn run(
                                     cursor,
                                     window: floor,
                                     messages,
-                                    bytes: bytes.clone(),
-                                    queued_bytes: queued_bytes.clone(),
+                                    bytes,
+                                    queued_bytes,
                                 },
                             );
                             Ok(Opened {
@@ -624,8 +436,6 @@ async fn run(
                                     id,
                                     owner: sender.clone(),
                                     receiver,
-                                    bytes,
-                                    queued_bytes,
                                 },
                             })
                         });
@@ -864,9 +674,12 @@ impl Subscriber {
             self.queued_bytes.fetch_sub(cost, Relaxed);
             return Err("conversation subscription byte budget exceeded".into());
         }
-        if self.messages.try_send(frame).is_err() {
-            self.bytes.fetch_sub(cost, Relaxed);
-            self.queued_bytes.fetch_sub(cost, Relaxed);
+        let credit = Credit {
+            cost,
+            bytes: self.bytes.clone(),
+            queued_bytes: self.queued_bytes.clone(),
+        };
+        if self.messages.try_send((frame, credit)).is_err() {
             return Err("conversation subscription closed".into());
         }
         Ok(())

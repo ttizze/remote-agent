@@ -14,6 +14,13 @@ pub struct Cursor {
     pub sequence: u64,
 }
 
+impl Cursor {
+    /// Sequences are comparable only within one store.
+    pub fn precedes(self, other: Self) -> bool {
+        self.store == other.store && self.sequence < other.sequence
+    }
+}
+
 /// Boundary values survive deletion of the item originally at the floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {

@@ -72,7 +72,7 @@ async fn concurrent_replays_publish_one_native_action_after_durable_admission() 
         let target = target.clone();
         tasks.spawn(async move {
             owners
-                .input(&target, submit(), context(seed), None)
+                .write(&target, Write::Event(submit(), context(seed), None))
                 .await
                 .unwrap()
         });
@@ -114,11 +114,13 @@ async fn subscribers_opened_between_other_conversations_commits_keep_independent
     let mut second = second.subscription;
     assert_ne!(first_replica.cursor(), second_replica.cursor());
     owners
-        .input(
+        .write(
             &target,
-            command(3, Command::Rename("renamed".into())),
-            context(3),
-            None,
+            Write::Event(
+                command(3, Command::Rename("renamed".into())),
+                context(3),
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -133,11 +135,13 @@ async fn subscribers_opened_between_other_conversations_commits_keep_independent
     owners.disconnect(1);
     assert!(first.recv().await.is_none());
     owners
-        .input(
+        .write(
             &target,
-            command(4, Command::Rename("still connected".into())),
-            context(4),
-            None,
+            Write::Event(
+                command(4, Command::Rename("still connected".into())),
+                context(4),
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -157,7 +161,7 @@ async fn public_input_rows_do_not_expose_native_bindings_or_action_tokens() {
         .unwrap()
         .subscription;
     owners
-        .input(&target, submit(), context(1), None)
+        .write(&target, Write::Event(submit(), context(1), None))
         .await
         .unwrap();
     let Action::Prepare { id, action, .. } = effects.recv().await.unwrap().action else {
@@ -165,16 +169,18 @@ async fn public_input_rows_do_not_expose_native_bindings_or_action_tokens() {
     };
     let secret = "private-native-source";
     owners
-        .input(
+        .write(
             &target,
-            Event::Prepared {
-                id,
-                action,
-                cwd: Some("/project".into()),
-                source: Some(secret.into()),
-            },
-            context(2),
-            None,
+            Write::Event(
+                Event::Prepared {
+                    id,
+                    action,
+                    cwd: Some("/project".into()),
+                    source: Some(secret.into()),
+                },
+                context(2),
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -241,11 +247,13 @@ async fn history_extensions_arrive_on_the_stream_before_later_commits() {
     let mut stream = opened.subscription;
     let _reply = owners.read(&target, 1, stream.id, None).await.unwrap();
     owners
-        .input(
+        .write(
             &target,
-            command(999, Command::Rename("later".into())),
-            context(999),
-            None,
+            Write::Event(
+                command(999, Command::Rename("later".into())),
+                context(999),
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -286,8 +294,6 @@ async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
                 id,
                 owner,
                 receiver,
-                bytes,
-                queued_bytes,
             },
         )
     }
@@ -307,6 +313,15 @@ async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
     assert!(second_read.recv().await.is_some());
     assert_eq!(budget.load(Relaxed), 0);
     assert_eq!(other.load(Relaxed), MAX_QUEUED_BYTES / 2);
+    // A frame may still be owned by an in-flight sender after unsubscribe.
+    // Its credit follows that frame until it is consumed or discarded.
+    let (mut sender, mut receiver) = stream(budget.clone());
+    sender.send(vec![1]).unwrap();
+    let in_flight = receiver.receiver.try_recv().unwrap();
+    drop(receiver);
+    assert_eq!(budget.load(Relaxed), frame_cost(in_flight.0.capacity()));
+    drop(in_flight);
+    assert_eq!(budget.load(Relaxed), 0);
     // One stream must close at its own limit, before the shared 16 MiB cap.
     let (mut over_bytes, mut closed) = stream(budget.clone());
     over_bytes

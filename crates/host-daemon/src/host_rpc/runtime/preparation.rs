@@ -80,7 +80,13 @@ impl Runtime {
                 if let Ok(projects) = service.project_snapshot().await {
                     runtime
                         .owners
-                        .workspace(target, cwd.clone(), projects.project_membership(Some(&cwd)))
+                        .write(
+                            target,
+                            Write::Workspace {
+                                cwd: cwd.clone(),
+                                membership: projects.project_membership(Some(&cwd)),
+                            },
+                        )
                         .await?;
                 }
                 let saved = runtime.storage.header(target)?;

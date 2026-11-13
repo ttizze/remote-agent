@@ -350,11 +350,13 @@ impl Runtime {
             .await;
         let (outcome, _) = runtime
             .owners
-            .input(
+            .write(
                 &request.session,
-                event,
-                Self::context(service, Some(request.provider)),
-                Some(header),
+                Write::Event(
+                    event,
+                    Self::context(service, Some(request.provider)),
+                    Some(header),
+                ),
             )
             .await
             .map_err(storage_failure)?;
@@ -400,7 +402,13 @@ impl Runtime {
         runtime.recovery(target).get_or_init(|| async {}).await;
         runtime
             .owners
-            .import_status(target, None, now())
+            .write(
+                target,
+                Write::ImportStatus {
+                    error: None,
+                    now: now(),
+                },
+            )
             .await
             .map_err(storage_failure)?;
         Ok(())

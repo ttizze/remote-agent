@@ -30,6 +30,7 @@ fn queued(id: &str, text: &str) -> rpc::Submission {
 fn thread(running: bool, steer: bool, waiting: Vec<rpc::Submission>) -> Thread {
     Thread {
         id: Some(session()),
+        steerable: running && steer,
         status: if running {
             SessionStatus::Running
         } else {
@@ -200,6 +201,18 @@ fn the_preference_and_the_alternate_choose_what_a_send_asks_the_host() {
             follow_up,
         });
         assert_eq!(format!("{effects:?}"), format!("{:?}", [expected]));
+    }
+}
+
+#[test]
+fn pending_inputs_use_host_steering_admission() {
+    for (capability, allowed) in [(true, false), (false, true)] {
+        let mut conversation = thread(true, capability, Vec::new());
+        conversation.steerable = allowed;
+        let mut state = snapshot(conversation, "follow-up");
+        state.input.composer_preferences.follow_up = FollowUp::Steer;
+        let (next, _) = submit(&state, "input", false);
+        assert_eq!(next.sessions.pending_submissions["input"].queued, !allowed);
     }
 }
 

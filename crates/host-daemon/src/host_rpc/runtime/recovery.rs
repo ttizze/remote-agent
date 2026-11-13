@@ -121,10 +121,7 @@ impl Runtime {
             .recovery(target)
             .get_or_try_init(|| async {
                 runtime
-                    .owners
-                    .input(
-                        target,
-                        Event::Restart {
+                    .owners.write(target, Write::Event(Event::Restart {
                             updating: runtime.updating_recovery,
                             continue_after_restart: service
                                 .inner
@@ -134,10 +131,7 @@ impl Runtime {
                                 .details
                                 .parent
                                 .is_none(),
-                        },
-                        Self::context(service, Some(provider)),
-                        None,
-                    )
+                        }, Self::context(service, Some(provider)), None))
                     .await?;
                 if let Err(error)=service.update_recovery_committed(target).await {
                     tracing::error!(target:"agent",operation="conversation.recovery.report",%target,%error);
@@ -236,10 +230,12 @@ impl Runtime {
                                 .inner
                                 .conversation
                                 .owners
-                                .workspace(
+                                .write(
                                     &id,
-                                    cwd.to_owned(),
-                                    projects.project_membership(Some(cwd)),
+                                    Write::Workspace {
+                                        cwd: cwd.to_owned(),
+                                        membership: projects.project_membership(Some(cwd)),
+                                    },
                                 )
                                 .await?;
                         }
@@ -329,7 +325,14 @@ impl Runtime {
                                 .inner
                                 .conversation
                                 .owners
-                                .import_failed(target, claim.id, claim.attempt, error.to_string())
+                                .write(
+                                    target,
+                                    Write::ImportFailure {
+                                        operation: claim.id,
+                                        claim: claim.attempt,
+                                        error: error.to_string(),
+                                    },
+                                )
                                 .await?;
                             return Ok(());
                         }
@@ -343,13 +346,15 @@ impl Runtime {
                         .inner
                         .conversation
                         .owners
-                        .import(
+                        .write(
                             target,
-                            source.clone(),
-                            claim.id,
-                            claim.attempt,
-                            response,
-                            now(),
+                            Write::Import {
+                                source: source.clone(),
+                                operation: claim.id,
+                                claim: claim.attempt,
+                                response,
+                                now: now(),
+                            },
                         )
                         .await?;
                     Self::event(service, target, Event::Wake).await?;

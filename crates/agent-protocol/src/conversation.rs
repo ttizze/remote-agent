@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod commands;
 mod execution;
+pub use execution::finish;
 pub mod records;
 mod recovery;
 #[cfg(test)]

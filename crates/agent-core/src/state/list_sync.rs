@@ -202,9 +202,9 @@ impl Operation for SubscribeCatalog {
         records::validate_list(&response.initial)
             .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
         if let records::Message::Snapshot { cursor, .. } = &response.initial
-            && base.cursor().is_some_and(|current| {
-                current.store == cursor.store && current.sequence > cursor.sequence
-            })
+            && base
+                .cursor()
+                .is_some_and(|current| cursor.precedes(current))
         {
             return Err(PeerError::InvalidMessage(
                 "list snapshot precedes its cached cursor".into(),
@@ -231,8 +231,7 @@ impl Operation for SubscribeCatalog {
         }
         let replica = match (current.cursor(), opened.cursor()) {
             (Some(current_cursor), Some(opened_cursor))
-                if current_cursor.store == opened_cursor.store
-                    && current_cursor.sequence > opened_cursor.sequence =>
+                if opened_cursor.precedes(current_cursor) =>
             {
                 current.as_ref().clone()
             }
@@ -292,9 +291,9 @@ pub(crate) fn received(
     };
     let apply = records::validate_list(&message).and_then(|()| {
         if let records::Message::Snapshot { cursor, .. } = &message
-            && replica.cursor().is_some_and(|current| {
-                current.store == cursor.store && current.sequence > cursor.sequence
-            })
+            && replica
+                .cursor()
+                .is_some_and(|current| cursor.precedes(current))
         {
             return Err(agent_protocol::sync::ApplyError::Version);
         }

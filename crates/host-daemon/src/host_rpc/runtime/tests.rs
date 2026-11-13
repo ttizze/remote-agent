@@ -1137,6 +1137,75 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     );
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     tokio::task::yield_now().await;
+    use agent_protocol::{
+        execution::ItemStatus,
+        items::ItemBody,
+        models::Item,
+        session::{ReasoningField, TextField},
+    };
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::Item {
+                turn_id: "turn-0".into(),
+                item: Arc::new(Item::new(
+                    "reason-0".into(),
+                    ItemStatus::Running,
+                    ItemBody::Reasoning {
+                        content: Vec::new(),
+                        summary: Vec::new(),
+                    },
+                )),
+            },
+        },
+        Some(attempt.id),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::ReasoningPart {
+                turn_id: "turn-0".into(),
+                item_id: "reason-0".into(),
+                field: ReasoningField::Summary,
+                index: 0,
+            },
+        },
+        Some(attempt.id),
+    )
+    .await
+    .unwrap();
+    for delta in ["", "A\n\nB"] {
+        Runtime::observe(
+            &service,
+            AgentChange::Session {
+                session: native.clone(),
+                change: SessionChange::Text {
+                    turn_id: "turn-0".into(),
+                    item_id: "reason-0".into(),
+                    field: TextField::ReasoningSummary { index: 0 },
+                    delta: delta.into(),
+                },
+            },
+            Some(attempt.id),
+        )
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+    }
+    let mut changes = service.inner.conversation.storage.changes();
+    tokio::time::advance(std::time::Duration::from_millis(800)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            if saved.thread.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten())
+                .any(|item| matches!(item.body(), ItemBody::Reasoning { summary, .. } if summary == &["A\n\nB"])) { break; }
+            changes.changed().await.unwrap();
+        }
+    }).await.expect("reasoning must stream after an empty part, before completion");
     Runtime::observe(&service, text(" final pending"), Some(attempt.id))
         .await
         .unwrap();

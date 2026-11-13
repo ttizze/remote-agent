@@ -177,24 +177,11 @@ impl Storage {
         source: &str,
     ) -> Result<decision::records::Selection, String> {
         self.with(|connection| {
-            let body: Option<Vec<u8>> = connection
-                .query_row(
-                    "SELECT options FROM sources WHERE thread=?1 AND provider=?2 AND native_id=?3",
-                    params![thread_key(connection, id)?, provider.key(), source],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(failure)?
-                .flatten();
-            body.map(|body| protocol::decode(&body).map_err(failure))
-                .transpose()?
-                .map_or_else(
-                    || {
-                        rows::header(connection, thread_key(connection, id)?)
-                            .map(|(header, _)| header.details.selection)
-                    },
-                    Ok,
-                )
+            let key = thread_key(connection, id)?;
+            saved_selection(connection, key, provider, source)?.map_or_else(
+                || rows::header(connection, key).map(|(header, _)| header.details.selection),
+                Ok,
+            )
         })
     }
 
@@ -497,18 +484,7 @@ impl Storage {
                 Some((&input.content, &delivery.attempt))
             });
             let admitted = admitted.map(|(content, attempt)| {
-                let body: Option<Vec<u8>> = transaction
-                    .query_row(
-                        "SELECT options FROM sources WHERE thread=?1 AND provider=?2 AND native_id=?3",
-                        params![key, attempt.provider.key(), attempt.source],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(failure)?
-                    .flatten();
-                let selected = body
-                    .map(|body| protocol::decode::<decision::records::Selection>(&body).map_err(failure))
-                    .transpose()?
+                let selected = saved_selection(&transaction, key, attempt.provider, &attempt.source)?
                     .unwrap_or(header.details.selection.clone());
                 let selected = selected.resolve(
                     content.model.as_ref(),
@@ -746,4 +722,23 @@ change,
         };
         Ok(message)
     }
+}
+
+fn saved_selection(
+    connection: &Connection,
+    key: i64,
+    provider: ProviderKind,
+    source: &str,
+) -> Result<Option<decision::records::Selection>, String> {
+    let body: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT options FROM sources WHERE thread=?1 AND provider=?2 AND native_id=?3",
+            params![key, provider.key(), source],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failure)?
+        .flatten();
+    body.map(|body| protocol::decode(&body).map_err(failure))
+        .transpose()
 }

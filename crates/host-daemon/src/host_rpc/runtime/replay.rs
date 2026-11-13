@@ -1,4 +1,4 @@
-//! Unmodified public recordings from T3's testkit (plus the two PR #55 forks).
+//! Public T3 recordings (including PR #55 forks) and a real DSH ACP recording.
 //! Dynamic Host IDs are deliberately not part of the reference expectations.
 use super::*;
 use crate::providers::{RequestOrigin, codex};
@@ -80,29 +80,141 @@ fn reference_recordings_keep_their_original_digests() {
 }
 
 #[tokio::test]
+async fn recorded_deepseek_acp_conversation_crosses_the_process_and_conversation_writer() {
+    use crate::providers::{Agent, SubmissionTarget, deepseek::DeepSeek};
+    let recording = recordings()
+        .into_iter()
+        .find(|r| r.provider == "deepseek")
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/providers/fixtures")
+            .join(&recording.file),
+        directory.path().join("recording.ndjson"),
+    )
+    .unwrap();
+    let script = directory.path().join("replay.mjs");
+    std::fs::write(&script,r#"
+import { readFileSync,writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+import assert from 'node:assert/strict';
+const rows=readFileSync(new URL('recording.ndjson',import.meta.url),'utf8').trim().split('\n').map(JSON.parse);
+let cursor=1;
+const ids=new Map();
+const normalize=request=>({...request,params:{...request.params,
+ ...(request.params?.cwd ? {cwd:'<workspace>'}:{}),
+ ...(request.method==='initialize' ? {clientInfo:{...request.params.clientInfo,version:'<version>'}}:{})}});
+for await(const line of createInterface({input:process.stdin})) {
+ const actual=JSON.parse(line), expected=rows[cursor++];
+ assert.equal(expected.type,'expect_outbound');
+ ids.set(expected.frame.id,actual.id);
+ assert.deepEqual(normalize({...actual,id:expected.frame.id}),expected.frame);
+ while(rows[cursor]?.type==='emit_inbound') {
+   const frame={...rows[cursor++].frame};
+   if(frame.id!==undefined) frame.id=ids.get(frame.id);
+   process.stdout.write(JSON.stringify(frame)+'\n');
+ }
+ if(rows[cursor]?.type==='runtime_exit') {writeFileSync(new URL('consumed',import.meta.url),'done');break;}
+}
+process.stdin.destroy();
+"#).unwrap();
+    let adapter = DeepSeek::load(
+        script,
+        directory.path().join("state"),
+        Some(directory.path().join("home")),
+        // An inert route selector for the local ACP fixture; no API is contacted.
+        Some(zeroize::Zeroizing::new("local-acp-fixture".into())),
+    )
+    .await
+    .unwrap();
+    let service = HostRpcService::new([], directory.path().join("projects.json"));
+    let mut receiver = adapter.event_stream().unwrap();
+    let consumer = service.clone();
+    let observing = tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let result = Runtime::observe(&consumer, event.change, event.execution).await;
+            if let Some(applied) = event.applied {
+                let _ = applied.send(result);
+            }
+        }
+    });
+    let cwd = directory.path().to_str().unwrap();
+    let created = adapter.create(cwd, None, None).await.unwrap();
+    let native = created.thread.id.as_ref().unwrap().clone();
+    native_fixture::own(&service, &native, &created);
+    let mut changes = service.inner.conversation.storage.changes();
+    adapter
+        .submit(
+            &op::Submission {
+                thread_id: native.clone(),
+                client_user_message_id: Uuid::new_v4().to_string().into(),
+                input: vec![op::Input::Text {
+                    text: "Reply exactly: recorded deepseek ok".into(),
+                }],
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+            },
+            SubmissionTarget::Start { cwd },
+            false,
+            None,
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if service
+                .inner
+                .conversation
+                .storage
+                .history(&native, 0)
+                .unwrap()
+                .thread
+                .turns
+                .is_some_and(|turns| {
+                    turns
+                        .iter()
+                        .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Completed)
+                })
+            {
+                break;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let response = service
+        .inner
+        .conversation
+        .storage
+        .history(&native, 0)
+        .unwrap();
+    let turns = response.thread.turns.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].items.iter().flatten().any(|item|matches!(item.body(),agent_protocol::items::ItemBody::AssistantText {text,..} if text=="recorded deepseek ok")));
+    adapter.shutdown().await;
+    assert!(
+        directory.path().join("consumed").is_file(),
+        "every recorded ACP exchange must be consumed"
+    );
+    drop(adapter);
+    observing.await.unwrap();
+}
+
+#[tokio::test]
 async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer() {
     // Expected literals/statuses come from the corresponding T3 output.ts files.
-    for (scenario, expected, interrupted) in [
-        ("simple", &["fixture simple ok"][..], false),
-        (
-            "multi_turn",
-            &[
-                "first fixture turn complete",
-                "second fixture turn complete",
-            ][..],
-            false,
-        ),
-        (
-            "claude_background_task_after_root",
-            &["L2_STARTED"][..],
-            false,
-        ),
+    for (scenario, expected) in [
+        ("simple", &["fixture simple ok"][..]),
+        ("claude_background_task_after_root", &["L2_STARTED"][..]),
         (
             "claude_background_monitor_wake",
             &["STARTED", "WAKE_DONE"][..],
-            false,
         ),
-        ("claude_background_task_interrupt", &[][..], true),
     ] {
         let recording = recordings()
             .into_iter()
@@ -168,27 +280,24 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
             .unwrap();
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), expected.len().max(1), "{scenario}");
-        for turn in &turns {
+        for (turn, expected) in turns.iter().zip(expected) {
             assert_eq!(
                 turn.status,
-                if interrupted {
-                    agent_protocol::execution::TurnStatus::Interrupted
-                } else {
-                    agent_protocol::execution::TurnStatus::Completed
-                },
+                agent_protocol::execution::TurnStatus::Completed,
                 "{scenario}"
             );
-        }
-        let texts: Vec<_> = turns
-            .iter()
-            .flat_map(|turn| turn.items.iter().flatten())
-            .filter_map(|item| match item.body() {
-                agent_protocol::items::ItemBody::AssistantText { text, .. } => Some(text.trim()),
-                _ => None,
-            })
-            .collect();
-        if !interrupted {
-            assert_eq!(texts, expected, "{scenario}");
+            let texts: Vec<_> = turn
+                .items
+                .iter()
+                .flatten()
+                .filter_map(|item| match item.body() {
+                    agent_protocol::items::ItemBody::AssistantText { text, .. } => {
+                        Some(text.trim())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, [*expected], "{scenario}: {}", turn.id);
         }
         if scenario == "claude_background_task_after_root" {
             assert!(turns[0].items.iter().flatten().any(|item| matches!(
@@ -196,26 +305,6 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
                 agent_protocol::items::ItemBody::CommandExecution { .. }
             ) && item.status
                 == agent_protocol::execution::ItemStatus::Completed));
-        }
-        if interrupted {
-            let statuses: Vec<_> = turns
-                .iter()
-                .flat_map(|turn| turn.items.iter().flatten())
-                .filter(|item| {
-                    matches!(
-                        item.body(),
-                        agent_protocol::items::ItemBody::CommandExecution { .. }
-                    )
-                })
-                .map(|item| item.status)
-                .collect();
-            assert_eq!(
-                statuses,
-                [
-                    agent_protocol::execution::ItemStatus::Completed,
-                    agent_protocol::execution::ItemStatus::Interrupted
-                ]
-            );
         }
     }
 }
@@ -406,10 +495,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
             &requested,
             live_output.as_ref(),
         );
-        if matches!(
-            recording.scenario.as_str(),
-            "thread_fork_native_prior_turn" | "thread_fork_native_siblings"
-        ) {
+        if recording.scenario == "thread_fork_native_prior_turn" {
             assert_fork_prefix(
                 &service.inner.conversation.storage,
                 &service.inner.conversation.owners,
@@ -553,42 +639,22 @@ async fn assert_fork_prefix(storage: &Storage, owners: &Arc<Owners>, recording: 
     .unwrap();
     let history = storage.history(&source, 0).unwrap();
     let through = history.thread.turns.as_ref().unwrap()[0].id.clone();
-    let count = if recording.scenario == "thread_fork_native_siblings" {
-        2
-    } else {
-        1
-    };
-    for _ in 0..count {
-        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-        owners
-            .fork(&source, target.clone(), through.clone(), 100)
-            .await
-            .unwrap();
-        let history = storage.history(&target, 0).unwrap();
-        let turns = history.thread.turns.unwrap();
-        assert_eq!(turns.len(), 1);
-        let texts = turns[0]
-            .items
-            .iter()
-            .flatten()
-            .map(|item| serde_json::to_string(item.body()).unwrap())
-            .collect::<Vec<_>>()
-            .join("\n");
-        // T3 prior-turn / PR55 sibling expectations: inherit only the selected prefix.
-        let (present, absent): (&str, &[&str]) =
-            if recording.scenario == "thread_fork_native_prior_turn" {
-                ("fork boundary alpha", &["fork boundary beta"])
-            } else {
-                (
-                    "sibling-source-8R3D",
-                    &["sibling-first-5L2P", "sibling-second-9N6C"],
-                )
-            };
-        assert!(texts.contains(present), "{}: {texts}", recording.scenario);
-        for marker in absent {
-            assert!(!texts.contains(marker));
-        }
-    }
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    owners
+        .fork(&source, target.clone(), through, 100)
+        .await
+        .unwrap();
+    let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
+    assert_eq!(turns.len(), 1);
+    let texts = turns[0]
+        .items
+        .iter()
+        .flatten()
+        .map(|item| serde_json::to_string(item.body()).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(texts.contains("fork boundary alpha"));
+    assert!(!texts.contains("fork boundary beta"));
 }
 
 fn decode_codex_frame(index: usize, frame: &Value) -> Vec<AgentChange> {

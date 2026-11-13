@@ -495,5 +495,12 @@
     "file": "thread_fork_native_siblings/claude_transcript.ndjson",
     "source": "PR55 9f04007d839c57bc08f6fa9c9c6363b40e97adbb",
     "sha256": "62ce0b0050556a24cd8a9b580be2fe999553bf8d43d6c783a128e1e8d659dce0"
+  },
+  {
+    "scenario": "deepseek_simple",
+    "provider": "deepseek",
+    "file": "deepseek_simple/acp_transcript.ndjson",
+    "source": "@deepseek-ai/dsh@0.2.2-rc.1, official Node 24.22.3; actual ACP process against a deterministic local Messages API, no remote inference; cwd/session/version normalized",
+    "sha256": "fa943b0cf56367c1f74969afb92bb438fd49a6f37e911e5dabf8c1aa878e082c"
   }
 ]

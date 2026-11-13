@@ -22,9 +22,9 @@ pub(crate) fn opened(
     records::validate_message(&response.initial)
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
     if let records::Message::Snapshot { cursor, .. } = &response.initial
-        && base.cursor().is_some_and(|current| {
-            current.store == cursor.store && current.sequence > cursor.sequence
-        })
+        && base
+            .cursor()
+            .is_some_and(|current| cursor.precedes(current))
     {
         return Err(PeerError::InvalidMessage(
             "conversation snapshot precedes its cached cursor".into(),
@@ -239,11 +239,7 @@ pub(crate) fn install(
     // Its queued changes still start at the captured cursor and harmlessly
     // catch up; older stream messages are fenced by the new subscription ID.
     let replica = match (previous.cursor(), output.replica.cursor()) {
-        (Some(current), Some(opened))
-            if current.store == opened.store && current.sequence > opened.sequence =>
-        {
-            previous.as_ref().clone()
-        }
+        (Some(current), Some(opened)) if opened.precedes(current) => previous.as_ref().clone(),
         _ => output.replica,
     };
     let mut projected = records::project(&replica)?;
@@ -315,9 +311,9 @@ pub(crate) fn apply(
     let mut replica = held.as_ref().clone();
     for message in messages {
         if let records::Message::Snapshot { cursor, .. } = &message
-            && replica.cursor().is_some_and(|current| {
-                current.store == cursor.store && current.sequence > cursor.sequence
-            })
+            && replica
+                .cursor()
+                .is_some_and(|current| cursor.precedes(current))
         {
             return Err(agent_protocol::sync::ApplyError::Version);
         }

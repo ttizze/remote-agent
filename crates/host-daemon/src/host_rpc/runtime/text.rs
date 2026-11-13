@@ -287,7 +287,15 @@ impl Runtime {
             SessionRef::new(attempt.provider, attempt.source.clone()).map_err(str::to_owned)?;
         tokio::spawn(async move {
             loop {
-                let Some(deadline) = source.text.lock().unwrap().deadline(token) else {
+                let deadline = {
+                    let mut text = source.text.lock().unwrap();
+                    let deadline = text.deadline(token);
+                    if deadline.is_none() && text.worker == Some(token) {
+                        text.worker = None;
+                    }
+                    deadline
+                };
+                let Some(deadline) = deadline else {
                     break;
                 };
                 tokio::select! { _ = tokio::time::sleep_until(deadline) => {}, _ = wake.notified() => { continue; } }

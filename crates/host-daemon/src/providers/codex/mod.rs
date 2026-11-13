@@ -1927,6 +1927,55 @@ rl.on('line', line => {
     }
 
     #[test]
+    fn recorded_spawn_agent_links_the_child_when_the_receiver_becomes_known() {
+        use super::*;
+        let rows = include_str!("../fixtures/subagent/codex_transcript.ndjson");
+        let mut checked = Vec::new();
+        for line in rows.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let frame = &row["frame"];
+            if row["type"] != "emit_inbound" || frame["params"]["item"]["tool"] != "spawnAgent" {
+                continue;
+            }
+            let line = frame.to_string();
+            let changes =
+                event_changes(uuid::Uuid::nil(), &RpcMessage::parse(&line).unwrap()).unwrap();
+            let links: Vec<_> = changes
+                .iter()
+                .filter_map(|change| match change {
+                    AgentChange::TaskParent { session, parent } => {
+                        Some((session.id.as_str(), parent.id.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let receivers = frame["params"]["item"]["receiverThreadIds"]
+                .as_array()
+                .unwrap();
+            let expected: Vec<_> = receivers
+                .iter()
+                .map(|child| {
+                    (
+                        child.as_str().unwrap(),
+                        frame["params"]["threadId"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(links, expected);
+            checked.push((frame["method"].as_str().unwrap().to_owned(), links.len()));
+        }
+        assert_eq!(
+            checked,
+            [
+                ("item/started".into(), 0),
+                ("item/completed".into(), 1),
+                ("item/started".into(), 0),
+                ("item/completed".into(), 1)
+            ]
+        );
+    }
+
+    #[test]
     fn started_subagents_report_parent_for_subscription_retention() {
         let line = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"parent"}}}).to_string();
         let change =

@@ -443,8 +443,10 @@ impl Storage {
             if existing_key(&transaction, target)?.is_some() { return Err("fork target already exists".into()); }
             let source_key = thread_key(&transaction, source)?;
             let turn = rows::turn(&transaction, source_key, through)?.ok_or("fork turn does not exist")?;
-            let busy: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE thread=?1 AND ordinal<=?2 AND state IN ('running','waiting'))", params![source_key, integer(turn.ordinal)?], |row| row.get(0)).map_err(failure)?;
-            if busy { return Err("finish the selected turn before forking".into()); }
+            if matches!(turn.state, TurnState::Running { .. } | TurnState::Waiting(decision::Wait::Retry { .. })) {
+                return Err("finish the selected turn before forking".into());
+            }
+            let busy: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE thread=?1 AND state IN ('running','waiting'))", [source_key], |row| row.get(0)).map_err(failure)?;
             let (mut header, _) = rows::header(&transaction, source_key)?;
             header.state.provider = turn.provider;
             header.state.queue_held = false;
@@ -463,10 +465,21 @@ impl Storage {
             // Native history preserves tool context when the selected prefix
             // has a native turn. The provider creates a separate resource at
             // the next input; unsupported providers use the portable history.
-            if let Some((source, through)) = fork_hint(&transaction, source_key, through, turn.provider)? {
+            if !busy && let Some((source, through)) = fork_hint(&transaction, source_key, through, turn.provider)? {
                 transaction.execute("INSERT INTO bindings(thread,provider,source_id,covered,state,body) VALUES (?1,?2,?3,?4,'fork',?5)", params![target_key,turn.provider.key(),source,integer(turn.ordinal)?,protocol::encode(TurnId::from(through)).map_err(failure)?]).map_err(failure)?;
             }
-            let mut state = State::new(header.state);
+            let mut state = rows::load(&transaction, target_key, self.process)?;
+            // The copy has no live provider callbacks. Finish copied background
+            // work using the same settlement rules as a completed execution.
+            let scope = rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process };
+            let background: Vec<_> = state.turns.values().filter(|turn| matches!(turn.state, TurnState::Waiting(decision::Wait::Background { .. }))).cloned().collect();
+            for turn in background {
+                let step = decision::finish(&state, &turn, TurnState::Completed, now);
+                state = state.apply(&step.changes);
+                for change in &step.changes {
+                    rows::write(&transaction, &scope, change, &state.turns, &mut Vec::new(), &mut Vec::new())?;
+                }
+            }
             state.counters.turn = turn.ordinal;
             state.counters.item = transaction.query_row("SELECT coalesce(max(position),0) FROM items WHERE thread=?1", [target_key], |row| row.get::<_,i64>(0)).map_err(failure)?.try_into().map_err(failure)?;
             rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None)?;

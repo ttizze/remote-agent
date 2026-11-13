@@ -853,7 +853,7 @@ fn item(
     }
 }
 
-pub(super) fn finish(state: &State, turn: &Turn, terminal: TurnState, now: i64) -> Step {
+pub fn finish(state: &State, turn: &Turn, terminal: TurnState, now: i64) -> Step {
     let held = !matches!(terminal, TurnState::Completed);
     let item_status = match &terminal {
         TurnState::Completed => ItemStatus::Completed,

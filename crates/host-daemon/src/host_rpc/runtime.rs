@@ -1,7 +1,7 @@
 //! Resource execution for committed conversation decisions. Provider I/O never
 //! runs inside a conversation receiver or a database transaction.
 use super::{
-    owners::{Effect, Owners},
+    owners::{Effect, Owners, Write},
     service::HostRpcService,
     storage::Storage,
 };
@@ -230,7 +230,10 @@ impl Runtime {
             .inner
             .conversation
             .owners
-            .input(target, event, Self::context(service, provider), None)
+            .write(
+                target,
+                Write::Event(event, Self::context(service, provider), None),
+            )
             .await?;
         service.inner.conversation.prune_requests(target);
         Ok(result)
