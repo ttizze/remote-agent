@@ -455,16 +455,16 @@ impl Storage {
                 changed
             } else { false };
             let retry = if let Event::Command { id, command: decision::Command::RetryInput { id: input, work_locally }, receipt: None } = &event {
-                match workspace::retry(header.details.workspace.as_ref(), state.inputs.get(input).map(|input| &input.state), state.thread.workspace.cwd(), state.bindings.is_empty(), *work_locally) {
+                match workspace::retry(header.details.workspace.as_deref(), state.inputs.get(input).map(|input| &input.state), state.thread.workspace.cwd(), state.bindings.is_empty(), *work_locally) {
                     Ok(retry) => retry,
-                    Err(reason) => { event = Event::RejectedCommand { id: id.clone(), reason: reason.into(), receipt: None }; None }
+                    Err(reason) => { event = Event::RejectedCommand { id: *id, reason: reason.into(), receipt: None }; None }
                 }
             } else { None };
             if let Some((_, cwd)) = &retry { state.thread.workspace = decision::Workspace::Folder(cwd.clone()); }
             let context=Context {external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
             let mut step = decision::step(&state, event, context);
             if let Some((workspace, _)) = retry.filter(|_| step.outcome == Outcome::Accepted) {
-                header.details.workspace = Some(workspace);
+                header.details.workspace = Some(Box::new(workspace));
                 transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header,&counters)?, key]).map_err(failure)?;
             }
             let reset = step.changes.iter().any(|change| matches!(change, Change::Turn(turn) if turn.state == decision::TurnState::RolledBack));
@@ -517,18 +517,12 @@ impl Storage {
             let mut updated = Vec::new();
             let mut removed = Vec::new();
             for change in &step.changes {
-                rows::write(
-                    &transaction,
-                    key,
-                    id,
-                    change,
-                    &state,
-                    through.sequence,
-                    context.now,
-                    self.process,
-                    &mut updated,
-                    &mut removed,
-                )?;
+                rows::write(&transaction,
+&rows::WriteScope { key, id, sequence:through.sequence, at:context.now, process:self.process },
+change,
+&state,
+&mut updated,
+&mut removed)?;
             }
             if let Some(binding) = native_turn {
                 let interrupt = executions::bind_turn(&transaction, key, self.process, binding, &state.turns)?

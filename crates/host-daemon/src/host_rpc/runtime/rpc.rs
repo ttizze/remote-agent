@@ -369,7 +369,7 @@ impl Runtime {
                 queue_held: false,
             },
             details: records::Details {
-                workspace: Some(workspace),
+                workspace: Some(Box::new(workspace)),
                 selection: request.selection.clone(),
                 capabilities: records::capabilities(agent.capabilities()),
                 updated_at: now(),

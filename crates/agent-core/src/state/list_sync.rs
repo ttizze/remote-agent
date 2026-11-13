@@ -412,11 +412,7 @@ pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
         }
     }
     if snapshot.lists.activity.active != active || snapshot.lists.activity.unread != unread {
-        snapshot.lists.activity = Arc::new(Activity {
-            active,
-            unread,
-            ..snapshot.lists.activity.as_ref().clone()
-        });
+        snapshot.lists.activity = Arc::new(Activity { active, unread });
     }
     if snapshot.lists.task_activity.as_deref() != Some(&activity) {
         snapshot.lists.task_activity = Some(Arc::new(activity));
@@ -581,7 +577,6 @@ fn pages(
         has_more_projects,
         provider_errors: errors,
         limit: snapshot.lists.list_query.limit,
-        ..Default::default()
     };
     if snapshot.lists.threads.as_deref() != Some(&list) {
         snapshot.lists.threads = Some(Arc::new(list));

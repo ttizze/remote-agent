@@ -1018,7 +1018,7 @@ mod tests {
         let other = id(ProviderKind::Claude, "same");
         let project = id(ProviderKind::Codex, "project");
         let placed = id(ProviderKind::Claude, "placed");
-        let affected = vec![root.clone(), project.clone(), placed.clone()];
+        let affected = [root.clone(), project.clone(), placed.clone()];
         let mut state = snapshot_list(json!([{"id":root},{"id":other},{"id":placed}]));
         let page = snapshot_list(json!([{"id":project,"projectId":"project"}]))
             .lists

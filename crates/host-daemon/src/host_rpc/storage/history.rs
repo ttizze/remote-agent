@@ -227,13 +227,15 @@ pub(super) fn write_history(
         state.turns.insert(turn.id.clone(), turn.clone());
         rows::write(
             transaction,
-            key,
-            id,
+            &rows::WriteScope {
+                key,
+                id,
+                sequence,
+                at: now,
+                process,
+            },
             &Change::Turn(turn.clone()),
             &state,
-            sequence,
-            now,
-            process,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
@@ -266,13 +268,15 @@ pub(super) fn write_history(
             };
             rows::write(
                 transaction,
-                key,
-                id,
+                &rows::WriteScope {
+                    key,
+                    id,
+                    sequence,
+                    at: now,
+                    process,
+                },
                 &Change::Item(item.clone()),
                 &state,
-                sequence,
-                now,
-                process,
                 &mut Vec::new(),
                 &mut Vec::new(),
             )?;
@@ -374,8 +378,13 @@ pub(super) fn install(
         let state = rows::load(transaction, key, process)?;
         rows::write(
             transaction,
-            key,
-            id,
+            &rows::WriteScope {
+                key,
+                id,
+                sequence,
+                at: now,
+                process,
+            },
             &Change::Binding {
                 provider: source.native_provider().map_err(failure)?,
                 value: Some(decision::Binding::Ready {
@@ -384,9 +393,6 @@ pub(super) fn install(
                 }),
             },
             &state,
-            sequence,
-            now,
-            process,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
@@ -469,18 +475,18 @@ impl Storage {
             };
             let mut messages = vec![initial];
             if let Some(item) = item {
-                if let Some(row) = rows::item_row(&transaction, key, id, item)? {
-                    if agent_protocol::sync::contains(
+                if let Some(row) = rows::item_row(&transaction, key, id, item)?
+                    && agent_protocol::sync::contains(
                         &Scope::Conversation(id.clone()),
                         Some(floor),
                         &row.key,
                         &row.position,
-                    ) {
-                        messages.push(Message::Hydrate {
-                            cursor: current,
-                            row,
-                        });
-                    }
+                    )
+                {
+                    messages.push(Message::Hydrate {
+                        cursor: current,
+                        row,
+                    });
                 }
             } else if floor.turn != 0 || floor.item != 0 {
                 floor = rows::older_window(&transaction, key, floor)?;

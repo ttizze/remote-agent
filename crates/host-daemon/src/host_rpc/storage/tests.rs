@@ -324,13 +324,15 @@ fn ready(storage: &Storage, id: &SessionRef) {
             state = state.apply(std::slice::from_ref(&binding));
             rows::write(
                 &transaction,
-                key,
-                id,
+                &rows::WriteScope {
+                    key,
+                    id,
+                    sequence: 0,
+                    at: 0,
+                    process: storage.process,
+                },
                 &binding,
                 &state,
-                0,
-                0,
-                storage.process,
                 &mut Vec::new(),
                 &mut Vec::new(),
             )?;
@@ -1799,15 +1801,7 @@ fn repeated_catalog_native_parent_does_not_version_an_unchanged_public_child() {
     let before = replica.rows()[&key].clone();
     let again = storage.claim(60_100, 1).unwrap().pop().unwrap();
     storage
-        .catalog_page(
-            &again,
-            &[(
-                child,
-                child_header,
-            )],
-            None,
-            60_100,
-        )
+        .catalog_page(&again, &[(child, child_header)], None, 60_100)
         .unwrap();
     let message = storage.list(replica.cursor()).unwrap();
     let replica = replica.apply(1, message).unwrap();

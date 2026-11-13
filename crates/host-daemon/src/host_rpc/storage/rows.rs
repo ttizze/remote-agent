@@ -444,18 +444,29 @@ fn write_input(
     Ok(())
 }
 
+pub(super) struct WriteScope<'a> {
+    pub key: i64,
+    pub id: &'a SessionRef,
+    pub sequence: u64,
+    pub at: i64,
+    pub process: Uuid,
+}
+
 pub(super) fn write(
     transaction: &Transaction<'_>,
-    key: i64,
-    id: &SessionRef,
+    scope: &WriteScope<'_>,
     change: &Change,
     state: &State,
-    sequence: u64,
-    at: i64,
-    process: Uuid,
     updated: &mut Vec<Row>,
     removed: &mut Vec<Removal<SessionRef>>,
 ) -> Result<(), String> {
+    let &WriteScope {
+        key,
+        id,
+        sequence,
+        process,
+        ..
+    } = scope;
     // A failed or discarded delivery must retain its identity as fenced,
     // unless it belongs to an already materialized (possibly steered) turn.
     let retired = match change {
@@ -554,39 +565,23 @@ pub(super) fn write(
         Change::RemoveInput(value) => {
             return remove(
                 transaction,
-                key,
-                id,
+                scope,
                 "inputs",
                 "input",
                 value.as_str(),
-                sequence,
-                at,
                 removed,
             );
         }
         Change::RemoveItem(value) => {
-            return remove(
-                transaction,
-                key,
-                id,
-                "items",
-                "item",
-                value.as_str(),
-                sequence,
-                at,
-                removed,
-            );
+            return remove(transaction, scope, "items", "item", value.as_str(), removed);
         }
         Change::RemoveRequest(value) => {
             return remove(
                 transaction,
-                key,
-                id,
+                scope,
                 "requests",
                 "request",
                 value.as_str(),
-                sequence,
-                at,
                 removed,
             );
         }
@@ -899,15 +894,19 @@ pub(super) fn hydrate(
 
 fn remove(
     transaction: &Transaction<'_>,
-    key: i64,
-    id: &SessionRef,
+    scope: &WriteScope<'_>,
     table: &str,
     kind: &str,
     record: &str,
-    sequence: u64,
-    at: i64,
     removed: &mut Vec<Removal<SessionRef>>,
 ) -> Result<(), String> {
+    let &WriteScope {
+        key,
+        id,
+        sequence,
+        at,
+        ..
+    } = scope;
     let deleted = transaction
         .execute(
             &format!("DELETE FROM {table} WHERE thread=?1 AND id=?2"),

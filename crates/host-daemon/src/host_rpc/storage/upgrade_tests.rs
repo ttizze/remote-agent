@@ -385,7 +385,10 @@ fn first_open_preserves_project_ids_roots_and_original_bytes_once() {
     let original = serde_json::to_vec(&vec![project.clone()]).unwrap();
     std::fs::write(&legacy, &original).unwrap();
     let storage = Storage::open(&destination);
-    assert_eq!(storage.projects().unwrap(), [project.clone()]);
+    assert_eq!(
+        storage.projects().unwrap().as_slice(),
+        std::slice::from_ref(&project)
+    );
     let backups = || {
         std::fs::read_dir(directory.path())
             .unwrap()

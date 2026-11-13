@@ -1092,7 +1092,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
                 Some(current.input.drafts[&current.panes.primary().navigation.draft_key].attachments[0].path.clone())
             } else { None };
             let sent = store.dispatch(Intent::Submit { thread_id: thread_id.clone(), client_user_message_id: input_id(&format!("client-{number}")), alternate: false }).await.unwrap_or_else(|error| panic!("{prompt}: {error}"));
-            assert!(if number == 0 { matches!(sent, Outcome::StartedThread { .. }) } else { matches!(sent, Outcome::Submitted { .. }) });
+            assert!(if number == 0 { matches!(sent, Outcome::StartedThread { .. }) } else { matches!(sent, Outcome::Submitted) });
             let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
             if let Some(previous) = &thread_id { assert_eq!(&id, previous); }
             let mut updates = store.subscribe();
@@ -3894,7 +3894,7 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
             .id
             .clone();
         let created = conversations::created(
-            &peer,
+            peer,
             conversations::create_request(
                 agent_protocol::session::ProviderKind::Codex,
                 Some(folder.to_str().unwrap().into()),

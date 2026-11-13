@@ -147,7 +147,7 @@ impl Storage {
             let transaction=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
             let key=thread_key(&transaction,target)?;
             let state=rows::load(&transaction,key,self.process)?;
-            if !state.permits(&decision::Action::FenceDelivery {id:id.clone(),action,attempt:attempt.clone()}) {return Ok(None);}
+            if !state.permits(&decision::Action::FenceDelivery {id: id.clone(),action,attempt:attempt.clone()}) {return Ok(None);}
             transaction.execute("UPDATE executions SET callbacks=0 WHERE thread=?1 AND attempt=?2 AND process=?3",params![key,attempt.id.to_string(),self.process.to_string()]).map_err(failure)?;
             let unload=!state.source_in_use(attempt.provider,&attempt.source,attempt.id);
             transaction.commit().map_err(failure)?;

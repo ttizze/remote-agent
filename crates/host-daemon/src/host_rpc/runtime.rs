@@ -440,7 +440,7 @@ impl Runtime {
                 content,
                 steer,
             } => {
-                Self::deliver(service, &target, id, action, attempt, cwd, content, steer).await?;
+                Self::deliver(service, &target, (id, action), attempt, cwd, content, steer).await?;
             }
             Action::Interrupt {
                 ref attempt,
@@ -497,7 +497,7 @@ impl Runtime {
                 action: token,
                 ref attempt,
             } => {
-                let source = runtime.source(&target, &attempt);
+                let source = runtime.source(&target, attempt);
                 let _io = source.io.lock().await;
                 let Some(unload) = runtime
                     .storage

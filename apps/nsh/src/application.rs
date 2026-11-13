@@ -765,6 +765,7 @@ impl Application {
         });
     }
 
+    #[cfg(desktop)]
     pub fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
         self.state.send_modify(|state| {
             let next = state.panels.clone().open_script(scope, cwd, command);
@@ -1347,11 +1348,11 @@ mod tests {
             "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
         })).unwrap()));
         let target = SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "repo-chat".into(),
         };
         let old = SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "old-chat".into(),
         };
         let a = reduce(

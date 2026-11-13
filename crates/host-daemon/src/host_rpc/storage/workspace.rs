@@ -8,7 +8,7 @@ use agent_protocol::{
 pub(in crate::host_rpc) enum SetupChange {
     Begin {
         input: ClientInputId,
-        workspace: WorkspacePreparation,
+        workspace: Box<WorkspacePreparation>,
     },
     Progress(crate::worktrees::Progress),
     Script {
@@ -209,4 +209,88 @@ pub(super) fn retry(
         (failed_script && matches!(input, Some(decision::InputState::Failed(_))))
             .then(|| (saved.clone(), cwd.unwrap_or(&saved.project_cwd).to_owned())),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_protocol::{
+        session::PreparationStage,
+        workspace::{WorkspaceSetup, WorkspaceStrategy},
+    };
+
+    fn saved() -> WorkspacePreparation {
+        WorkspacePreparation {
+            project_cwd: "/project".into(),
+            strategy: Some(WorkspaceStrategy::Worktree {
+                base_ref: "main".into(),
+                start_from_origin: false,
+            }),
+            generation: Uuid::from_u128(1),
+            setup: Some(WorkspaceSetup::new(Some("main".into()), 0)),
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn work_locally_requires_an_early_unbound_input() {
+        let saved = saved();
+        for (stage, early) in [
+            (PreparationStage::Workspace, true),
+            (PreparationStage::Worktree, true),
+            (PreparationStage::SetupScript, true),
+            (PreparationStage::Provider, false),
+        ] {
+            let input = decision::InputState::Preparing {
+                stage,
+                action: Uuid::from_u128(2),
+                mode: decision::DeliveryMode::Direct,
+            };
+            for unbound in [false, true] {
+                let result = retry(Some(&saved), Some(&input), Some("/checkout"), unbound, true);
+                if early && unbound {
+                    let (workspace, cwd) = result.unwrap().unwrap();
+                    assert_eq!(workspace.strategy, Some(WorkspaceStrategy::Root));
+                    assert_eq!(cwd, "/project");
+                } else {
+                    assert!(result.is_err(), "{stage:?}, unbound={unbound}");
+                }
+            }
+        }
+        let failed = decision::InputState::Failed(Default::default());
+        assert!(
+            retry(Some(&saved), Some(&failed), Some("/checkout"), true, true)
+                .unwrap()
+                .is_some()
+        );
+        assert!(retry(Some(&saved), Some(&failed), Some("/checkout"), false, true).is_err());
+        assert!(retry(None, Some(&failed), Some("/checkout"), true, true).is_err());
+    }
+
+    #[test]
+    fn retry_reenters_only_a_failed_script_and_preserves_the_checkout() {
+        let mut saved = saved();
+        let failed = decision::InputState::Failed(Default::default());
+        let queued = decision::InputState::Queued { steer: None };
+        assert!(
+            retry(Some(&saved), Some(&failed), Some("/checkout"), true, false)
+                .unwrap()
+                .is_none()
+        );
+        saved
+            .setup
+            .as_mut()
+            .unwrap()
+            .stage(SetupStageId::SetupScript, SetupStageStatus::Failed, 1);
+        assert!(
+            retry(Some(&saved), Some(&queued), Some("/checkout"), true, false)
+                .unwrap()
+                .is_none()
+        );
+        let (workspace, cwd) = retry(Some(&saved), Some(&failed), Some("/checkout"), true, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace, saved);
+        assert_eq!(cwd, "/checkout");
+    }
 }

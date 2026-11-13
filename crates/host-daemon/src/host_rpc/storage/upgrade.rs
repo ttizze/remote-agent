@@ -380,20 +380,21 @@ impl Previous {
                         now.max(0) as u64,
                     );
                 }
-                header.details.workspace = Some(decision::records::WorkspacePreparation {
-                    project_cwd: row
-                        .startup
-                        .as_ref()
-                        .and_then(|startup| startup.project_cwd.clone())
-                        .unwrap_or_else(|| row.cwd.clone()),
-                    strategy: row
-                        .startup
-                        .as_ref()
-                        .and_then(|startup| startup.workspace.clone()),
-                    generation: Uuid::new_v4(),
-                    visible: setup.is_some(),
-                    setup,
-                });
+                header.details.workspace =
+                    Some(Box::new(decision::records::WorkspacePreparation {
+                        project_cwd: row
+                            .startup
+                            .as_ref()
+                            .and_then(|startup| startup.project_cwd.clone())
+                            .unwrap_or_else(|| row.cwd.clone()),
+                        strategy: row
+                            .startup
+                            .as_ref()
+                            .and_then(|startup| startup.workspace.clone()),
+                        generation: Uuid::new_v4(),
+                        visible: setup.is_some(),
+                        setup,
+                    }));
             }
             history::insert_header(transaction, id, &header, &Counters::default(), sequence)?;
         }
@@ -413,13 +414,15 @@ impl Previous {
                 for input in &queue.inputs {
                     Self::input(
                         transaction,
-                        key,
-                        id,
+                        &rows::WriteScope {
+                            key,
+                            id,
+                            sequence,
+                            at: now,
+                            process,
+                        },
                         input,
                         InputState::Queued { steer: None },
-                        sequence,
-                        process,
-                        now,
                     )?;
                 }
             }
@@ -454,14 +457,17 @@ impl Previous {
 
     fn input(
         transaction: &Transaction<'_>,
-        key: i64,
-        id: &SessionRef,
+        scope: &rows::WriteScope<'_>,
         input: &Submission,
         status: InputState,
-        sequence: u64,
-        process: Uuid,
-        now: i64,
     ) -> Result<(), String> {
+        let &rows::WriteScope {
+            key,
+            id,
+            sequence,
+            at: now,
+            process,
+        } = scope;
         if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
             let accepted = transaction.query_row("SELECT outcome FROM receipts WHERE operation_id=?1 AND provider IS ?2 AND thread_id=?3", params![operation.to_string(),id.provider.map(ProviderKind::key),id.id], |row| row.get::<_,Vec<u8>>(0)).optional().map_err(failure)?.map(|bytes| protocol::decode::<Outcome>(&bytes).map_err(failure)).transpose()?;
             if accepted == Some(Outcome::Accepted) {
@@ -489,13 +495,15 @@ impl Previous {
         };
         rows::write(
             transaction,
-            key,
-            id,
+            &rows::WriteScope {
+                key,
+                id,
+                sequence,
+                at: now,
+                process,
+            },
             &Change::Input(pending),
             &state,
-            sequence,
-            now,
-            process,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
@@ -552,8 +560,13 @@ impl Conversation {
             {
                 rows::write(
                     transaction,
-                    key,
-                    &self.id,
+                    &rows::WriteScope {
+                        key,
+                        id: &self.id,
+                        sequence,
+                        at: now,
+                        process,
+                    },
                     &Change::Binding {
                         provider: binding.session.native_provider().map_err(failure)?,
                         value: Some(decision::Binding::Ready {
@@ -564,9 +577,6 @@ impl Conversation {
                         }),
                     },
                     &state,
-                    sequence,
-                    now,
-                    process,
                     &mut Vec::new(),
                     &mut Vec::new(),
                 )?;
@@ -652,13 +662,15 @@ impl Conversation {
             rows::write_header(transaction, key, &self.id, &state, sequence, now, None)?;
             Previous::input(
                 transaction,
-                key,
-                &self.id,
+                &rows::WriteScope {
+                    key,
+                    id: &self.id,
+                    sequence,
+                    at: now,
+                    process,
+                },
                 input,
                 status,
-                sequence,
-                process,
-                now,
             )?;
         }
         Ok(())

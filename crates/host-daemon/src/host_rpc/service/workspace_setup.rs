@@ -130,7 +130,7 @@ impl HostRpcService {
             .header(target)
             .map_err(super::super::runtime::storage_failure)?;
         let mut workspace = match header.details.workspace {
-            Some(workspace) => workspace,
+            Some(workspace) => *workspace,
             None => self.workspace_preparation(cwd.into(), None).await?,
         };
         let strategy = workspace
@@ -188,7 +188,7 @@ impl HostRpcService {
             action,
             SetupChange::Begin {
                 input: input.clone(),
-                workspace: workspace.clone(),
+                workspace: Box::new(workspace.clone()),
             },
         )
         .await?;

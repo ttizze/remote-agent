@@ -1356,6 +1356,20 @@ async fn refresh_auth_tokens(
     let _ = process.send_raw(&line).await;
 }
 
+async fn admit_request(
+    instance: uuid::Uuid,
+    stopped: tokio_util::sync::CancellationToken,
+    process: &Arc<CodexAppServer>,
+    output: &tokio::sync::mpsc::Sender<AgentEvent>,
+    scopes: &super::scopes::Scopes,
+    line: &str,
+) -> Result<(), String> {
+    let request = serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let change = request_change(instance, stopped, request, process.clone())?;
+    let execution = scopes.observe(&change);
+    crate::providers::emit_for(output, change, execution).await
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -1591,18 +1605,4 @@ rl.on('line', line => {
             assert!(!super::unmaterialized_history(code, message, id));
         }
     }
-}
-
-async fn admit_request(
-    instance: uuid::Uuid,
-    stopped: tokio_util::sync::CancellationToken,
-    process: &Arc<CodexAppServer>,
-    output: &tokio::sync::mpsc::Sender<AgentEvent>,
-    scopes: &super::scopes::Scopes,
-    line: &str,
-) -> Result<(), String> {
-    let request = serde_json::from_str(line).map_err(|error| error.to_string())?;
-    let change = request_change(instance, stopped, request, process.clone())?;
-    let execution = scopes.observe(&change);
-    crate::providers::emit_for(output, change, execution).await
 }

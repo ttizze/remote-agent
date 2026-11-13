@@ -393,7 +393,7 @@ impl Runtime {
                 .await
             }
             Work::Continue { target, source } => {
-                let result = async {
+                async {
                     let selection = storage.header(target)?.details.selection;
                     let (outcome, _) = Self::event(
                         service,
@@ -423,15 +423,14 @@ impl Runtime {
                     storage.delivered(claim.id, claim.attempt)?;
                     Ok::<_, String>(())
                 }
-                .await;
-                result
+                .await
             }
         };
         if let Err(error) = result {
-            if let Work::Catalog { provider, .. } = claim.work {
-                if let Err(error) = storage.catalog_failed(&claim, provider) {
-                    tracing::error!(target:"agent",operation="catalog.failure",%error);
-                }
+            if let Work::Catalog { provider, .. } = claim.work
+                && let Err(error) = storage.catalog_failed(&claim, provider)
+            {
+                tracing::error!(target:"agent",operation="catalog.failure",%error);
             }
             let delay = 1000i64.saturating_mul(1i64 << claim.attempt.min(6));
             if let Err(error) =

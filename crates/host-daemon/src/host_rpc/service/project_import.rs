@@ -129,20 +129,18 @@ impl HostRpcService {
                 .as_deref()
                 .and_then(|cwd| projects.project_for_workspace(cwd))
                 .is_some_and(|project| imported.contains(project))
-            {
-                if let Some(source) = self
+                && let Some(source) = self
                     .inner
                     .conversation
                     .storage
                     .active_source(&conversation)
                     .map_err(super::super::runtime::storage_failure)?
-                {
-                    self.inner
-                        .conversation
-                        .storage
-                        .queue_import(&conversation, &source, super::super::runtime::now())
-                        .map_err(super::super::runtime::storage_failure)?;
-                }
+            {
+                self.inner
+                    .conversation
+                    .storage
+                    .queue_import(&conversation, &source, super::super::runtime::now())
+                    .map_err(super::super::runtime::storage_failure)?;
             }
         }
         Ok(())

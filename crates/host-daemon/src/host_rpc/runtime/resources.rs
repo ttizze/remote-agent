@@ -137,10 +137,9 @@ impl Runtime {
                 if current.permits(&preparing)
                     && current.bindings.get(&kind) == Some(&binding)
                     && !current.source_in_use(kind, native_id, Uuid::nil())
+                    && let Ok(agent) = service.inner.providers.get(kind)
                 {
-                    if let Ok(agent) = service.inner.providers.get(kind) {
-                        agent.unload(native_id).await?;
-                    }
+                    agent.unload(native_id).await?;
                 }
                 Ok::<_, Failure>(())
             }
@@ -393,7 +392,7 @@ impl Runtime {
             .map_err(storage_failure)?;
         drop(catalog);
         let (outcome,_) = Self::event(service,target,Event::AligningProvider {
-            id:id.clone(),action,source:native.id.clone(),
+            id: id.clone(),action,source:native.id.clone(),
         }).await.map_err(storage_failure)?;
         if outcome!=Outcome::Accepted {
             return Err(Failure::new("preparation_cancelled","input preparation is no longer current"));
@@ -460,8 +459,7 @@ impl Runtime {
     pub(super) async fn deliver(
         service: &HostRpcService,
         target: &SessionRef,
-        id: ClientInputId,
-        token: Uuid,
+        (id, token): (ClientInputId, Uuid),
         attempt: Attempt,
         cwd: String,
         content: decision::InputContent,

@@ -11,14 +11,11 @@ pub fn changed(
     subscription: uuid::Uuid,
     change: agent_protocol::session::SessionChange,
 ) -> Option<(Snapshot, records::Message)> {
-    let Some(id) = previous
+    let id = previous
         .sessions
         .subscriptions
         .iter()
-        .find_map(|(id, current)| (*current == subscription).then_some(id.clone()))
-    else {
-        return None;
-    };
+        .find_map(|(id, current)| (*current == subscription).then_some(id.clone()))?;
     let current = previous.sessions.conversations[&id].clone();
     let mut snapshot = previous.clone();
     let generation = snapshot

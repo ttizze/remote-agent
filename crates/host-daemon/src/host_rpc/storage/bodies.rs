@@ -76,13 +76,15 @@ impl Storage {
                 committed.cursor = Self::advance(&transaction)?;
                 rows::write(
                     &transaction,
-                    key,
-                    target,
+                    &rows::WriteScope {
+                        key,
+                        id: target,
+                        sequence: committed.cursor.sequence,
+                        at: 0,
+                        process: self.process,
+                    },
                     &Change::Item(item),
                     &state,
-                    committed.cursor.sequence,
-                    0,
-                    self.process,
                     &mut committed.rows,
                     &mut committed.removed,
                 )?;

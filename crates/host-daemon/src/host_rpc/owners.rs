@@ -33,7 +33,7 @@ pub(super) struct Effect {
 
 enum Input {
     Write {
-        write: Write,
+        write: Box<Write>,
         reply: oneshot::Sender<Result<(Outcome, Cursor), String>>,
     },
     Subscribe {
@@ -142,11 +142,11 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Discover {
+                write: Box::new(Write::Discover {
                     source,
                     header,
                     now,
-                },
+                }),
                 reply,
             },
         )?;
@@ -166,7 +166,7 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Hydrate { id, version, body },
+                write: Box::new(Write::Hydrate { id, version, body }),
                 reply,
             },
         )?;
@@ -232,7 +232,7 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Event(event, context, create),
+                write: Box::new(Write::Event(event, context, create)),
                 reply,
             },
         )?;
@@ -252,11 +252,11 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Setup {
+                write: Box::new(Write::Setup {
                     generation,
                     update,
                     now,
-                },
+                }),
                 reply,
             },
         )?;
@@ -276,11 +276,11 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Setup {
+                write: Box::new(Write::Setup {
                     generation,
                     update,
                     now,
-                },
+                }),
                 reply,
             },
         )
@@ -296,7 +296,7 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::ImportStatus { error, now },
+                write: Box::new(Write::ImportStatus { error, now }),
                 reply,
             },
         )?;
@@ -319,13 +319,13 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Import {
+                write: Box::new(Write::Import {
                     source,
                     operation,
                     claim,
                     response,
                     now,
-                },
+                }),
                 reply,
             },
         )?;
@@ -344,7 +344,7 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Workspace { cwd, membership },
+                write: Box::new(Write::Workspace { cwd, membership }),
                 reply,
             },
         )?;
@@ -362,7 +362,7 @@ impl Owners {
         self.send(
             target,
             Input::Write {
-                write: Write::Read(turn),
+                write: Box::new(Write::Read(turn)),
                 reply,
             },
         )?;
@@ -449,7 +449,7 @@ async fn run(
             Input::Write { write, reply } => {
                 let records = storage.clone();
                 let scope = target.clone();
-                let result = tokio::task::spawn_blocking(move || match write {
+                let result = tokio::task::spawn_blocking(move || match *write {
                     Write::Setup {
                         generation,
                         update,
@@ -496,7 +496,9 @@ async fn run(
                     Ok::<_, String>((committed.step.outcome, committed.cursor))
                 }
                 .await;
-                let _ = reply.send(result);
+                if let Err(Err(error)) = reply.send(result) {
+                    tracing::warn!(target: "agent", operation="conversation.owner.write", session=%target, %error);
+                }
             }
             Input::Subscribe {
                 session,

@@ -107,7 +107,7 @@ fn turn_key(turn: &str, occurrence: usize) -> String {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ConversationRowContent {
     Preparation {
-        preparation: PreparationPresentation,
+        preparation: Box<PreparationPresentation>,
     },
     ProviderHandoff {
         text: String,
@@ -913,7 +913,7 @@ pub fn project_conversation(
             queued: false,
             edit_turn_id: None,
             content: ConversationRowContent::Preparation {
-                preparation: preparation::project(language, &source, setup),
+                preparation: Box::new(preparation::project(language, &source, setup)),
             },
         });
     }
@@ -939,7 +939,7 @@ pub fn project_conversation(
             queued: false,
             edit_turn_id: None,
             content: ConversationRowContent::Preparation {
-                preparation: preparation_presentation(language, preparation),
+                preparation: Box::new(preparation_presentation(language, preparation)),
             },
         });
     }
@@ -4587,11 +4587,13 @@ mod history_notice_tests {
 
     #[test]
     fn history_pages_keep_source_errors_visible_and_can_clear_them_after_recovery() {
-        let mut thread = models::Thread::default();
-        thread.history_read_state = Some(HistoryReadState::new(
-            HistoryReadKind::Incomplete,
-            vec!["claude: Claude failed to start".into()],
-        ));
+        let mut thread = models::Thread {
+            history_read_state: Some(HistoryReadState::new(
+                HistoryReadKind::Incomplete,
+                vec!["claude: Claude failed to start".into()],
+            )),
+            ..Default::default()
+        };
         assert_eq!(
             history_notice(UiLanguage::Japanese, &thread).as_deref(),
             Some("履歴の一部を読み取れませんでした。\nclaude: Claude failed to start")
@@ -4603,9 +4605,11 @@ mod history_notice_tests {
 
     #[test]
     fn normal_pagination_has_no_warning_before_or_after_loading_the_remaining_history() {
-        let mut thread = models::Thread::default();
-        thread.history_cursor = Some("older-page".into());
-        thread.history_has_more = Some(true);
+        let mut thread = models::Thread {
+            history_cursor: Some("older-page".into()),
+            history_has_more: Some(true),
+            ..Default::default()
+        };
         assert_eq!(history_notice(UiLanguage::Japanese, &thread), None);
         thread.history_cursor = None;
         thread.history_has_more = Some(false);

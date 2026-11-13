@@ -165,7 +165,7 @@ impl Shape {
 
 #[derive(Clone, PartialEq)]
 struct Row {
-    preparation: Option<agent_core::presentation::conversation::PreparationPresentation>,
+    preparation: Option<Box<agent_core::presentation::conversation::PreparationPresentation>>,
     id: String,
     body: SharedString,
     streaming: bool,
@@ -1968,6 +1968,59 @@ fn interrupted_row(label: impl Fn() -> String + 'static) -> View {
                 ),
         )
         .child(rule())
+}
+
+fn history_header(
+    connection: Connection,
+    following: Signal<bool>,
+    history: Memo<Option<agent_core::presentation::conversation::HistoryControl>>,
+    notice: Memo<Option<String>>,
+) -> View {
+    view()
+        .child(when(
+            move || history.get().is_some(),
+            move || {
+                view()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        crate::ui::text_button(
+                            move || {
+                                SharedString::from(history.with(|history| {
+                                    history
+                                        .as_ref()
+                                        .map(|history| history.load_label.clone())
+                                        .unwrap_or_default()
+                                }))
+                            },
+                            move || {
+                                following.set(false);
+                                if let Some(thread_id) = connection
+                                    .context
+                                    .with_untracked(|p| p.navigation().thread_id)
+                                {
+                                    connection.dispatch(Intent::ReadOlder { thread_id });
+                                }
+                            },
+                        )
+                        .enabled(move || {
+                            history.with(|history| {
+                                history.as_ref().is_some_and(|history| !history.loading)
+                            })
+                        }),
+                    )
+                    .child(text(move || {
+                        history.with(|history| {
+                            history
+                                .as_ref()
+                                .and_then(|history| history.error.as_ref())
+                                .map(|error| error.to_string())
+                                .unwrap_or_default()
+                        })
+                    }))
+            },
+        ))
+        .child(text(move || notice.get().unwrap_or_default()))
 }
 
 /// A selected conversation whose history has not arrived: it is loading, or

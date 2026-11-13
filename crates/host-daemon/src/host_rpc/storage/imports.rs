@@ -104,13 +104,15 @@ impl Storage {
                 state = state.apply(std::slice::from_ref(&binding));
                 rows::write(
                     &transaction,
-                    key,
-                    target,
+                    &rows::WriteScope {
+                        key,
+                        id: target,
+                        sequence: sequence.sequence,
+                        at: now,
+                        process: self.process,
+                    },
                     &binding,
                     &state,
-                    sequence.sequence,
-                    now,
-                    self.process,
                     &mut updated,
                     &mut Vec::new(),
                 )?;
@@ -282,10 +284,11 @@ impl Storage {
             let source_key = rows::source(&transaction, key, source.native_provider().map_err(failure)?, &source.id)?;
             let sequence = Self::advance(&transaction)?;
             let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, source.to_string().as_bytes());
+            let import = Import { source, source_key, namespace, write: rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process } };
             let mut occurrences = HashMap::new();
             for native in response.thread.turns.iter().flatten() {
                 let occurrence = occurrences.entry(native.id.clone()).or_insert(0);
-                import_turn(&transaction, key, target, source, source_key, native, *occurrence, namespace, sequence.sequence, self.process, now, &mut state)?;
+                import_turn(&transaction, &import, native, *occurrence, &mut state)?;
                 *occurrence += 1;
             }
             let previous=rows::header(&transaction,key)?.0.details.selection;
@@ -299,20 +302,27 @@ impl Storage {
     }
 }
 
+struct Import<'a> {
+    source: &'a SessionRef,
+    source_key: i64,
+    namespace: Uuid,
+    write: rows::WriteScope<'a>,
+}
+
 fn import_turn(
     transaction: &Transaction<'_>,
-    key: i64,
-    target: &SessionRef,
-    source: &SessionRef,
-    source_key: i64,
+    import: &Import<'_>,
     native: &agent_protocol::models::Turn,
     occurrence: usize,
-    namespace: Uuid,
-    sequence: u64,
-    process: Uuid,
-    now: i64,
     state: &mut State,
 ) -> Result<(), String> {
+    let Import {
+        source,
+        source_key,
+        namespace,
+        write,
+    } = import;
+    let &rows::WriteScope { key, sequence, .. } = write;
     // A native echo of a Host-owned execution cannot replace canonical input,
     // tool output or another provider's history with a text-only import.
     let mapped = transaction.query_row("SELECT turn_id,process,attempt FROM executions WHERE thread=?1 AND source_id=?2 AND native_turn_id=?3 AND (native_position=?4 OR (?4=0 AND native_position IS NULL)) ORDER BY started_seq DESC LIMIT 1", params![key,source_key,native.id.as_str(),occurrence as i64], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).optional().map_err(failure)?;
@@ -357,7 +367,7 @@ fn import_turn(
         state.counters.turn += 1;
         Turn {
             id: Uuid::new_v5(
-                &namespace,
+                namespace,
                 format!("turn:{occurrence}:{}", native.id).as_bytes(),
             )
             .to_string()
@@ -384,13 +394,9 @@ fn import_turn(
     state.turns.insert(turn.id.clone(), turn.clone());
     rows::write(
         transaction,
-        key,
-        target,
+        write,
         &Change::Turn(turn.clone()),
         state,
-        sequence,
-        now,
-        process,
         &mut Vec::new(),
         &mut Vec::new(),
     )?;
@@ -400,7 +406,7 @@ fn import_turn(
         .transpose()?
         .unwrap_or_else(|| {
             Uuid::new_v5(
-                &namespace,
+                namespace,
                 format!("import:{occurrence}:{}", turn.id).as_bytes(),
             )
         });
@@ -414,7 +420,7 @@ fn import_turn(
             continue;
         }
         let canonical = Uuid::new_v5(
-            &namespace,
+            namespace,
             format!("item:{}:{}", turn.id, native.id).as_bytes(),
         )
         .to_string()
@@ -444,13 +450,9 @@ fn import_turn(
         };
         rows::write(
             transaction,
-            key,
-            target,
+            write,
             &Change::Item(item.clone()),
             state,
-            sequence,
-            now,
-            process,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;

@@ -124,7 +124,7 @@ async fn send(store: &Store, text: &str, client_id: &str) -> agent_protocol::ses
     let snapshot = store.snapshot();
     assert!(
         if thread_id.is_some() {
-            matches!(outcome, Outcome::Submitted { .. })
+            matches!(outcome, Outcome::Submitted)
         } else {
             matches!(outcome, Outcome::StartedThread { .. })
         },

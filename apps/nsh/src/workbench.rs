@@ -34,6 +34,7 @@ impl Workbench {
         });
     }
 
+    #[cfg(desktop)]
     pub fn run_script(self, cwd: String, command: String) {
         self.application
             .with(|application| application.open_script(self.scope.get_untracked(), cwd, command));

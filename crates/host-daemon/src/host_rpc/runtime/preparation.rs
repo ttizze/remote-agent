@@ -17,7 +17,7 @@ impl Runtime {
         provider: ProviderKind,
     ) -> Result<(), String> {
         let runtime = &service.inner.conversation;
-        let workspace = runtime.storage.header(&target)?.details.workspace;
+        let workspace = runtime.storage.header(target)?.details.workspace;
         let mut setup_generation = workspace.as_ref().map(|workspace| workspace.generation);
         if stage == PreparationStage::Worktree {
             setup_generation = Some(action);
@@ -40,7 +40,7 @@ impl Runtime {
             );
             service
                 .setup_update(
-                    &target,
+                    target,
                     action,
                     super::super::storage::workspace::SetupChange::Begin {
                         input: id.clone(),
@@ -51,12 +51,12 @@ impl Runtime {
                 .map_err(|error| error.to_string())?;
             setup_generation = Some(action);
         }
-        let result = Self::prepare(service, &target, &id, action, stage, cwd, provider).await;
+        let result = Self::prepare(service, target, &id, action, stage, cwd, provider).await;
         match result {
             Ok((cwd, source, created)) => {
                 Self::event(
                     service,
-                    &target,
+                    target,
                     Event::Prepared {
                         id,
                         action,
@@ -68,33 +68,30 @@ impl Runtime {
                 if let Ok(projects) = service.project_snapshot().await {
                     runtime
                         .owners
-                        .workspace(
-                            &target,
-                            cwd.clone(),
-                            projects.project_membership(Some(&cwd)),
-                        )
+                        .workspace(target, cwd.clone(), projects.project_membership(Some(&cwd)))
                         .await?;
                 }
-                let saved = runtime.storage.state(&target)?;
+                let saved = runtime.storage.state(target)?;
                 if let Some(native) = source {
-                    Self::release_unused_source(service, &target, provider, &native).await?;
+                    Self::release_unused_source(service, target, provider, &native).await?;
                 }
-                if created && saved.thread.workspace.cwd() != Some(cwd.as_str()) {
-                    if let Err(error) = service.inner.worktrees.discard(cwd).await {
-                        tracing::warn!(target: "agent", operation="conversation.discard_worktree", %error);
-                    }
+                if created
+                    && saved.thread.workspace.cwd() != Some(cwd.as_str())
+                    && let Err(error) = service.inner.worktrees.discard(cwd).await
+                {
+                    tracing::warn!(target: "agent", operation="conversation.discard_worktree", %error);
                 }
             }
             Err(error) => {
                 if let Some(generation) = setup_generation {
-                    service.setup_update(&target, generation, super::super::storage::workspace::SetupChange::Finish {
-                                phase: if runtime.storage.state(&target)?.inputs.get(&id).is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action)) { agent_protocol::workspace::SetupPhase::Failed } else { agent_protocol::workspace::SetupPhase::Cancelled },
+                    service.setup_update(target, generation, super::super::storage::workspace::SetupChange::Finish {
+                                phase: if runtime.storage.state(target)?.inputs.get(&id).is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action)) { agent_protocol::workspace::SetupPhase::Failed } else { agent_protocol::workspace::SetupPhase::Cancelled },
                                 error: Some(error.message.clone()),
                             }).await.map_err(|error| error.to_string())?;
                 }
                 Self::event(
                     service,
-                    &target,
+                    target,
                     Event::PreparationFailed {
                         id,
                         action,

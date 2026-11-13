@@ -654,7 +654,9 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
         assert_eq!(thread.workspace_setup.is_some(), automatic);
         assert_eq!(
             Path::new(thread.cwd.as_deref().unwrap()) == fixture.repository,
-            !automatic
+            !automatic,
+            "automatic={automatic}; projected={thread:?}; stored={:?}",
+            fixture.host.inner.conversation.storage.header(&id).unwrap()
         );
         drop(blocked);
         until(&mut updates, |thread| thread.preparations.is_empty()).await;

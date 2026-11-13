@@ -53,7 +53,7 @@ pub struct WorkspacePreparation {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Details {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<WorkspacePreparation>,
+    pub workspace: Option<Box<WorkspacePreparation>>,
     pub parent: Option<SessionRef>,
     pub selection: Selection,
     pub capabilities: Capabilities,
