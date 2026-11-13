@@ -78,7 +78,9 @@ pub(super) fn presentation(
                 }
                 Block::CodeBlock(code)
             }
-            Part::Table { rows, .. } => {
+            Part::Table {
+                source, csv, rows, ..
+            } => {
                 let mut table = Table::default();
                 table.align = rows[0]
                     .iter()
@@ -115,7 +117,20 @@ pub(super) fn presentation(
                 });
                 table.head = rows.next().unwrap_or_default();
                 table.rows = rows.collect();
-                Block::Table(table)
+                output.push(Row {
+                    depth,
+                    marker,
+                    block: Block::Table(table),
+                });
+                output.push(Row {
+                    depth,
+                    marker: None,
+                    block: Block::Custom(
+                        CustomNode::new("bex:table-actions")
+                            .with_data(json!({"markdown": source, "csv": csv})),
+                    ),
+                });
+                continue;
             }
             Part::Image { source, .. } => {
                 Block::Custom(CustomNode::new("bex:image").with_data(json!(source)))
@@ -559,7 +574,7 @@ mod tests {
         assert!(matches!(&children[1], Block::CodeBlock(code) if code.code == "echo hi"));
         assert!(matches!(&children[2], Block::Custom(node) if node.name == "bex:image"));
         assert!(matches!(&children[3], Block::Table(_)));
-        assert_eq!(children[4].plain_text(), "Continued");
+        assert_eq!(children.last().unwrap().plain_text(), "Continued");
         assert_eq!(items[1].children[0].plain_text(), "Next");
     }
 
@@ -567,8 +582,8 @@ mod tests {
     fn table_alignment_and_file_custom_nodes_survive_conversion() {
         let doc = presentation(
             vec![Part::Table {
-                source: String::new(),
-                csv: String::new(),
+                source: "|file|\n|---|\n|hello.txt|".into(),
+                csv: "\"file\"\r\n\"hello.txt\"".into(),
                 depth: 0,
                 marker: None,
                 rows: vec![vec![vec![Part::Text(vec![
@@ -585,5 +600,12 @@ mod tests {
         };
         assert_eq!(table.align, [ColumnAlign::Right]);
         assert_eq!(table.head[0].content[0].plain_text(), "hello.txt");
+        let Block::Custom(actions) = &doc.blocks[1] else {
+            panic!("missing table copy actions")
+        };
+        assert_eq!(
+            actions.data,
+            json!({"markdown":"|file|\n|---|\n|hello.txt|", "csv":"\"file\"\r\n\"hello.txt\""})
+        );
     }
 }

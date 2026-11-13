@@ -29,12 +29,6 @@ use agent_protocol::{
     editors::{EditorId, FileManagerRevealKind},
     file_metadata::FileMetadataKind,
 };
-#[cfg(any(
-    test,
-    feature = "standard-text",
-    not(any(target_os = "macos", target_os = "ios")),
-    all(target_os = "macos", debug_assertions)
-))]
 use nsh_core::keymap::Modifiers;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
@@ -45,12 +39,6 @@ const DARK_SURFACES: [u32; 3] = [0x080808, 0x0f0f0f, 0x141414];
 const LIGHT_SURFACES: [u32; 3] = [0xffffff, 0xfafafa, 0xf4f4f5];
 
 /// The editor-opening modifier follows the platform's primary shortcut key.
-#[cfg(any(
-    test,
-    feature = "standard-text",
-    not(any(target_os = "macos", target_os = "ios")),
-    all(target_os = "macos", debug_assertions)
-))]
 pub(crate) fn primary_modifier(modifiers: Modifiers, apple: bool) -> bool {
     if apple { modifiers.cmd } else { modifiers.ctrl }
 }

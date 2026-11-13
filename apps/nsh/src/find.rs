@@ -9,61 +9,6 @@ use crate::{
 use agent_core::presentation::conversation::{TextMatch, find_matches};
 use nsh_core::{keymap::When, prelude::*};
 
-/// A horizontal scroll and the direct child whose page position gives its offset.
-#[derive(Clone, Copy)]
-pub(crate) struct Viewport {
-    view: ElementRef,
-    content: ElementRef,
-}
-
-/// Immutable enclosing scroll owners, outermost first, scoped to their views.
-pub(crate) type Viewports = Option<Stored<Vec<Viewport>>>;
-
-pub(crate) fn enclosing(parent: Viewports, view: ElementRef, content: ElementRef) -> Viewports {
-    let mut owners = parent.map(|parent| parent.get()).unwrap_or_default();
-    owners.push(Viewport { view, content });
-    Some(stored(owners))
-}
-
-/// Enclosing spans are measured before scrolling, innermost first. Carrying
-/// each inner movement into the hit keeps nested tables/code in the same space.
-fn horizontal_offsets(
-    viewports: impl IntoIterator<Item = (std::ops::Range<f32>, std::ops::Range<f32>)>,
-    mut hit: std::ops::Range<f32>,
-) -> Vec<Option<f32>> {
-    viewports
-        .into_iter()
-        .map(|(viewport, content)| {
-            let width = viewport.end - viewport.start;
-            if width <= 0.0 {
-                return None;
-            }
-            let offset = viewport.start - content.start;
-            // A drawn zero-width anchor marks the first glyph: leave the viewport
-            // after its leading edge for the match. Native text reports its width.
-            let end = if hit.end > hit.start {
-                hit.end
-            } else {
-                hit.start + width
-            };
-            let delta = nsh_core::scroll::reveal_delta(
-                px(hit.start - viewport.start),
-                px(end - viewport.start),
-                px(width),
-            )
-            .0;
-            let next = (offset + delta).clamp(0.0, (content.end - content.start - width).max(0.0));
-            if next == offset {
-                return None;
-            }
-            let moved = next - offset;
-            hit.start -= moved;
-            hit.end -= moved;
-            Some(next)
-        })
-        .collect()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Match {
     row: String,
@@ -80,7 +25,6 @@ pub(crate) struct Find {
     selected: Signal<Option<(u64, Match)>>,
     timeline: Stored<Option<Timeline>>,
     // Rendering the same hit again must not undo a reader's manual scroll.
-    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     last_anchor: Stored<Option<String>>,
 }
 
@@ -92,7 +36,6 @@ impl Find {
             current: signal((0, 0)),
             selected: signal(None),
             timeline: stored(None),
-            #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
             last_anchor: stored(None),
         }
     }
@@ -126,14 +69,6 @@ impl Find {
             .filter(|(index, _)| *index == document)
             .map(|(_, range)| range)
     }
-    #[cfg(target_os = "macos")]
-    pub(crate) fn selected_row(self, row: &str) -> bool {
-        self.selected.with(|selected| {
-            selected
-                .as_ref()
-                .is_some_and(|(_, selected)| selected.row == row)
-        })
-    }
     pub(crate) fn key(self) -> Option<String> {
         let (navigation, selected) = self.selected.get()?;
         Some(
@@ -148,29 +83,8 @@ impl Find {
             .expect("search identity serializes"),
         )
     }
-    /// Native glyphs or a drawn inline attachment report the selected text's
-    /// actual position. Ignore measurements belonging to an earlier match.
-    pub(crate) fn reveal(
-        self,
-        view: ElementRef,
-        rect: Bounds<Points>,
-        key: String,
-        parents: Viewports,
-    ) {
-        let parents = parents.map(|parents| parents.get()).unwrap_or_default();
-        spawn(async move {
-            self.reveal_at(view, rect, key, parents).await;
-        });
-    }
-
-    async fn reveal_at(
-        self,
-        view: ElementRef,
-        rect: Bounds<Points>,
-        key: String,
-        parents: Vec<Viewport>,
-    ) -> bool {
-        if self.key().as_ref() != Some(&key) {
+    async fn reveal_at(self, view: ElementRef, key: &str) -> bool {
+        if self.key().as_deref() != Some(key) {
             return false;
         }
         let Some(timeline) = self.timeline.with(|timeline| *timeline) else {
@@ -179,51 +93,19 @@ impl Find {
         let Some(bounds) = view.measure().await else {
             return false;
         };
-        let x = bounds.page.x.0 + rect.origin.x.0;
-        let mut measured = Vec::new();
-        for parent in parents.into_iter().rev() {
-            let (Some(viewport), Some(content)) =
-                (parent.view.measure().await, parent.content.measure().await)
-            else {
-                continue;
-            };
-            if self.key().as_ref() != Some(&key) {
-                return false;
-            }
-            measured.push((
-                parent.view,
-                viewport.page.x.0..viewport.page.x.0 + viewport.frame.size.width.0,
-                content.page.x.0..content.page.x.0 + content.frame.size.width.0,
-            ));
-        }
-        let offsets = horizontal_offsets(
-            measured
-                .iter()
-                .map(|(_, viewport, content)| (viewport.clone(), content.clone())),
-            x..x + rect.size.width.0,
-        );
-        for ((view, _, _), offset) in measured.into_iter().zip(offsets) {
-            if let Some(offset) = offset {
-                view.scroll_to(point(px(offset), px(0.0)), false);
-            }
-        }
-        if self.key().as_ref() != Some(&key) {
+        if self.key().as_deref() != Some(key) {
             return false;
         }
-        timeline
-            .reveal_text(bounds.page.y.0 + rect.origin.y.0)
-            .await;
-        self.key().as_ref() == Some(&key)
+        timeline.reveal_text(bounds.page.y.0).await;
+        self.key().as_deref() == Some(key)
     }
 
-    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     pub(crate) fn reset_anchor(self) {
         self.last_anchor.replace(None);
     }
 
     /// The standard TextView's inline match is revealed by NSH. Remember it
     /// only after measuring succeeds, so a culled attempt cannot suppress it.
-    #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
     pub(crate) fn reveal_anchor(self, view: ElementRef, key: String) {
         if self.key().as_ref() != Some(&key)
             || self.last_anchor.with(|last| last.as_ref() == Some(&key))
@@ -237,15 +119,7 @@ impl Find {
                 .animated(false),
         );
         spawn(async move {
-            if self
-                .reveal_at(
-                    view,
-                    Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(1.0))),
-                    key.clone(),
-                    Vec::new(),
-                )
-                .await
-            {
+            if self.reveal_at(view, &key).await {
                 self.last_anchor.replace(Some(key));
             }
         });
@@ -398,48 +272,4 @@ fn open_bar(find: Find, timeline: Timeline) -> View {
         .child(ui::icon_button(Icon::CLOSE, tr("閉じる"), move || {
             find.close()
         }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::horizontal_offsets;
-
-    #[test]
-    fn find_reveals_hidden_table_columns_and_unwrapped_code() {
-        for (viewport, content, hit, expected) in [
-            (100.0..400.0, 100.0..1600.0, 1100.0..1180.0, Some(796.0)),
-            // A drawn code anchor has no width: leave room after its leading edge.
-            (100.0..400.0, 100.0..1600.0, 1100.0..1100.0, Some(984.0)),
-            // An enclosing table may already have moved this code viewport left of the window.
-            (-200.0..100.0, -200.0..1300.0, -180.0..-180.0, Some(4.0)),
-            // Previous also reveals a match to the left of an already scrolled view.
-            (100.0..400.0, -400.0..1100.0, -100.0..-60.0, Some(284.0)),
-            (100.0..400.0, -400.0..1100.0, 150.0..190.0, None),
-            (100.0..400.0, 100.0..1600.0, 1590.0..1600.0, Some(1200.0)),
-            (100.0..400.0, 100.0..300.0, 150.0..190.0, None),
-            (100.0..100.0, 100.0..1600.0, 1100.0..1180.0, None),
-            (100.0..99.0, 100.0..1600.0, 1100.0..1180.0, None),
-        ] {
-            assert_eq!(horizontal_offsets([(viewport, content)], hit), [expected]);
-        }
-    }
-
-    #[test]
-    fn a_code_match_inside_a_wide_table_is_revealed_in_both_viewports() {
-        for (content, hit, expected) in [
-            (600.0..1600.0, 1500.0..1540.0, [Some(756.0), Some(400.0)]),
-            // The same target is reached from an existing inner scroll position.
-            (400.0..1400.0, 1300.0..1340.0, [Some(756.0), Some(400.0)]),
-            // Going back can move the inner content right while its table moves left.
-            (100.0..1100.0, 400.0..440.0, [Some(284.0), Some(272.0)]),
-        ] {
-            assert_eq!(
-                horizontal_offsets(
-                    [(600.0..800.0, content), (100.0..400.0, 100.0..1100.0),],
-                    hit
-                ),
-                expected
-            );
-        }
-    }
 }

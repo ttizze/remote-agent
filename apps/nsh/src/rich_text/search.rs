@@ -1,4 +1,4 @@
-//! Search uses the same paragraph documents as both renderers. Styling, link
+//! Search uses the same paragraph documents as the standard TextView. Styling, link
 //! destinations, images and other non-text parts never become phantom matches.
 use super::{Part, parts};
 use agent_core::presentation::conversation::{TextMatch, find_matches};
@@ -105,18 +105,12 @@ pub(super) fn decorate(
             run["highlights"] = highlights(&ranges, active, offset, length);
             offset += length;
         }
-        offset += 1; // the paragraph separator both renderers draw
+        offset += 1; // the paragraph separator TextView draws
     }
     blocks
 }
 
 /// Only the paragraph carrying the selected start needs a new drawn anchor.
-#[cfg(any(
-    test,
-    feature = "standard-text",
-    not(any(target_os = "macos", target_os = "ios")),
-    all(target_os = "macos", debug_assertions)
-))]
 pub(super) fn reveals(block: &Value) -> bool {
     std::iter::once(&block["markerHighlights"])
         .chain(
@@ -131,11 +125,6 @@ pub(super) fn reveals(block: &Value) -> bool {
 }
 
 /// Styled fragments of one run, in UTF-8 bytes; native views convert to UTF-16.
-#[cfg(any(
-    feature = "standard-text",
-    not(any(target_os = "macos", target_os = "ios")),
-    all(target_os = "macos", debug_assertions)
-))]
 #[derive(Default)]
 pub(super) struct Fragment {
     pub text: String,
@@ -144,11 +133,6 @@ pub(super) struct Fragment {
     pub reveal: bool,
 }
 
-#[cfg(any(
-    feature = "standard-text",
-    not(any(target_os = "macos", target_os = "ios")),
-    all(target_os = "macos", debug_assertions)
-))]
 pub(super) fn fragments(run: &Value) -> Vec<Fragment> {
     let text = run["text"].as_str().unwrap_or_default();
     let mut result = Vec::new();

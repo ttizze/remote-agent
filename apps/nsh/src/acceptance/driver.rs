@@ -81,7 +81,6 @@ pub(crate) fn start(
         lines,
         index: taken.len(),
         since: Instant::now(),
-        action_at: NSDate::timeIntervalSinceReferenceDate_class(),
         ready: false,
         finished: false,
         steps: taken,
@@ -131,7 +130,6 @@ struct Driver {
     lines: Vec<Line>,
     index: usize,
     since: Instant,
-    action_at: f64,
     ready: bool,
     finished: bool,
     steps: Vec<Value>,
@@ -145,7 +143,7 @@ impl Driver {
         let line = &self.lines[self.index];
         eprintln!(
             "acceptance-step {}",
-            json!({"source": line.source, "at": NSDate::timeIntervalSinceReferenceDate_class(), "actionAt": self.action_at})
+            json!({"source": line.source, "at": NSDate::timeIntervalSinceReferenceDate_class()})
         );
         self.steps.push(json!({
             "line": line.number,
@@ -190,7 +188,7 @@ enum Attempt {
 }
 
 fn tick(driver: &Rc<RefCell<Driver>>, mtm: MainThreadMarker) {
-    let (timeout, step, elapsed, menus, output, fixture, action_at) = {
+    let (timeout, step, elapsed, menus, output, fixture) = {
         let mut driver = driver.borrow_mut();
         if driver.finished {
             return;
@@ -213,52 +211,9 @@ fn tick(driver: &Rc<RefCell<Driver>>, mtm: MainThreadMarker) {
             driver.menus.clone(),
             driver.output.clone(),
             driver.fixture,
-            driver.action_at,
         )
     };
-    let started = NSDate::timeIntervalSinceReferenceDate_class();
-    let result = match &step {
-        Step::Paint(text, budget) => painted(
-            &Tree::read(mtm, &menus),
-            text,
-            *budget,
-            Some(action_at),
-            PaintCheck::Existing,
-        ),
-        Step::PaintVisible(text, budget) => painted(
-            &Tree::read(mtm, &menus),
-            text,
-            *budget,
-            Some(action_at),
-            PaintCheck::VisiblePrefix,
-        ),
-        Step::PaintRows(count, text, budget) => match super::rows_available(*count) {
-            Some(at) => painted(
-                &Tree::read(mtm, &menus),
-                text,
-                *budget,
-                Some(at),
-                PaintCheck::AfterPage,
-            ),
-            None => Attempt::Pending(format!("waiting for {count} fixture rows")),
-        },
-        Step::PaintStream(text, budget) => painted(
-            &Tree::read(mtm, &menus),
-            text,
-            *budget,
-            None,
-            PaintCheck::Existing,
-        ),
-        _ => attempt(&step, elapsed, &menus, &output, fixture, mtm),
-    };
-    if matches!(&result, Attempt::Passed(..) | Attempt::Press(..))
-        && matches!(
-            &step,
-            Step::Press(_) | Step::Scroll(..) | Step::Control(_) | Step::Key(_)
-        )
-    {
-        driver.borrow_mut().action_at = started;
-    }
+    let result = attempt(&step, elapsed, &menus, &output, fixture, mtm);
     match result {
         Attempt::Passed(message, artifact) => {
             driver.borrow_mut().record("passed", &message, artifact)
@@ -431,9 +386,6 @@ fn attempt(
         Step::Activate => activate(mtm),
         Step::DenyMicrophone => done(deny_microphone()),
         Step::Relaunch => Attempt::Relaunch,
-        Step::Paint(..) | Step::PaintVisible(..) | Step::PaintRows(..) | Step::PaintStream(..) => {
-            unreachable!("paint uses the driver's last action time")
-        }
         Step::Expect(_)
         | Step::ExpectAbsent(_)
         | Step::ExpectMenuBar(_)
@@ -491,78 +443,6 @@ fn expectation(step: &Step, menus: &[Retained<NSMenu>], mtm: MainThreadMarker) -
         }
         _ => return None,
     })
-}
-
-enum PaintCheck {
-    Existing,
-    AfterPage,
-    VisiblePrefix,
-}
-
-fn painted(
-    tree: &Tree,
-    expected: &str,
-    budget: Duration,
-    action_at: Option<f64>,
-    check: PaintCheck,
-) -> Attempt {
-    for node in &tree.nodes {
-        let Target::Element(object) = &node.target else {
-            continue;
-        };
-        if !responds(object, sel!(bexPaintedAtForText:since:visiblePrefix:)) {
-            continue;
-        }
-        let Some(text) = text(object, sel!(string)).filter(|text| text.contains(expected)) else {
-            continue;
-        };
-        let Some(view) = object.downcast_ref::<NSView>() else {
-            continue;
-        };
-        if view.visibleRect().size.height <= 0.0 || view.isHiddenOrHasHiddenAncestor() {
-            continue;
-        }
-        let source = action_at.or_else(|| {
-            text.split_once(expected)?
-                .1
-                .split_once("Ready at ")?
-                .1
-                .split_whitespace()
-                .next()?
-                .trim_end_matches('.')
-                .parse::<f64>()
-                .ok()
-        });
-        let Some(source) = source else {
-            return Attempt::Failed("stream fixture has no emission timestamp".into());
-        };
-        let at: f64 = unsafe {
-            msg_send![&**object, bexPaintedAtForText: &*NSString::from_str(expected), since: if matches!(check, PaintCheck::AfterPage) { source } else { f64::NEG_INFINITY }, visiblePrefix: matches!(check, PaintCheck::VisiblePrefix)]
-        };
-        if at == 0.0 {
-            if matches!(check, PaintCheck::AfterPage)
-                && NSDate::timeIntervalSinceReferenceDate_class() - source > budget.as_secs_f64()
-            {
-                return Attempt::Failed(format!(
-                    "no native draw of {expected:?} within {} ms after the fixture page became available",
-                    budget.as_millis()
-                ));
-            }
-            continue;
-        }
-        let elapsed = (at - source).max(0.0);
-        let message = format!(
-            "{expected:?} drawn in {:.1} ms (budget {} ms)",
-            elapsed * 1000.0,
-            budget.as_millis()
-        );
-        return if elapsed <= budget.as_secs_f64() {
-            Attempt::Passed(message, None)
-        } else {
-            Attempt::Failed(message)
-        };
-    }
-    Attempt::Pending(format!("no visible native draw contains {expected:?}"))
 }
 
 thread_local! {

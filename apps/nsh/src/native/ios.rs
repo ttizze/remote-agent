@@ -399,7 +399,6 @@ impl NativeComponent for Toolbar {
 
 pub fn register(components: &Components) {
     super::hosted::register(components, "bex.details", "bex_nsh_details");
-    super::hosted::register(components, "bex.messageText", "bex_nsh_message_text");
     super::hosted::register(components, "bex.browser.remote", "bex_nsh_browser");
     super::terminal::register(components);
     components.register(
