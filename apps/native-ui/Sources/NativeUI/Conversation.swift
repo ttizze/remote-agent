@@ -1,32 +1,16 @@
 import SwiftUI
 
-public enum ConversationColors {
-    public static var surface: Color {
-        #if os(macOS)
-            Color(nsColor: .controlBackgroundColor)
-        #else
-            Color(uiColor: .secondarySystemBackground)
-        #endif
-    }
-
-    public static var separator: Color {
-        #if os(macOS)
-            Color(nsColor: .separatorColor)
-        #else
-            Color(uiColor: .separator)
-        #endif
-    }
-}
-
-/// The iPhone message layout is shared verbatim with Mac. Only the selectable
-/// content and OS actions are supplied by each platform.
+/// Native conversation components shared by the Apple clients.
 public struct ConversationMessage<Images: View, Content: View, Actions: View, Notices: View, Markers: View>: View {
     let user: Bool
     let hasText: Bool
+    let hasImages: Bool
     let collapsible: Bool
     let searching: Bool
+    let persistentActions: Bool
     let expandTitle: String
     let collapseTitle: String
+    let expand: () -> Void
     let images: Images
     let markers: Markers
     let identifier: String
@@ -34,47 +18,75 @@ public struct ConversationMessage<Images: View, Content: View, Actions: View, No
     let actions: Actions
     let notices: Notices
     @State private var expanded = false
+    @State private var hovered = false
 
-    public init(user: Bool, hasText: Bool, collapsible: Bool = false, searching: Bool = false,
-                expandTitle: String, collapseTitle: String, identifier: String,
+    public init(user: Bool, hasText: Bool, hasImages: Bool = false, collapsible: Bool = false, searching: Bool = false,
+                persistentActions: Bool = false,
+                expandTitle: String, collapseTitle: String, identifier: String, expand: @escaping () -> Void = {},
                 @ViewBuilder markers: () -> Markers,
                 @ViewBuilder images: () -> Images, @ViewBuilder content: () -> Content,
                 @ViewBuilder actions: () -> Actions, @ViewBuilder notices: () -> Notices) {
+        self.hasImages = hasImages; self.persistentActions = persistentActions
         self.user = user; self.hasText = hasText; self.collapsible = collapsible; self.searching = searching
-        self.expandTitle = expandTitle; self.collapseTitle = collapseTitle
+        self.expandTitle = expandTitle; self.collapseTitle = collapseTitle; self.expand = expand
         self.markers = markers(); self.identifier = identifier
         self.images = images(); self.content = content(); self.actions = actions(); self.notices = notices()
     }
 
     public var body: some View {
-        VStack(alignment: user ? .trailing : .leading, spacing: 14) {
+        VStack(alignment: user ? .trailing : .leading, spacing: 4) {
             markers
-            VStack(alignment: user ? .trailing : .leading, spacing: 12) {
-                images
-                if hasText {
-                    if user {
+            images
+            if hasText {
+                if user {
+                    ConversationBubbleLayout {
                         content
-                            .frame(maxHeight: collapsible && !expanded && !searching ? 176 : nil, alignment: .top)
-                            .clipped()
-                            .padding(14)
-                            .background(ConversationColors.surface, in: RoundedRectangle(cornerRadius: 22))
-                    } else {
-                        content
-                    }
+                            .frame(maxHeight: folded ? 176 : nil, alignment: .top).clipped()
+                            .overlay(alignment: .bottom) {
+                                if folded {
+                                    LinearGradient(
+                                        colors: [.clear, ConversationColors.bubble],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                    .frame(height: 28).allowsHitTesting(false)
+                                }
+                            }
+                            .padding(12)
+                            .background(ConversationColors.bubble, in: UnevenRoundedRectangle(
+                                topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 18,
+                                topTrailingRadius: hasImages ? 6 : 18
+                            ))
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("conversation.user-bubble")
+                    }.frame(maxWidth: .infinity, alignment: .trailing)
+                } else {
+                    content.padding(.horizontal, 4)
                 }
             }
-            .padding(.leading, user ? 42 : 0)
-            .frame(maxWidth: .infinity, alignment: user ? .trailing : .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier(identifier)
             if user, collapsible {
-                Button { expanded.toggle() } label: { Text(verbatim: expanded ? collapseTitle : expandTitle) }
-                    .font(.caption).foregroundStyle(.secondary)
+                Button { expand(); expanded.toggle() } label: { Text(verbatim: expanded ? collapseTitle : expandTitle) }
+                    .font(.system(size: 12)).foregroundStyle(ConversationColors.muted).padding(.horizontal, 8)
+                    .frame(height: 24).padding(.top, 2)
             }
-            actions
+            actions.opacity(actionsVisible ? 1 : 0).accessibilityHidden(!actionsVisible)
             notices
         }
-        .padding(.bottom, user ? 12 : 8)
+        .frame(maxWidth: .infinity, alignment: user ? .trailing : .leading)
+        .accessibilityElement(children: .contain).accessibilityIdentifier(identifier)
+        .onHover { hovered = $0 }
+    }
+
+    private var folded: Bool {
+        collapsible && !expanded && !searching
+    }
+
+    private var actionsVisible: Bool {
+        #if os(macOS)
+            hovered || persistentActions
+        #else
+            true
+        #endif
     }
 }
 
@@ -83,24 +95,19 @@ public struct ConversationActivityHeader: View {
     let canCollapse: Bool
     let isInProgress: Bool
     let expanded: Bool
-    let progress: Bool
 
-    public init(summary: String, canCollapse: Bool, isInProgress: Bool, expanded: Bool,
-                progress: Bool = true) {
+    public init(summary: String, canCollapse: Bool, isInProgress: Bool, expanded: Bool) {
         self.summary = summary; self.canCollapse = canCollapse
-        self.isInProgress = isInProgress; self.expanded = expanded; self.progress = progress
+        self.isInProgress = isInProgress; self.expanded = expanded
     }
 
     public var body: some View {
-        let label = Text(verbatim: summary).font(.system(size: 16)).lineLimit(1).truncationMode(.tail)
+        let label = Text(verbatim: summary).font(.system(size: 14)).lineLimit(1).truncationMode(.tail)
         HStack(spacing: 5) {
             NativeShimmer(label: label, active: isInProgress)
             if canCollapse {
                 Image(systemName: expanded ? "chevron.down" : "chevron.right")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            }
-            if isInProgress, progress {
-                ProgressView().controlSize(.small)
             }
             Spacer(minLength: 0)
         }.contentShape(Rectangle())
@@ -109,20 +116,30 @@ public struct ConversationActivityHeader: View {
 
 public struct ConversationPlan<Content: View, Actions: View>: View {
     let title: String
+    let badge: String
     let content: Content
     let actions: Actions
-    public init(title: String, @ViewBuilder content: () -> Content, @ViewBuilder actions: () -> Actions) {
-        self.title = title; self.content = content(); self.actions = actions()
+    public init(title: String, badge: String, @ViewBuilder content: () -> Content,
+                @ViewBuilder actions: () -> Actions) {
+        self.title = title; self.badge = badge; self.content = content(); self.actions = actions()
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack { Text(verbatim: title).font(.subheadline.weight(.semibold)); Spacer(); actions }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Text(verbatim: badge).font(.system(size: 12, weight: .medium)).padding(.horizontal, 5).frame(height: 18)
+                    .background(ConversationColors.separator, in: RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(ConversationColors.cardBorder))
+                Text(verbatim: title).font(.system(size: 14, weight: .medium))
+                Spacer(minLength: 0)
+                actions
+            }
             content
         }
-        .padding(12)
-        .background(ConversationColors.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ConversationColors.separator))
+        .padding(20).foregroundStyle(ConversationColors.foreground)
+        .background(ConversationColors.surface, in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(ConversationColors.cardBorder))
+        .padding(.horizontal, 4).padding(.vertical, 2)
     }
 }
 
@@ -140,8 +157,8 @@ public struct ConversationCode<Header: View, Content: View>: View {
             Divider()
             content
         }
-        .background(ConversationColors.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(ConversationColors.separator, lineWidth: 0.5))
+        .background(ConversationColors.code, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .contain).accessibilityIdentifier("conversation.code")
     }
 }
 
@@ -158,7 +175,6 @@ public struct ConversationTable<Actions: View, Cell: View>: View {
 
     public var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
-            actions
             ScrollView(.horizontal) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(rowLengths.indices, id: \.self) { row in
@@ -172,8 +188,9 @@ public struct ConversationTable<Actions: View, Cell: View>: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(ConversationColors.separator, lineWidth: 0.5))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(ConversationColors.cardBorder, lineWidth: 0.5))
             }
+            actions
         }
     }
 }
@@ -192,7 +209,7 @@ public struct ConversationCopyButton: View {
             Image(systemName: copied ? "checkmark" : "doc.on.doc")
         }
         .accessibilityLabel(Text(verbatim: copied ? copiedTitle : title))
-        .buttonStyle(.plain)
+        .buttonStyle(ConversationActionStyle())
         .task(id: copied) {
             guard copied else { return }
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
@@ -208,8 +225,8 @@ public struct ConversationActions<Content: View>: View {
     }
 
     public var body: some View {
-        HStack(spacing: 20) { content }
-            .font(.system(size: 19)).foregroundStyle(.secondary).buttonStyle(.plain).padding(.vertical, 4)
+        HStack(spacing: 8) { content }
+            .font(.system(size: 12)).foregroundStyle(ConversationColors.muted).buttonStyle(ConversationActionStyle())
     }
 }
 
@@ -241,31 +258,33 @@ public struct ConversationSubagent<Message: View>: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Button(action: open) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "person.crop.circle").overlay(alignment: .bottomTrailing) {
-                            Circle().fill(statusColor).frame(width: 7, height: 7)
-                        }
-                        Text(verbatim: name).lineLimit(1)
+        Button(action: open) {
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle").font(.system(size: 14)).frame(width: 24, height: 24)
+                    .background(ConversationColors.bubble, in: Circle())
+                    .overlay(Circle().stroke(ConversationColors.cardBorder))
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle().fill(statusColor).frame(width: 8, height: 8)
+                            .overlay(Circle().stroke(ConversationColors.surface, lineWidth: 2)).offset(x: 1, y: 1)
                     }
-                }.disabled(!enabled)
-                Spacer(minLength: 8)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(verbatim: name).font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(ConversationColors.foreground).lineLimit(1)
+                    message.font(.system(size: 11)).foregroundStyle(ConversationColors.muted)
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 if let elapsed {
-                    Text(verbatim: elapsed).font(.caption).foregroundStyle(.secondary)
+                    Text(verbatim: elapsed).font(.system(size: 11)).foregroundStyle(ConversationColors.muted)
                 }
-            }
-            message.padding(.leading, 28)
-        }.buttonStyle(.plain)
+            }.padding(.horizontal, 8).padding(.vertical, 6)
+        }.buttonStyle(.plain).disabled(!enabled).accessibilityLabel(Text(verbatim: name))
     }
 
     private var statusColor: Color {
         switch status {
         case "running": .accentColor
-        case "completed": .green
+        case "completed": Color(red: 1.0 / 255, green: 178.0 / 255, blue: 118.0 / 255)
         case "failed": .red
-        default: .secondary
+        default: ConversationColors.muted
         }
     }
 }
@@ -277,11 +296,16 @@ public struct ConversationDivider: View {
     }
 
     public var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.down.right.and.arrow.up.left")
-            Text(verbatim: label)
-            Rectangle().frame(height: 1)
-        }.font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            ConversationColors.separator.frame(height: 1)
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                Text(verbatim: label)
+            }.fixedSize(horizontal: true, vertical: false)
+            ConversationColors.separator.frame(height: 1)
+        }
+        .font(.system(size: 12)).foregroundStyle(ConversationColors.muted)
+        .padding(.vertical, 4)
     }
 }
 
@@ -307,7 +331,8 @@ public struct ConversationPreparationStep: View {
             } else {
                 Image(systemName: symbol).frame(width: 20)
             }
-            Text(verbatim: label).frame(maxWidth: .infinity, alignment: .leading)
+            NativeShimmer(label: Text(verbatim: label).lineLimit(1), active: running)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let detail {
                 Text(verbatim: detail).font(.caption)
             }
@@ -319,7 +344,7 @@ public struct ConversationPreparationStep: View {
         if !tail.isEmpty {
             Text(verbatim: tail).font(.caption.monospaced()).textSelection(.enabled)
                 .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6)).padding(.leading, 28)
+                .background(ConversationColors.code, in: RoundedRectangle(cornerRadius: 6)).padding(.leading, 30)
         }
     }
 }
@@ -340,9 +365,10 @@ public struct ConversationPreparation<Header: View, Steps: View, Actions: View, 
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            header
+            header.padding(.bottom, 8)
+                .overlay(alignment: .bottom) { ConversationColors.separator.frame(height: 1) }
             if showSteps {
-                Divider(); steps
+                steps
             }
             if let error {
                 Text(verbatim: error).font(.caption).foregroundStyle(.red)
@@ -352,7 +378,7 @@ public struct ConversationPreparation<Header: View, Steps: View, Actions: View, 
                 VStack(alignment: .leading) { actions }
             }
             details
-        }.font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+        }.font(.system(size: 14)).foregroundStyle(ConversationColors.muted).monospacedDigit()
             .accessibilityIdentifier("task.preparation")
     }
 }
@@ -361,6 +387,7 @@ public struct ConversationWork<Content: View>: View {
     let title: String
     let symbol: String
     let active: Bool
+    let accessibilityLabel: String?
     @Binding var expanded: Bool
     let content: Content
     public init(
@@ -368,17 +395,27 @@ public struct ConversationWork<Content: View>: View {
         symbol: String,
         expanded: Binding<Bool>,
         active: Bool = false,
+        accessibilityLabel: String? = nil,
         @ViewBuilder content: () -> Content
     ) {
+        self.accessibilityLabel = accessibilityLabel
         self.title = title; self.symbol = symbol; self.active = active; _expanded = expanded; self.content = content()
     }
 
     public var body: some View {
-        DisclosureGroup(isExpanded: $expanded) { content } label: {
-            Label { NativeShimmer(label: Text(verbatim: title).lineLimit(1), active: active) } icon: {
-                Image(systemName: symbol)
+        VStack(alignment: .leading, spacing: 8) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: symbol).font(.system(size: 16)).frame(width: 24, height: 24)
+                    NativeShimmer(label: Text(verbatim: title).lineLimit(1), active: active)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 12)).frame(width: 16, height: 16).opacity(0.7)
+                }.font(.system(size: 14)).foregroundStyle(ConversationColors.muted)
+            }.buttonStyle(.plain).accessibilityLabel(Text(verbatim: accessibilityLabel ?? title))
+            if expanded {
+                content.padding(.leading, 28)
             }
-            .font(.system(size: 17)).foregroundStyle(.secondary).padding(.vertical, 5)
         }
     }
 }

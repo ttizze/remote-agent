@@ -232,8 +232,7 @@ enum ConversationAttributedText {
     }
 
     private static func font(for style: MarkdownStyle) -> UIFont {
-        let headingSizes: [CGFloat] = [26, 23, 21, 19, 18, 18]
-        let size: CGFloat = style.code ? 15 : style.header.map { headingSizes[Int($0) - 1] } ?? 18
+        let size = ConversationTypography.size(heading: style.header.map(Int.init), code: style.code)
         let base = style.code ? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
             : UIFont.systemFont(ofSize: size, weight: style.header == nil ? .regular : .semibold)
         return UIFontMetrics.default.scaledFont(for: base)

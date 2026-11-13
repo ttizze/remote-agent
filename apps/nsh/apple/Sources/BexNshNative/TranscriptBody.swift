@@ -314,7 +314,7 @@ private struct MacCodeBlock: View {
     }
 
     private var showingSource: Bool {
-        source || code.diagram == nil || document.findKey != nil
+        source || code.diagram == nil
     }
 
     var body: some View {
@@ -323,13 +323,13 @@ private struct MacCodeBlock: View {
                 Text(verbatim: code.label).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
                 if code.diagram != nil {
-                    Button(label(showingSource ? "diagram" : "source")) { source.toggle() }
+                    Button(label(showingSource ? "diagram" : "source")) { send(["action": "browse"]); source.toggle() }
                     if !showingSource {
-                        Button(label(large ? "shrink" : "enlarge")) { large.toggle() }
+                        Button(label(large ? "shrink" : "enlarge")) { send(["action": "browse"]); large.toggle() }
                     }
                 }
                 if showingSource {
-                    Button { wrapped.toggle() } label: {
+                    Button { send(["action": "browse"]); wrapped.toggle() } label: {
                         Image(systemName: wrapped ? "text.alignleft" : "arrow.right.to.line")
                     }.accessibilityLabel(Text(verbatim: label(wrapped ? "unwrap" : "wrap")))
                 }
@@ -351,6 +351,12 @@ private struct MacCodeBlock: View {
                       let image = NSImage(data: data) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
                     .frame(maxHeight: large ? 640 : 300).padding(12)
+            }
+        }.onChange(of: document.findKey, initial: true) { _, key in
+            if key != nil,
+               code.blocks
+               .contains(where: { $0.runs.contains(where: { $0.highlights?.contains(where: \.active) == true }) }) {
+                source = true
             }
         }
     }

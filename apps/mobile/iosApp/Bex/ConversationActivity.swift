@@ -31,7 +31,7 @@ struct ThreadDecoratedActivity: View {
             ForEach(values.indices, id: \.self) { index in
                 switch values[index] {
                 case let .plan(title, markdown, filename):
-                    ConversationPlan(title: title) {
+                    ConversationPlan(title: title, badge: String(localized: "計画")) {
                         ConversationMarkdown(blocks: blocks, media: media, selection: selection)
                     } actions: {
                         Menu {

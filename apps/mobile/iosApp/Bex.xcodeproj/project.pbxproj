@@ -90,6 +90,7 @@
 		C0DE00000000000000000A09 /* WorkspaceDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000A0A /* WorkspaceDetails.swift */; };
 		A9C1000000000000000000F4 /* ConversationQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F3 /* ConversationQueue.swift */; };
 		A9C1000000000000000000F6 /* ConversationActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F5 /* ConversationActivity.swift */; };
+		A9C1000000000000000000FE /* ConversationStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000FD /* ConversationStyle.swift */; };
 		A9C1000000000000000000FC /* ConversationModel+Input.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000FB /* ConversationModel+Input.swift */; };
 		A9C1000000000000000000FA /* Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F9 /* Conversation.swift */; };
 		A9C1000000000000000000F8 /* Shimmer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9C1000000000000000000F7 /* Shimmer.swift */; };
@@ -186,6 +187,7 @@
 		C0DE00000000000000000A0A /* WorkspaceDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDetails.swift; sourceTree = "<group>"; };
 		A9C1000000000000000000F3 /* ConversationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationQueue.swift; sourceTree = "<group>"; };
 		A9C1000000000000000000F5 /* ConversationActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivity.swift; sourceTree = "<group>"; };
+		A9C1000000000000000000FD /* ConversationStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-ui/Sources/NativeUI/ConversationStyle.swift; sourceTree = SOURCE_ROOT; };
 		A9C1000000000000000000FB /* ConversationModel+Input.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bex/ConversationModel+Input.swift; sourceTree = SOURCE_ROOT; };
 		A9C1000000000000000000F9 /* Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-ui/Sources/NativeUI/Conversation.swift; sourceTree = SOURCE_ROOT; };
 		A9C1000000000000000000F7 /* Shimmer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-ui/Sources/NativeUI/Shimmer.swift; sourceTree = SOURCE_ROOT; };
@@ -285,6 +287,7 @@
 				A9C1000000000000000000F7 /* Shimmer.swift */,
 				A9C1000000000000000000F9 /* Conversation.swift */,
 				A9C1000000000000000000FB /* ConversationModel+Input.swift */,
+				A9C1000000000000000000FD /* ConversationStyle.swift */,
                 C30000000000000000000004 /* TerminalScreen.swift */,
                 F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */,
                 C0DE00000000000000000702 /* BrowserScreen.swift */,
@@ -490,6 +493,7 @@
 				A9C1000000000000000000F8 /* Shimmer.swift in Sources */,
 				A9C1000000000000000000FA /* Conversation.swift in Sources */,
 				A9C1000000000000000000FC /* ConversationModel+Input.swift in Sources */,
+				A9C1000000000000000000FE /* ConversationStyle.swift in Sources */,
                 C30000000000000000000003 /* TerminalScreen.swift in Sources */,
                 D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */,
                 C0DE00000000000000000701 /* BrowserScreen.swift in Sources */,

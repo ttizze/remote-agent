@@ -1,4 +1,5 @@
 import Foundation
+import NativeUI
 #if os(macOS)
     import AppKit
 
@@ -297,13 +298,7 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
     /// A block's text size: on the Mac T3 Code's `.chat-markdown` (14 pt
     /// text, 12 pt in a table's cells, 13 pt code, headings from 20 pt).
     private static func size(_ block: MessageParagraph, cell: String?) -> CGFloat {
-        #if os(macOS)
-            let text: CGFloat = cell == nil ? 14 : 12
-            let (base, headings): (CGFloat, [CGFloat]) = (block.code ? 13 : text, [20, 18, 16, 14, 14, 14])
-        #else
-            let (base, headings): (CGFloat, [CGFloat]) = (block.code ? 15 : 18, [26, 23, 21, 19, 18, 18])
-        #endif
-        return block.header.map { headings[min(5, max(0, $0 - 1))] } ?? base
+        ConversationTypography.size(heading: block.header, code: block.code, table: cell != nil)
     }
 
     /// Whether the run at `position` is part of the caption a chip's author

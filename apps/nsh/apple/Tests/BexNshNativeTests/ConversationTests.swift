@@ -80,7 +80,7 @@ final class ConversationTests: XCTestCase {
         func row(_ id: String) -> NativeConversationRow {
             NativeConversationRow(
                 id: id,
-                user: true,
+                user: false,
                 gap: 16,
                 buttons: [.init(action: "copy", title: "Copy message", icon: "copy", iconOnly: true)],
                 document: document,
@@ -89,7 +89,8 @@ final class ConversationTests: XCTestCase {
                 media: [:],
                 time: nil,
                 queued: false,
-                steer: false
+                steer: false,
+                trailing: true
             )
         }
         var actions: [[String: Any]] = []

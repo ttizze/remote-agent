@@ -27,6 +27,7 @@ struct NativeConversationRow: Decodable, Equatable {
     let time: String?
     let queued: Bool
     let steer: Bool
+    var trailing: Bool? = nil
     var collapsible: Bool? = nil
     var top: Double? = nil
     var agentStatus: String? = nil
@@ -454,6 +455,10 @@ struct NativeConversationUpdate: Decodable {
             if action["action"] as? String == "selection" {
                 showSelection(action)
             } else {
+                if let name = action["action"] as? String,
+                   ["fold", "group", "item", "setupDetails", "browse"].contains(name) {
+                    following = false; readingAnchor = anchor()
+                }
                 send?(action)
             }
         }
@@ -649,7 +654,7 @@ private struct MacConversationRow: View {
                     text
                 }.accessibilityIdentifier("subagent." + row.id)
             } else if row.plan == true {
-                ConversationPlan(title: row.planTitle ?? "") { text } actions: {
+                ConversationPlan(title: row.planTitle ?? "", badge: label("plan")) { text } actions: {
                     ForEach(headers, id: \.action) { action($0) }
                 }
             } else if row.separator == true, row.icon == "compact" {
@@ -664,7 +669,8 @@ private struct MacConversationRow: View {
                     title: work.title,
                     symbol: MessageAttributes.symbol(row.icon) ?? "chevron.left.forwardslash.chevron.right",
                     expanded: Binding(get: { work.icon == "chevronDown" }, set: { _ in emit(work.action) }),
-                    active: work.shimmer != nil
+                    active: work.shimmer != nil,
+                    accessibilityLabel: work.accessibilityLabel
                 ) {
                     text
                 }
@@ -683,13 +689,16 @@ private struct MacConversationRow: View {
 
     private var text: some View {
         TranscriptContent(parts: row.parts + (row.user ? [] : row.images.map { .image(.init(source: $0)) }),
-                          document: row.document, media: row.media, send: send)
+                          document: row.document, media: row.media, send: send,
+                          identifier: row.user ? "conversation.user-body" : "conversation.assistant-body")
     }
 
     private var message: some View {
         ConversationMessage(user: row.user, hasText: !row.parts.isEmpty || !row.user && !row.images.isEmpty,
-                            collapsible: row.collapsible ?? false, searching: row.document.searching ?? false,
-                            expandTitle: label("expand"), collapseTitle: label("collapse"), identifier: row.id) {
+                            hasImages: !row.images.isEmpty, collapsible: row.collapsible ?? false,
+                            searching: row.document.searching ?? false, persistentActions: row.trailing ?? false,
+                            expandTitle: label("expand"), collapseTitle: label("collapse"), identifier: row.id,
+                            expand: { emit("browse") }) {
             if row.queued {
                 Text(verbatim: label("queued")).font(.caption).foregroundStyle(.secondary)
             }
@@ -716,8 +725,7 @@ private struct MacConversationRow: View {
                     if row.user {
                         time
                     }
-                    ForEach(footer.sorted { ($0.action == "copy" ? 0 : 1) < ($1.action == "copy" ? 0 : 1) },
-                            id: \.action) { action($0) }
+                    ForEach(footer, id: \.action) { action($0) }
                     if !row.user {
                         time
                     }
@@ -728,7 +736,8 @@ private struct MacConversationRow: View {
 
     @ViewBuilder private var time: some View {
         if let time = row.time {
-            Text(verbatim: time).font(.caption)
+            Text(verbatim: time).font(.system(size: 12))
+                .accessibilityIdentifier(row.user ? "conversation.user-time" : "conversation.assistant-time")
         }
     }
 
@@ -742,6 +751,7 @@ private struct MacConversationRow: View {
 
     private func action(_ value: ConversationButton) -> some View {
         ConversationAction(value: value, icon: row.icon, copiedTitle: label("copied"), send: emit)
+            .accessibilityIdentifier("conversation." + (row.user ? "user-" : "assistant-") + value.action)
     }
 }
 
@@ -783,7 +793,7 @@ private struct ConversationAction: View {
                 }
                 ConversationActivityHeader(summary: value.title, canCollapse: value.disclosure == true,
                                            isInProgress: value.shimmer != nil,
-                                           expanded: value.icon == "chevronDown", progress: false)
+                                           expanded: value.icon == "chevronDown")
             }
         } else if value.iconOnly == true, let symbol = MessageAttributes.symbol(value.icon) {
             Image(systemName: symbol).rotationEffect(.degrees(value.action == "fork" ? 90 : 0))
@@ -799,6 +809,7 @@ struct TranscriptContent: NSViewRepresentable {
     let document: MessageDocument
     let media: [String: String]
     let send: ([String: Any]) -> Void
+    var identifier: String?
     @State private var layoutRevision = 0
     func makeNSView(context _: Context) -> TranscriptBody {
         TranscriptBody()
@@ -806,6 +817,7 @@ struct TranscriptContent: NSViewRepresentable {
 
     func updateNSView(_ view: TranscriptBody, context _: Context) {
         _ = layoutRevision
+        view.setAccessibilityIdentifier(identifier)
         view.resized = { layoutRevision &+= 1 }
         view.send = send; view.update(parts, document: document, media: media)
     }

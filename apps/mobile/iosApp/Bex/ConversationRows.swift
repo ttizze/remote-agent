@@ -67,6 +67,7 @@ struct ThreadMessageRow: View, Equatable {
 
     var body: some View {
         ConversationMessage(user: isUser, hasText: !(item.data.body ?? "").isEmpty,
+                            hasImages: !item.data.imageSources.isEmpty,
                             collapsible: item.source.collapsesUserText(),
                             expandTitle: String(localized: "全文を表示"), collapseTitle: String(localized: "折りたたむ"),
                             identifier: "item.\(item.data.id)") {
@@ -119,12 +120,6 @@ struct ThreadMessageRow: View, Equatable {
             if isUser {
                 time
             }
-            if !text.isEmpty {
-                ConversationCopyButton(title: String(localized: isUser ? "発言をコピー" : "回答をコピー"),
-                                       copiedTitle: String(localized: "コピーしました")) {
-                    UIPasteboard.general.string = text
-                }
-            }
             if let edit {
                 Button(action: edit) { Image(systemName: "pencil") }
                     .disabled(!editingEnabled)
@@ -139,6 +134,12 @@ struct ThreadMessageRow: View, Equatable {
                 .disabled(forking)
                 .accessibilityLabel("ここから会話を分岐")
                 .accessibilityIdentifier("response.fork." + item.data.id)
+            }
+            if !text.isEmpty {
+                ConversationCopyButton(title: String(localized: isUser ? "発言をコピー" : "回答をコピー"),
+                                       copiedTitle: String(localized: "コピーしました")) {
+                    UIPasteboard.general.string = text
+                }
             }
             if !isUser {
                 time

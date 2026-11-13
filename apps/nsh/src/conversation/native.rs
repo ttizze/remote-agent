@@ -160,7 +160,7 @@ pub(super) fn project_row(
     } else if row.notification.is_some() {
         parts = vec![crate::rich_text::plain(body.clone(), None)];
     }
-    let labels = json!({"copyCode":tr("コードをコピー"),"thisResponse":tr("この応答"),"showDetails":tr("詳細を表示"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
+    let labels = json!({"plan":tr("計画"),"copyCode":tr("コードをコピー"),"thisResponse":tr("この応答"),"showDetails":tr("詳細を表示"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
     let focus = row.progress.is_some()
         || row.status.is_some()
         || row.preparation.as_ref().is_some_and(|setup| setup.shimmer);
@@ -666,7 +666,14 @@ fn handle_row(
 ) {
     let connection = surroundings.connection;
     let action = data["action"].as_str().unwrap_or_default();
+    if matches!(
+        action,
+        "fold" | "group" | "item" | "setupDetails" | "browse"
+    ) {
+        timeline.following.set(false);
+    }
     match action {
+        "browse" => {}
         "image" => {
             let source = data["text"].as_str().unwrap_or_default().to_owned();
             surroundings.preview.load_image(
