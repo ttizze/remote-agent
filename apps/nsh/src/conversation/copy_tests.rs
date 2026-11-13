@@ -6,7 +6,8 @@ fn native_message_copy_actions_keep_the_original_body_and_role() {
         (Kind::User, "発言をコピー"),
         (Kind::Response, "回答をコピー"),
     ] {
-        let row = Row::new("message".into(), kind, Shape::Message, source);
+        let mut row = Row::new("message".into(), kind, Shape::Message, source);
+        row.actions = kind == Kind::Response;
         assert_eq!(row.body.as_str(), source);
         let native = native::project_row(&row, false, "target", "/repo", None, true, None);
         assert!(
@@ -35,5 +36,17 @@ fn native_message_copy_actions_keep_the_original_body_and_role() {
                 "assistant"
             }
         );
+        if kind == Kind::Response {
+            row.actions = false;
+            let hidden = native::project_row(&row, false, "target", "/repo", None, true, None);
+            assert!(
+                hidden["buttons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|button| button["action"] != "copy"),
+                "only the response's designated meta row has its actions"
+            );
+        }
     }
 }

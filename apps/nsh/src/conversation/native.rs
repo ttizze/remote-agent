@@ -84,7 +84,7 @@ fn button(action: &str, title: &str) -> Value {
         _ => None,
     };
     let disclosure = matches!(action, "fold" | "group" | "item" | "setupDetails");
-    json!({"action":action,"title":if disclosure {title.get(4..).unwrap_or(title)} else {title},"icon":icon,"iconOnly":matches!(action,"copy" | "copyError" | "fork" | "edit" | "planMenu"),"disclosure":disclosure})
+    json!({"action":action,"title":if disclosure {title.get(4..).unwrap_or(title)} else {title},"icon":icon,"iconOnly":matches!(action,"copy" | "copyError" | "fork" | "edit" | "planMenu"),"disclosure":disclosure,"header":matches!(action,"fold"|"group"|"item"|"planMenu"|"agent")})
 }
 
 pub(super) fn project_row(
@@ -116,14 +116,6 @@ pub(super) fn project_row(
     if matches!(row.shape, Shape::Interrupted) {
         body.push_str(&format!(" · {}", tr("ユーザーが実行を中断しました")));
     }
-    if let Some(error) = &row.error {
-        body = format!(
-            "{}\n\n{}\n\n{}",
-            error.title,
-            error.message,
-            error.details.as_deref().unwrap_or_default()
-        );
-    }
     if let Some(setup) = &row.preparation {
         body.push_str("\n\n");
         for step in setup.steps.iter().filter(|_| setup.show_steps) {
@@ -153,6 +145,9 @@ pub(super) fn project_row(
     let blocks = match &row.detail {
         Some(item) if open => item.source.detail_blocks(),
         Some(_) => Vec::new(),
+        None if row.error.is_some() || row.agent.is_some() || row.notification.is_some() => {
+            Vec::new()
+        }
         None => agent_core::presentation::markdown::workspace_markdown_blocks(
             body.clone(),
             cwd.into(),
@@ -166,20 +161,74 @@ pub(super) fn project_row(
         buttons.push(button("retry", tr("再試行")));
     }
     let file_paths = crate::rich_text::file_paths(&blocks);
-    let parts = crate::rich_text::indexed(crate::rich_text::parts(
+    let mut parts = crate::rich_text::indexed(crate::rich_text::parts(
         blocks,
         &crate::rich_text::diagrams(&body),
         &|file| chips.map(|chips| chips.chip(file)),
     ));
-    let labels = json!({"copyCode":tr("コードをコピー"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
-    let document = json!({"blocks":[],"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"maxWidth":LANE_WIDTH,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
+    if let Some(error) = &row.error {
+        parts = vec![
+            crate::rich_text::plain(
+                error.title.clone(),
+                Some(if error.is_usage_limit {
+                    0xe5b567
+                } else {
+                    0xff8e86
+                }),
+            ),
+            crate::rich_text::plain(error.message.clone(), None),
+        ];
+        if let Some(details) = &error.details {
+            parts.push(crate::rich_text::plain(details.clone(), Some(0xaaaaaa)));
+        }
+    } else if let Some(agent) = &row.agent {
+        parts = vec![crate::rich_text::plain(agent.message.clone(), None)];
+    } else if row.notification.is_some() {
+        parts = vec![crate::rich_text::plain(body.clone(), None)];
+    }
+    let labels = json!({"copyCode":tr("コードをコピー"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
+    let document = json!({"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
     json!({
-        "id":row.id,"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
+        "id":row.id,"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
         "collapsible":row.kind == Kind::User && agent_core::presentation::conversation::should_collapse_user_message(&row.body),
         "trailing":matches!(row.shape,Shape::Actions),"fold":matches!(row.shape,Shape::Fold{..} | Shape::Working),"time":row.time,"queued":row.queued,"steer":row.steer,
         "busy":row.streaming || row.status.is_some() || row.detail.as_ref().is_some_and(|item|item.live),"document":document,
         "agentStatus":row.agent.as_ref().map(|agent| agent.status)
     })
+}
+
+fn row_icon(row: &Row) -> Option<&'static str> {
+    use agent_core::presentation::background_work::NotificationIcon;
+    if let Some(icon) = row.notification {
+        return Some(match icon {
+            NotificationIcon::Bot => "agent",
+            NotificationIcon::Terminal => "terminal",
+            NotificationIcon::Eye => "eye",
+            NotificationIcon::Zap => "zap",
+            NotificationIcon::CircleAlert => "alert",
+        });
+    }
+    let kind = row
+        .detail
+        .as_ref()
+        .map(|item| item.source.data.kind.as_str())
+        .unwrap_or(&row.group_kind);
+    match row.shape {
+        Shape::Interrupted => Some("stop"),
+        Shape::Divider => Some("compact"),
+        Shape::Error => Some("alert"),
+        Shape::Group { .. } | Shape::Work { .. } | Shape::Live if !kind.is_empty() => {
+            Some(match kind {
+                "command" => "terminal",
+                "fileChange" => "edit",
+                "mixed" => "tools",
+                "reasoning" => "thinking",
+                "webSearch" => "globe",
+                _ => "tool",
+            })
+        }
+        _ => None,
+    }
 }
 
 fn row_buttons(row: &Row, open: bool) -> Vec<Value> {
@@ -215,7 +264,7 @@ fn row_buttons(row: &Row, open: bool) -> Vec<Value> {
     if matches!(
         row.shape,
         Shape::Message | Shape::Commentary | Shape::Actions
-    ) && (row.kind != Kind::Activity || matches!(row.shape, Shape::Actions))
+    ) && (row.kind == Kind::User || row.actions || matches!(row.shape, Shape::Actions))
     {
         buttons.push(button(
             "copy",
@@ -473,7 +522,7 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
             .prop("data", move || {
                 let (history, notice, opening) = connection.publication.with(|p| {
                     use agent_core::presentation::context::ConversationOpening;
-                    (p.context.opening().is_none().then(||p.context.history()).flatten(),[p.context.thread_error(),p.conversation.as_ref().and_then(|conversation|conversation.history_notice())].into_iter().flatten().collect::<Vec<_>>().join("\n"),match p.context.opening() {
+                    (p.context.opening().is_none().then(||p.context.history()).flatten(),p.conversation.as_ref().and_then(|conversation|conversation.history_notice()),match p.context.opening() {
                         Some(ConversationOpening::Loading) => json!({"loading":true,"text":tr("会話を読み込み中…")}),
                         Some(ConversationOpening::Failed{error}) => json!({"loading":false,"text":error.to_string(),"retry":tr("再試行")}),
                         None => Value::Null,
@@ -481,13 +530,15 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                 });
                 let mut rows = projected.get();
                 let query = surroundings.find.highlighted();
+                let top_space = connection.context.with(|context|if context.thread_error().is_some(){16}else{24});
                 for (index,row) in rows.iter_mut().enumerate() {
-                    row["top"] = json!(if index == 0 {24} else {0});
+                    row["top"] = json!(if index == 0 {top_space} else {0});
                     if let Ok(mut parts) = serde_json::from_value::<Vec<crate::rich_text::Part>>(row["parts"].clone()) {
                         crate::rich_text::highlight(&mut parts, &query, surroundings.find.selection(row["id"].as_str().unwrap_or_default()));
                         row["parts"] = json!(parts);
                     }
-                    row["document"]["findKey"] = json!(surroundings.find.key());
+                    row["document"]["searching"] = json!(!query.is_empty());
+                    row["document"]["findKey"] = json!(surroundings.find.selection(row["id"].as_str().unwrap_or_default()).and_then(|_|surroundings.find.key()));
                     let sources = image_sources(row);
                     row["media"] = media.with(|files| json!(sources.iter().filter_map(|source| match files.get(source) { Some(Image::Ready(_,data)) => Some((source.clone(),data.clone())), _=>None }).collect::<HashMap<_,_>>()));
                     row["document"]["mediaErrors"] = media.with(|files| json!(sources.iter().filter_map(|source| match files.get(source) { Some(Image::Failed(error)) => Some((source.clone(),error.clone())), _=>None }).collect::<HashMap<_,_>>()));
@@ -499,6 +550,14 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
             })
             .on_native_event(move |event: &NativeEvent| {
                 if event.data["scope"].as_str() != Some(scope.get_untracked().as_str()) { return; }
+                #[cfg(desktop)]
+                if event.data["action"] == "saveImage" {
+                    if let Some(source) = event.data["text"].as_str()
+                        && let Some(Image::Ready(file,_)) = media.with_untracked(|files|files.get(source).cloned()) {
+                        crate::media::save_image(file,None);
+                    }
+                    return;
+                }
                 if event.data["action"] == "retryImage" {
                     if let Some(source) = event.data["text"].as_str() { media.update(|files| {files.remove(source);}); retry_images.update(|serial|*serial = serial.wrapping_add(1)); }
                 } else if event.data["action"] == "visible" {
@@ -585,7 +644,7 @@ fn handle_row(
             surroundings.preview.load_image(
                 connection,
                 source,
-                (!row.images.is_empty()).then_some(row.images),
+                (row.kind == Kind::User && !row.images.is_empty()).then_some(row.images),
             );
         }
         "setupTerminal" | "workLocally" | "cancelSetup" => {

@@ -96,17 +96,14 @@ struct MessageParagraph: Decodable, Equatable, Sendable {
 }
 
 struct MessageDocument: Decodable, Equatable, Sendable {
-    let blocks: [MessageParagraph]
     let secondary: Bool
-    /// The text's color at the device's contrast.
-    var foreground: UInt32? = nil
     /// The selected occurrence, so layout reveals it once per navigation.
     var findKey: String? = nil
+    var searching: Bool? = nil
     /// Whose text it is, `user` or `assistant`, as its accessibility identifier names it.
     let role: String
     let target: String
     let sideChat: Bool
-    let maxWidth: Double
     /// The selection menu's items in the app's language.
     let menu: MessageMenuTitles
     var labels: [String: String]? = nil
@@ -114,8 +111,8 @@ struct MessageDocument: Decodable, Equatable, Sendable {
     /// A table's cell, `header` or `body`, whose text is smaller.
     var cell: String? = nil
 
-    static let empty = MessageDocument(blocks: [], secondary: false, role: "assistant", target: "", sideChat: false,
-                                       maxWidth: 0, menu: MessageMenuTitles(quote: "", sideChat: ""))
+    static let empty = MessageDocument(secondary: false, role: "assistant", target: "", sideChat: false,
+                                       menu: MessageMenuTitles(quote: "", sideChat: ""))
 }
 
 /// What a selection's menu calls adding it to the chat and asking about it in
@@ -133,6 +130,16 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
         switch name {
         case "copy": symbol = "doc.on.doc"
         case "agent": symbol = "person.crop.circle"
+        case "terminal": symbol = "terminal"
+        case "eye": symbol = "eye"
+        case "zap": symbol = "bolt"
+        case "alert": symbol = "exclamationmark.circle"
+        case "stop": symbol = "stop.circle"
+        case "compact": symbol = "arrow.down.right.and.arrow.up.left"
+        case "tools": symbol = "hammer"
+        case "thinking": symbol = "brain"
+        case "globe": symbol = "globe"
+        case "tool": symbol = "wrench"
         case "fork": symbol = "arrow.triangle.branch"
         case "edit": symbol = "pencil"
         case "more": symbol = "ellipsis"

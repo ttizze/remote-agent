@@ -1,5 +1,23 @@
 import AppKit
 
+/// Horizontal code/table overflow must leave vertical scrolling to the transcript.
+@MainActor private final class TranscriptHorizontalScroll: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        if abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX), !event.modifierFlags.contains(.shift) {
+            var ancestor = superview
+            while let view = ancestor {
+                if let transcript = view as? ConversationScrollView {
+                    transcript.scrollWheel(with: event); return
+                }
+                ancestor = view.superview
+            }
+            nextResponder?.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+}
+
 indirect enum TranscriptPart: Decodable, Equatable {
     struct Code: Decodable, Equatable {
         let label: String
@@ -8,7 +26,7 @@ indirect enum TranscriptPart: Decodable, Equatable {
         let diagram: Diagram?
     }
 
-    struct Diagram: Decodable, Equatable { let svg: String; let png: String; let width: Double; let height: Double }
+    struct Diagram: Decodable, Equatable { let png: String; let width: Double; let height: Double }
     struct Table: Decodable, Equatable { let source: String; let csv: String; let rows: [[[TranscriptPart]]] }
     struct Image: Decodable, Equatable { let source: String }
     struct Link: Decodable, Equatable { let url: String }
@@ -58,18 +76,19 @@ private extension Optional {
 @MainActor final class TranscriptBody: NSView {
     private var parts: [TranscriptPart] = []
     private var blocks: [TranscriptBlock] = []
-    private var document = MessageDocument.empty
-    private var media: [String: String] = [:]
     var send: (([String: Any]) -> Void)?
     var resized: (() -> Void)?
     override var isFlipped: Bool {
         true
     }
 
+    func clear() {
+        blocks.forEach { $0.removeFromSuperview() }
+        blocks.removeAll(); parts.removeAll()
+    }
+
     func update(_ parts: [TranscriptPart], document: MessageDocument, media: [String: String]) {
-        let contentChanged = self.parts != parts || self.media != media
-        self.document = document
-        self.media = media
+        let contentChanged = self.parts != parts
         if contentChanged {
             // Preserve native selection in unchanged paragraphs during streaming.
             let previous = self.parts
@@ -193,7 +212,9 @@ private extension Optional {
         if text.attributedString() != content {
             text.textStorage?.setAttributedString(content)
         }
-        text.setSelectedRange(retained)
+        if text.selectedRange() != retained {
+            text.setSelectedRange(retained)
+        }
         text.setAccessibilityIdentifier("message.\(document.role)-text")
         text.action = { [weak self] in self?.send?($0) }
     }
@@ -245,7 +266,7 @@ private extension Optional {
     private let header = NSTextField(labelWithString: "")
     private let copy = NSButton()
     private let wrap = NSButton()
-    private let scroll = NSScrollView()
+    private let scroll = TranscriptHorizontalScroll()
     private var wrapping = true
     init(_ code: TranscriptPart.Code) {
         self.code = code
@@ -280,7 +301,8 @@ private extension Optional {
 
     override func update(document: MessageDocument, media: [String: String]) {
         super.update(document: document, media: media)
-        copy.title = label(code.diagram == nil ? "copyCode" : "copyDiagram"); wrap.title = label(wrapping ? "unwrap" : "wrap")
+        copy.title = label(code.diagram == nil ? "copyCode" : "copyDiagram"); wrap
+            .title = label(wrapping ? "unwrap" : "wrap")
         for (button, key) in [(copy, "copy"), (wrap, "wrap")] {
             button.isBordered = false
             button.image = MessageAttributes.icon(key, size: 12, label: button.title); button.imagePosition = .imageOnly
@@ -310,11 +332,19 @@ private extension Optional {
         wrap.frame.origin = NSPoint(x: max(0, copy.frame.minX - wrap.frame.width - 6), y: 5)
         header.frame = NSRect(x: 14, y: 8, width: max(0, wrap.frame.minX - 20), height: 16)
         zoom.sizeToFit(); zoom.frame.origin = NSPoint(x: max(14, copy.frame.minX - zoom.frame.width - 6), y: 5)
-        mode.sizeToFit(); mode.frame.origin = NSPoint(x: max(14, (zoom.isHidden ? wrap.frame.minX : zoom.frame.minX) - mode.frame.width - 6), y: 5)
+        mode.sizeToFit(); mode.frame.origin = NSPoint(
+            x: max(14, (zoom.isHidden ? wrap.frame.minX : zoom.frame.minX) - mode.frame.width - 6),
+            y: 5
+        )
         header.frame.size.width = max(0, (mode.isHidden ? wrap.frame.minX : mode.frame.minX) - 20)
         if !drawing.isHidden, let diagram = code.diagram, diagram.width > 0 {
             let height = min(large ? 640 : min(300, diagram.height), available * diagram.height / diagram.width)
-            drawing.frame = NSRect(x: 15, y: 35, width: min(available, height * diagram.width / diagram.height), height: height)
+            drawing.frame = NSRect(
+                x: 15,
+                y: 35,
+                width: min(available, height * diagram.width / diagram.height),
+                height: height
+            )
             return drawing.frame.maxY + 15
         }
         let contentWidth = wrapping ? available : max(available, ceil(text.text.attributedString().size().width))
@@ -343,8 +373,8 @@ private extension Optional {
 }
 
 @MainActor final class NativeTableBlock: TranscriptBlock {
-    private let table: TranscriptPart.Table
-    private let scroll = NSScrollView()
+    private var table: TranscriptPart.Table
+    private let scroll = TranscriptHorizontalScroll()
     private let content = FlippedTranscriptCanvas()
     private var cells: [[TranscriptBody]] = []
     private let copy = NSButton()
@@ -352,15 +382,36 @@ private extension Optional {
         self.table = table
         super.init(frame: .zero)
         scroll.documentView = content; scroll.hasHorizontalScroller = true; scroll.drawsBackground = false
-        for row in table.rows {
-            cells.append(row.map { _ in let cell = TranscriptBody(); content.addSubview(cell); return cell })
-        }
+        syncCells()
         copy.target = self; copy.action = #selector(showCopyMenu); copy.isBordered = false
         addSubview(scroll); addSubview(copy)
     }
 
     @available(*, unavailable) required init?(coder _: NSCoder) {
         fatalError()
+    }
+
+    override func replace(_ part: TranscriptPart) -> Bool {
+        guard case let .table(table) = part else { return false }
+        self.table = table; syncCells(); return true
+    }
+
+    private func syncCells() {
+        while cells.count > table.rows.count {
+            cells.removeLast().forEach { $0.removeFromSuperview() }
+        }
+        for (index, row) in table.rows.enumerated() {
+            if index == cells.count {
+                cells.append([])
+            }
+            while cells[index].count > row.count {
+                cells[index].removeLast().removeFromSuperview()
+            }
+            while cells[index].count < row
+                .count {
+                let cell = TranscriptBody(); content.addSubview(cell); cells[index].append(cell)
+            }
+        }
     }
 
     override func update(document: MessageDocument, media: [String: String]) {
@@ -411,7 +462,7 @@ private extension Optional {
 
 @MainActor final class NativePicture: TranscriptBlock {
     private let source: String
-    private let button = NSButton()
+    private let button = PictureButton()
     private let image: Bool
     private let error = NSTextField(wrappingLabelWithString: "")
     init(_ source: String, image: Bool = true) {
@@ -438,11 +489,17 @@ private extension Optional {
         button.imagePosition = button.image != nil ? .imageOnly : .noImage
         button.image?.accessibilityDescription = button.title
         button.setAccessibilityLabel(button.title)
+        button.menu = nil
+        if image, button.image != nil {
+            let menu = NSMenu()
+            let save = NSMenuItem(title: label("saveImage"), action: #selector(saveImage), keyEquivalent: "")
+            save.target = self; menu.addItem(save); button.menu = menu
+        }
     }
 
     override func measure(_ width: CGFloat) -> CGFloat {
         let size = button.image?.size ?? .zero
-        let height = size.width > 0 ? min(300, size.height * min(1, width / size.width)) : 30
+        let height = size.width > 0 ? min(480, size.height * min(1, width / size.width)) : 30
         let messageHeight: CGFloat = error.isHidden ? 0 : ceil(error.cell?.cellSize(forBounds: NSRect(
             x: 0,
             y: 0,
@@ -456,6 +513,118 @@ private extension Optional {
 
     @objc private func open() {
         emit(document.mediaErrors?[source] != nil ? "retryImage" : image ? "image" : "link", text: source)
+    }
+
+    @objc private func saveImage() {
+        emit("saveImage", text: source)
+    }
+
+    var imageSize: NSSize {
+        button.image?.size ?? NSSize(width: 256, height: 192)
+    }
+
+    func fill(width: CGFloat, height: CGFloat) {
+        _ = measure(width); button.cover = true
+        button.frame = NSRect(
+            x: 0,
+            y: error.isHidden ? 0 : error.frame.maxY,
+            width: width,
+            height: max(26, height - error.frame.height)
+        )
+    }
+}
+
+@MainActor private final class PictureButton: NSButton {
+    var cover = false
+    override func draw(_ dirtyRect: NSRect) {
+        guard cover, let image, image.size.width > 0, image.size.height > 0 else { super.draw(dirtyRect); return }
+        let scale = max(bounds.width / image.size.width, bounds.height / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        NSGraphicsContext.saveGraphicsState(); bounds.clip()
+        image.draw(in: NSRect(
+            x: (bounds.width - size.width) / 2,
+            y: (bounds.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        ))
+        NSGraphicsContext.restoreGraphicsState()
+    }
+}
+
+/// Sent images keep one shape above the message; every cell opens its own image.
+@MainActor final class NativeSentImages: NSView {
+    private var sources: [String] = []
+    private var pictures: [NativePicture] = []
+    var send: (([String: Any]) -> Void)?
+    override var isFlipped: Bool {
+        true
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame); wantsLayer = true; layer?.cornerRadius = 16; layer?.masksToBounds = true
+        layer?.borderWidth = 1; layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+    }
+
+    @available(*, unavailable) required init?(coder _: NSCoder) {
+        fatalError()
+    }
+
+    func update(_ sources: [String], document: MessageDocument, media: [String: String]) {
+        if self.sources != sources {
+            pictures.forEach { $0.removeFromSuperview() }
+            pictures = sources
+                .map { source in let picture = NativePicture(source); addSubview(picture); return picture }
+            self.sources = sources
+        }
+        isHidden = sources.isEmpty
+        for picture in pictures {
+            picture.send = { [weak self] in self?.send?($0) }
+            picture.update(document: document, media: media)
+        }
+    }
+
+    func measure(_ maximum: CGFloat) -> NSSize {
+        guard !pictures.isEmpty else { return .zero }
+        if pictures.count == 1 {
+            let size = pictures[0].imageSize
+            let width = min(maximum, max(96, size.width * 192 / max(1, size.height)))
+            pictures[0].fill(width: width, height: 192); pictures[0].frame = NSRect(
+                x: 0,
+                y: 0,
+                width: width,
+                height: 192
+            )
+            return NSSize(width: width, height: 192)
+        }
+        let width = min(320, maximum)
+        for (index, picture) in pictures.enumerated() {
+            let rect: NSRect
+            if pictures.count == 3 {
+                let first = (width - 1) * 0.6
+                rect = index == 0 ? NSRect(x: 0, y: 0, width: first, height: 192) : NSRect(
+                    x: first + 1,
+                    y: CGFloat(index - 1) * 96.5,
+                    width: width - first - 1,
+                    height: 95.5
+                )
+            } else {
+                let height: CGFloat = pictures.count == 2 ? 192 : 96
+                let last = pictures.count % 2 == 1 && index == pictures.count - 1
+                rect = NSRect(
+                    x: CGFloat(index % 2) * (width + 1) / 2,
+                    y: CGFloat(index / 2) * (height + 1),
+                    width: last ? width : (width - 1) / 2,
+                    height: height
+                )
+            }
+            picture.fill(width: rect.width, height: rect.height); picture.frame = rect
+        }
+        return NSSize(width: width, height: pictures.count <= 3 ? 192 : CGFloat((pictures.count + 1) / 2) * 97 - 1)
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        pictures
     }
 }
 

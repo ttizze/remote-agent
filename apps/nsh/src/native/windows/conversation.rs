@@ -1,5 +1,7 @@
 //! One Win32 viewport owns its native Rich Edit controls, scrolling and selection.
 mod control;
+mod picture;
+mod tooltip;
 use control::{Edit, Item, items};
 use nsh_platform_windows::{ComponentContext, Components, NativeComponent};
 use serde_json::{Value, json};
@@ -13,7 +15,7 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         UI::{
-            Controls::{DRAWITEMSTRUCT, NMHDR, RichEdit::*, SetScrollInfo},
+            Controls::{DRAWITEMSTRUCT, NMHDR, RichEdit::*, SetScrollInfo, WM_MOUSELEAVE},
             HiDpi::GetDpiForWindow,
             Shell::*,
             WindowsAndMessaging::*,
@@ -172,8 +174,8 @@ impl NativeComponent for Conversation {
         if let Some(notice) = value["notice"].as_str() {
             parts.push(json!({"Text":[{"runs":[{"text":notice}]}]}));
         }
-        if value["history"].is_object() && value["history"]["enabled"] == true {
-            buttons.push(json!({"title":value["history"]["title"],"action":"history"}));
+        if value["history"].is_object() {
+            buttons.push(json!({"title":value["history"]["title"],"action":"history","enabled":value["history"]["enabled"]}));
         }
         if !parts.is_empty() || !buttons.is_empty() {
             state.rows.insert(
@@ -289,7 +291,7 @@ impl Viewport {
                 });
                 if row.value != *value || row.width != available {
                     let expanded =
-                        self.expanded.contains(&id) || !value["document"]["findKey"].is_null();
+                        self.expanded.contains(&id) || value["document"]["searching"] == true;
                     let (descriptors, body) = items(
                         value,
                         &self.blocks,
@@ -471,12 +473,39 @@ impl Row {
         let mut index = 0;
         let mut offset = 0;
         let mut body_start = 0;
+        let mut leading = 0;
         while index < self.items.len() {
             if index == self.body.start {
                 body_start = offset;
             }
+            if self.items[index].is_icon() {
+                self.items[index].place(x + 4, y + offset + 4, (16.0 * scale) as i32, scale, None);
+                leading = (28.0 * scale) as i32;
+                index += 1;
+                continue;
+            }
             let maximum = (self.collapsed && self.body.contains(&index))
                 .then_some(((176.0 * scale) as i32 - (offset - body_start)).max(0));
+            if self.value["user"] == true
+                && index < self.body.start
+                && self.items[index].is_picture()
+            {
+                let end = (index..self.body.start)
+                    .find(|at| !self.items[*at].is_picture())
+                    .unwrap_or(self.body.start);
+                if end - index > 1 {
+                    let image_width = ((320.0 * scale) as i32).min(width * 4 / 5);
+                    offset += layout_pictures(
+                        &self.items[index..end],
+                        x + width - image_width,
+                        y + offset,
+                        image_width,
+                        scale,
+                    ) + 4;
+                    index = end;
+                    continue;
+                }
+            }
             if self.items[index].inline_width(scale).is_some() {
                 let end = (index..self.items.len())
                     .find(|at| self.items[*at].inline_width(scale).is_none())
@@ -501,19 +530,64 @@ impl Row {
                 index = end;
             } else {
                 let user = self.value["user"] == true && self.body.contains(&index);
-                let drawn_width = if user { width * 4 / 5 } else { width };
+                let drawn_width = if self.value["user"] == true
+                    && self.items[index].is_picture()
+                    && index < self.body.start
+                {
+                    self.items[index].picture_width(width * 4 / 5, scale)
+                } else if user {
+                    width * 4 / 5
+                } else {
+                    width
+                };
                 let height = self.items[index].place(
-                    x + width - drawn_width,
+                    x + width - drawn_width + leading,
                     y + offset,
-                    drawn_width,
+                    drawn_width - leading,
                     scale,
                     maximum,
                 );
                 offset += height + if height > 0 { 6 } else { 0 };
                 index += 1;
             }
+            leading = 0;
         }
         offset + (self.value["gap"].as_f64().unwrap_or(8.0) as f32 * scale) as i32
+    }
+}
+
+fn layout_pictures(pictures: &[Item], x: i32, y: i32, width: i32, scale: f32) -> i32 {
+    let count = pictures.len();
+    let gap = scale.ceil() as i32;
+    for (index, picture) in pictures.iter().enumerate() {
+        let (left, top, w, h) = if count == 3 {
+            let first = width * 3 / 5;
+            if index == 0 {
+                (0, 0, first, (192.0 * scale) as i32)
+            } else {
+                (
+                    first + gap,
+                    ((index - 1) as f32 * 96.5 * scale) as i32,
+                    width - first - gap,
+                    (95.5 * scale) as i32,
+                )
+            }
+        } else {
+            let height = (if count == 2 { 192.0 } else { 96.0 } * scale) as i32;
+            let last = count % 2 == 1 && index + 1 == count;
+            (
+                (index % 2) as i32 * (width + gap) / 2,
+                (index / 2) as i32 * (height + gap),
+                if last { width } else { (width - gap) / 2 },
+                height,
+            )
+        };
+        picture.cell(x + left, y + top, w, h);
+    }
+    if count <= 3 {
+        (192.0 * scale) as i32
+    } else {
+        count.div_ceil(2) as i32 * ((96.0 * scale) as i32 + gap) - gap
     }
 }
 
@@ -613,7 +687,13 @@ unsafe extern "system" fn procedure(
             }
             WM_COMMAND if l.0 != 0 => {
                 if let Some(action) = unsafe { Edit::button(HWND(l.0 as *mut _)) } {
+                    let copied = action["action"] == "copy";
                     state.button(action, &context.owner);
+                    if copied {
+                        unsafe {
+                            Edit::copied(HWND(l.0 as *mut _));
+                        }
+                    }
                 }
             }
             _ => {}

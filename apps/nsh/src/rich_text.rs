@@ -50,7 +50,6 @@ pub(crate) enum Part {
 /// A Mermaid block as Core draws it.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Diagram {
-    svg: String,
     png: String,
     width: f32,
     height: f32,
@@ -88,7 +87,6 @@ pub(crate) fn diagrams(source: &str) -> Vec<(String, Diagram)> {
                         markdown_diagram(fence).map(|diagram| {
                             let drawing = Diagram {
                                 png: svg_png(&diagram.svg, 1600.0).unwrap_or_default(),
-                                svg: diagram.svg,
                                 width: diagram.width,
                                 height: diagram.height,
                             };
@@ -644,7 +642,12 @@ mod tests {
         else {
             panic!("a complete Mermaid block draws: {}", drawn.len());
         };
-        assert!(diagram.svg.contains("<svg") && diagram.width > 0.0 && diagram.height > 0.0);
+        assert!(diagram.width > 0.0 && diagram.height > 0.0);
+        assert!(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &diagram.png)
+                .unwrap()
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
         assert_eq!(code.trim_end(), "flowchart LR\n  A --> B");
         let streaming = parsed(&source[..source.len() - 3]);
         assert!(

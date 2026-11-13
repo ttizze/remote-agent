@@ -4,10 +4,18 @@ import CoreText
 import XCTest
 
 final class MessageTests: XCTestCase {
+    private struct Fixture: Decodable {
+        let blocks: [MessageParagraph]
+        let secondary: Bool
+        let target: String
+        let sideChat: Bool
+    }
+
     @MainActor func testConversationActionsUseAvailableSystemSymbols() {
         for name in [
             "copy",
             "agent",
+            "terminal", "eye", "zap", "alert", "stop", "compact", "tools", "thinking", "globe", "tool",
             "edit",
             "fork",
             "more",
@@ -99,7 +107,7 @@ final class MessageTests: XCTestCase {
     @MainActor func testCoreHighlightByteRangesPreserveUnicodeAndStyles() throws {
         let data = Data(#"{"blocks":[{"header":null,"marker":null,"code":false,"quoted":false,"depth":0,"alignment":"left","runs":[{"text":"😀é ","strong":false,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":4,"end":6,"active":true}]},{"text":"bold","strong":true,"emphasis":false,"strikethrough":false,"code":false,"link":null,"darkColor":null,"lightColor":null,"highlights":[{"start":0,"end":4,"active":false}]}]}],"secondary":false,"role":"assistant","target":"","sideChat":false,"maxWidth":500,"menu":{"quote":"","sideChat":""}}"#
             .utf8)
-        let document = try JSONDecoder().decode(MessageDocument.self, from: data)
+        let document = try JSONDecoder().decode(Fixture.self, from: data)
         let content = MessageAttributes.text(document.blocks, secondary: false, dark: true)
         XCTAssertEqual(content.string, "😀é bold")
         let accented = (content.string as NSString).range(of: "é").location
@@ -150,7 +158,7 @@ final class MessageTests: XCTestCase {
 
     @MainActor func testNativeTextPreservesTheSharedContentAndOpaqueActionTarget() throws {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "message", withExtension: "json"))
-        let document = try JSONDecoder().decode(MessageDocument.self, from: Data(contentsOf: url))
+        let document = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: url))
         let attributed = MessageAttributes.text(document.blocks, secondary: document.secondary, dark: true)
         XCTAssertEqual(attributed.string, "日本語 👋 ファイル")
         XCTAssertEqual(document.target, "opaque-native-menu-target")

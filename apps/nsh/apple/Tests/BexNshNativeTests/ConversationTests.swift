@@ -3,22 +3,53 @@ import AppKit
 import XCTest
 
 final class ConversationTests: XCTestCase {
+    @MainActor func testNativeCopyFeedbackResetsWhenItsCellChangesMessages() throws {
+        let view = NativeConversationCell(frame: NSRect(x: 0, y: 0, width: 700, height: 200))
+        var document = MessageDocument.empty; document.labels = ["copied": "Copied"]
+        func row(_ id: String) -> NativeConversationRow {
+            NativeConversationRow(
+                id: id,
+                user: true,
+                gap: 16,
+                buttons: [.init(action: "copy", title: "Copy message", icon: "copy", iconOnly: true)],
+                document: document,
+                parts: [.text([paragraph("original **source**")])],
+                images: [],
+                media: [:],
+                time: nil,
+                queued: false,
+                steer: false
+            )
+        }
+        var actions: [[String: Any]] = []
+        view.update(row("first"), width: 700, scope: "thread", send: { actions.append($0) })
+        let copy = try XCTUnwrap(controls(view).first { $0.title == "Copy message" })
+        copy.performClick(nil)
+        XCTAssertEqual(actions.last?["action"] as? String, "copy")
+        XCTAssertEqual(copy.accessibilityLabel(), "Copied")
+        XCTAssertEqual(copy.imagePosition, .imageOnly)
+        view.update(row("second"), width: 700, scope: "thread", send: { actions.append($0) })
+        XCTAssertEqual(copy.accessibilityLabel(), "Copy message")
+        XCTAssertEqual(copy.image?.accessibilityDescription, "Copy message")
+    }
+
     @MainActor func testNativeCodeAndTableKeepAccessibleIconActionsAndWrappingState() throws {
         var document = MessageDocument.empty
-        document.labels = ["copyCode":"Copy code", "copyTable":"Copy table", "wrap":"Wrap", "unwrap":"Unwrap"]
+        document.labels = ["copyCode": "Copy code", "copyTable": "Copy table", "wrap": "Wrap", "unwrap": "Unwrap"]
         let body = TranscriptBody()
-        body.update([.code(.init(label:"swift", source:"let x = 1", blocks:[paragraph("let x = 1")], diagram:nil)),
-                     .table(.init(source:"| a |", csv:"a", rows:[[[.text([paragraph("a")])]]]))], document:document, media:[:])
+        body.update([.code(.init(label: "swift", source: "let x = 1", blocks: [paragraph("let x = 1")], diagram: nil)),
+                     .table(.init(source: "| a |", csv: "a", rows: [[[.text([paragraph("a")])]]]))], document: document,
+                    media: [:])
         let buttons = controls(body)
-        for title in ["Copy code","Copy table","Unwrap"] {
-            let button = try XCTUnwrap(buttons.first{$0.accessibilityLabel() == title},title)
-            XCTAssertEqual(button.imagePosition,.imageOnly)
+        for title in ["Copy code", "Copy table", "Unwrap"] {
+            let button = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == title }, title)
+            XCTAssertEqual(button.imagePosition, .imageOnly)
             XCTAssertNotNil(button.image)
         }
-        let wrap = try XCTUnwrap(buttons.first{$0.title == "Unwrap"})
+        let wrap = try XCTUnwrap(buttons.first { $0.title == "Unwrap" })
         wrap.performClick(nil)
-        XCTAssertEqual(wrap.accessibilityLabel(),"Wrap")
-        XCTAssertEqual(wrap.image?.accessibilityDescription,"Wrap")
+        XCTAssertEqual(wrap.accessibilityLabel(), "Wrap")
+        XCTAssertEqual(wrap.image?.accessibilityDescription, "Wrap")
     }
 
     @MainActor func testStreamingReusesTheNativeTextAndPreservesOnlyUnchangedSelection() throws {
@@ -42,7 +73,13 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(view.table.numberOfRows, 1)
         let first = try XCTUnwrap(view.table.view(atColumn: 0, row: 0, makeIfNecessary: true))
         XCTAssertTrue(texts(first).contains { $0.string == "Original conversation" })
-        try view.update(update(scope: "two", text: "Different conversation"))
+        let selected = try XCTUnwrap(texts(first).first)
+        selected.setSelectedRange((selected.string as NSString).range(of: "conversation"))
+        try view.update(update(scope: "two", text: "Original conversation"))
+        await settle()
+        let identical = try XCTUnwrap(view.table.view(atColumn: 0, row: 0, makeIfNecessary: true))
+        XCTAssertTrue(texts(identical).allSatisfy { $0.selectedRange().length == 0 })
+        try view.update(update(scope: "three", text: "Different conversation"))
         await settle()
         let next = try XCTUnwrap(view.table.view(atColumn: 0, row: 0, makeIfNecessary: true))
         XCTAssertTrue(texts(next).contains { $0.string == "Different conversation" })
@@ -70,6 +107,27 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(action["text"] as? String, "Alpha")
         XCTAssertEqual(action["target"] as? String, "selected-conversation")
         XCTAssertTrue(toolbar.isHidden)
+        // Scrolling dismisses the actions while preserving the actual text
+        // selection. A publication refresh must not manufacture a new selection.
+        text.setSelectedRange((text.string as NSString).range(of: "Bravo"))
+        XCTAssertFalse(toolbar.isHidden)
+        view.scroll.beginInteraction?(); view.scroll.endInteraction?()
+        XCTAssertTrue(toolbar.isHidden)
+        view.update(NativeConversationUpdate(
+            scope: "selected-conversation",
+            reset: false,
+            order: nil,
+            changed: [],
+            removed: [],
+            following: false,
+            inset: 0,
+            history: nil,
+            notice: nil,
+            latest: "Latest"
+        ))
+        await settle()
+        XCTAssertEqual(text.selectedRange(), (text.string as NSString).range(of: "Bravo"))
+        XCTAssertTrue(toolbar.isHidden)
         view.stop()
     }
 
@@ -87,8 +145,8 @@ final class ConversationTests: XCTestCase {
                                  "depth": 0, "alignment": "left", "runs": [["text": text, "strong": false,
                                                                             "emphasis": false, "strikethrough": false,
                                                                             "code": false]]]]]],
-            "document": ["blocks": [], "secondary": false, "role": "assistant", "target": scope,
-                         "sideChat": true, "maxWidth": 700, "menu": ["quote": "Quote", "sideChat": "Side chat"]]
+            "document": ["secondary": false, "role": "assistant", "target": scope,
+                         "sideChat": true, "menu": ["quote": "Quote", "sideChat": "Side chat"]]
         ]
         let data = try JSONSerialization.data(withJSONObject: ["scope": scope, "reset": true, "order": ["same-row-id"],
                                                                "changed": [row], "removed": [], "following": true,
@@ -101,7 +159,7 @@ final class ConversationTests: XCTestCase {
     }
 
     @MainActor private func controls(_ view: NSView) -> [NSButton] {
-        (view as? NSButton).map{[$0]} ?? view.subviews.flatMap(controls)
+        (view as? NSButton).map { [$0] } ?? view.subviews.flatMap(controls)
     }
 
     @MainActor private func settle() async {

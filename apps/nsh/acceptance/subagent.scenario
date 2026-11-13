@@ -1,12 +1,13 @@
-# A child keeps its name, latest message, timing and navigation outside folded work.
+# Expanding work keeps the child's name, latest message, timing and navigation.
 expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
 type "AI に依頼する" "[items] [immediate] サブエージェントを確認します"
 press 送信
 expect "シミュレータで完了しました。" 30000
+press "*作業しました"
 expect "Fixture reviewer" 20000
 expect "Reviewed."
-expect "4.5秒"
+expect "4秒"
 type "AI に依頼する" "親の下書き"
 press "Fixture reviewer"
 expect "Review the change" 20000
@@ -16,6 +17,7 @@ expect_absent "親の下書き"
 press 検証プロジェクト
 press "Simulator conversation"
 expect "親の下書き" after "AI に依頼する" 20000
+press "*作業しました"
 expect "Fixture reviewer"
 expect "Reviewed."
 screenshot returned-to-parent

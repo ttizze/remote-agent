@@ -103,7 +103,7 @@ jobs:
               scripts/test-ios-scroll.sh) area=iphone ;;
               apps/native-focus/*) area=mac ;;
               apps/native-browser/* | apps/native-settings/*) area='iphone-mac' ;;
-              # The NSH client is the Mac, Windows and iPhone app.
+              # Desktop NSH also provides the browser renderer used by iPhone fixtures.
               apps/nsh/*) area=nsh ;;
               apps/mobile/src/* | apps/mobile/build.gradle.kts | build.gradle.kts | settings.gradle.kts | \
                 gradle.properties | gradle/* | gradlew | gradlew.bat | detekt.yml | scripts/android-e2e.sh | \

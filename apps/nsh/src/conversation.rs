@@ -127,7 +127,7 @@ struct Row {
     /// A plan's complete Markdown.
     note: SharedString,
     /// A notification row's icon.
-    notification: Option<crate::ui::Icon>,
+    notification: Option<agent_core::presentation::background_work::NotificationIcon>,
     agent: Option<agent_core::presentation::agents::SubagentPresentation>,
     error: Option<TurnErrorPresentation>,
     /// The message's id while the Host may not have received it: it goes back
@@ -488,7 +488,7 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
             }
         }
         ConversationRowContent::Notification { icon, .. } => {
-            shown.notification = Some(crate::ui::Icon::notification(icon));
+            shown.notification = Some(icon);
         }
         ConversationRowContent::Error { error } => shown.error = Some(error),
         _ => {}

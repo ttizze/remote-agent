@@ -9,6 +9,7 @@ struct ConversationButton: Decodable, Equatable {
     var menuItems: [MessageMenuItem]? = nil
     var enabled: Bool? = nil
     var accessibilityLabel: String? = nil
+    var header: Bool? = nil
 }
 
 struct NativeConversationRow: Decodable, Equatable {
@@ -29,6 +30,8 @@ struct NativeConversationRow: Decodable, Equatable {
     var collapsible: Bool? = nil
     var top: Double? = nil
     var agentStatus: String? = nil
+    var icon: String? = nil
+    var separator: Bool? = nil
 }
 
 struct NativeConversationUpdate: Decodable {
@@ -180,7 +183,9 @@ struct NativeConversationUpdate: Decodable {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if !self.applying && !self.restoring { self.hideSelection() }
+                if !self.applying, !self.restoring {
+                    self.hideSelection()
+                }
                 self.updateLatest()
             }
         })
@@ -244,7 +249,6 @@ struct NativeConversationUpdate: Decodable {
             scope = update.scope
             readingAnchor = nil
             hideSelection()
-            table.isHidden = true
         }
         for id in update.removed {
             rows.removeValue(forKey: id)
@@ -324,7 +328,6 @@ struct NativeConversationUpdate: Decodable {
             refreshVisible()
             table.layoutSubtreeIfNeeded()
             restore(anchor)
-            table.isHidden = false
             return
         }
         applying = true
@@ -339,7 +342,6 @@ struct NativeConversationUpdate: Decodable {
                 self.table.layoutSubtreeIfNeeded()
                 if self.generation == generation {
                     self.restore(anchor)
-                    self.table.isHidden = false
                 }
                 if self.pending {
                     self.pending = false
@@ -530,12 +532,14 @@ struct NativeConversationUpdate: Decodable {
 
 @MainActor final class NativeConversationCell: NSTableCellView {
     private let body = TranscriptBody()
+    private let sentImages = NativeSentImages()
     private let bubble = NSView()
     private let metadata = NSTextField(labelWithString: "")
     private let marker = NSTextField(labelWithString: "")
     private let progress = NSProgressIndicator()
     private let rule = NSView()
     private let agentBadge = NSView()
+    private let rowIcon = NSImageView()
     private let expand = NSButton()
     private var buttons: [NSButton] = []
     private var row: NativeConversationRow?
@@ -557,13 +561,14 @@ struct NativeConversationUpdate: Decodable {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        for child in [bubble, body, metadata, marker, progress, rule, expand, agentBadge] {
+        for child in [bubble, body, sentImages, metadata, marker, progress, rule, expand, agentBadge, rowIcon] {
             addSubview(child)
         }
         bubble.wantsLayer = true; bubble.layer?.cornerRadius = 18
         bubble.layer?.backgroundColor = NSColor(white: 20.0 / 255, alpha: 1).cgColor
         rule.wantsLayer = true; rule.layer?.backgroundColor = NSColor(white: 22.0 / 255, alpha: 1).cgColor
         agentBadge.wantsLayer = true; agentBadge.layer?.cornerRadius = 4
+        rowIcon.contentTintColor = .secondaryLabelColor; rowIcon.setAccessibilityElement(false)
         progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
         metadata.font = .systemFont(ofSize: 12); marker.font = .systemFont(ofSize: 12)
         metadata.textColor = NSColor(white: 170.0 / 255, alpha: 1); marker.textColor = metadata.textColor
@@ -578,8 +583,12 @@ struct NativeConversationUpdate: Decodable {
     }
 
     override func accessibilityChildren() -> [Any]? {
-        let actions: [Any] = row?.user == true ? [metadata] + buttons : buttons + [metadata]
-        return [marker, body] + actions + (expand.isHidden ? [] : [expand])
+        let time: [Any] = metadata.stringValue.isEmpty ? [] : [metadata]
+        let headers: [Any] = buttons.enumerated().filter { row?.buttons[$0.offset].header == true }.map(\.element)
+        let footer: [Any] = buttons.enumerated().filter { row?.buttons[$0.offset].header != true }.map(\.element)
+        let actions: [Any] = row?.user == true ? time + footer : footer + time
+        return (marker.isHidden ? [] : [marker]) + (sentImages.isHidden ? [] : [sentImages]) + headers + [body] +
+            actions + (expand.isHidden ? [] : [expand])
     }
 
     override func updateTrackingAreas() {
@@ -623,30 +632,45 @@ struct NativeConversationUpdate: Decodable {
         let changed = self.row != row || self.scope != scope || lane != width
         if self.row?.id != row.id || self.scope != scope {
             unfolded = false; hovered = false
+            buttons.compactMap { $0 as? CopyActionButton }.forEach { $0.reset() }
+            body.clear()
         }
         self.send = send; self.scope = scope
+        guard changed else { return false }
         body.send = { [weak self] action in
             guard let self, let row = self.row else { return }
             var value = action; value["scope"] = self.scope; value["row"] = row.id; self.send?(value)
         }
-        let parts = row.parts + row.images.map { TranscriptPart.image(.init(source: $0)) }
+        sentImages.send = body.send
+        sentImages.update(row.user ? row.images : [], document: row.document, media: row.media)
+        let parts = row.parts + (row.user ? [] : row.images.map { TranscriptPart.image(.init(source: $0)) })
         body.update(parts, document: row.document, media: row.media)
         metadata.stringValue = row.time ?? ""
         marker.stringValue = [
             row.queued ? row.document.labels?["queued"] : nil,
             row.steer ? row.document.labels?["steer"] : nil
         ].compactMap(\.self).joined(separator: " · ")
+        marker.setAccessibilityLabel([
+            row.queued ? row.document.labels?["queuedDescription"] : nil,
+            row.steer ? row.document.labels?["steerDescription"] : nil
+        ].compactMap(\.self).joined(separator: " · "))
         marker.isHidden = marker.stringValue.isEmpty
         if self.row?.buttons != row.buttons {
             buttons.forEach { $0.removeFromSuperview() }
             buttons = row.buttons.map { action in
-                let button = NSButton(title: action.title, target: self, action: #selector(pressed(_:)))
+                let button = action.action == "copy" ? CopyActionButton() : NSButton()
+                button.title = action.title; button.target = self; button.action = #selector(pressed(_:))
                 button.identifier = .init(action.action); button.isBordered = false; button.isEnabled = action
                     .enabled ?? true
                 button.font = .systemFont(ofSize: action.disclosure == true ? 14 : 12)
                 button.contentTintColor = NSColor(white: 170.0 / 255, alpha: 1)
-                button.image = MessageAttributes.icon(action.icon, size: action.disclosure == true ? 14 : 12, label: action.accessibilityLabel ?? action.title)
-                button.imagePosition = action.iconOnly == true ? .imageOnly : action.action == "agent" ? .imageLeading : .imageTrailing
+                button.image = MessageAttributes.icon(
+                    action.icon,
+                    size: action.disclosure == true ? 14 : 12,
+                    label: action.accessibilityLabel ?? action.title
+                )
+                button.imagePosition = action.iconOnly == true ? .imageOnly : action
+                    .action == "agent" ? .imageLeading : .imageTrailing
                 button.setAccessibilityLabel(action.accessibilityLabel ?? action.title); button.toolTip = action.title
                 addSubview(button); return button
             }
@@ -657,6 +681,7 @@ struct NativeConversationUpdate: Decodable {
             progress.stopAnimation(nil)
         }
         self.row = row; lane = width
+        rowIcon.image = MessageAttributes.icon(row.icon, size: 14); rowIcon.isHidden = rowIcon.image == nil
         agentBadge.isHidden = row.agentStatus == nil
         let color: NSColor = switch row.agentStatus {
         case "completed": .systemGreen
@@ -682,6 +707,11 @@ struct NativeConversationUpdate: Decodable {
         if !marker.isHidden {
             marker.sizeToFit(); marker.frame.origin = NSPoint(x: x, y: y); y += 20
         }
+        if !sentImages.isHidden {
+            let size = sentImages.measure(lane * 0.8)
+            sentImages.frame = NSRect(x: outer + lane - size.width, y: y, width: size.width, height: size.height)
+            y += size.height + (row.parts.isEmpty ? 0 : 4)
+        }
         if row.agentStatus != nil {
             metadata.sizeToFit()
             for button in buttons {
@@ -697,10 +727,20 @@ struct NativeConversationUpdate: Decodable {
             measured = NSSize(width: lane, height: ceil(max(1, y + height + row.gap)))
             return
         }
-        let height = body.measure(max(1, width - inset * 2))
-        let collapsed = row.collapsible == true && !unfolded && row.document.findKey == nil
+        let headers = row.buttons.indices.filter { row.buttons[$0].header == true }
+        let iconInset: CGFloat = rowIcon.isHidden ? 0 : 28
+        rowIcon.frame = NSRect(x: x + 4, y: y + 5, width: 16, height: 16)
+        y += placeHeaders(headers, x: x + iconInset, y: y, width: width - iconInset)
+        let bodyIcon: CGFloat = headers.isEmpty ? iconInset : 0
+        let height = body.measure(max(1, width - inset * 2 - bodyIcon))
+        let collapsed = row.collapsible == true && !unfolded && row.document.searching != true
         let drawn = collapsed ? min(176, height) : height
-        body.frame = NSRect(x: x + inset, y: y + (row.user ? 12 : 0), width: width - inset * 2, height: drawn)
+        body.frame = NSRect(
+            x: x + inset + bodyIcon,
+            y: y + (row.user ? 12 : 0),
+            width: width - inset * 2 - bodyIcon,
+            height: drawn
+        )
         body.wantsLayer = true; body.layer?.masksToBounds = collapsed
         bubble.isHidden = !row.user || row.parts.isEmpty
         bubble.frame = NSRect(x: x, y: y, width: width, height: drawn + (row.user ? 24 : 0))
@@ -714,7 +754,9 @@ struct NativeConversationUpdate: Decodable {
         }
         y += row.fold == true ? 4 : row.user ? 4 : row.parts.isEmpty ? 2 : 6
         metadata.sizeToFit()
-        let widths = row.buttons.enumerated().map { index, action -> CGFloat in
+        let footer = row.buttons.indices.filter { row.buttons[$0].header != true }
+        let widths = footer.map { index -> CGFloat in
+            let action = row.buttons[index]
             if action.iconOnly == true {
                 return 24
             }
@@ -726,19 +768,37 @@ struct NativeConversationUpdate: Decodable {
         if row.user {
             metadata.frame.origin = NSPoint(x: max(x, bx - metadata.frame.width - 8), y: y + 4)
         }
-        for (index, button) in buttons.enumerated() {
-            button.frame = NSRect(x: bx, y: y, width: widths[index], height: 24); bx += widths[index] + gap
+        for (at, index) in footer.enumerated() {
+            buttons[index].frame = NSRect(x: bx, y: y, width: widths[at], height: 24); bx += widths[at] + gap
         }
         if !row.user {
             metadata.frame.origin = NSPoint(x: bx, y: y + 4)
         }
-        let meta = !buttons.isEmpty || !metadata.stringValue.isEmpty
+        let meta = !footer.isEmpty || !metadata.stringValue.isEmpty
         if meta {
             y += 24
         }
-        rule.isHidden = row.fold != true
+        rule.isHidden = row.fold != true && row.separator != true
         rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
         measured = NSSize(width: lane, height: ceil(max(1, y + row.gap + (row.fold == true ? 8 : 0))))
+    }
+
+    private func placeHeaders(_ indices: [Int], x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
+        var height: CGFloat = 0
+        for index in indices {
+            let button = buttons[index]; button.sizeToFit()
+            let menu = button.imagePosition == .imageOnly
+            button.frame = NSRect(
+                x: menu ? x + width - 24 : x,
+                y: y,
+                width: menu ? 24 : min(width, button.frame.width + 8),
+                height: 24
+            )
+            if !menu {
+                height = 28
+            }
+        }
+        return height
     }
 
     @objc private func toggleExpanded() {
@@ -757,12 +817,39 @@ struct NativeConversationUpdate: Decodable {
             menu.popUp(positioning: nil, at: NSPoint(x: sender.frame.minX, y: sender.frame.maxY), in: self)
         } else {
             send?(["action": id, "row": row.id, "scope": scope])
+            (sender as? CopyActionButton)?.copied(row.document.labels?["copied"] ?? "")
         }
     }
 
     @objc private func menuPressed(_ item: NSMenuItem) {
         guard let row, let id = item.representedObject as? String else { return }
         send?(["action": id, "row": row.id, "scope": scope])
+    }
+}
+
+/// Feedback belongs to the native button and ends when its row is reused.
+@MainActor private final class CopyActionButton: NSButton {
+    private var original: (NSImage?, String?, String?)?
+    private var serial = 0
+    func reset() {
+        serial += 1
+        if let original {
+            image = original.0; setAccessibilityLabel(original.1); toolTip = original.2
+        }
+        original = nil
+    }
+
+    func copied(_ label: String) {
+        if original == nil {
+            original = (image, accessibilityLabel(), toolTip)
+        }
+        image = MessageAttributes.icon("check", size: 12, label: label)
+        setAccessibilityLabel(label); toolTip = label
+        serial += 1; let expected = serial
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, serial == expected else { return }
+            reset()
+        }
     }
 }
 

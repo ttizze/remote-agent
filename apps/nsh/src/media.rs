@@ -478,15 +478,25 @@ fn viewer(preview: Preview) -> impl Element {
                     .enabled(move || zoom.get().zoomed_out().is_some()),
                 )
                 .child(
-                    nsh_base::button()
-                        .accessibility_label(Some(SharedString::from(tr("倍率をリセット"))))
-                        .h(px(24.0))
-                        .px_2()
-                        .rounded(px(ui::RADIUS))
-                        .justify_center()
-                        .hover(|s| s.bg(colors::GHOST_HOVER))
-                        .child(text(move || zoom.get().label()).text_size(px(14.0)))
-                        .on_press(move || zoom.set(ImageZoom::FIT)),
+                    view()
+                        .role(AccessibilityRole::Group)
+                        .accessibility_value(move || {
+                            Some(nsh_core::AccessibilityValue {
+                                text: Some(zoom.get().label().into()),
+                                ..Default::default()
+                            })
+                        })
+                        .child(
+                            nsh_base::button()
+                                .accessibility_label(Some(SharedString::from(tr("倍率をリセット"))))
+                                .h(px(24.0))
+                                .px_2()
+                                .rounded(px(ui::RADIUS))
+                                .justify_center()
+                                .hover(|s| s.bg(colors::GHOST_HOVER))
+                                .child(text(move || zoom.get().label()).text_size(px(14.0)))
+                                .on_press(move || zoom.set(ImageZoom::FIT)),
+                        ),
                 )
                 .child(
                     ui::icon_button(Icon::ZOOM_IN, tr("拡大"), move || {
@@ -551,7 +561,7 @@ fn gallery_thumbnails(preview: Preview, sources: Memo<Vec<String>>) -> impl Elem
 /// Saves the image's local copy where the user chooses, as the desktop
 /// client's did; `saved` marks it once it is.
 #[cfg(desktop)]
-fn save_image(file: Shared<LocalFile>, saved: Option<Signal<bool>>) {
+pub(crate) fn save_image(file: Shared<LocalFile>, saved: Option<Signal<bool>>) {
     let mut dialog = nsh_core::file_dialog::SaveDialog::new();
     if let Some(name) = file.path.file_name() {
         dialog = dialog.file_name(name.to_string_lossy());

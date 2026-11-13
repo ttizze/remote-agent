@@ -222,10 +222,6 @@ impl Icon {
 }
 
 impl Icon {
-    const NOTIFY_BOT: Self = icon!(Bot);
-    const NOTIFY_TERMINAL: Self = icon!(Terminal);
-    const NOTIFY_EYE: Self = icon!(Eye);
-    const NOTIFY_ZAP: Self = icon!(Zap);
     /// Lucide 1 names circle-alert circle-exclamation-point.
     pub(crate) const ALERT: Self = icon!(CircleExclamationPoint);
     /// T3 Code's sidebar statuses: working, waiting on background work, an
@@ -234,20 +230,6 @@ impl Icon {
     pub(crate) const STATUS_WAITING: Self = icon!(CircleDotDashed);
     pub(crate) const STATUS_DONE: Self = icon!(CircleCheck);
     pub(crate) const STATUS_APPROVAL: Self = icon!(ShieldQuestionMark);
-
-    /// A notification row's icon, as T3 Code's work log draws it.
-    pub(crate) fn notification(
-        icon: agent_core::presentation::background_work::NotificationIcon,
-    ) -> Self {
-        use agent_core::presentation::background_work::NotificationIcon::*;
-        match icon {
-            Bot => Self::NOTIFY_BOT,
-            Terminal => Self::NOTIFY_TERMINAL,
-            Eye => Self::NOTIFY_EYE,
-            Zap => Self::NOTIFY_ZAP,
-            CircleAlert => Self::ALERT,
-        }
-    }
 }
 
 /// An icon in the current text color.

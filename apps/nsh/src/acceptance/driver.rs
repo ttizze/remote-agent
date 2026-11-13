@@ -522,6 +522,14 @@ fn reading_order(tree: &Tree, find: &Find) -> Attempt {
             )
         })
         .filter(|&node| tree.frame(node).size.height > 0.0)
+        // A native scrollbar's arrow buttons are window chrome, not rows of
+        // the conversation. Its position is checked by expect_scrolled.
+        .filter(|&node| {
+            !tree
+                .lineage(node)
+                .into_iter()
+                .any(|at| tree.nodes[at].role == "AXScrollBar")
+        })
         .collect();
     if texts.len() < 2 {
         return Attempt::Pending(format!("{} elements to order", texts.len()));
@@ -1378,7 +1386,10 @@ fn scroll(
     let hit = content
         .hitTest(content.convertPoint_fromView(point, None))
         .ok_or("the wheel hit no view")?;
-    hit.scrollWheel(&event);
+    // NSWindow dispatches a wheel to the enclosing scroll view, including
+    // when hit testing lands on one of its document's plain NSViews.
+    let scroll: Option<Retained<NSView>> = unsafe { msg_send![&*hit, enclosingScrollView] };
+    scroll.unwrap_or(hit).scrollWheel(&event);
     Ok(())
 }
 
