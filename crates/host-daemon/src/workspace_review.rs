@@ -197,11 +197,7 @@ mod tests {
             }))
             .await
             .unwrap();
-        let task = store
-            .prepare(root.to_str(), || async { Ok(()) })
-            .await
-            .unwrap()
-            .unwrap();
+        let task = store.prepare(root.to_str()).await.unwrap().unwrap();
         let branch = git(&task, &["branch", "--show-current"]).trim().to_owned();
         let key = comparison::base_key(&branch);
         assert_eq!(

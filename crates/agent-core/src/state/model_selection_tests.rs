@@ -310,7 +310,7 @@ fn apply(snapshot: &Snapshot, intent: Intent) -> Snapshot {
 #[test]
 fn existing_conversation_can_choose_another_provider_without_losing_its_draft() {
     let id = agent_protocol::session::SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "existing".into(),
     };
     let key = DraftKey::from(id.clone());
@@ -549,21 +549,18 @@ fn reading_a_conversation_and_refreshing_catalogs_do_not_remember_its_model() {
     );
     let remembered = snapshot.catalog.model_preferences.clone();
     let session = agent_protocol::session::SessionRef {
-        provider: ProviderKind::Claude,
+        provider: Some(ProviderKind::Claude),
         id: "old".into(),
     };
     let mut snapshot = snapshot;
     ReadThread::open(session.clone())
         .prepare(&mut snapshot, "")
         .unwrap();
-    ReadThread::open(session.clone()).apply(
+    crate::test_conversations::open(
         &mut snapshot,
-        "",
         serde_json::from_value(json!({
-            "session":session, "response":{
-                "thread":{"id":session,"cwd":"/old"},
-                "model":{"provider":"claude","id":"shared"}, "effort":"medium", "serviceTier":"fast"
-            }
+            "thread":{"id":session,"cwd":"/old"},
+            "model":{"provider":"claude","id":"shared"}, "effort":"medium", "serviceTier":"fast"
         }))
         .unwrap(),
     );
@@ -612,7 +609,7 @@ fn explicit_changes_in_existing_chats_are_remembered_without_touching_other_chat
         "default",
     );
     let session = agent_protocol::session::SessionRef {
-        provider: ProviderKind::Claude,
+        provider: Some(ProviderKind::Claude),
         id: "existing".into(),
     };
     let snapshot = select(
@@ -881,7 +878,7 @@ fn starting_a_new_chat_does_not_repair_other_conversations_from_the_catalog() {
         "default",
     );
     let key = DraftKey::from(agent_protocol::session::SessionRef {
-        provider: ProviderKind::Claude,
+        provider: Some(ProviderKind::Claude),
         id: "old-model".into(),
     });
     let previous = Arc::new(Draft {

@@ -28,3 +28,13 @@ uniffi::setup_scaffolding!();
 #[cfg(test)]
 #[path = "../tests/support/model_catalog.rs"]
 mod test_models;
+
+#[cfg(test)]
+#[path = "../tests/support/conversation_fixtures.rs"]
+mod test_conversations;
+
+// Shared with integration suites; each test binary uses only part of the Host.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/host.rs"]
+mod test_host;

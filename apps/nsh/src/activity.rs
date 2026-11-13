@@ -61,6 +61,34 @@ pub(crate) fn details(
             item_id: item.source.data.native_id.clone()?,
         })
     });
+    let output = computed(move || {
+        if !open()
+            || item.with(|item| {
+                item.as_ref()
+                    .is_none_or(|item| item.source.data.kind != "command")
+            })
+        {
+            return None;
+        }
+        let read = request.get()?;
+        Some((read.thread_id, read.item_id))
+    });
+    effect(move || {
+        if let Some((thread_id, item_id)) = output.get() {
+            connection.dispatch(Intent::WatchCommandOutput {
+                thread_id: thread_id.clone(),
+                item_id: item_id.clone(),
+                watching: true,
+            });
+            cleanup(move || {
+                connection.dispatch(Intent::WatchCommandOutput {
+                    thread_id,
+                    item_id,
+                    watching: false,
+                })
+            });
+        }
+    });
     let running = move || {
         request.with(|read| {
             read.as_ref().is_some_and(|read| {

@@ -184,7 +184,7 @@ fn extension_changes_membership_before_subsequent_live_changes() {
 }
 
 #[test]
-fn rollback_cascades_items_and_resets_an_empty_loaded_window() {
+fn removing_a_turn_cascades_items_and_keeps_the_loaded_window() {
     let cached = empty()
         .apply(
             1,
@@ -210,7 +210,8 @@ fn rollback_cascades_items_and_resets_an_empty_loaded_window() {
         )
         .unwrap();
     assert!(next.rows.is_empty());
-    assert!(next.cursor.is_none()); // The owner must subscribe again, not resume from an invalid floor.
+    assert_eq!(next.cursor, Some(cursor(3)));
+    assert_eq!(next.window, cached.window);
 }
 
 #[test]
@@ -329,6 +330,59 @@ fn hydration_cannot_advance_a_stale_rows_version_without_its_live_change() {
             )
             .unwrap(),
         cached
+    );
+}
+
+#[test]
+fn unrelated_streaming_does_not_starve_a_valid_hydration() {
+    let mut deferred = item("i", 2, 1, "t", 1);
+    deferred.content = Content::Summary("summary".into());
+    let cached = empty()
+        .apply(
+            1,
+            snapshot(2, window(0, 0), vec![turn("t", 1, 1), deferred]),
+        )
+        .unwrap();
+    let streaming = cached
+        .apply(1, changes(2, 10, vec![input("another", 10, "new")], vec![]))
+        .unwrap();
+    let full = item("i", 2, 1, "t", 1);
+    let hydrated = streaming
+        .apply(
+            1,
+            Message::Hydrate {
+                cursor: cursor(2),
+                row: full.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(hydrated.rows()[&full.key], full);
+    assert_eq!(hydrated.cursor(), Some(cursor(10)));
+    let removed = streaming
+        .apply(
+            1,
+            changes(
+                10,
+                11,
+                vec![],
+                vec![Removal {
+                    key: full.key.clone(),
+                    version: 11,
+                }],
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        removed
+            .apply(
+                1,
+                Message::Hydrate {
+                    cursor: cursor(2),
+                    row: full
+                }
+            )
+            .unwrap(),
+        removed
     );
 }
 

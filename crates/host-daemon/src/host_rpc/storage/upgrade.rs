@@ -1,0 +1,694 @@
+//! Read the previous database once, with the Host lease held. The destination
+//! schema, converted rows and version commit together; originals stay untouched.
+use super::*;
+use agent_protocol::{
+    conversation::{
+        Attempt, InputContent, InputState, PendingDelivery, PendingInput, UnknownState,
+    },
+    models::{ThreadResponse, Turn},
+    operations::{InputQueue, Submission},
+    session::{PreparationStatus, SessionPreparation},
+};
+use serde::Deserialize;
+use std::{collections::BTreeMap, fs, io::ErrorKind};
+
+const FILES: [&str; 5] = [
+    "bex-conversations.json",
+    "bex-read-state.json",
+    "bex-model-selections.json",
+    "bex-conversations.rewind",
+    "bex-projects.json",
+];
+
+#[derive(Deserialize)]
+struct Binding {
+    session: SessionRef,
+    covered: Option<usize>,
+}
+#[derive(Deserialize)]
+struct Handoff {
+    session: SessionRef,
+    delivery: String,
+    submission: agent_protocol::session::SubmissionDelivery,
+    input_id: ClientInputId,
+    receipt: Option<agent_protocol::operations::SubmissionReceipt>,
+}
+#[derive(Deserialize)]
+struct Startup {
+    preparation: SessionPreparation,
+}
+#[derive(Deserialize)]
+struct Conversation {
+    id: SessionRef,
+    active: SessionRef,
+    cwd: String,
+    name: Option<String>,
+    preview: Option<String>,
+    bindings: Vec<Binding>,
+    handoffs: Vec<Handoff>,
+    startup: Option<Startup>,
+}
+#[derive(Deserialize)]
+struct Read {
+    session: SessionRef,
+    turn_id: TurnId,
+    unread: bool,
+}
+#[derive(Deserialize)]
+struct Selection {
+    session: SessionRef,
+    #[serde(flatten)]
+    options: decision::records::Selection,
+}
+#[derive(Deserialize)]
+struct Rewind {
+    previous: Option<Conversation>,
+    history: ThreadResponse,
+}
+
+pub(super) struct Previous {
+    history: BTreeMap<SessionRef, ThreadResponse>,
+    conversations: Vec<Conversation>,
+    queues: BTreeMap<SessionRef, InputQueue>,
+    reads: Vec<Read>,
+    models: Vec<Selection>,
+    projects: Vec<agent_protocol::models::Project>,
+    backup: tempfile::TempDir,
+}
+
+fn file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("{}: {error}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(failure(error)),
+    }
+}
+
+fn table(connection: &Connection, name: &str) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(failure)
+}
+
+fn state<T: serde::de::DeserializeOwned>(
+    connection: Option<&Connection>,
+    path: &Path,
+    name: &str,
+    filename: &str,
+) -> Result<Vec<T>, String> {
+    if let Some(connection) = connection
+        && table(connection, "host_state")?
+    {
+        let body: Option<Vec<u8>> = connection
+            .query_row("SELECT body FROM host_state WHERE name=?1", [name], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(failure)?;
+        if let Some(body) = body {
+            return serde_json::from_slice(&body).map_err(failure);
+        }
+    }
+    Ok(file(&path.with_file_name(filename))?.unwrap_or_default())
+}
+
+pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
+    let source = path.with_file_name("bex-transcripts.sqlite");
+    if !source.exists() && !FILES.iter().any(|name| path.with_file_name(name).exists()) {
+        return Ok(None);
+    }
+    let connection = source
+        .exists()
+        .then(|| {
+            Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(failure)
+        })
+        .transpose()?;
+    let mut history = BTreeMap::new();
+    let mut queues = BTreeMap::new();
+    if let Some(connection) = &connection {
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(failure)?;
+        if version > 1 {
+            return Err(format!(
+                "unsupported previous conversation database version: {version}"
+            ));
+        }
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(failure)?;
+        if integrity != "ok" {
+            return Err("previous conversation database failed integrity check".into());
+        }
+        if table(connection, "conversations")? {
+            let mut statement = connection
+                .prepare("SELECT provider,id,cwd,metadata FROM conversations")
+                .map_err(failure)?;
+            let mut entries = statement.query([]).map_err(failure)?;
+            while let Some(entry) = entries.next().map_err(failure)? {
+                let kind: String = entry.get(0).map_err(failure)?;
+                let id = SessionRef::new(provider(&kind)?, entry.get(1).map_err(failure)?)
+                    .map_err(str::to_owned)?;
+                let body: Option<Vec<u8>> = entry.get(3).map_err(failure)?;
+                let mut response: ThreadResponse = body
+                    .map(|body| protocol::decode(&body).map_err(failure))
+                    .transpose()?
+                    .unwrap_or_default();
+                response.thread.id = Some(id.clone());
+                response.thread.cwd = response.thread.cwd.or(entry.get(2).map_err(failure)?);
+                history.insert(id, response);
+            }
+        }
+        if table(connection, "turns")? {
+            let mut statement = connection
+                .prepare("SELECT provider,id,body FROM turns ORDER BY provider,id,position")
+                .map_err(failure)?;
+            let mut entries = statement.query([]).map_err(failure)?;
+            while let Some(entry) = entries.next().map_err(failure)? {
+                let kind: String = entry.get(0).map_err(failure)?;
+                let id = SessionRef::new(provider(&kind)?, entry.get(1).map_err(failure)?)
+                    .map_err(str::to_owned)?;
+                let body: Vec<u8> = entry.get(2).map_err(failure)?;
+                let turn: Turn = protocol::decode(&body).map_err(failure)?;
+                let response = history.entry(id.clone()).or_default();
+                response.thread.id = Some(id);
+                response
+                    .thread
+                    .turns
+                    .get_or_insert_default()
+                    .push(Arc::new(turn));
+            }
+        }
+        if table(connection, "queues")? {
+            let mut statement = connection
+                .prepare("SELECT provider,id,body FROM queues")
+                .map_err(failure)?;
+            let mut entries = statement.query([]).map_err(failure)?;
+            while let Some(entry) = entries.next().map_err(failure)? {
+                let kind: String = entry.get(0).map_err(failure)?;
+                let id = SessionRef::new(provider(&kind)?, entry.get(1).map_err(failure)?)
+                    .map_err(str::to_owned)?;
+                let body: Vec<u8> = entry.get(2).map_err(failure)?;
+                queues.insert(id, protocol::decode(&body).map_err(failure)?);
+            }
+        }
+    }
+    let mut conversations: Vec<Conversation> =
+        state(connection.as_ref(), path, "bindings", FILES[0])?;
+    let committed_state = connection
+        .as_ref()
+        .map(|connection| table(connection, "host_state"))
+        .transpose()?
+        .unwrap_or(false);
+    if !committed_state && let Some(rewind) = file::<Rewind>(&path.with_file_name(FILES[3]))? {
+        let id = rewind
+            .history
+            .thread
+            .id
+            .clone()
+            .ok_or("previous rewind has no identity")?;
+        conversations.retain(|row| row.id != id);
+        if let Some(previous) = rewind.previous {
+            if previous.id != id {
+                return Err("previous rewind identity is inconsistent".into());
+            }
+            conversations.push(previous);
+        }
+        history.insert(id, rewind.history);
+    }
+    let reads = state(connection.as_ref(), path, "reads", FILES[1])?;
+    let models = state(connection.as_ref(), path, "models", FILES[2])?;
+    let mut projects: Vec<agent_protocol::models::Project> =
+        file(&path.with_file_name(FILES[4]))?.unwrap_or_default();
+    let reserved = crate::projects::chat_directories(path).map_err(failure)?;
+    for project in &mut projects {
+        project.roots.retain(|root| {
+            let path = std::fs::canonicalize(&root.path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&root.path));
+            !reserved.contains(dunce::simplified(&path))
+        });
+    }
+    projects.retain(|project| !project.roots.is_empty());
+    let parent = path.parent().ok_or("missing storage directory")?;
+    let backup = tempfile::Builder::new()
+        .prefix("before-conversation-rows-")
+        .tempdir_in(parent)
+        .map_err(failure)?;
+    if let Some(connection) = &connection {
+        let destination = backup.path().join("bex-transcripts.sqlite");
+        connection
+            .execute(
+                "VACUUM INTO ?1",
+                [destination.to_str().ok_or("invalid backup path")?],
+            )
+            .map_err(failure)?;
+    }
+    for name in FILES {
+        match fs::copy(path.with_file_name(name), backup.path().join(name)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(failure(error)),
+        }
+    }
+    for entry in fs::read_dir(backup.path()).map_err(failure)? {
+        fs::File::open(entry.map_err(failure)?.path())
+            .and_then(|file| file.sync_all())
+            .map_err(failure)?;
+    }
+    #[cfg(unix)]
+    for directory in [backup.path(), parent] {
+        fs::File::open(directory)
+            .and_then(|file| file.sync_all())
+            .map_err(failure)?;
+    }
+    Ok(Some(Previous {
+        history,
+        conversations,
+        queues,
+        reads,
+        models,
+        projects,
+        backup,
+    }))
+}
+
+impl Previous {
+    pub(super) fn keep(self) {
+        let _ = self.backup.keep();
+    }
+
+    pub(super) fn write(&self, transaction: &Transaction<'_>, process: Uuid) -> Result<(), String> {
+        let now = super::super::runtime::now();
+        let mut history = self.history.clone();
+        for row in &self.conversations {
+            row.active.native_provider().map_err(failure)?;
+            for binding in &row.bindings {
+                binding.session.native_provider().map_err(failure)?;
+            }
+            let response = history.entry(row.id.clone()).or_default();
+            response.thread.id = Some(row.id.clone());
+            response.thread.cwd = (!row.cwd.trim().is_empty()).then(|| row.cwd.clone());
+            response.thread.name = row.name.clone().or(response.thread.name.take());
+            response.thread.preview = row.preview.clone().or(response.thread.preview.take());
+            response.thread.active_provider = row.active.provider;
+        }
+        for id in self.queues.keys() {
+            history.entry(id.clone()).or_insert_with(|| ThreadResponse {
+                thread: agent_protocol::models::Thread {
+                    id: Some(id.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        let sequence = Storage::advance(transaction)?.sequence;
+        for project in &self.projects {
+            super::projects::write(transaction, project, sequence)?;
+        }
+        if !self.projects.is_empty() {
+            jobs::enqueue(
+                transaction,
+                Uuid::new_v4(),
+                "projects",
+                now,
+                &jobs::Work::ProjectsChanged,
+            )?;
+        }
+        // Parents can appear later in the previous database. Insert identities
+        // first, then attach the validated links in a second pass.
+        for (id, response) in &history {
+            let mut header = history::header(response, now);
+            header.details.parent = None;
+            if let Some(selection) = self
+                .models
+                .iter()
+                .find(|selection| &selection.session == id)
+            {
+                header.details.selection = selection.options.clone();
+            }
+            history::insert_header(transaction, id, &header, &Counters::default(), sequence)?;
+        }
+        for (id, response) in &history {
+            let source = self
+                .conversations
+                .iter()
+                .find(|row| &row.id == id)
+                .and_then(|row| row.bindings.first())
+                .map_or(id, |binding| &binding.session);
+            let sources = native_history_sources(response, source)?;
+            history::write_history(transaction, id, response, &sources, sequence, process, now)?;
+            restore_user_receipts(transaction, id, response, sequence)?;
+
+            let key = thread_key(transaction, id)?;
+            if let Some(queue) = self.queues.get(id) {
+                for input in &queue.inputs {
+                    Self::input(
+                        transaction,
+                        key,
+                        id,
+                        input,
+                        InputState::Queued { steer: None },
+                        sequence,
+                        process,
+                        now,
+                    )?;
+                }
+            }
+        }
+        for row in &self.conversations {
+            row.restore(transaction, sequence, process, now)?;
+        }
+        for (id, response) in &history {
+            history::link_parent(
+                transaction,
+                thread_key(transaction, id)?,
+                response.thread.parent_id.as_ref(),
+                sequence,
+            )?;
+        }
+        for read in &self.reads {
+            let Some(key) = existing_key(transaction, &read.session)? else {
+                continue;
+            };
+            let (mut header, counters) = rows::header(transaction, key)?;
+            header.details.activity.completion = Some(read.turn_id.clone());
+            header.details.read_through = (!read.unread).then(|| read.turn_id.clone());
+            transaction
+                .execute(
+                    "UPDATE threads SET body=?1 WHERE key=?2",
+                    params![codec::header(&header, &counters)?, key],
+                )
+                .map_err(failure)?;
+        }
+        Ok(())
+    }
+
+    fn input(
+        transaction: &Transaction<'_>,
+        key: i64,
+        id: &SessionRef,
+        input: &Submission,
+        status: InputState,
+        sequence: u64,
+        process: Uuid,
+        now: i64,
+    ) -> Result<(), String> {
+        if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
+            let accepted = transaction.query_row("SELECT outcome FROM receipts WHERE operation_id=?1 AND provider IS ?2 AND thread_id=?3", params![operation.to_string(),id.provider.map(ProviderKind::key),id.id], |row| row.get::<_,Vec<u8>>(0)).optional().map_err(failure)?.map(|bytes| protocol::decode::<Outcome>(&bytes).map_err(failure)).transpose()?;
+            if accepted == Some(Outcome::Accepted) {
+                return Ok(());
+            }
+        }
+        let mut state = rows::load(transaction, key, process)?;
+        if state.inputs.contains_key(&input.client_user_message_id) {
+            return Ok(());
+        }
+        state.counters.input += 1;
+        state.thread.queue_held = true;
+        let content = InputContent {
+            parts: input.input.clone(),
+            model: input.model.clone(),
+            effort: input.effort.clone(),
+            service_tier: input.service_tier.clone(),
+            follow_up: input.follow_up,
+        };
+        let pending = PendingInput {
+            id: input.client_user_message_id.clone(),
+            position: state.counters.input,
+            content,
+            state: status,
+        };
+        rows::write(
+            transaction,
+            key,
+            id,
+            &Change::Input(pending),
+            &state,
+            sequence,
+            now,
+            process,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )?;
+        rows::write_header(transaction, key, id, &state, sequence, now, None)?;
+        if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
+                    params![
+                        operation.to_string(),
+                        id.provider.map(ProviderKind::key),
+                        id.id,
+                        integer(sequence)?,
+                        protocol::encode(Outcome::Accepted).map_err(failure)?
+                    ],
+                )
+                .map_err(failure)?;
+        }
+        Ok(())
+    }
+}
+
+impl Conversation {
+    fn restore(
+        &self,
+        transaction: &Transaction<'_>,
+        sequence: u64,
+        process: Uuid,
+        now: i64,
+    ) -> Result<(), String> {
+        let key = thread_key(transaction, &self.id)?;
+        for binding in &self.bindings {
+            rows::source(
+                transaction,
+                key,
+                binding.session.native_provider().map_err(failure)?,
+                &binding.session.id,
+            )?;
+        }
+        let state = rows::load(transaction, key, process)?;
+        for binding in &self.bindings {
+            let pending = self.handoffs.iter().any(|handoff| {
+                handoff.session == binding.session
+                    && (handoff.delivery == "Pending"
+                        || matches!(
+                            handoff.submission,
+                            agent_protocol::session::SubmissionDelivery::Sending
+                                | agent_protocol::session::SubmissionDelivery::Unknown
+                        ))
+            });
+            if !pending
+                && (binding.session.provider != self.active.provider
+                    || binding.session == self.active)
+            {
+                rows::write(
+                    transaction,
+                    key,
+                    &self.id,
+                    &Change::Binding {
+                        provider: binding.session.native_provider().map_err(failure)?,
+                        value: Some(decision::Binding::Ready {
+                            covered: binding
+                                .covered
+                                .map_or(state.history_end(), |covered| covered as u64),
+                            source: binding.session.id.clone(),
+                        }),
+                    },
+                    &state,
+                    sequence,
+                    now,
+                    process,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                )?;
+            }
+        }
+        for handoff in &self.handoffs {
+            if handoff.receipt.is_none()
+                && matches!(
+                    handoff.submission,
+                    agent_protocol::session::SubmissionDelivery::Sending
+                        | agent_protocol::session::SubmissionDelivery::Unknown
+                )
+                && let Ok(input) = Uuid::parse_str(handoff.input_id.as_str())
+            {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
+                        params![
+                            input.to_string(),
+                            self.id.provider.map(ProviderKind::key),
+                            self.id.id,
+                            integer(sequence)?,
+                            protocol::encode(Outcome::DeliveryUnknown).map_err(failure)?
+                        ],
+                    )
+                    .map_err(failure)?;
+            }
+            if handoff.receipt.is_some()
+                && let Ok(operation) = Uuid::parse_str(handoff.input_id.as_str())
+            {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
+                        params![
+                            operation.to_string(),
+                            self.id.provider.map(ProviderKind::key),
+                            self.id.id,
+                            integer(sequence)?,
+                            protocol::encode(Outcome::Accepted).map_err(failure)?
+                        ],
+                    )
+                    .map_err(failure)?;
+            }
+        }
+        if let Some(startup) = &self.startup {
+            let preparation = &startup.preparation;
+            let input = &preparation.submission;
+            let mut state = rows::load(transaction, key, process)?;
+            let status = match &preparation.status {
+                PreparationStatus::Preparing => InputState::Preparing {
+                    stage: preparation.stage,
+                    action: Uuid::new_v4(),
+                    mode: decision::DeliveryMode::Direct,
+                },
+                PreparationStatus::Sending | PreparationStatus::Unknown => {
+                    state.counters.turn += 1;
+                    let attempt = Attempt {
+                        id: Uuid::new_v4(),
+                        turn: Uuid::new_v4().to_string().into(),
+                        provider: self.active.native_provider().map_err(failure)?,
+                        source: self.active.id.clone(),
+                    };
+                    InputState::Unknown {
+                        delivery: PendingDelivery {
+                            action: Uuid::new_v4(),
+                            attempt,
+                            ordinal: state.counters.turn,
+                            interrupt: None,
+                            steer: false,
+                            queued: false,
+                        },
+                        status: UnknownState::Fenced,
+                    }
+                }
+                PreparationStatus::Failed { error } => InputState::Failed(error.clone()),
+                PreparationStatus::Interrupted => {
+                    InputState::Failed(agent_protocol::execution::ExecutionError {
+                        message: "準備を停止しました。".into(),
+                        ..Default::default()
+                    })
+                }
+            };
+            rows::write_header(transaction, key, &self.id, &state, sequence, now, None)?;
+            Previous::input(
+                transaction,
+                key,
+                &self.id,
+                input,
+                status,
+                sequence,
+                process,
+                now,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn restore_user_receipts(
+    transaction: &Transaction<'_>,
+    id: &SessionRef,
+    response: &ThreadResponse,
+    sequence: u64,
+) -> Result<(), String> {
+    for item in response
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .flat_map(|turn| turn.items.iter().flatten())
+    {
+        if matches!(
+            item.body(),
+            agent_protocol::items::ItemBody::UserMessage { .. }
+        ) && let Some(input) = item
+            .client_input_id
+            .as_ref()
+            .and_then(|id| Uuid::parse_str(id.as_str()).ok())
+        {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
+                    params![
+                        input.to_string(),
+                        id.provider.map(ProviderKind::key),
+                        id.id,
+                        integer(sequence)?,
+                        protocol::encode(Outcome::Accepted).map_err(failure)?
+                    ],
+                )
+                .map_err(failure)?;
+        }
+    }
+
+    Ok(())
+}
+
+// Qualified addresses existed only in the previous store. Decode them here;
+// public IDs stay unchanged and live protocols never accept this old format.
+fn native_address(id: &str, first: &SessionRef) -> Result<(SessionRef, String), String> {
+    use base64::Engine;
+    if let Some(encoded) = id.strip_prefix("bex:") {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(failure)?;
+        let address: (SessionRef, String) = serde_json::from_slice(&bytes).map_err(failure)?;
+        address.0.native_provider().map_err(failure)?;
+        Ok(address)
+    } else {
+        Ok((first.clone(), id.into()))
+    }
+}
+
+fn native_history_sources(
+    response: &ThreadResponse,
+    first: &SessionRef,
+) -> Result<BTreeMap<TurnId, history::NativeTurn>, String> {
+    response
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .map(|turn| {
+            let (source, native) = native_address(turn.id.as_str(), first)?;
+            let items = turn
+                .items
+                .iter()
+                .flatten()
+                .map(|item| {
+                    let (owner, native) = native_address(item.id.as_str(), &source)?;
+                    if owner != source {
+                        return Err("previous item belongs to another native source".into());
+                    }
+                    Ok((item.id.clone(), native.into()))
+                })
+                .collect::<Result<_, String>>()?;
+            Ok((
+                turn.id.clone(),
+                history::NativeTurn {
+                    source,
+                    id: native.into(),
+                    items,
+                },
+            ))
+        })
+        .collect()
+}

@@ -6,6 +6,7 @@ pub mod deepseek;
 mod refreshed;
 mod registry;
 pub(crate) mod requests;
+mod scopes;
 mod settings;
 pub use claude::Claude;
 pub(crate) use registry::Registry;
@@ -16,7 +17,7 @@ use agent_protocol::session::ProviderKind;
 use agent_protocol::{
     composer::ComposerCatalog,
     ids::TurnId,
-    models::{Empty, Item, Thread, ThreadResponse},
+    models::{Empty, Thread, ThreadResponse},
     operations as op,
     permissions::{PermissionMode, PermissionSettings},
     requests::{Answer, RequestBody},
@@ -81,7 +82,7 @@ impl Failure {
 
 pub struct Backend {
     pub(crate) provider: ProviderKind,
-    pub(crate) agent: Result<Arc<dyn Agent>, Failure>,
+    pub(crate) agent: Result<Arc<dyn Provider>, Failure>,
     pub(crate) dictation: Option<Dictation>,
 }
 
@@ -169,7 +170,7 @@ pub(crate) struct SubmissionState {
 /// Preserve healthy pages on a later failure and reject repeated cursors.
 /// Filtered lists can widen follow-up reads without enlarging the first page.
 pub(crate) fn session_pages<'a>(
-    agent: &'a dyn Agent,
+    agent: &'a dyn Discovery,
     search: &'a str,
     scope: SessionListScope<'a>,
     first_limit: u32,
@@ -191,7 +192,7 @@ pub(crate) fn session_pages<'a>(
                 } else {
                     later_limit
                 };
-                let read = Agent::list(agent, search, cursor, scope, limit);
+                let read = crate::providers::Discovery::list(agent, search, cursor, scope, limit);
                 if let Some(deadline) = deadline {
                     read_session_page(read, deadline).await?
                 } else {
@@ -300,7 +301,7 @@ pub(crate) trait Identity: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait Agent: Identity {
+pub(crate) trait Configuration: Send + Sync {
     async fn codex_cli(&self, _: bool) -> Result<op::CodexCliStatus, Failure> {
         Err(Failure::new(
             "unsupported",
@@ -308,21 +309,27 @@ pub(crate) trait Agent: Identity {
         ))
     }
     fn data_recipient(&self) -> &'static str;
-    fn capabilities(&self) -> Capabilities;
-    /// The items an opened turn shows before its details are read. Providers
-    /// whose opened histories include activity keep every item.
-    fn summary_items(&self, _items: &[Arc<Item>]) -> Option<Vec<Arc<Item>>> {
-        None
+    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure>;
+    async fn model_settings(
+        &self,
+        _id: &str,
+    ) -> Result<agent_protocol::models::ModelSettings, Failure> {
+        Err(Failure::new(
+            "unsupported",
+            "Model settings cannot be discovered",
+        ))
     }
-    fn availability(&self) -> Result<(), Failure>;
-    /// An adapter that never started its process cannot own interrupted work.
-    /// Read failures after startup still require a complete restart snapshot.
-    fn requires_restart_snapshot(&self) -> bool {
-        true
-    }
-    /// Reject creation before the Host creates a workspace. Some adapters can
-    /// create a conversation locally and defer starting an executable.
-    fn validate_create(&self) -> Result<(), Failure>;
+    async fn catalog(&self, cwd: &str) -> ComposerCatalog;
+    async fn read_permissions(&self) -> Result<PermissionSettings, Failure>;
+    async fn update_permissions(
+        &self,
+        mode: PermissionMode,
+        version: &str,
+    ) -> Result<PermissionSettings, Failure>;
+}
+
+#[async_trait::async_trait]
+pub(crate) trait Discovery: Send + Sync {
     fn storage_directory(&self) -> &Path;
     /// External native histories distinguish client draft namespaces. Provider
     /// checkpoints owned by this Host already share its identity namespace.
@@ -349,7 +356,20 @@ pub(crate) trait Agent: Identity {
         include_activity: bool,
     ) -> Result<agent_protocol::session::HistoryPage, Failure>;
     async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure>;
-    async fn read_turn_items(&self, id: &str, turn_id: &TurnId) -> Result<Vec<Arc<Item>>, Failure>;
+}
+
+#[async_trait::async_trait]
+pub(crate) trait Agent: Send + Sync {
+    fn capabilities(&self) -> Capabilities;
+    fn availability(&self) -> Result<(), Failure>;
+    /// An adapter that never started its process cannot own interrupted work.
+    /// Read failures after startup still require a complete restart snapshot.
+    fn requires_restart_snapshot(&self) -> bool {
+        true
+    }
+    /// Reject creation before the Host creates a workspace. Some adapters can
+    /// create a conversation locally and defer starting an executable.
+    fn validate_create(&self) -> Result<(), Failure>;
     async fn create(
         &self,
         cwd: &str,
@@ -376,6 +396,7 @@ pub(crate) trait Agent: Identity {
         route: SubmissionTarget<'_>,
         reload: bool,
         browser: Option<Value>,
+        execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure>;
     /// Continue persisted native history without replaying a user message.
     async fn continue_turn(
@@ -384,6 +405,7 @@ pub(crate) trait Agent: Identity {
         _model: Option<&str>,
         _effort: Option<&str>,
         _service_tier: Option<&str>,
+        _execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
         Err(Failure::new(
             "unsupported_operation",
@@ -391,39 +413,26 @@ pub(crate) trait Agent: Identity {
         ))
     }
     async fn interrupt(&self, id: &str, turn: &TurnId) -> Result<Empty, Failure>;
-    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure>;
-    async fn model_settings(
-        &self,
-        _id: &str,
-    ) -> Result<agent_protocol::models::ModelSettings, Failure> {
-        Err(Failure::new(
-            "unsupported",
-            "Model settings cannot be discovered",
-        ))
-    }
-    async fn catalog(&self, cwd: &str) -> ComposerCatalog;
     /// Explain uncertainty when native history cannot prove inactivity. Providers
     /// with authoritative listed status need no additional check.
     async fn workspace_idle_warning(&self, _id: &str) -> Option<&'static str> {
         None
     }
     async fn discard_workspace_processes(&self, dir: &Path) -> Result<(), Failure>;
-    async fn read_permissions(&self) -> Result<PermissionSettings, Failure>;
-    async fn update_permissions(
-        &self,
-        mode: PermissionMode,
-        version: &str,
-    ) -> Result<PermissionSettings, Failure>;
     async fn fork(
         &self,
         id: &str,
         turn: &str,
         browser: Option<Value>,
     ) -> Result<ThreadResponse, Failure>;
-    async fn rename(&self, id: &str, name: &str) -> Result<Empty, Failure>;
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>>;
     async fn shutdown(&self);
 }
+
+/// The registry retains each concrete provider once and exposes only the port
+/// required by its caller. Executing a conversation cannot manage credentials.
+pub(crate) trait Provider: Agent + Identity + Configuration + Discovery {}
+impl<T: Agent + Identity + Configuration + Discovery> Provider for T {}
 
 pub(crate) enum AgentChange {
     TaskParent {
@@ -450,51 +459,30 @@ pub(crate) enum AgentChange {
     },
     Stopped {
         provider: agent_protocol::session::ProviderKind,
-        reason: String,
+        error: agent_protocol::execution::ExecutionError,
     },
 }
 pub(crate) struct AgentEvent {
+    pub execution: Option<uuid::Uuid>,
     pub change: AgentChange,
     pub applied: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-}
-#[cfg(test)]
-pub(crate) fn unavailable_origin(
-    instance: uuid::Uuid,
-    native_id: Value,
-    stopped: tokio_util::sync::CancellationToken,
-) -> RequestOrigin {
-    struct UnavailableSource(tokio_util::sync::CancellationToken);
-    #[async_trait::async_trait]
-    impl AnswerSource for UnavailableSource {
-        fn is_alive(&self) -> bool {
-            !self.0.is_cancelled()
-        }
-        async fn prepare(
-            &self,
-            _: &Value,
-            _: &RequestBody,
-            _: &Answer,
-        ) -> Result<AnswerWrite, Failure> {
-            Err(Failure::new(
-                "answer_not_sent",
-                "request source has changed",
-            ))
-        }
-    }
-    RequestOrigin {
-        instance,
-        native_id,
-        provider: agent_protocol::session::ProviderKind::Codex,
-        source: std::sync::Arc::new(UnavailableSource(stopped)),
-    }
 }
 pub(crate) async fn emit(
     events: &tokio::sync::mpsc::Sender<AgentEvent>,
     change: AgentChange,
 ) -> Result<(), String> {
+    emit_for(events, change, None).await
+}
+
+pub(crate) async fn emit_for(
+    events: &tokio::sync::mpsc::Sender<AgentEvent>,
+    change: AgentChange,
+    execution: Option<uuid::Uuid>,
+) -> Result<(), String> {
     let (applied, receipt) = tokio::sync::oneshot::channel();
     events
         .send(AgentEvent {
+            execution,
             change,
             applied: Some(applied),
         })
@@ -632,8 +620,14 @@ mod tests {
     async fn prefetched_pages_survive_project_waits_and_continue_from_their_cursor() {
         let (_root, agent, expected) = two_session_history().await;
         for first_limit in [1, 2] {
-            let first_page =
-                Agent::list(&agent, "", None, SessionListScope::All, first_limit).await;
+            let first_page = crate::providers::Discovery::list(
+                &agent,
+                "",
+                None,
+                SessionListScope::All,
+                first_limit,
+            )
+            .await;
             let first_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             tokio::time::pause();
             tokio::time::advance(Duration::from_secs(6)).await;

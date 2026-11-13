@@ -96,10 +96,9 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
             error,
         ),
     };
-    let service = HostRpcService::new(
-        [codex.into(), claude, deepseek],
-        ProjectStore::new(directory.join("bex-worktrees.json")),
-    );
+    let project_path = directory.join("bex-worktrees.json");
+    let projects = tokio::task::spawn_blocking(move || ProjectStore::new(project_path)).await?;
+    let service = HostRpcService::new([codex.into(), claude, deepseek], projects);
     service.set_history_scope(directory.clone(), config.isolated);
     service
         .enable_apns(
@@ -115,9 +114,13 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         .await
         .map_err(anyhow::Error::msg)?;
     service.start().map_err(anyhow::Error::msg)?;
-    if let Err(error) = service.resume_after_update(&directory).await {
-        tracing::error!(target: "agent", operation = "host.update.resume", message = %error);
-    }
+    let resuming = service.clone();
+    let resume_directory = directory.clone();
+    tokio::spawn(async move {
+        if let Err(error) = resuming.resume_after_update(&resume_directory).await {
+            tracing::error!(target:"agent",operation="host.update.resume",message=%error);
+        }
+    });
     let local_ticket = endpoint.local_ticket();
     let runtime = Arc::new(
         HostRuntime::new(

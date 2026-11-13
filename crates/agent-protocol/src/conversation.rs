@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod commands;
 mod execution;
+pub mod records;
 mod recovery;
 #[cfg(test)]
 mod tests;
@@ -32,6 +33,7 @@ pub struct Thread {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 /// Shared preparation progress outlives the input that initiated it. Retrying a
 /// failed input must reuse this resource, rather than reset its directory.
 pub enum Workspace {
@@ -121,9 +123,11 @@ pub struct PendingDelivery {
     pub ordinal: u64,
     pub interrupt: Option<Uuid>,
     pub steer: bool,
+    pub queued: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InputState {
     Preparing {
         stage: PreparationStage,
@@ -157,11 +161,19 @@ pub enum UnknownState {
 pub struct Turn {
     pub id: TurnId,
     pub ordinal: u64,
-    pub started_at: i64,
+    pub provider: ProviderKind,
+    pub queued: bool,
+    pub observed: bool,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub retry_count: u8,
+    pub error: Option<ExecutionError>,
     pub state: TurnState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnState {
     Running { interrupt: Option<Uuid> },
     Waiting(Wait),
@@ -183,6 +195,10 @@ pub struct Item {
     pub turn: TurnId,
     pub position: u64,
     pub status: ItemStatus,
+    pub deferred: bool,
+    /// Imported history can have an older public item identity distinct from
+    /// its input address. New Host items derive the address from their ID.
+    pub input: Option<ClientInputId>,
     pub body: ItemBody,
 }
 
@@ -195,16 +211,30 @@ pub struct Request {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequestState {
     Awaiting,
-    Sending { action: Uuid, answer: Answer },
+    Sending { action: Uuid },
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Binding {
-    Ready { source: String },
-    Injecting { source: String, action: Uuid },
+    Ready {
+        source: String,
+        covered: u64,
+    },
+    /// History injection has started; an interrupted injection is rebuilt in
+    /// another native source rather than appended a second time.
+    Aligning {
+        source: String,
+    },
+    /// Rebuild the selected prefix in a new native session before delivery.
+    Fork {
+        source: String,
+        through: TurnId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,10 +307,46 @@ impl State {
             .max_by_key(|turn| turn.ordinal)
     }
 
+    pub fn history_end(&self) -> u64 {
+        self.turns
+            .values()
+            .filter(|turn| turn.state != TurnState::RolledBack)
+            .map(|turn| turn.ordinal)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// A native source may still serve a newer foreground execution while an
+    /// older background execution's uncertain input is being resolved.
+    pub fn source_in_use(&self, provider: ProviderKind, source: &str, excluding: Uuid) -> bool {
+        let other = |attempt: &Attempt| {
+            attempt.id != excluding && attempt.provider == provider && attempt.source == source
+        };
+        self.attempts
+            .values()
+            .filter(|attempt| {
+                self.turns.get(&attempt.turn).is_some_and(|turn| {
+                    matches!(
+                        turn.state,
+                        TurnState::Running { .. } | TurnState::Waiting(_)
+                    )
+                })
+            })
+            .any(other)
+            || self
+                .inputs
+                .values()
+                .filter_map(PendingInput::live_delivery)
+                .any(|delivery| other(&delivery.attempt))
+    }
+
     fn steerable_attempt(&self) -> Option<&Attempt> {
         self.active_turn()
             .filter(|turn| matches!(turn.state, TurnState::Running { interrupt: None }))
             .and_then(|turn| self.attempts.get(&turn.id))
+            .filter(|attempt| !self.inputs.values().any(|input|
+                matches!(&input.state, InputState::Unknown { delivery, status: UnknownState::Resolving { .. } }
+                    if delivery.attempt.id == attempt.id)))
     }
 
     /// Recheck just before dispatching an action. The resource owner must also
@@ -294,7 +360,7 @@ impl State {
             Action::FenceDelivery { id, action, attempt } => self.inputs.get(id).is_some_and(|input|
                 matches!(&input.state, InputState::Unknown { delivery, status: UnknownState::Resolving { .. } }
                     if delivery.action == *action && &delivery.attempt == attempt)),
-            Action::Interrupt { attempt, action } => self.attempts.get(&attempt.turn) == Some(attempt)
+            Action::Interrupt { attempt, action, .. } => self.attempts.get(&attempt.turn) == Some(attempt)
                 && self.turns.get(&attempt.turn).is_some_and(|turn|
                     matches!(turn.state, TurnState::Running { interrupt: Some(current) } if current == *action)),
             Action::Resume { attempt, .. } => self.attempts.get(&attempt.turn) == Some(attempt)
@@ -325,6 +391,9 @@ impl State {
                 }
                 Change::Item(row) => {
                     next.items.insert(row.id.clone(), row.clone());
+                }
+                Change::RemoveItem(id) => {
+                    next.items.remove(id);
                 }
                 Change::Request(row) => {
                     next.requests.insert(row.id.clone(), row.clone());
@@ -360,6 +429,7 @@ pub enum Change {
     RemoveInput(ClientInputId),
     Turn(Turn),
     Item(Item),
+    RemoveItem(ItemId),
     Request(Request),
     RemoveRequest(RequestId),
     Binding {
@@ -393,6 +463,7 @@ impl Change {
             Self::RemoveInput(id) => ChangeKey::Input(id.clone()),
             Self::Turn(turn) => ChangeKey::Turn(turn.id.clone()),
             Self::Item(item) => ChangeKey::Item(item.id.clone()),
+            Self::RemoveItem(id) => ChangeKey::Item(id.clone()),
             Self::Request(request) => ChangeKey::Request(request.id.clone()),
             Self::RemoveRequest(id) => ChangeKey::Request(id.clone()),
             Self::Binding { provider, .. } => ChangeKey::Binding(*provider),
@@ -426,8 +497,16 @@ pub enum Command {
         content: InputContent,
     },
     ResumeQueue,
-    HoldQueue,
     RemoveInput(ClientInputId),
+    EditInput {
+        id: ClientInputId,
+        parts: Vec<InputPart>,
+    },
+    MoveInput {
+        id: ClientInputId,
+        before: Option<ClientInputId>,
+    },
+    SteerInput(ClientInputId),
     ResolveUnknown {
         id: ClientInputId,
         retry: bool,
@@ -438,21 +517,51 @@ pub enum Command {
         enabled: bool,
         content: InputContent,
     },
-    Interrupt,
+    Interrupt {
+        turn: Option<TurnId>,
+    },
     Answer {
         id: RequestId,
         answer: Answer,
     },
     Rename(String),
+    Rewind(TurnId),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Event {
+    AligningProvider {
+        id: ClientInputId,
+        action: Uuid,
+        source: String,
+    },
+    /// The resource owner reports a dead execution after fencing callbacks.
+    ExecutionLost {
+        attempt: Uuid,
+        error: ExecutionError,
+    },
+    NativeStatus {
+        provider: ProviderKind,
+        source: String,
+        status: crate::models::SessionStatus,
+    },
+    Title(String),
+    /// A native background wake starts an execution without a client input.
+    ObservedStart {
+        execution: Uuid,
+        provider: ProviderKind,
+        source: String,
+    },
     /// The owner looks up the receipt by operation ID and checks store and
     /// target identity before calling step. Existing receipts skip all work.
     Command {
         id: OperationId,
         command: Command,
+        receipt: Option<Outcome>,
+    },
+    RejectedCommand {
+        id: OperationId,
+        reason: String,
         receipt: Option<Outcome>,
     },
     Prepared {
@@ -469,6 +578,13 @@ pub enum Event {
     Delivered {
         id: ClientInputId,
         action: Uuid,
+        native_turn: Option<TurnId>,
+    },
+    InterruptResult {
+        attempt: Uuid,
+        action: Uuid,
+        error: Option<ExecutionError>,
+        background: Vec<BackgroundTask>,
     },
     DeliveryFailed {
         id: ClientInputId,
@@ -486,6 +602,8 @@ pub enum Event {
     },
     Provider {
         attempt: Uuid,
+        native_turn: Option<TurnId>,
+        native_items: Vec<(String, ItemId)>,
         observation: Observation,
     },
     Answered {
@@ -502,11 +620,17 @@ pub enum Event {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
+    Timing {
+        started_at: Option<i64>,
+        completed_at: Option<i64>,
+        duration_ms: Option<u64>,
+    },
     Item {
         /// An application ID, resolved by the Host's native-ID boundary. The
         /// owner commits that mapping together with this step's item changes.
         id: ItemId,
         status: ItemStatus,
+        deferred: bool,
         body: ItemBody,
     },
     Request {
@@ -514,7 +638,10 @@ pub enum Observation {
         id: RequestId,
         body: RequestBody,
     },
+    RemoveItem(ItemId),
+    RequestResolved(RequestId),
     Completed,
+    Notice(ExecutionError),
     Failed(ExecutionError),
     Interrupted,
     Retry {
@@ -553,10 +680,12 @@ pub enum Action {
     Interrupt {
         attempt: Attempt,
         action: Uuid,
+        background: bool,
     },
     Resume {
         attempt: Attempt,
         cwd: String,
+        error: Option<ExecutionError>,
     },
     Answer {
         attempt: Attempt,
@@ -576,6 +705,9 @@ pub struct Continuation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     Accepted,
+    /// A retained write from before durable input admission may have run. Its
+    /// original UUID remains fenced without discarding the device's input.
+    DeliveryUnknown,
     Rejected(String),
     Ignored,
 }
@@ -607,9 +739,22 @@ impl Default for Step {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Context {
+    /// Native work is active before its first turn can be materialized.
+    pub external_busy: bool,
     pub now: i64,
     pub seed: Uuid,
     pub steers: bool,
+}
+
+/// Native metadata can only affect the currently bound execution provider.
+pub fn current_source(
+    provider: ProviderKind,
+    binding: Option<&Binding>,
+    observed_provider: ProviderKind,
+    source: &str,
+) -> bool {
+    provider == observed_provider
+        && matches!(binding,Some(Binding::Ready {source:current,..}) if current==source)
 }
 
 fn allocate(seed: Uuid, label: &str) -> Uuid {
@@ -647,6 +792,24 @@ pub fn step(state: &State, event: Event, context: Context) -> Step {
             let mut result = commands::command(state, id, command, context);
             result.receipt = Some((id, result.outcome.clone()));
             result
+        }
+        Event::RejectedCommand {
+            id,
+            reason,
+            receipt,
+        } => {
+            if let Some(outcome) = receipt {
+                return Step {
+                    outcome,
+                    ..Default::default()
+                };
+            }
+            let outcome = Outcome::Rejected(reason);
+            Step {
+                receipt: Some((id, outcome.clone())),
+                outcome,
+                ..Default::default()
+            }
         }
         Event::Restart {
             updating,

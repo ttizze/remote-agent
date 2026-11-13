@@ -14,7 +14,16 @@ impl HostRpcService {
         if enabled {
             self.inner
                 .router
-                .register_live_activity(session, params)
+                .register_live_activity(
+                    session,
+                    params,
+                    self.inner
+                        .conversation
+                        .storage
+                        .activity()
+                        .map_err(super::super::runtime::storage_failure)?
+                        .display,
+                )
                 .map_err(|error| Failure::new("live_activity_failed", error))?;
         }
         Ok(agent_protocol::live_activity::LiveActivityRegistration { enabled })
@@ -36,82 +45,123 @@ impl HostRpcService {
         Ok(agent_protocol::models::Empty {})
     }
 
-    pub(super) async fn read_task_activity(
+    /// Updating must inspect provider-owned processes as well as saved Bex
+    /// executions. This admission read never publishes client list state.
+    pub(super) async fn update_task_snapshot(
         &self,
-        require_complete: bool,
     ) -> Result<agent_protocol::live_activity::TaskActivityState, Failure> {
-        self.inner.router.check_read_state()?;
-        let revision = self.inner.router.task_activity_revision();
-        let agents: Vec<_> = self
+        let agents = self
             .inner
             .providers
             .all()
             .into_iter()
-            .filter(|(_, agent)| !require_complete || agent.requires_restart_snapshot())
-            .collect();
-        // An unavailable provider has no Host-owned process to interrupt. A
-        // broken provider installation must not prevent updating the app.
-        let has_sources = !agents.is_empty()
-            || (!require_complete && self.inner.providers.startup_errors().next().is_some());
-        let listings =
-            futures_util::future::join_all(agents.into_iter().map(|(_, agent)| async move {
-                tokio::time::timeout(
-                    SESSION_LIST_TIMEOUT,
-                    session_pages(
-                        agent.as_ref(),
-                        "",
-                        SessionListScope::Loaded,
-                        100,
-                        100,
-                        None,
-                        None,
+            .filter(|(_, agent)| agent.requires_restart_snapshot())
+            .collect::<Vec<_>>();
+        let listings = futures_util::future::join_all(agents.into_iter().map(
+            |(provider, agent)| async move {
+                (
+                    provider,
+                    tokio::time::timeout(
+                        SESSION_LIST_TIMEOUT,
+                        session_pages(
+                            agent.as_ref(),
+                            "",
+                            SessionListScope::Loaded,
+                            100,
+                            100,
+                            None,
+                            None,
+                        )
+                        .try_collect::<Vec<_>>(),
                     )
-                    .try_collect::<Vec<_>>(),
+                    .await,
                 )
-                .await
-            }))
-            .await;
-        let mut native = Vec::new();
-        let mut successful = false;
-        let mut complete = true;
-        for result in listings {
-            if let Ok(Ok(pages)) = result {
-                let fresh = pages
-                    .iter()
-                    .flatten()
-                    .all(|summary| summary.thread.list_stale != Some(true));
-                successful |= fresh;
-                complete &= fresh;
-                for summary in pages.into_iter().flatten() {
-                    if let Some(thread) = self.inner.conversations.summary(summary.thread)? {
-                        native.push(thread);
-                    }
+            },
+        ))
+        .await;
+        let mut headers = std::collections::BTreeMap::new();
+        let mut inspected = std::collections::HashSet::new();
+        for (provider, result) in listings {
+            let pages = result.map_err(|_| {
+                Failure::new(
+                    "task_activity_incomplete",
+                    "実行中のタスクをすべて確認できません。",
+                )
+            })??;
+            inspected.insert(provider);
+            for summary in pages.into_iter().flatten() {
+                let native_status = summary.thread.status;
+                if summary.thread.list_stale == Some(true) {
+                    return Err(Failure::new(
+                        "task_activity_incomplete",
+                        "実行中のタスクをすべて確認できません。",
+                    ));
                 }
-            } else {
-                complete = false;
+                let Some(thread) = self
+                    .inner
+                    .conversation
+                    .storage
+                    .native_summary(summary.thread)
+                    .map_err(super::super::runtime::storage_failure)?
+                else {
+                    continue;
+                };
+                let Some(id) = thread.id.clone() else {
+                    continue;
+                };
+                let mut header = self
+                    .inner
+                    .conversation
+                    .storage
+                    .lookup(&id)
+                    .map_err(super::super::runtime::storage_failure)?
+                    .unwrap_or_else(|| {
+                        super::super::storage::history::header(
+                            &agent_protocol::models::ThreadResponse {
+                                thread,
+                                ..Default::default()
+                            },
+                            super::super::runtime::now(),
+                        )
+                    });
+                header.details.activity.status = native_status;
+                headers.insert(id, header);
             }
         }
-        let state = self.inner.router.task_activity(native, revision);
-        if !successful && has_sources {
-            return Err(Failure::new(
-                "task_activity_unavailable",
-                "タスクの状態を取得できません。",
-            ));
-        }
-        if require_complete && !complete {
-            return Err(Failure::new(
-                "task_activity_incomplete",
-                "実行中のタスクをすべて確認できません。時間をおいて再試行してください。",
-            ));
-        }
-        if complete
-            && self.inner.providers.startup_errors().next().is_none()
-            && let Some(apns) = self.inner.router.apns()
+        for (id, mut header, _) in self
+            .inner
+            .conversation
+            .storage
+            .headers(true)
+            .map_err(super::super::runtime::storage_failure)?
         {
-            apns.activate(state.display.clone());
+            // A complete native loaded-list is also evidence about absent
+            // sources: they have no live provider-owned work. Keep this fact
+            // local to restart admission; it never rewrites the saved header.
+            if header.details.activity.status == agent_protocol::models::SessionStatus::Unknown
+                && header.details.activity.latest
+                    != Some(agent_protocol::models::TurnStatus::Running)
+            {
+                let status = headers
+                    .get(&id)
+                    .map(|native| native.details.activity.status)
+                    .or_else(|| {
+                        inspected
+                            .contains(&header.state.provider)
+                            .then_some(agent_protocol::models::SessionStatus::Idle)
+                    });
+                if let Some(status) = status {
+                    header.details.activity.status = status;
+                    header.details.activity.stale = false;
+                }
+            }
+            headers.insert(id, header);
         }
-        Ok(state)
+        Ok(agent_protocol::conversation::records::list_activity(
+            headers.iter(),
+        ))
     }
+
     pub async fn enable_apns(
         &self,
         path: &std::path::Path,
@@ -141,22 +191,60 @@ mod tests {
                 .contains("bex-conversations.json")
         );
     }
-    use crate::host_rpc::routing::HostSession;
-    use agent_protocol::live_activity::{MarkSessionRead, ReadTaskActivity, TaskActivityState};
-    use agent_protocol::session::SessionRef;
-
-    async fn next_activity(connection: &mut HostSession) -> TaskActivityState {
+    use agent_protocol::{
+        conversation::records,
+        live_activity::{MarkSessionRead, TaskActivityState},
+        session::SessionRef,
+        sync::{Content, Key, Scope},
+    };
+    struct ListReader {
+        updates: crate::host_rpc::routing::HostSubscription,
+        replica: records::Replica,
+    }
+    async fn open_list(service: &HostRpcService, connection: u64) -> ListReader {
+        let reply = service
+            .dispatch(
+                connection,
+                &Call::SubscribeList(records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let Response::Success { result } =
+            agent_protocol::protocol::decode::<Response<records::OpenedList>>(&reply.initial)
+                .unwrap()
+        else {
+            panic!("list subscription failed")
+        };
+        ListReader {
+            updates: reply.updates.unwrap(),
+            replica: records::Replica::new(Scope::List, 1)
+                .apply(1, result.initial)
+                .unwrap(),
+        }
+    }
+    async fn next_activity(reader: &mut ListReader) -> TaskActivityState {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if let agent_protocol::protocol::Notification::TaskActivity { state } =
-                    agent_protocol::protocol::decode(&connection.recv().await.unwrap()).unwrap()
-                {
-                    return state;
+            let message = agent_protocol::protocol::decode::<records::Message>(
+                &reader.updates.recv().await.unwrap(),
+            )
+            .unwrap();
+            reader.replica = reader.replica.apply(1, message).unwrap();
+            records::list_activity(reader.replica.rows().values().filter_map(|row| {
+                let record = match &row.content {
+                    Content::Full(record) | Content::Summary(record) => record,
+                };
+                match (&row.key, record.as_ref()) {
+                    (Key::Thread(id), records::Record::Thread(header)) => Some((id, header)),
+                    _ => None,
                 }
-            }
+            }))
         })
         .await
-        .unwrap()
+        .expect("committed list update arrives")
     }
 
     #[cfg(unix)]
@@ -164,19 +252,17 @@ mod tests {
     async fn activity_uses_only_normal_conversations_even_with_saved_subagent_completions() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("bex-transcripts.sqlite");
         let session = |id: &str| SessionRef::new(ProviderKind::Codex, id.into()).unwrap();
         let root = session("public-root");
-        let child = session("child");
-        let grandchild = session("grandchild");
-        crate::host_rpc::store::ConversationStore::open(&path)
-            .save_state(
-                "reads",
-                &[&root, &child, &grandchild].map(|session| {
-                    serde_json::json!({"session":session,"turn_id":"completed","unread":true})
-                }),
-            )
-            .unwrap();
+        std::fs::write(
+            directory.path().join("bex-read-state.json"),
+            serde_json::to_vec(&["public-root", "child", "grandchild"].map(
+                |id| serde_json::json!({"session":session(id),"turn_id":"completed","unread":true}),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("bex-conversations.json"), serde_json::to_vec(&[serde_json::json!({"id":root,"active":session("native-root"),"cwd":directory.path(),"name":null,"preview":null,"bindings":[{"session":session("native-root"),"covered":null}],"segments":[],"handoffs":[],"startup":null})]).unwrap()).unwrap();
         let program = directory.path().join("codex-fixture");
         std::fs::write(&program, r##"#!/usr/bin/env node
 const rl = require('node:readline').createInterface({input:process.stdin});
@@ -195,7 +281,6 @@ rl.on('line', line => {
       cwd:process.env.CODEX_HOME,status:{type:'active'}}};
   }
   if (m.method === 'thread/list') {
-    if (p.sourceKinds.includes('subAgentThreadSpawn')) throw new Error('Subagents are outside system activity');
     result = {data:['running','native-root'].map(id => ({id,name:id,cwd:process.env.CODEX_HOME,
       status:{type:id === 'running' ? 'active' : 'idle'}})),nextCursor:null};
   }
@@ -216,21 +301,16 @@ rl.on('line', line => {
             [crate::providers::codex::Codex::new(Ok(server.clone())).into()],
             ProjectStore::new(directory.path().join("projects.json")),
         );
-        let mut conversation = crate::host_rpc::conversations::Conversation::new(&Thread {
-            id: Some(session("native-root")),
-            cwd: Some(directory.path().to_string_lossy().into_owned()),
-            ..Default::default()
-        })
-        .unwrap();
-        conversation.id = root.clone();
-        service.inner.conversations.save(conversation).unwrap();
         service.start().unwrap();
 
-        let bootstrap = service.read_task_activity(false).await.unwrap();
-        assert!(bootstrap.unread.is_empty());
-        assert_eq!(bootstrap.display.current.label, "実行中 1件");
+        let bootstrap = service.update_task_snapshot().await.unwrap();
+        assert_eq!(bootstrap.unread, [(root.clone(), "completed".into())]);
+        assert_eq!(bootstrap.display.current.label, "実行中 1件 · 完了 1件");
         let listed = service
-            .list_sessions(&op::ListSessions::new(Default::default()))
+            .search_list(&agent_protocol::conversation::records::SearchList {
+                term: String::new(),
+                limit: Some(10_000),
+            })
             .await
             .unwrap();
         assert!(
@@ -239,10 +319,10 @@ rl.on('line', line => {
                 .iter()
                 .any(|thread| thread.id.as_ref() == Some(&root))
         );
-        let first = service.read_task_activity(false).await.unwrap();
+        let first = service.update_task_snapshot().await.unwrap();
         assert_eq!(first.unread, [(root, "completed".into())]);
         assert_eq!(first.display.current.label, "実行中 1件 · 完了 1件");
-        let repeated = service.read_task_activity(false).await.unwrap();
+        let repeated = service.update_task_snapshot().await.unwrap();
         assert_eq!(repeated, first);
         let reads = server
             .request::<_, Vec<String>>("fixture/reads", &serde_json::json!({}))
@@ -260,81 +340,104 @@ rl.on('line', line => {
 
     #[tokio::test]
     async fn reading_on_either_device_broadcasts_to_both_and_reconnect_reads_the_shared_state() {
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
+        use agent_protocol::conversation::{Command, InputContent, records};
         let directory = tempfile::tempdir().unwrap();
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
         let service = HostRpcService::new(
-            [],
+            [agent.backend()],
             ProjectStore::new(directory.path().join("projects.json")),
         );
-        let id = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
-        service.inner.router.task_activity(
-            vec![Thread {
-                id: Some(id.clone()),
-                ..Default::default()
-            }],
-            0,
-        );
-        let mut phone = service.open_session();
-        let mut desktop = service.open_session();
-        for (index, reader) in [(0, phone.id()), (1, desktop.id())] {
-            let turn_id: agent_protocol::ids::TurnId = format!("turn-{index}").into();
-            service.inner.router.session_change(
-                &id,
-                agent_protocol::session::SessionChange::Turn {
-                    turn: agent_protocol::models::Turn {
-                        id: turn_id.clone(),
-                        status: agent_protocol::execution::TurnStatus::Completed,
-                        ..Default::default()
+        let phone = service.open_session();
+        let desktop = service.open_session();
+        let mut phone_list = open_list(&service, phone.id()).await;
+        let mut desktop_list = open_list(&service, desktop.id()).await;
+        let id = session_uuid();
+        let _: records::Opened = call(
+            &service,
+            phone.id(),
+            Call::CreateConversation(records::Create {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                session: id.clone(),
+                subscription: uuid::Uuid::new_v4(),
+                cwd: Some(directory.path().to_string_lossy().into_owned()),
+                selection: Default::default(),
+                initial: None,
+            }),
+        )
+        .await
+        .unwrap();
+        for reader in [phone.id(), desktop.id()] {
+            let input = uuid::Uuid::new_v4();
+            let _: records::Acknowledged = call(
+                &service,
+                reader,
+                Call::ChangeConversation(records::Change {
+                    session: id.clone(),
+                    operation: input,
+                    command: Command::Submit {
+                        id: input.to_string().into(),
+                        content: InputContent {
+                            parts: vec![op::Input::Text {
+                                text: "complete".into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
                     },
-                    completed: true,
-                },
-            );
-            for connection in [&mut phone, &mut desktop] {
-                assert_eq!(
-                    next_activity(connection).await.unread,
-                    vec![(id.clone(), turn_id.clone())]
-                );
+                }),
+            )
+            .await
+            .unwrap();
+            let mut completed = None;
+            for connection in [&mut phone_list, &mut desktop_list] {
+                loop {
+                    let update = next_activity(connection).await;
+                    if let Some((_, turn)) =
+                        update.unread.iter().find(|(session, _)| session == &id)
+                    {
+                        completed = Some(turn.clone());
+                        break;
+                    }
+                }
             }
-            let reply = service
-                .dispatch(
-                    reader,
-                    &Call::MarkSessionRead(MarkSessionRead {
-                        session: id.clone(),
-                        turn_id,
-                    }),
-                )
-                .await
-                .unwrap();
-            assert!(matches!(
-                agent_protocol::protocol::decode::<Response<agent_protocol::models::Empty>>(
-                    &reply.initial
-                )
-                .unwrap(),
-                Response::Success { .. }
-            ));
-            for connection in [&mut phone, &mut desktop] {
-                assert!(next_activity(connection).await.unread.is_empty());
+            let _: agent_protocol::models::Empty = call(
+                &service,
+                reader,
+                Call::MarkSessionRead(MarkSessionRead {
+                    session: id.clone(),
+                    turn_id: completed.unwrap(),
+                }),
+            )
+            .await
+            .unwrap();
+            for connection in [&mut phone_list, &mut desktop_list] {
+                loop {
+                    if next_activity(connection).await.unread.is_empty() {
+                        break;
+                    }
+                }
             }
         }
-        // A fresh client and a restarted Host must not restore device-local badges.
         let restarted = HostRpcService::new(
             [],
             ProjectStore::new(directory.path().join("projects.json")),
         );
         let reconnected = restarted.open_session();
-        let reply = restarted
-            .dispatch(
-                reconnected.id(),
-                &Call::ReadTaskActivity(ReadTaskActivity {}),
-            )
-            .await
-            .unwrap();
-        let Response::Success { result } =
-            agent_protocol::protocol::decode::<Response<TaskActivityState>>(&reply.initial)
-                .unwrap()
+        let list = open_list(&restarted, reconnected.id()).await;
+        let state = restarted.inner.conversation.storage.activity().unwrap();
+        let records::Message::Snapshot { cursor, .. } =
+            restarted.inner.conversation.storage.list(None).unwrap()
         else {
-            panic!("read shared activity")
+            panic!("initial list")
         };
-        assert!(result.unread.is_empty());
+        assert_eq!(list.replica.cursor(), Some(cursor));
+        assert!(state.unread.is_empty());
+    }
+    fn session_uuid() -> SessionRef {
+        SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap()
     }
 
     #[tokio::test]

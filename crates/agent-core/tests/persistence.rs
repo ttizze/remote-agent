@@ -10,7 +10,7 @@ fn runtime_fields_cannot_override_restored_user_work() {
     let mut snapshot = Snapshot::default();
     Arc::make_mut(&mut snapshot.input.drafts).insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            provider: Some(agent_protocol::session::ProviderKind::Codex),
             id: "thread".into(),
         }
         .into(),
@@ -58,4 +58,45 @@ fn missing_or_invalid_user_work_is_not_silently_discarded() {
     }
     assert!(persistence::decode(b"{").is_err());
     assert_eq!(persistence::decode(b"").unwrap(), Snapshot::default());
+}
+
+#[test]
+fn pre_cutover_project_drafts_receive_a_persisted_address_without_losing_text() {
+    use agent_core::state::{DraftKey, ScopedData};
+    let mut snapshot = Snapshot::default();
+    let old = DraftKey::from("new:/project");
+    Arc::make_mut(&mut snapshot.input.drafts).insert(
+        old.clone(),
+        Arc::new(Draft {
+            text: "unfinished".into(),
+            ..Default::default()
+        }),
+    );
+    Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
+        old.clone();
+    Arc::make_mut(&mut snapshot.lists.archived_scopes).insert(
+        "other-host".into(),
+        Arc::new(ScopedData {
+            drafts: snapshot.input.drafts.clone(),
+            navigation: snapshot.panes.primary().navigation.clone(),
+            ..Default::default()
+        }),
+    );
+    let restored = persistence::decode(&persistence::encode(&snapshot).unwrap()).unwrap();
+    let key = &restored.panes.primary().navigation.draft_key;
+    let DraftKey::Session { session } = key else {
+        panic!("draft address missing")
+    };
+    assert_eq!(session.provider, None);
+    assert!(uuid::Uuid::parse_str(&session.id).is_ok());
+    assert_eq!(restored.input.drafts[key].text, "unfinished");
+    assert!(!restored.input.drafts.contains_key(&old));
+    let archived = &restored.lists.archived_scopes["other-host"];
+    assert_eq!(
+        archived.drafts[&archived.navigation.draft_key].text,
+        "unfinished"
+    );
+    assert_ne!(&archived.navigation.draft_key, key);
+    let again = persistence::decode(&persistence::encode(&restored).unwrap()).unwrap();
+    assert_eq!(again.panes.primary().navigation.draft_key, *key);
 }

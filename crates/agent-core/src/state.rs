@@ -8,7 +8,7 @@ use operations as op;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -29,6 +29,36 @@ pub struct Draft {
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub model_settings_changed: bool,
 }
+fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
+    let mut draft = current.clone();
+    let mut text = recovered.text.clone();
+    append_transcript(&mut text, &current.text);
+    draft.text = text;
+    for invocation in &recovered.invocations {
+        if !draft.invocations.contains(invocation) {
+            draft.invocations.push(invocation.clone());
+        }
+    }
+    for attachment in &recovered.attachments {
+        if !draft
+            .attachments
+            .iter()
+            .any(|file| file.path == attachment.path)
+        {
+            draft.attachments.push(attachment.clone());
+        }
+    }
+    draft
+}
+
+/// A restore that the Host may have committed before its reply reached us.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputRecovery {
+    pub session: crate::session::SessionRef,
+    pub operation: uuid::Uuid,
+    pub draft: Arc<Draft>,
+}
+
 /// Explicit picker choices remembered on this device. Reading a conversation or
 /// refreshing a catalog must never change what the next new chat starts with.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -81,6 +111,8 @@ pub struct PaneState {
     #[serde(skip)]
     pub observed_agents: Option<crate::session::SessionRef>,
     #[serde(skip)]
+    pub output_items: Arc<BTreeSet<agent_protocol::ids::ItemId>>,
+    #[serde(skip)]
     pub epoch: u64,
     #[serde(skip)]
     pub error: Option<String>,
@@ -100,7 +132,7 @@ impl WorkspaceLocation {
         }
     }
 }
-/// New drafts have a local identity; existing drafts use the complete session identity.
+/// Conversation drafts keep their address before and after creation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DraftKey {
@@ -133,15 +165,6 @@ impl From<&crate::session::SessionRef> for DraftKey {
     }
 }
 impl DraftKey {
-    fn new_chat(cwd: &str, slot: u64) -> Self {
-        Self::Local {
-            key: if slot == 0 {
-                format!("new:{cwd}")
-            } else {
-                format!("new:{slot}:{cwd}")
-            },
-        }
-    }
     fn is_empty(&self) -> bool {
         matches!(self, Self::Local { key } if key.is_empty())
     }
@@ -182,6 +205,8 @@ pub struct AccountState {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
+    #[serde(default)]
+    pub cursor: Option<agent_protocol::sync::Cursor>,
     pub sequence: u64,
     pub submitted_at_ms: Option<u64>,
     pub draft_key: DraftKey,
@@ -267,6 +292,11 @@ impl<T: ?Sized> Same for Arc<T> {
         Arc::ptr_eq(self, other)
     }
 }
+impl<A: Same, B: Same> Same for (A, B) {
+    fn same(&self, other: &Self) -> bool {
+        self.0.same(&other.0) && self.1.same(&other.1)
+    }
+}
 impl<T: Same> Same for Option<T> {
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
@@ -286,6 +316,7 @@ macro_rules! same_by_eq {
     };
 }
 same_by_eq!(
+    uuid::Uuid,
     bool,
     u64,
     String,
@@ -371,6 +402,14 @@ group! {
 group! {
     /// Conversation lists, projects and the activity shown beside them.
     pub struct Lists {
+        #[serde(skip)]
+        pub replica: Option<Arc<agent_protocol::conversation::records::Replica>>,
+        #[serde(skip)]
+        pub subscription: Option<uuid::Uuid>,
+        #[serde(skip)]
+        pub provider_errors: Arc<serde_json::Map<String, serde_json::Value>>,
+        #[serde(skip)]
+        pub search_results: Option<(String, Arc<ThreadList>)>,
         #[serde(default)]
         pub threads: Option<Arc<ThreadList>>,
         #[serde(skip)]
@@ -389,15 +428,16 @@ group! {
         /// Mobile recent feed loads project pages independently of expansion.
         #[serde(skip)]
         pub recent_chats: bool,
-        /// Disk copies need one authoritative read; live lists continue through notifications.
-        #[serde(skip)]
-        pub unconfirmed_lists: Arc<BTreeSet<op::OperationKey>>,
     }
 }
 
 group! {
     /// Open conversations and the input they have accepted or are still receiving.
     pub struct Sessions {
+        #[serde(skip)]
+        pub live_outputs: Arc<BTreeMap<agent_protocol::conversation::records::OutputKey, (uuid::Uuid, agent_protocol::sync::Output)>>,
+        #[serde(skip)]
+        pub replicas: Arc<BTreeMap<crate::session::SessionRef, Arc<agent_protocol::conversation::records::Replica>>>,
         #[serde(default)]
         #[serde(with = "crate::persistence::entries")]
         pub conversations: Arc<BTreeMap<crate::session::SessionRef, Arc<Thread>>>,
@@ -405,15 +445,16 @@ group! {
         pub subscriptions: Arc<BTreeMap<crate::session::SessionRef, uuid::Uuid>>,
         pub pending_submissions:
             Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
-        /// Startup identity changes outlive pending sends, which subscribers may coalesce.
-        #[serde(skip)]
-        pub draft_sessions: Arc<BTreeMap<DraftKey, crate::session::SessionRef>>,
     }
 }
 
 group! {
     /// Text and attachments typed on this device and not yet handed to the Host.
     pub struct Input {
+        #[serde(default)]
+        pub input_recoveries: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<InputRecovery>>>,
+        #[serde(default)]
+        pub new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
         #[serde(with = "crate::persistence::entries")]
         pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
         /// Answers composed for awaiting questions; local to this device.
@@ -426,6 +467,19 @@ group! {
         /// Queued messages being edited in their conversation's composer.
         #[serde(skip)]
         pub queued_edits: Arc<BTreeMap<crate::session::SessionRef, follow_up::QueuedEdit>>,
+    }
+}
+
+impl Input {
+    fn new_chat(&mut self, cwd: &str, slot: u64) -> DraftKey {
+        Arc::make_mut(&mut self.new_drafts)
+            .entry(format!("{slot}:{cwd}"))
+            .or_insert_with(|| crate::session::SessionRef {
+                provider: None,
+                id: uuid::Uuid::new_v4().to_string(),
+            })
+            .clone()
+            .into()
     }
 }
 
@@ -604,6 +658,8 @@ impl Snapshot {
     }
 }
 
+pub(crate) mod conversations;
+pub(crate) mod list_sync;
 mod notifications;
 use notifications::notification;
 pub mod projects;
@@ -611,14 +667,19 @@ pub use projects::ProjectPreferences;
 pub mod follow_up;
 pub use follow_up::{ComposerPreferences, SendShortcut};
 pub mod operations;
+mod outputs;
 pub use operations::Intent;
 
 /// Client-owned data from a previously configured Host storage area. Keeping
 /// it separate prevents storage switches from deleting or mixing user drafts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScopedData {
+    #[serde(default)]
+    pub input_recoveries: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<InputRecovery>>>,
     #[serde(with = "crate::persistence::entries")]
     pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    #[serde(default)]
+    pub new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
     pub pending_submissions:
         Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
@@ -627,17 +688,33 @@ pub struct ScopedData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
+    ListRows {
+        subscription_id: uuid::Uuid,
+        message: Box<agent_protocol::conversation::records::Message>,
+    },
+    CommandOutput {
+        subscription_id: uuid::Uuid,
+        update: Box<agent_protocol::sync::OutputUpdate>,
+    },
     StorageScope(String),
     HostTicket(String),
     HostHomeDirectory(Option<String>),
-    TerminalFailed { handle: String, reason: String },
+    TerminalFailed {
+        handle: String,
+        reason: String,
+    },
     Intent(Intent),
     SubmissionFailed(agent_protocol::ids::ClientInputId),
     SubmissionUnknown(agent_protocol::ids::ClientInputId),
 
     Notification(crate::protocol::Notification),
-    SessionUpdate(Box<crate::session::SessionUpdate>),
-    ConnectionChecked { failure: Option<String> },
+    ConversationRows {
+        subscription_id: uuid::Uuid,
+        message: Box<agent_protocol::conversation::records::Message>,
+    },
+    ConnectionChecked {
+        failure: Option<String>,
+    },
     Connected,
     Disconnected,
 }
@@ -653,9 +730,20 @@ fn clear_workspace_location(workspace: &mut WorkspaceLocation) {
 
 pub fn reduce(previous: &Snapshot, pane_id: &str, event: Event) -> (Snapshot, Vec<Effect>) {
     let (mut next, mut effects) = match event {
+        Event::ListRows {
+            subscription_id,
+            message,
+        } => list_sync::received(previous, subscription_id, *message),
+        Event::CommandOutput {
+            subscription_id,
+            update,
+        } => outputs::received(previous, subscription_id, *update),
         Event::Intent(intent) => reduce_intent(previous, pane_id, intent),
         Event::Notification(message) => notification(previous, message),
-        Event::SessionUpdate(update) => notifications::session_update(previous, *update),
+        Event::ConversationRows {
+            subscription_id,
+            message,
+        } => conversations::received(previous, subscription_id, *message),
         event => reduce_event(previous, event),
     };
     let before = previous
@@ -714,7 +802,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         return (next, Vec::new());
     };
     prepare_operations!(intent, next, pane_id, [
-        ReadTaskActivity, RegisterLiveActivity, UnregisterLiveActivity, ReadHostSoftware,
+        RegisterLiveActivity, UnregisterLiveActivity, ReadHostSoftware,
         ReadPermissionSettings, UpdatePermissionSettings,
         ManageCodexCli, ReadProviderSettings, SetProviderEnabled, ReadDshCredentials, UpdateDshCredential, ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession, RewindSession,
@@ -722,8 +810,8 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         RevokeDevice, ListFiles, ResolveFile, ResolveFileReference, ReadFile,
         ReadFileOpenCapabilities, OpenInEditor,
         SaveFile, WriteWorkspaceFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListProjectSessions,
-        ListAgents, AddProject, ScanProjects, ImportProjects, CreateSession, RetryPreparation,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree,
+        ListAgents, AddProject, ScanProjects, ImportProjects, RetryPreparation,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -789,27 +877,19 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
                     .filter(|project| selected && !project.registered).map(|project| project.path.clone()).collect()).unwrap_or_default();
             }
         }
-        Intent::ReadOlder { thread_id } => {
-            if previous.operation_running(op::OperationKey::History { session: thread_id.clone() }) {
-                return (next, Vec::new());
-            }
-            if let Some(cursor) = previous.sessions.conversations.get(&thread_id).and_then(|thread| thread.history_cursor.clone()) {
-                return prepare(next, pane_id, op::ReadHistory { session: thread_id, cursor, include_activity: false });
-            }
-            let window = op::HISTORY_WINDOW_TURNS;
-            let limit = u32::try_from(previous.sessions.conversations.get(&thread_id).map_or(window.into(), |thread| {
-                thread.history_limit
-                    .unwrap_or_else(|| thread.turns.as_ref().map_or(window.into(), |turns| turns.len() as u64))
-            })).unwrap_or(u32::MAX).saturating_add(window);
-            return prepare(next, pane_id, op::ReadThread { limit, ..op::ReadThread::new(thread_id) });
+        Intent::CreateSession(request) => {
+            let target = crate::session::SessionRef { provider: None, id: uuid::Uuid::new_v4().to_string() };
+            return (next, vec![Effect::execute(op::StartConversation { target, request })]);
         }
-        Intent::LoadTurnItems(params) => {
-            if previous.sessions.conversations.get(&params.thread_id)
-                .and_then(|thread| thread.turns.as_ref())
-                .and_then(|turns| turns.iter().rfind(|turn| turn.id == params.turn_id))
-                .is_some_and(|turn| turn.items_summary) {
-                return prepare(next, pane_id, params);
+        Intent::ReadOlder { thread_id } => {
+            if previous.operation_running(op::OperationKey::History { session: thread_id.clone() }) { return (next, Vec::new()); }
+            if previous.sessions.replicas.get(&thread_id).and_then(|replica| replica.window()).is_some_and(|window| window.turn != 0 || window.item != 0) {
+                return prepare(next, pane_id, op::ReadHistory { session: thread_id });
             }
+        }
+        Intent::WatchCommandOutput { thread_id, item_id, watching } => {
+            let effects = outputs::watch(&mut next, pane_id, agent_protocol::conversation::records::OutputKey { session: thread_id, item: item_id }, watching);
+            return (next, effects);
         }
         Intent::CloseTerminal { handle } => {
             if let Some(terminal) = Arc::make_mut(&mut next.terminals).remove(&handle)
@@ -869,22 +949,23 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             let effects = follow_up::reduce(&mut next, thread_id, action);
             return (next, effects);
         }
+        Intent::RestoreUnknownSubmission { ref client_user_message_id }
+        | Intent::DiscardUnknownSubmission { ref client_user_message_id }
+            if previous.operation_running(op::OperationKey::InputRecovery {input:client_user_message_id.clone()}) => {},
         Intent::RestoreUnknownSubmission { client_user_message_id } => {
-            if previous
-                .sessions.pending_submissions
-                .get(&client_user_message_id)
-                .is_some_and(|pending| pending.delivery_unknown)
-            {
-                return reduce(previous, pane_id, Event::SubmissionFailed(client_user_message_id));
+            if let Some(effect) = op::resolve_saved_input(previous, &client_user_message_id, true) {
+                return (next, vec![effect]);
+            }
+            if let Some(effect) = op::resolve_local_input(previous,&client_user_message_id,true) {
+                return (next, vec![effect]);
             }
         }
         Intent::DiscardUnknownSubmission { client_user_message_id } => {
-            if previous
-                .sessions.pending_submissions
-                .get(&client_user_message_id)
-                .is_some_and(|pending| pending.delivery_unknown)
-            {
-                Arc::make_mut(&mut next.sessions.pending_submissions).remove(&client_user_message_id);
+            if let Some(effect) = op::resolve_saved_input(previous, &client_user_message_id, false) {
+                return (next, vec![effect]);
+            }
+            if let Some(effect) = op::resolve_local_input(previous,&client_user_message_id,false) {
+                return (next, vec![effect]);
             }
         }
         Intent::RemoveAttachment { draft_key, index } => {
@@ -896,37 +977,23 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             }
         }
 
-        Intent::ListSessions(mut operation) => {
-            let refresh = operation.query.search_term == previous.lists.list_query.search_term;
-            if let Err(error) = op::Operation::prepare(&mut operation, &mut next, pane_id) {
-                Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(error);
-                return (next, Vec::new());
+        Intent::ListSessions(operation) => return list_sync::query(next, operation.query, true),
+        Intent::ListProjectSessions(operation) => {
+            if next.lists.expanded_projects.contains_key(&operation.project_id) {
+                Arc::make_mut(&mut next.lists.expanded_projects).insert(operation.project_id,operation.limit);
             }
-            let mut effects = vec![Effect::execute(operation)];
-            if refresh && next.connection.connected { effects.push(Effect::execute(op::ReadTaskActivity {})); }
-            return (next, effects);
+            let effects=list_sync::project(&mut next, false);
+            return (next,effects);
         }
         Intent::RefreshProject { project_id } => {
-            let Some(limit) = previous.lists.expanded_projects.get(&project_id).copied() else {
-                return (next, Vec::new());
-            };
-            return prepare(next, pane_id, op::ListProjectSessions {
-                project_id,
-                limit,
-                search_term: previous.lists.list_query.search_term.clone(),
-            });
+            let effects=list_sync::refresh_project(&next,&project_id);
+            return (next,effects);
         }
         Intent::SetProjectPinned { project_id, pinned } => projects::update(&mut next, &project_id, |p| p.pinned = pinned),
         Intent::ReorderProject { project_id, target_id, after } => projects::reorder(&mut next, &project_id, &target_id, after),
         Intent::MoveChatToProject { thread_id, project_id } => {
             projects::move_chat(&mut next, &thread_id, &project_id);
-            if next.connection.connected && next.lists.expanded_projects.contains_key(&project_id)
-                && !next.lists.project_threads.contains_key(&project_id)
-                && projects::chat_placement(next.lists.project_preferences.get(&next.connection.storage_scope), &thread_id) == Some(project_id.as_str()) {
-                return prepare(next, pane_id, op::ListProjectSessions {
-                    project_id, limit: 5, search_term: previous.lists.list_query.search_term.clone(),
-                });
-            }
+
         },
         Intent::EditProject { project_id, name, section } => {
             match projects::validate_project_labels(&name, &section) {
@@ -952,65 +1019,34 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             p.archived_ids.clear();
         }),
         Intent::SetProjectExpanded { project_id, expanded } => {
-            if !expanded {
+            if expanded {
+                Arc::make_mut(&mut next.lists.expanded_projects).entry(project_id).or_insert(5);
+            } else {
                 Arc::make_mut(&mut next.lists.expanded_projects).remove(&project_id);
-            } else if !previous.lists.expanded_projects.contains_key(&project_id) {
-                if previous.lists.threads.as_ref().is_none_or(|page| {
-                    !page.projects.iter().any(|project| project.id == project_id)
-                }) {
-                    return (next, Vec::new());
-                }
-                let page = previous.lists.project_threads.get(&project_id);
-                let limit = page.map_or(5, |page| page.limit);
-                Arc::make_mut(&mut next.lists.expanded_projects).insert(project_id.clone(), limit);
-                if next.connection.connected && (page.is_none() || next.lists.unconfirmed_lists.contains(&op::OperationKey::ProjectList { project_id: project_id.clone() })) {
-                    return prepare(next, pane_id, op::ListProjectSessions {
-                        project_id,
-                        limit,
-                        search_term: previous.lists.list_query.search_term.clone(),
-                    });
-                }
             }
+            let effects=list_sync::project(&mut next, false);
+            return (next,effects);
         }
         Intent::ExpandThreadList { project_id } => {
-            if let Some(project_id) = project_id {
-                let Some(limit) = previous.lists.expanded_projects.get(&project_id) else {
-                    return (next, Vec::new());
-                };
-                let limit = limit.saturating_add(10);
-                Arc::make_mut(&mut next.lists.expanded_projects).insert(project_id.clone(), limit);
-                return prepare(next, pane_id, op::ListProjectSessions {
-                    project_id,
-                    limit,
-                    search_term: previous.lists.list_query.search_term.clone(),
-                });
+            if let Some(project_id)=project_id {
+                if let Some(limit)=Arc::make_mut(&mut next.lists.expanded_projects).get_mut(&project_id) {*limit=limit.saturating_add(10);}
+                let effects=list_sync::project(&mut next, false);
+                return (next,effects);
             }
-            let mut query = (*previous.lists.list_query).clone();
-            query.limit = query.limit.saturating_add(10);
-            query.part = Some(crate::models::ListPart::Chats);
-            return prepare(next, pane_id, op::ListSessions::new(query));
+            let mut query=(*next.lists.list_query).clone();
+            query.limit=query.limit.saturating_add(10);
+            return list_sync::query(next,query,false);
         }
         Intent::ShowRecentChats | Intent::ExpandRecentChats => {
-            let expanding = matches!(intent, Intent::ExpandRecentChats);
-            if !expanding && previous.lists.recent_chats {
-                return (next, Vec::new());
-            }
-            next.lists.recent_chats = true;
-            let mut query = (*previous.lists.list_query).clone();
-            if expanding {
-                query.limit = query.limit.saturating_add(10);
-            }
-            query.project_limit = query.project_limit.max(query.limit);
-            query.part = None;
-            if next.connection.connected {
-                return prepare(next, pane_id, op::ListSessions::new(query));
-            }
+            if matches!(intent,Intent::ExpandRecentChats) {Arc::make_mut(&mut next.lists.list_query).limit=next.lists.list_query.limit.saturating_add(10);}
+            next.lists.recent_chats=true;
+            let effects=list_sync::project(&mut next, false);
+            return (next,effects);
         }
         Intent::ExpandProjects => {
-            let mut query = (*previous.lists.list_query).clone();
-            query.project_limit = query.project_limit.saturating_add(10);
-            query.part = Some(crate::models::ListPart::Projects);
-            return prepare(next, pane_id, op::ListSessions::new(query));
+            let mut query=(*next.lists.list_query).clone();
+            query.project_limit=query.project_limit.saturating_add(10);
+            return list_sync::query(next,query,false);
         }
 
         Intent::ShowThreadList => {
@@ -1020,7 +1056,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         }
         Intent::NewChat { cwd } => {
             next.invalidate_pane(pane_id);
-            let key = DraftKey::new_chat(&cwd, pane.draft_slot);
+            let key = next.input.new_chat(&cwd, pane.draft_slot);
             let existing = previous.input.drafts.get(&key);
             if existing.is_none_or(|draft| draft.model.is_none()) {
                 let selection = previous.catalog.model_preferences.provider
@@ -1240,6 +1276,7 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
         clear_workspace_location(Arc::make_mut(&mut pane.workspace));
     }
     if previous_id != navigation.thread_id {
+        pane.output_items = Arc::default();
         pane.observed_agents = None;
     }
     let selected = navigation.thread_id.clone();
@@ -1262,6 +1299,7 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
             .unread
             .remove(&id);
     }
+    outputs::retire(snapshot);
 }
 
 fn prepare<O: operations::Operation>(
@@ -1331,10 +1369,11 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
             next.lists.activity = Arc::default();
             next.lists.expanded_projects = Arc::default();
             next.lists.project_threads = Arc::default();
-            next.lists.unconfirmed_lists = Arc::default();
             if !next.connection.storage_scope.is_empty() {
                 let archived = ScopedData {
+                    input_recoveries: std::mem::take(&mut next.input.input_recoveries),
                     drafts: std::mem::take(&mut next.input.drafts),
+                    new_drafts: std::mem::take(&mut next.input.new_drafts),
                     pending_submissions: std::mem::take(&mut next.sessions.pending_submissions),
                     file_drafts: std::mem::take(&mut next.files.file_drafts),
                     navigation: std::mem::take(
@@ -1344,7 +1383,9 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 Arc::make_mut(&mut next.lists.archived_scopes)
                     .insert(next.connection.storage_scope.clone(), Arc::new(archived));
                 if let Some(saved) = Arc::make_mut(&mut next.lists.archived_scopes).remove(&scope) {
+                    next.input.input_recoveries = saved.input_recoveries.clone();
                     next.input.drafts = saved.drafts.clone();
+                    next.input.new_drafts = saved.new_drafts.clone();
                     next.sessions.pending_submissions = saved.pending_submissions.clone();
                     next.files.file_drafts = saved.file_drafts.clone();
                     Arc::make_mut(next.panes.primary_mut()).navigation = saved.navigation.clone();
@@ -1358,19 +1399,22 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                         draft_slot: pane.draft_slot,
                         epoch: pane.epoch.wrapping_add(1),
                         navigation: Arc::new(Navigation {
-                            draft_key: DraftKey::new_chat(&cwd, pane.draft_slot),
+                            draft_key: next.input.new_chat(&cwd, pane.draft_slot),
                             cwd,
                             ..Default::default()
                         }),
                         ..Default::default()
                     });
                 }
+                next.sessions.replicas = Arc::default();
                 next.sessions.conversations = Arc::default();
+                next.lists.replica = None;
+                next.lists.subscription = None;
+                next.lists.search_results = None;
                 next.lists.threads = None;
                 next.files.workspace = Arc::default();
                 Arc::make_mut(next.panes.primary_mut()).workspace = Arc::default();
                 Arc::make_mut(next.panes.primary_mut()).workspaces = Arc::default();
-                next.sessions.draft_sessions = Arc::default();
                 next.catalog.account = Arc::default();
                 next.catalog.models = Arc::default();
                 next.catalog.model_errors = Arc::default();
@@ -1388,35 +1432,16 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
         Event::SubmissionFailed(id) => {
             if let Some(pending) = Arc::make_mut(&mut next.sessions.pending_submissions).remove(&id)
             {
-                let draft = Arc::make_mut(
-                    Arc::make_mut(&mut next.input.drafts)
-                        .entry(pending.draft_key.clone())
-                        .or_default(),
-                );
-                let mut restored = pending.draft.text.clone();
-                append_transcript(&mut restored, &draft.text);
-                draft.text = restored;
-                for invocation in &pending.draft.invocations {
-                    if !draft.invocations.contains(invocation) {
-                        draft.invocations.push(invocation.clone());
-                    }
-                }
-                for attachment in &pending.draft.attachments {
-                    if !draft
-                        .attachments
-                        .iter()
-                        .any(|current| current.path == attachment.path)
-                    {
-                        draft.attachments.push(attachment.clone());
-                    }
-                }
+                let draft = Arc::make_mut(&mut next.input.drafts)
+                    .entry(pending.draft_key.clone())
+                    .or_default();
+                *draft = Arc::new(merge_recovered_draft(&pending.draft, draft));
             }
         }
         Event::ConnectionChecked { failure } => next.connection.connection_failure = failure,
         Event::Connected => {
             next.connection.connection_generation =
                 previous.connection.connection_generation.saturating_add(1);
-            next.reset_list_revisions();
             next.operations = Default::default();
             next.reset_session();
             next.connection.connected = true;
@@ -1439,7 +1464,11 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 }
             }
         }
-        Event::Intent(_) | Event::Notification(_) | Event::SessionUpdate(_) => {
+        Event::Intent(_)
+        | Event::Notification(_)
+        | Event::CommandOutput { .. }
+        | Event::ListRows { .. }
+        | Event::ConversationRows { .. } => {
             unreachable!("handled by the reducer router")
         }
     }
@@ -1447,40 +1476,8 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
 }
 
 impl Snapshot {
-    fn reset_list_revisions(&mut self) {
-        for page in self
-            .lists
-            .threads
-            .iter_mut()
-            .chain(Arc::make_mut(&mut self.lists.project_threads).values_mut())
-        {
-            if page.revision == 0
-                && page.data.iter().all(|row| row.list_revision == 0)
-                && page
-                    .projects
-                    .iter()
-                    .all(|project| project.list_revision == 0)
-            {
-                continue;
-            }
-            let page = Arc::make_mut(page);
-            page.revision = 0;
-            for row in &mut page.data {
-                row.list_revision = 0;
-            }
-            for project in &mut page.projects {
-                project.list_revision = 0;
-            }
-        }
-        for thread in Arc::make_mut(&mut self.sessions.conversations).values_mut() {
-            if thread.list_revision != 0 {
-                Arc::make_mut(thread).list_revision = 0;
-            }
-        }
-    }
-
     fn prepare_connection_refresh(&mut self) -> Vec<Effect> {
-        let mut effects = vec![Effect::execute(op::ReadTaskActivity {})];
+        let mut effects = Vec::new();
         if self.catalog.provider_settings.take().is_some() {
             effects.push(Effect::execute(op::ReadProviderSettings {}));
         }
@@ -1491,16 +1488,11 @@ impl Snapshot {
             effects.push(Effect::execute(op::ReadFileOpenCapabilities {}));
         }
         effects.extend(op::reconnect_file_trees(self));
-        if self.lists.threads.is_none()
-            || self
-                .lists
-                .unconfirmed_lists
-                .contains(&op::OperationKey::SessionList)
-        {
-            effects.push(Effect::execute(op::ListSessions::new(
-                (*self.lists.list_query).clone(),
-            )));
-        }
+        effects.push(Effect::execute(list_sync::SubscribeCatalog {
+            refresh: false,
+        }));
+        effects.extend(list_sync::reconnect_search(self));
+        effects.extend(op::reconnect_input_recovery(self));
         // The Host catalog can change while a mobile client is backgrounded.
         // Keep cached choices visible until the fresh catalog arrives.
         effects.extend(op::refresh_models());
@@ -1516,6 +1508,22 @@ impl Snapshot {
                     .map(|effect| effect.in_pane(&id)),
             );
         }
+        let pending_threads = self
+            .sessions
+            .pending_submissions
+            .values()
+            .filter_map(|pending| {
+                let DraftKey::Session { session } = &pending.draft_key else {
+                    return None;
+                };
+                (!self.selected_in_any_pane(session)).then_some(session.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        effects.extend(
+            pending_threads
+                .into_iter()
+                .map(|session| Effect::execute(op::ReadThread::new(session))),
+        );
         for (handle, terminal) in self.terminals.iter() {
             if terminal.phase == TerminalPhase::Suspended {
                 effects.push(match &terminal.target {
@@ -1535,6 +1543,7 @@ impl Snapshot {
                 });
             }
         }
+        effects.extend(outputs::reconnect(self));
         effects
     }
 
@@ -1570,7 +1579,9 @@ impl Snapshot {
         self.files.file_open_capabilities = None;
         self.catalog.composer_catalogs = Arc::default();
         self.catalog.permission_settings = Arc::default();
+        self.lists.subscription = None;
         self.sessions.subscriptions = Arc::default();
+        self.sessions.live_outputs = Arc::default();
         for thread in Arc::make_mut(&mut self.sessions.conversations).values_mut() {
             if !thread.requests.is_empty() || !thread.submissions.is_empty() {
                 let thread = Arc::make_mut(thread);
@@ -1665,6 +1676,7 @@ impl Snapshot {
             if previous.model.is_none()
                 && let DraftKey::Session { session } = key
                 && !self.sessions.conversations.contains_key(session)
+                && !self.input.new_drafts.values().any(|draft| draft == session)
             {
                 continue;
             }
@@ -1871,6 +1883,14 @@ fn submission(
         );
         return (next, Vec::new());
     }
+    if thread_id.is_none() && !matches!(draft_key, DraftKey::Session { .. }) {
+        let mut next = previous.clone();
+        next.fail_operation(
+            op::OperationKey::Submission { draft_key },
+            "会話の下書きを開いてから送信してください。".into(),
+        );
+        return (next, Vec::new());
+    }
     let mut next = previous.clone();
     if let Some(reason) = thread_id
         .as_ref()
@@ -1912,6 +1932,7 @@ fn submission(
     Arc::make_mut(&mut next.sessions.pending_submissions).insert(
         client_user_message_id.clone(),
         Arc::new(PendingSubmission {
+            cursor: None,
             sequence,
             submitted_at_ms: None,
             draft_key: draft_key.clone(),
@@ -1937,8 +1958,11 @@ fn submission(
             follow_up: requested,
         }),
         None => Effect::execute(op::StartSubmission {
+            thread_id: match draft_key {
+                DraftKey::Session { session } => session,
+                DraftKey::Local { .. } => unreachable!("new conversation draft was validated"),
+            },
             provider: provider.expect("new submission has a provider"),
-            draft_key,
             cwd,
             client_user_message_id,
             draft,
@@ -2093,13 +2117,11 @@ mod submission_tests {
             },
             lists: crate::state::Lists {
                 threads: Some(Arc::new(crate::models::ThreadList {
-                    revision: 0,
                     data: vec![thread],
                     projects: vec![],
                     has_more: false,
                     has_more_projects: false,
                     limit: 5,
-                    project_pages: Default::default(),
                     provider_errors: None,
                 })),
                 ..Default::default()
@@ -2159,98 +2181,48 @@ fn append_transcript(text: &mut String, transcript: &str) {
 
 fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::SessionRef) {
     follow_up::reconcile_edit(snapshot, thread_id);
-    if snapshot.sessions.pending_submissions.is_empty() {
-        return;
-    }
-    let Some(thread) = snapshot.sessions.conversations.get(thread_id) else {
+    let Some(replica) = snapshot.sessions.replicas.get(thread_id) else {
         return;
     };
     let draft_key = DraftKey::from(thread_id);
-    let deliveries: Vec<_> = snapshot
+    let settled: Vec<_> = snapshot
         .sessions
         .pending_submissions
         .iter()
         .filter(|(_, pending)| pending.draft_key == draft_key)
-        .filter_map(|(id, _)| {
-            thread
-                .submissions
-                .get(id)
-                .map(|delivery| (id.clone(), delivery.clone()))
+        .filter(|(id, pending)| {
+            let observed = replica
+                .rows()
+                .contains_key(&agent_protocol::sync::Key::Input {
+                    thread: thread_id.clone(),
+                    id: (*id).clone(),
+                })
+                || replica
+                    .rows()
+                    .contains_key(&agent_protocol::sync::Key::Item {
+                        thread: thread_id.clone(),
+                        id: id.to_string().into(),
+                    });
+            let covered =
+                pending
+                    .cursor
+                    .zip(replica.cursor())
+                    .is_some_and(|(accepted, current)| {
+                        accepted.store == current.store && accepted.sequence <= current.sequence
+                    });
+            observed || covered
         })
+        .map(|(id, pending)| (id.clone(), pending.draft.clone()))
         .collect();
-    for (id, delivery) in deliveries {
-        use crate::session::SubmissionDelivery;
-        if delivery == SubmissionDelivery::Rejected {
-            *snapshot = reduce_event(snapshot, Event::SubmissionFailed(id)).0;
-            continue;
+    for (id, selected) in settled {
+        if let Some(draft) = shared_mut(&mut snapshot.input.drafts, &draft_key)
+            && draft.model == selected.model
+            && draft.effort == selected.effort
+            && draft.service_tier == selected.service_tier
+        {
+            draft.model_settings_changed = false;
         }
-        // Someone removed it from the queue: it is gone, not returned to the composer.
-        if delivery == SubmissionDelivery::Withdrawn {
-            Arc::make_mut(&mut snapshot.sessions.pending_submissions).remove(&id);
-            continue;
-        }
-        let mut pending = (*snapshot.sessions.pending_submissions[&id]).clone();
-        match delivery {
-            SubmissionDelivery::Sending => pending.delivery_unknown = false,
-            SubmissionDelivery::Accepted { turn_id } => {
-                if let Some(draft) = shared_mut(&mut snapshot.input.drafts, &pending.draft_key)
-                    && draft.model == pending.draft.model
-                    && draft.effort == pending.draft.effort
-                    && draft.service_tier == pending.draft.service_tier
-                {
-                    draft.model_settings_changed = false;
-                }
-                pending.accepted = true;
-                pending.delivery_unknown = false;
-                if turn_id.is_some() && pending.turn_id != turn_id {
-                    pending.turn_id = turn_id;
-                    pending.after_item_id = None;
-                }
-            }
-            SubmissionDelivery::Unknown => pending.delivery_unknown = true,
-            SubmissionDelivery::Rejected | SubmissionDelivery::Withdrawn => unreachable!(),
-        }
-        if pending != *snapshot.sessions.pending_submissions[&id] {
-            Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(id, Arc::new(pending));
-        }
-    }
-    let mut pending_ids = snapshot
-        .sessions
-        .pending_submissions
-        .iter()
-        .filter(|(_, pending)| pending.draft_key == draft_key)
-        .map(|(id, _)| id)
-        .peekable();
-    let Some(first) = pending_ids.next() else {
-        return;
-    };
-    let thread = &snapshot.sessions.conversations[thread_id];
-    let mut native_echoes = thread
-        .turns
-        .iter()
-        .flatten()
-        .flat_map(|turn| turn.items.iter().flatten())
-        .filter(|item| matches!(item.body(), crate::models::ItemBody::UserMessage { .. }))
-        .filter_map(|item| item.client_input_id.as_ref());
-    if pending_ids.peek().is_none() {
-        if let Some(id) = native_echoes.find(|id| *id == first) {
-            Arc::make_mut(&mut snapshot.sessions.pending_submissions).remove(id);
-        }
-        return;
-    }
-    let pending_ids: HashSet<_> = std::iter::once(first).chain(pending_ids).collect();
-    let mut echoed = HashSet::new();
-    for id in native_echoes {
-        if pending_ids.contains(id) {
-            echoed.insert(id);
-            if echoed.len() == pending_ids.len() {
-                break;
-            }
-        }
-    }
-    if !echoed.is_empty() {
-        Arc::make_mut(&mut snapshot.sessions.pending_submissions)
-            .retain(|id, _| !echoed.contains(id));
+        Arc::make_mut(&mut snapshot.sessions.pending_submissions).remove(&id);
     }
 }
 
@@ -2285,7 +2257,7 @@ mod history_tests {
                     false,
                 ),
             ] {
-                let snapshot = Snapshot {
+                let mut snapshot = Snapshot {
                     connection: crate::state::Connection {
                         connected: true,
                         ..Default::default()
@@ -2317,6 +2289,19 @@ mod history_tests {
                     ),
                     ..Default::default()
                 };
+                let replica = crate::test_conversations::replica(
+                    crate::models::ThreadResponse {
+                        thread: Thread {
+                            id: Some(session.clone()),
+                            history_cursor: Some("older".into()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    1,
+                );
+                Arc::make_mut(&mut snapshot.sessions.replicas)
+                    .insert(session.clone(), Arc::new(replica));
                 let (next, effects) = reduce(
                     &snapshot,
                     "",

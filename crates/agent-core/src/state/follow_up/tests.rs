@@ -340,6 +340,20 @@ fn a_withdrawn_message_leaves_without_returning_to_the_composer() {
             ..thread(true, true, Vec::new())
         }),
     );
+    let replica = crate::test_conversations::replica(
+        crate::models::ThreadResponse {
+            thread: thread(true, true, Vec::new()),
+            ..Default::default()
+        },
+        1,
+    );
+    Arc::make_mut(
+        Arc::make_mut(&mut state.sessions.pending_submissions)
+            .get_mut("queued")
+            .unwrap(),
+    )
+    .cursor = replica.cursor();
+    Arc::make_mut(&mut state.sessions.replicas).insert(session(), Arc::new(replica));
     super::super::reconcile_pending(&mut state, &session());
     assert!(state.sessions.pending_submissions.is_empty());
     assert!(text(&state).is_empty());

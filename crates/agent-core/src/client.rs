@@ -1,5 +1,5 @@
 //! Client workflows built on the shared transport and protocol.
-use crate::{peer::PeerError, state::operations::ReadThread};
+use crate::peer::PeerError;
 use agent_protocol::operations::*;
 use agent_protocol::requests::{Answer, Request, validate_answer};
 use agent_transport::client::{Client, Updates};
@@ -20,6 +20,83 @@ pub(crate) fn error(reason: impl std::fmt::Display) -> AgentError {
     AgentError::Failed {
         reason: crate::presentation::error::error_source(&reason.to_string()),
     }
+}
+
+pub(crate) fn command_result(
+    reply: agent_protocol::conversation::records::Acknowledged,
+) -> Result<agent_protocol::sync::Cursor, PeerError> {
+    reply.accepted().map_err(|error| PeerError::Remote {
+        delivery: error.delivery,
+        error: serde_json::to_string(&error).expect("command failure serializes"),
+        sequence: None,
+    })
+}
+
+pub(crate) async fn resolve_hydration(
+    mut response: agent_protocol::conversation::records::Hydrated,
+    expected: &agent_protocol::ids::ItemId,
+    session: Option<&crate::transport::Session>,
+) -> Result<Vec<agent_protocol::conversation::records::Message>, PeerError> {
+    use agent_protocol::{
+        conversation::records::{self, Record},
+        sync::{Content, Message},
+    };
+    if let Some(grant) = response.transfer.take() {
+        let row = response
+            .messages
+            .iter_mut()
+            .rev()
+            .find_map(|message| match message {
+                Message::Hydrate { row, .. } => Some(row),
+                _ => None,
+            });
+        let source = row.as_ref().and_then(|row| match &row.content {
+            Content::Full(value) | Content::Summary(value) => match value.as_ref() {
+                Record::Item(item) => Some(item.clone()),
+                _ => None,
+            },
+        });
+        let item = source
+            .as_ref()
+            .map(|item| item.content.as_ref().clone())
+            .unwrap_or_else(|| {
+                crate::models::Item::new(
+                    expected.clone(),
+                    Default::default(),
+                    crate::models::ItemBody::Sleep {},
+                )
+            });
+        // Even an obsolete control response must consume its one-use grant.
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::transfers::resolve_item(
+                agent_protocol::operations::ItemResponse {
+                    item,
+                    transfer: Some(grant),
+                },
+                session,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(PeerError::RequestTimeout {
+                method: "item body transfer".into(),
+            })
+        })?;
+        let (Some(row), Some(mut source)) = (row, source) else {
+            return Err(PeerError::InvalidMessage("hydration row is missing".into()));
+        };
+        if resolved.item.id != *expected {
+            return Err(PeerError::InvalidMessage("hydration item changed".into()));
+        }
+        source.content = std::sync::Arc::new(resolved.item);
+        row.content = Content::Full(std::sync::Arc::new(records::Record::Item(source)));
+    }
+    for message in &response.messages {
+        records::validate_message(message)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+    }
+    Ok(response.messages)
 }
 
 /// A recording owns its prepared connection until transcription finishes or
@@ -86,7 +163,12 @@ pub trait ClientExt {
         operation: &O,
     ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError>;
     async fn models(&self, provider: crate::session::ProviderKind) -> Result<ModelPage, PeerError>;
-    async fn respond(&self, request: &Request, answer: &Answer) -> Result<(), PeerError>;
+    async fn respond(
+        &self,
+        session: &crate::session::SessionRef,
+        request: &Request,
+        answer: &Answer,
+    ) -> Result<(), PeerError>;
     async fn session_images(
         &self,
         thread_id: &crate::session::SessionRef,
@@ -98,17 +180,17 @@ impl ClientExt for Client {
         &self,
         operation: &O,
     ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError> {
-        if !matches!(
-            operation.method(),
-            "host/session/open" | "host/session/create"
-        ) {
-            return Ok(None);
-        }
-        let (mut output, updates) = self
-            .request_stream::<O::Output>(&operation.request()?)
-            .await?;
-        validate_output(operation, &output)?;
         let id = uuid::Uuid::new_v4();
+        let mut request = operation.request()?;
+        match &mut request {
+            crate::protocol::Call::SubscribeList(params) => params.subscription = id,
+            crate::protocol::Call::SubscribeConversation(params) => params.subscription = id,
+            crate::protocol::Call::SubscribeCommandOutput(params) => params.subscription = id,
+            crate::protocol::Call::CreateConversation(params) => params.subscription = id,
+            _ => return Ok(None),
+        }
+        let (mut output, updates) = self.request_stream::<O::Output>(&request).await?;
+        validate_output(operation, &output)?;
         O::subscription(&mut output, id);
         Ok(Some((output, updates, id)))
     }
@@ -167,14 +249,24 @@ impl ClientExt for Client {
         }
     }
 
-    async fn respond(&self, request: &Request, answer: &Answer) -> Result<(), PeerError> {
+    async fn respond(
+        &self,
+        session: &crate::session::SessionRef,
+        request: &Request,
+        answer: &Answer,
+    ) -> Result<(), PeerError> {
         validate_answer(&request.body, answer).map_err(PeerError::InvalidMessage)?;
-        self.request::<crate::models::Empty>(&crate::protocol::Call::AnswerSession(SessionAnswer {
-            request_id: request.id.clone(),
-            answer: answer.clone(),
-        }))
-        .await
-        .map(|_| ())
+        let reply: agent_protocol::conversation::records::Acknowledged = self
+            .call(&agent_protocol::conversation::records::Change {
+                session: session.clone(),
+                operation: uuid::Uuid::new_v4(),
+                command: agent_protocol::conversation::Command::Answer {
+                    id: request.id.clone(),
+                    answer: answer.clone(),
+                },
+            })
+            .await?;
+        command_result(reply).map(|_| ())
     }
 
     async fn session_images(
@@ -183,43 +275,62 @@ impl ClientExt for Client {
         session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError> {
         // Gallery reads follow bounded history pages independently of the
-        // Store's visible window and close their transient subscription first.
-        let read = ReadThread::new(thread_id.to_owned());
-        let (opened, stream) = self
-            .request_stream::<crate::session::OpenedSession>(&crate::protocol::Call::OpenSession(
-                crate::session::OpenSession {
+        // Store's visible window, retaining their subscription until paging ends.
+        use agent_protocol::{conversation::records, sync::Scope};
+        let subscription = uuid::Uuid::new_v4();
+        let (opened, _stream) = self
+            .request_stream::<records::Opened>(&crate::protocol::Call::SubscribeConversation(
+                records::Subscribe {
                     session: thread_id.clone(),
-                    limit: 1000,
-                    include_activity: true,
-                    known_version: None,
+                    subscription,
+                    cached: None,
+                    window: None,
                 },
             ))
             .await?;
-        validate_output(
-            &crate::state::operations::OpenThread {
-                read: &read,
-                known_version: None,
-            },
-            &opened,
-        )?;
-        drop(stream);
-        let mut thread = opened.response.thread;
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..1000 {
-            let Some(cursor) = thread.history_cursor.take() else {
-                break;
-            };
-            if !seen.insert(cursor.clone()) {
-                return Err(PeerError::InvalidMessage("history cursor repeated".into()));
-            }
-            self.call(&crate::session::ReadHistory {
-                session: thread_id.clone(),
-                cursor,
-                include_activity: true,
-            })
-            .await?
-            .prepend_to(&mut thread);
+        if &opened.session != thread_id {
+            return Err(PeerError::InvalidMessage(
+                "gallery conversation identity changed".into(),
+            ));
         }
+        records::validate_message(&opened.initial)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        let mut replica = records::Replica::new(Scope::Conversation(thread_id.clone()), 1)
+            .apply(1, opened.initial)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        loop {
+            let previous_window = replica.window();
+            if replica
+                .window()
+                .is_none_or(|window| window.turn == 0 && window.item == 0)
+            {
+                break;
+            }
+            let messages = self
+                .call(&records::Extend {
+                    session: thread_id.clone(),
+                    subscription,
+                    cached: replica.cursor().ok_or_else(|| {
+                        PeerError::InvalidMessage("gallery cursor is missing".into())
+                    })?,
+                })
+                .await?;
+            for message in messages {
+                replica = replica
+                    .apply(1, message)
+                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            }
+            if replica.window().map(|window| (window.turn, window.item))
+                >= previous_window.map(|window| (window.turn, window.item))
+            {
+                return Err(PeerError::InvalidMessage(
+                    "gallery history did not advance".into(),
+                ));
+            }
+        }
+        let thread = records::project(&replica)
+            .ok_or_else(|| PeerError::InvalidMessage("gallery conversation disappeared".into()))?
+            .thread;
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
         let mut native_items = std::collections::HashSet::new();
@@ -233,17 +344,40 @@ impl ClientExt for Client {
                 }
                 let detail;
                 let item = if item.is_deferred() {
-                    detail = crate::transfers::resolve_item(
-                        self.call(&crate::state::operations::ReadItem {
-                            thread_id: thread_id.clone(),
-                            turn_id: turn.id.clone(),
-                            item_id: item.id.clone(),
+                    let response = self
+                        .call(&records::Hydrate {
+                            session: thread_id.clone(),
+                            subscription,
+                            cached: replica.cursor().expect("opened gallery"),
+                            item: item.id.clone(),
                         })
-                        .await?,
-                        session,
-                    )
-                    .await?;
-                    &detail.item
+                        .await?;
+                    let messages = resolve_hydration(response, &item.id, session).await?;
+                    for message in messages {
+                        replica = replica
+                            .apply(1, message)
+                            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                    }
+                    let row = replica
+                        .rows()
+                        .get(&agent_protocol::sync::Key::Item {
+                            thread: thread_id.clone(),
+                            id: item.id.clone(),
+                        })
+                        .ok_or_else(|| {
+                            PeerError::InvalidMessage("gallery item is no longer available".into())
+                        })?;
+                    let value = match &row.content {
+                        agent_protocol::sync::Content::Full(value)
+                        | agent_protocol::sync::Content::Summary(value) => value,
+                    };
+                    let records::Record::Item(value) = value.as_ref() else {
+                        return Err(PeerError::InvalidMessage(
+                            "gallery hydration is not an item".into(),
+                        ));
+                    };
+                    detail = value.content.clone();
+                    detail.as_ref()
                 } else {
                     item.as_ref()
                 };
@@ -306,10 +440,7 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
-    #[allow(dead_code)]
-    mod host_fixture {
-        include!("../tests/support/host.rs");
-    }
+    use crate::test_host as host_fixture;
 
     #[tokio::test]
     async fn model_pages_reject_payloads_owned_by_another_provider() {

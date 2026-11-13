@@ -185,6 +185,11 @@ extension ThreadScreen {
                         threadId: threadId, turnId: turnId,
                         itemId: item.data.nativeId ?? item.data.id
                     )
+                },
+                watchOutput: { watching in
+                    guard item.data.kind == "command", let threadId = conversation?.id,
+                          let itemId = item.data.nativeId else { return }
+                    model.perform(.watchCommandOutput(threadId: threadId, itemId: itemId, watching: watching))
                 }
             ).equatable()
         }

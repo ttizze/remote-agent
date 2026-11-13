@@ -8,20 +8,59 @@ use std::{
 
 pub(crate) mod icons;
 pub(crate) mod state;
-pub(crate) mod titles;
+
+/// Reserved paths include the physical parent before the chat folder exists.
+pub(crate) fn chat_directories(
+    state_file: &Path,
+) -> io::Result<std::collections::BTreeSet<PathBuf>> {
+    let configured = state_file.with_file_name("bex-chats");
+    let mut paths = std::collections::BTreeSet::from([configured.clone()]);
+    for path in [
+        state_file
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+        configured.as_path(),
+    ] {
+        match std::fs::canonicalize(path) {
+            Ok(physical) => {
+                let physical = dunce::simplified(&physical);
+                paths.insert(if path == configured {
+                    physical.to_owned()
+                } else {
+                    physical.join("bex-chats")
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(paths)
+}
 
 /// The Host owns project registration independently of native provider catalogs.
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
     path: PathBuf,
-    registration: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) storage: Arc<crate::host_rpc::storage::Storage>,
 }
 impl ProjectStore {
+    #[cfg(feature = "test-support")]
+    pub fn fixture_projects(&self) -> Result<Vec<Project>, String> {
+        self.storage.projects()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn replace_fixture_projects(&self, projects: &[Project]) -> Result<(), String> {
+        self.storage.replace_projects(projects)
+    }
+
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            registration: Arc::default(),
-        }
+        let path = path.into();
+        let storage = Arc::new(crate::host_rpc::storage::Storage::open(
+            &path.with_file_name("bex-conversations.sqlite"),
+        ));
+        Self { path, storage }
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -31,11 +70,10 @@ impl ProjectStore {
     }
 
     async fn read_projects(&self) -> anyhow::Result<Vec<Project>> {
-        match tokio::fs::read(self.path.with_file_name("bex-projects.json")).await {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
-        }
+        let storage = self.storage.clone();
+        tokio::task::spawn_blocking(move || storage.projects())
+            .await?
+            .map_err(anyhow::Error::msg)
     }
     pub(crate) async fn register(&self, root: &Path) -> anyhow::Result<String> {
         anyhow::ensure!(
@@ -48,9 +86,13 @@ impl ProjectStore {
             tokio::fs::metadata(root).await?.is_dir(),
             "project path must be a directory"
         );
-        let _registration = self.registration.lock().await;
-        let mut projects = self.read_projects().await?;
         let path = root.to_str().context("project path is not UTF-8")?;
+        let state_path = self.path.clone();
+        let chats = tokio::task::spawn_blocking(move || chat_directories(&state_path)).await??;
+        if chats.contains(root) {
+            return Ok(path.into());
+        }
+        let projects = self.read_projects().await?;
         for registered in projects.iter().flat_map(|project| &project.roots) {
             if registered.path == path
                 || tokio::fs::canonicalize(&registered.path)
@@ -61,8 +103,8 @@ impl ProjectStore {
                 return Ok(path.into());
             }
         }
-        projects.push(Project {
-            list_revision: 0,
+        let storage = self.storage.clone();
+        let project = Project {
             id: uuid::Uuid::new_v4().to_string(),
             name: root
                 .file_name()
@@ -70,33 +112,16 @@ impl ProjectStore {
                 .unwrap_or_else(|| path.into()),
             roots: vec![agent_protocol::models::ProjectRoot { path: path.into() }],
             icon: None,
-        });
-        let file = self.path.with_file_name("bex-projects.json");
-        let bytes = serde_json::to_vec(&projects)?;
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            if let Some(parent) = file.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            atomicwrites::AtomicFile::new(&file, atomicwrites::AllowOverwrite).write(|f| {
-                use std::io::Write;
-                f.write_all(&bytes)
-            })?;
-            Ok(())
-        })
-        .await??;
+        };
+        tokio::task::spawn_blocking(move || storage.register_project(&project))
+            .await?
+            .map_err(anyhow::Error::msg)?;
         Ok(path.into())
     }
     pub(crate) async fn load(&self) -> anyhow::Result<state::Snapshot> {
-        // Admission reserves the configured path before preparation creates it.
-        // Keep it alongside the physical path when its parent is a symlink.
-        let mut chat_directories = std::collections::BTreeSet::from([self.chat_directory()]);
-        match tokio::fs::canonicalize(self.chat_directory()).await {
-            Ok(path) => {
-                chat_directories.insert(dunce::simplified(&path).to_owned());
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        let state_file = self.path.clone();
+        let chat_directories =
+            tokio::task::spawn_blocking(move || chat_directories(&state_file)).await??;
         let mut snapshot = state::Snapshot {
             chat_directories,
             ..Default::default()
@@ -180,10 +205,8 @@ mod tests {
     async fn standalone_chat_directory_does_not_become_a_project() {
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
-        let store = ProjectStore::new(root.join("bex-worktrees.json"));
-        let chats = store.chat_directory();
+        let chats = root.join("bex-chats");
         std::fs::create_dir(&chats).unwrap();
-        store.register(&chats).await.unwrap();
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let projects = serde_json::json!([
@@ -195,6 +218,7 @@ mod tests {
             serde_json::to_vec(&projects).unwrap(),
         )
         .unwrap();
+        let store = ProjectStore::new(root.join("bex-worktrees.json"));
         let snapshot = store.load().await.unwrap();
         assert_eq!(snapshot.projects.len(), 1);
         assert_eq!(snapshot.projects[0].id, "mixed");

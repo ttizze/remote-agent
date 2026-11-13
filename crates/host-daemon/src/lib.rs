@@ -20,7 +20,7 @@ pub use host_runtime::HostRuntime;
 
 pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials};
 
-pub use host_rpc::{HostRpcService, HostSession, SessionId};
+pub use host_rpc::{HostReply, HostRpcService, HostSession, HostSubscription, SessionId};
 pub use projects::ProjectStore;
 
 mod visualize;

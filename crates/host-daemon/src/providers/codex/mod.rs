@@ -90,6 +90,7 @@ pub struct Codex {
     processed: tokio::sync::watch::Sender<u64>,
     subscriptions: Arc<retention::Subscriptions>,
     rosters: Arc<background::Rosters>,
+    scopes: Arc<super::scopes::Scopes>,
 }
 pub use codex_app_server::AppServerConfig as Config;
 
@@ -134,6 +135,9 @@ impl Codex {
                     .map(|dirs| dirs.home_dir().join(".codex"))
                     .unwrap_or_default()
             });
+        let scopes = Arc::new(super::scopes::Scopes::default());
+        let (processed, progress) = tokio::sync::watch::channel(0);
+        let stopped = tokio_util::sync::CancellationToken::new();
         Self {
             cli: cli::Updater::new(Config::default()),
             accounts: Arc::default(),
@@ -142,10 +146,15 @@ impl Codex {
             directory,
             instance: uuid::Uuid::new_v4(),
             process,
-            stopped: Default::default(),
-            processed: tokio::sync::watch::channel(0).0,
-            subscriptions: Arc::default(),
+            stopped: stopped.clone(),
+            processed,
+            subscriptions: Arc::new(retention::Subscriptions::new(
+                scopes.clone(),
+                progress,
+                stopped,
+            )),
             rosters: Arc::default(),
+            scopes,
         }
     }
     pub async fn enable_accounts(
@@ -215,9 +224,13 @@ impl Codex {
         reload: bool,
     ) -> Result<(), Failure> {
         let params = thread_config(serde_json::json!({"threadId":id,"cwd":cwd}), browser);
-        let resume = self
-            .thread_response("thread/resume", &params)
-            .map(|reply| reply.map(drop).map_err(Failure::before_submission));
+        let resume = async {
+            self.scopes.suspend(id);
+            self.thread_response("thread/resume", &params)
+                .await
+                .map(|response| self.scopes.history(&response))
+                .map_err(Failure::before_submission)
+        };
         self.subscriptions.start(id, reload, resume).await
     }
 
@@ -308,7 +321,6 @@ impl Codex {
             .map(|mut turn| {
                 if !include_activity {
                     turn.items = turn.items.map(native::summary_items);
-                    turn.items_summary = true;
                 }
                 Arc::new(turn)
             })
@@ -674,36 +686,66 @@ impl Identity for Codex {
 }
 
 #[async_trait::async_trait]
-impl Agent for Codex {
+impl crate::providers::Configuration for Codex {
     async fn codex_cli(&self, update: bool) -> Result<op::CodexCliStatus, Failure> {
         Ok(self.cli.request(update).await)
     }
     fn data_recipient(&self) -> &'static str {
         "OpenAI"
     }
-    fn capabilities(&self) -> agent_protocol::session::Capabilities {
-        agent_protocol::session::Capabilities {
-            steer: true,
-            fork: true,
-            rename: true,
-            model_change: true,
+    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
+        let config: Result<Value, _> = self
+            .request("config/read", &serde_json::json!({"includeLayers":false}))
+            .await;
+        let configured = config
+            .as_ref()
+            .ok()
+            .and_then(|value| value["config"]["model"].as_str());
+        let page: Page<Value> = self.request("model/list", &serde_json::json!({"limit":params.limit,"cursor":params.cursor,"includeHidden":true})).await?;
+        let mut data = page
+            .data
+            .into_iter()
+            .filter(|value| value["hidden"] != true || value["model"].as_str() == configured)
+            .map(native::parse_model)
+            .collect::<Result<Vec<_>, _>>()?;
+        if params.cursor.is_none()
+            && let Ok(config) = config
+        {
+            let account: Result<Value, _> = self
+                .request("account/read", &serde_json::json!({"refreshToken":false}))
+                .await;
+            let account_type = account
+                .as_ref()
+                .ok()
+                .and_then(|value| value["account"]["type"].as_str());
+            native::include_configured_model(&mut data, &config["config"], account_type);
         }
+        Ok(op::ModelPage {
+            data,
+            next_cursor: page.next_cursor,
+            provider_errors: None,
+        })
     }
-    fn summary_items(
+
+    async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
+        self.composer_catalog(cwd).await
+    }
+    async fn read_permissions(
         &self,
-        items: &[Arc<agent_protocol::items::Item>],
-    ) -> Option<Vec<Arc<agent_protocol::items::Item>>> {
-        Some(native::summary_items(items.to_vec()))
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        Codex::read_permissions(self).await
     }
-    fn availability(&self) -> Result<(), Failure> {
-        self.server().map(|_| ())
+    async fn update_permissions(
+        &self,
+        mode: agent_protocol::permissions::PermissionMode,
+        version: &str,
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        Codex::update_permissions(self, mode, version).await
     }
-    fn requires_restart_snapshot(&self) -> bool {
-        self.process.is_ok()
-    }
-    fn validate_create(&self) -> Result<(), Failure> {
-        self.availability()
-    }
+}
+
+#[async_trait::async_trait]
+impl crate::providers::Discovery for Codex {
     fn storage_directory(&self) -> &std::path::Path {
         &self.directory
     }
@@ -832,34 +874,6 @@ impl Agent for Codex {
         self.history_page(id, Some(cursor), include_activity).await
     }
 
-    async fn read_turn_items(
-        &self,
-        id: &str,
-        turn_id: &agent_protocol::ids::TurnId,
-    ) -> Result<Vec<Arc<Item>>, Failure> {
-        if turn_id.is_empty() {
-            return Err(Failure::new("invalid_params", "turn ID is required"));
-        }
-        let mut items = Vec::new();
-        let mut cursor = None;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            let page = self.item_page(id, turn_id, cursor.as_deref()).await?;
-            items.extend(page.data.into_iter().map(|entry| entry.item));
-            cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
-            let Some(next) = &cursor else {
-                break;
-            };
-            if !seen.insert(next.clone()) {
-                return Err(Failure::new(
-                    "invalid_thread_history",
-                    "item cursor repeated",
-                ));
-            }
-        }
-        Ok(items)
-    }
-
     async fn read_item(
         &self,
         params: &op::ReadItem,
@@ -906,6 +920,31 @@ impl Agent for Codex {
                 ));
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Agent for Codex {
+    fn capabilities(&self) -> agent_protocol::session::Capabilities {
+        agent_protocol::session::Capabilities {
+            steer: true,
+            fork: true,
+            model_change: true,
+            ..Default::default()
+        }
+    }
+    fn availability(&self) -> Result<(), Failure> {
+        self.server()?;
+        if let Some(error) = self.restoration_error.borrow().as_ref() {
+            return Err(Failure::new("account_unavailable", error));
+        }
+        Ok(())
+    }
+    fn requires_restart_snapshot(&self) -> bool {
+        self.process.is_ok()
+    }
+    fn validate_create(&self) -> Result<(), Failure> {
+        self.availability()
     }
     async fn create(
         &self,
@@ -965,9 +1004,7 @@ impl Agent for Codex {
             .map_err(|error| Failure::unknown("provider_unload_failed", error))
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
-        if let Some(error) = self.restoration_error.borrow().as_ref() {
-            return Err(Failure::new("account_unavailable", error));
-        }
+        self.availability()?;
         let native: Value = self
             .request(
                 "thread/read",
@@ -989,6 +1026,7 @@ impl Agent for Codex {
         route: crate::providers::SubmissionTarget<'_>,
         reload: bool,
         browser: Option<Value>,
+        execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use crate::providers::SubmissionTarget;
         let mut params = serde_json::json!({
@@ -998,22 +1036,45 @@ impl Agent for Codex {
         });
         let turn_id = match route {
             SubmissionTarget::Steer(turn) => {
+                self.scopes.reserve(&input.thread_id.id, execution);
+                self.scopes
+                    .bind(&input.thread_id.id, turn.into(), execution);
                 params["expectedTurnId"] = turn.into();
-                self.request::<_, agent_protocol::models::Empty>("turn/steer", &params)
-                    .await?;
+                let result = self
+                    .request::<_, agent_protocol::models::Empty>("turn/steer", &params)
+                    .await;
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
+                {
+                    self.scopes.cancel(&input.thread_id.id, execution);
+                }
+                result?;
                 Some(turn.into())
             }
             SubmissionTarget::Start { cwd } => {
                 self.resume(&input.thread_id.id, Some(cwd), browser, reload)
                     .await?;
+                self.scopes.reserve(&input.thread_id.id, execution);
                 params["model"] = serde_json::json!(input.model.as_ref().map(|model| &model.id));
                 params["effort"] = serde_json::json!(input.effort);
                 params["serviceTierForTurn"] = serde_json::json!(input.service_tier);
                 params["summary"] = REASONING_SUMMARY.into();
-                let reply: Value = self.request("turn/start", &params).await?;
+                let result = self.request::<_, Value>("turn/start", &params).await;
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
+                {
+                    self.scopes.cancel(&input.thread_id.id, execution);
+                }
+                let reply = result?;
                 Some(native_turn_id(reply["turn"]["id"].as_str())?)
             }
         };
+        if let Some(turn) = &turn_id {
+            self.scopes
+                .bind(&input.thread_id.id, turn.clone(), execution);
+        }
         Ok(op::SubmissionReceipt { turn_id })
     }
     async fn continue_turn(
@@ -1022,12 +1083,23 @@ impl Agent for Codex {
         model: Option<&str>,
         effort: Option<&str>,
         service_tier: Option<&str>,
+        execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
-        let reply: Value = self
-            .request("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}))
-            .await?;
+        self.scopes.reserve(id, execution);
+        let result = self
+            .request::<_,Value>("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}))
+            .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
+        {
+            self.scopes.cancel(id, execution);
+        }
+        let reply = result?;
+        let turn = native_turn_id(reply["turn"]["id"].as_str())?;
+        self.scopes.bind(id, turn.clone(), execution);
         Ok(op::SubmissionReceipt {
-            turn_id: Some(native_turn_id(reply["turn"]["id"].as_str())?),
+            turn_id: Some(turn),
         })
     }
     async fn interrupt(
@@ -1058,57 +1130,8 @@ impl Agent for Codex {
         }
         Ok(agent_protocol::models::Empty {})
     }
-    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let config: Result<Value, _> = self
-            .request("config/read", &serde_json::json!({"includeLayers":false}))
-            .await;
-        let configured = config
-            .as_ref()
-            .ok()
-            .and_then(|value| value["config"]["model"].as_str());
-        let page: Page<Value> = self.request("model/list", &serde_json::json!({"limit":params.limit,"cursor":params.cursor,"includeHidden":true})).await?;
-        let mut data = page
-            .data
-            .into_iter()
-            .filter(|value| value["hidden"] != true || value["model"].as_str() == configured)
-            .map(native::parse_model)
-            .collect::<Result<Vec<_>, _>>()?;
-        if params.cursor.is_none()
-            && let Ok(config) = config
-        {
-            let account: Result<Value, _> = self
-                .request("account/read", &serde_json::json!({"refreshToken":false}))
-                .await;
-            let account_type = account
-                .as_ref()
-                .ok()
-                .and_then(|value| value["account"]["type"].as_str());
-            native::include_configured_model(&mut data, &config["config"], account_type);
-        }
-        Ok(op::ModelPage {
-            data,
-            next_cursor: page.next_cursor,
-            provider_errors: None,
-        })
-    }
-
-    async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
-        self.composer_catalog(cwd).await
-    }
     async fn discard_workspace_processes(&self, _dir: &std::path::Path) -> Result<(), Failure> {
         Ok(())
-    }
-    async fn read_permissions(
-        &self,
-    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        Codex::read_permissions(self).await
-    }
-    async fn update_permissions(
-        &self,
-        mode: agent_protocol::permissions::PermissionMode,
-        version: &str,
-    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        Codex::update_permissions(self, mode, version).await
     }
     async fn fork(
         &self,
@@ -1128,13 +1151,6 @@ impl Agent for Codex {
         self.subscribed(&response);
         Ok(response)
     }
-    async fn rename(&self, id: &str, name: &str) -> Result<agent_protocol::models::Empty, Failure> {
-        self.request(
-            "thread/name/set",
-            &serde_json::json!({"threadId":id,"name":name}),
-        )
-        .await
-    }
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>> {
         // Subscribe before spawning the pump. Otherwise Codex can emit a
         // server request in the scheduling gap and it would be lost before
@@ -1150,9 +1166,8 @@ impl Agent for Codex {
         let process = codex.clone();
         let subscriptions = self.subscriptions.clone();
         let rosters = self.rosters.clone();
-        subscriptions
-            .clone()
-            .spawn_releaser(codex.clone(), stopped.clone());
+        let scopes = self.scopes.clone();
+        subscriptions.clone().spawn_releaser(codex.clone());
         let (output, receiver) = tokio::sync::mpsc::channel(256);
         tokio::spawn(async move {
             let (cause, reason) = loop {
@@ -1175,19 +1190,15 @@ impl Agent for Codex {
                                 refresh_auth_tokens(&accounts, &process, &line).await;
                             });
                         } else if request.kind() == RpcMessageKind::Request {
-                            let admission = match serde_json::from_str(&line)
-                                .map_err(|e| e.to_string())
-                                .and_then(|request| {
-                                    request_change(
-                                        instance,
-                                        stopped.clone(),
-                                        request,
-                                        process.clone(),
-                                    )
-                                }) {
-                                Ok(change) => emit(&output, change).await,
-                                Err(error) => Err(error),
-                            };
+                            let admission = admit_request(
+                                instance,
+                                stopped.clone(),
+                                &process,
+                                &output,
+                                &scopes,
+                                &line,
+                            )
+                            .await;
                             if let Err(error) = &admission {
                                 tracing::warn!(target: "agent", operation = "host.codex.request_rejected", message = %error);
                             }
@@ -1205,11 +1216,23 @@ impl Agent for Codex {
                                         &request.params::<Value>().unwrap_or_default(),
                                     );
                                     wake(&process, &change, background.continuations);
-                                    if matches!(change, AgentChange::TaskParent { .. }) {
-                                        Ok(())
-                                    } else {
-                                        emit_all(&output, [Some(change), background.roster]).await
+                                    let child =
+                                        if let AgentChange::TaskParent { session, .. } = &change {
+                                            Some(session.id.clone())
+                                        } else {
+                                            None
+                                        };
+                                    let execution = scopes.observe(&change);
+                                    let result = emit_all(
+                                        &output,
+                                        [Some(change), background.roster],
+                                        execution,
+                                    )
+                                    .await;
+                                    if let (Ok(()), Some(child)) = (&result, child) {
+                                        scopes.admit(&child);
                                     }
+                                    result
                                 }
                                 Ok(None) => Ok(()),
                                 Err(error) => Err(error),
@@ -1253,7 +1276,7 @@ impl Agent for Codex {
             if let Err(error) = process.shutdown().await {
                 tracing::error!(target: "agent", operation = "host.codex.shutdown", message = %error);
             }
-            let _=emit(&output,AgentChange::Stopped {provider:ProviderKind::Codex,reason:"エージェントとの接続が終了しました。ホストを再起動してから再送信してください。".into()}).await;
+            let _=emit(&output,AgentChange::Stopped {provider:ProviderKind::Codex,error:agent_protocol::execution::ExecutionError {message:"エージェントとの接続が終了しました。ホストを再起動してから再送信してください。".into(),category:agent_protocol::execution::ErrorCategory::Network,..Default::default()}}).await;
         });
         Some(receiver)
     }
@@ -1293,9 +1316,10 @@ fn wake(process: &Arc<CodexAppServer>, change: &AgentChange, prompts: Vec<String
 async fn emit_all(
     output: &tokio::sync::mpsc::Sender<AgentEvent>,
     changes: impl IntoIterator<Item = Option<AgentChange>>,
+    execution: Option<uuid::Uuid>,
 ) -> Result<(), String> {
     for change in changes.into_iter().flatten() {
-        emit(output, change).await?;
+        crate::providers::emit_for(output, change, execution).await?;
     }
     Ok(())
 }
@@ -1435,7 +1459,7 @@ rl.on('line', line => {
                 vec!["task", "review", "helper"],
             ),
         ] {
-            let page = super::Agent::list(&agent, "", None, scope, 10)
+            let page = crate::providers::Discovery::list(&agent, "", None, scope, 10)
                 .await
                 .unwrap();
             let ids: Vec<_> = page
@@ -1540,18 +1564,13 @@ rl.on('line', line => {
 
     #[tokio::test]
     async fn provider_process_events_cannot_mutate_host_owned_terminals() {
-        use futures_util::FutureExt;
-        let router = crate::host_rpc::routing::SessionRouter::new();
-        let mut connection = router.open_session();
         for method in ["process/outputDelta", "process/exited"] {
             let line = serde_json::json!({"method":method,"params":{"processHandle":"owned","deltaBase64":"aW5qZWN0ZWQ=","exitCode":0}}).to_string();
-            if let Some(change) =
+            assert!(
                 super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                     .unwrap()
-            {
-                router.apply(change, &[]).unwrap();
-            }
-            assert!(connection.recv().now_or_never().is_none());
+                    .is_none()
+            );
         }
     }
     #[test]
@@ -1572,4 +1591,18 @@ rl.on('line', line => {
             assert!(!super::unmaterialized_history(code, message, id));
         }
     }
+}
+
+async fn admit_request(
+    instance: uuid::Uuid,
+    stopped: tokio_util::sync::CancellationToken,
+    process: &Arc<CodexAppServer>,
+    output: &tokio::sync::mpsc::Sender<AgentEvent>,
+    scopes: &super::scopes::Scopes,
+    line: &str,
+) -> Result<(), String> {
+    let request = serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let change = request_change(instance, stopped, request, process.clone())?;
+    let execution = scopes.observe(&change);
+    crate::providers::emit_for(output, change, execution).await
 }

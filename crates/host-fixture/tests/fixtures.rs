@@ -114,8 +114,13 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
         )
         .await
         .unwrap();
-        let server =
-            PairingServer::start(&root, host.ticket.clone(), Identity::generate()).unwrap();
+        let server = PairingServer::start(
+            &root,
+            host.projects.clone(),
+            host.ticket.clone(),
+            Identity::generate(),
+        )
+        .unwrap();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let base = format!("http://127.0.0.1:{}", server.port);

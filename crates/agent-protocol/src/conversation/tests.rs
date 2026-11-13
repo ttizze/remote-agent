@@ -3,6 +3,7 @@ use crate::items::AssistantPhase;
 
 fn context(seed: u128) -> Context {
     Context {
+        external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),
         steers: true,
@@ -19,6 +20,7 @@ fn state() -> State {
     state.bindings.insert(
         ProviderKind::Claude,
         Binding::Ready {
+            covered: 0,
             source: "native-session".into(),
         },
     );
@@ -83,16 +85,244 @@ fn starting(state: &State, seed: u128) -> (State, ClientInputId, Uuid, Attempt) 
     )
 }
 
+// An ambiguous native write can have changed provider context. Explicit retry
+// must prepare a fresh source before sending, while preserving the input ID.
+fn deliver_after_rebuilding(state: &State, resumed: &Step, seed: u128) -> Step {
+    let [
+        Action::Prepare {
+            id,
+            action,
+            stage: PreparationStage::Provider,
+            ..
+        },
+    ] = &resumed.actions[..]
+    else {
+        panic!("ambiguous delivery must rebuild its provider source");
+    };
+    let pending = state.apply(&resumed.changes);
+    step(
+        &pending,
+        Event::Prepared {
+            id: id.clone(),
+            action: *action,
+            cwd: Some("/project".into()),
+            source: Some("rebuilt-native-session".into()),
+        },
+        context(seed),
+    )
+}
+
 fn running() -> (State, Attempt) {
     let (state, id, action, attempt) = starting(&state(), 1);
-    let delivered = step(&state, Event::Delivered { id, action }, context(2));
+    let delivered = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id,
+            action,
+        },
+        context(2),
+    );
     (state.apply(&delivered.changes), attempt)
+}
+
+#[test]
+fn failed_interrupts_allow_retry_without_replacing_a_newer_interrupt_or_losing_background_work() {
+    for background in [
+        Vec::new(),
+        vec![BackgroundTask {
+            id: "task".into(),
+            kind: crate::execution::BackgroundTaskKind::Command,
+            description: None,
+        }],
+    ] {
+        let (mut state, attempt) = running();
+        if !background.is_empty() {
+            state = state.apply(
+                &observe(
+                    &state,
+                    &attempt,
+                    Observation::Background {
+                        tasks: background.clone(),
+                    },
+                    5,
+                )
+                .changes,
+            );
+        }
+        let stopping = command(&state, 6, Command::Interrupt { turn: None });
+        let Action::Interrupt { action, .. } = stopping.actions[0] else {
+            panic!("interrupt missing")
+        };
+        state = state.apply(&stopping.changes);
+        let failed = step(
+            &state,
+            Event::InterruptResult {
+                attempt: attempt.id,
+                action,
+                error: Some(ExecutionError {
+                    message: "interrupt not sent".into(),
+                    ..Default::default()
+                }),
+                background: background.clone(),
+            },
+            context(7),
+        );
+        state = state.apply(&failed.changes);
+        assert_eq!(
+            state.turns[&attempt.turn].error.as_ref().unwrap().message,
+            "interrupt not sent"
+        );
+        if background.is_empty() {
+            assert_eq!(
+                state.turns[&attempt.turn].state,
+                TurnState::Running { interrupt: None }
+            );
+        } else {
+            assert_eq!(
+                state.turns[&attempt.turn].state,
+                TurnState::Waiting(Wait::Background {
+                    tasks: background.clone()
+                })
+            );
+        }
+        let retry = command(&state, 8, Command::Interrupt { turn: None });
+        assert_eq!(retry.actions.len(), 1);
+        state = state.apply(&retry.changes);
+        let stale = step(
+            &state,
+            Event::InterruptResult {
+                attempt: attempt.id,
+                action,
+                error: Some(ExecutionError::default()),
+                background,
+            },
+            context(9),
+        );
+        assert!(stale.changes.is_empty());
+    }
+}
+
+#[test]
+fn stopping_background_work_retains_the_answer_and_the_work_that_keeps_running() {
+    let task = BackgroundTask {
+        id: "agent".into(),
+        kind: crate::execution::BackgroundTaskKind::Subagent,
+        description: Some("Review".into()),
+    };
+    for remaining in [vec![task.clone()], vec![]] {
+        let (state, attempt) = running();
+        let waiting = observe(
+            &state,
+            &attempt,
+            Observation::Background {
+                tasks: vec![task.clone()],
+            },
+            3,
+        );
+        let state = state.apply(&waiting.changes);
+        let stop = command(&state, 4, Command::Interrupt { turn: None });
+        let Action::Interrupt {
+            action,
+            background: true,
+            ..
+        } = stop.actions[0]
+        else {
+            panic!("background stop")
+        };
+        let state = state.apply(&stop.changes);
+        let result = step(
+            &state,
+            Event::InterruptResult {
+                attempt: attempt.id,
+                action,
+                error: None,
+                background: remaining.clone(),
+            },
+            context(5),
+        );
+        let state = state.apply(&result.changes);
+        let turn = &state.turns[&attempt.turn];
+        assert!(turn.error.is_none());
+        assert_eq!(
+            turn.state,
+            if remaining.is_empty() {
+                TurnState::Completed
+            } else {
+                TurnState::Waiting(Wait::Background { tasks: remaining })
+            }
+        );
+        let stale = step(
+            &state,
+            Event::InterruptResult {
+                attempt: attempt.id,
+                action,
+                error: None,
+                background: vec![],
+            },
+            context(6),
+        );
+        assert!(stale.changes.is_empty());
+    }
+}
+
+#[test]
+fn delayed_stop_cannot_cancel_a_different_turn_or_a_new_preparation() {
+    let (state, attempt) = running();
+    let rejected = command(
+        &state,
+        20,
+        Command::Interrupt {
+            turn: Some("older-turn".into()),
+        },
+    );
+    assert!(matches!(rejected.outcome, Outcome::Rejected(_)));
+    assert!(rejected.changes.is_empty());
+    assert!(rejected.actions.is_empty());
+    let stopped = command(
+        &state,
+        21,
+        Command::Interrupt {
+            turn: Some(attempt.turn),
+        },
+    );
+    assert!(matches!(&stopped.actions[..], [Action::Interrupt { .. }]));
+
+    let state = State::new(Thread {
+        workspace: Workspace::Missing,
+        ..state.thread
+    });
+    let submitted = submit(&state, 22, FollowUp::Queue);
+    let state = state.apply(&submitted.changes);
+    let rejected = command(
+        &state,
+        23,
+        Command::Interrupt {
+            turn: Some("older-input".into()),
+        },
+    );
+    assert!(matches!(rejected.outcome, Outcome::Rejected(_)));
+    assert!(rejected.actions.is_empty());
+    let input = state.inputs.keys().next().unwrap();
+    let stopped = command(
+        &state,
+        24,
+        Command::Interrupt {
+            turn: Some(input.to_string().into()),
+        },
+    );
+    assert!(matches!(
+        &stopped.actions[..],
+        [Action::CancelPreparation { .. }]
+    ));
 }
 
 fn observe(state: &State, attempt: &Attempt, observation: Observation, seed: u128) -> Step {
     let result = step(
         state,
         Event::Provider {
+            native_items: Vec::new(),
+            native_turn: None,
             attempt: attempt.id,
             observation,
         },
@@ -117,6 +347,7 @@ fn admission_stores_input_before_delivery_and_ack_moves_the_same_id_into_history
     let delivered = step(
         &pending,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action,
         },
@@ -129,9 +360,214 @@ fn admission_stores_input_before_delivery_and_ack_moves_the_same_id_into_history
         state.turns[&attempt.turn].state,
         TurnState::Running { interrupt: None }
     );
-    let duplicate = step(&state, Event::Delivered { id, action }, context(3));
+    let duplicate = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id,
+            action,
+        },
+        context(3),
+    );
     assert_eq!(duplicate, Step::default());
     assert_eq!(initial, self::state());
+}
+
+#[test]
+fn queued_edits_and_moves_keep_identity_and_never_modify_in_flight_input() {
+    let (mut state, _) = running();
+    for seed in [3, 4, 5] {
+        state = state.apply(&submit(&state, seed, FollowUp::Queue).changes);
+    }
+    let id = |seed| ClientInputId(Uuid::from_u128(seed).to_string());
+    let moved = command(
+        &state,
+        6,
+        Command::MoveInput {
+            id: id(5),
+            before: Some(id(3)),
+        },
+    );
+    state = state.apply(&moved.changes);
+    let ordered = |state: &State| {
+        let mut rows: Vec<_> = state.inputs.values().collect();
+        rows.sort_by_key(|input| input.position);
+        rows.into_iter()
+            .map(|input| input.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ordered(&state), [id(5), id(3), id(4)]);
+    let edited = command(
+        &state,
+        7,
+        Command::EditInput {
+            id: id(3),
+            parts: vec![InputPart::Text {
+                text: "changed".into(),
+            }],
+        },
+    );
+    state = state.apply(&edited.changes);
+    assert_eq!(ordered(&state), [id(5), id(3), id(4)]);
+    assert_eq!(
+        state.inputs[&id(3)].content.parts,
+        [InputPart::Text {
+            text: "changed".into()
+        }]
+    );
+    assert!(matches!(
+        command(
+            &state,
+            8,
+            Command::EditInput {
+                id: id(3),
+                parts: vec![]
+            }
+        )
+        .outcome,
+        Outcome::Rejected(_)
+    ));
+    let (pending, input, _, _) = starting(&self::state(), 11);
+    assert!(matches!(
+        command(
+            &pending,
+            12,
+            Command::MoveInput {
+                id: input.clone(),
+                before: None
+            }
+        )
+        .outcome,
+        Outcome::Rejected(_)
+    ));
+    assert!(matches!(
+        command(
+            &pending,
+            13,
+            Command::EditInput {
+                id: input,
+                parts: content(FollowUp::Queue).parts
+            }
+        )
+        .outcome,
+        Outcome::Rejected(_)
+    ));
+}
+
+#[test]
+fn steering_a_selected_queued_input_does_not_drain_the_inputs_before_it() {
+    let (mut state, attempt) = running();
+    for seed in [3, 4] {
+        state = state.apply(&submit(&state, seed, FollowUp::Queue).changes);
+    }
+    let selected: ClientInputId = Uuid::from_u128(4).to_string().into();
+    let steer = command(&state, 5, Command::SteerInput(selected.clone()));
+    assert!(
+        matches!(&steer.actions[..], [Action::Deliver { id, attempt: current, steer: true, .. }] if id == &selected && current == &attempt)
+    );
+    let next = state.apply(&steer.changes);
+    assert!(matches!(
+        next.inputs[Uuid::from_u128(3).to_string().as_str()].state,
+        InputState::Queued { .. }
+    ));
+    assert_eq!(state.inputs.len(), 2);
+}
+
+#[test]
+fn rewind_rejects_work_running_outside_the_saved_history() {
+    let (state, attempt) = running();
+    let state = state.apply(&observe(&state, &attempt, Observation::Completed, 4).changes);
+    let result = step(
+        &state,
+        Event::Command {
+            id: OperationId::Client(Uuid::new_v4()),
+            receipt: None,
+            command: Command::Rewind(attempt.turn),
+        },
+        Context {
+            external_busy: true,
+            ..context(5)
+        },
+    );
+    assert_eq!(
+        result.outcome,
+        Outcome::Rejected("conversation is busy".into())
+    );
+    assert!(result.changes.is_empty());
+    assert!(result.actions.is_empty());
+}
+
+#[test]
+fn rewind_retains_rows_and_counters_and_invalidates_native_bindings() {
+    let (state, attempt) = running();
+    assert!(matches!(
+        command(&state, 3, Command::Rewind(attempt.turn.clone())).outcome,
+        Outcome::Rejected(_)
+    ));
+    let completed = observe(&state, &attempt, Observation::Completed, 4);
+    let state = state.apply(&completed.changes);
+    let before = state.clone();
+    let rewound = command(&state, 5, Command::Rewind(attempt.turn.clone()));
+    let state = state.apply(&rewound.changes);
+    assert_eq!(state.turns[&attempt.turn].state, TurnState::RolledBack);
+    assert_eq!(state.items, before.items);
+    assert_eq!(state.counters, before.counters);
+    assert!(state.bindings.is_empty());
+    assert!(state.attempts.is_empty());
+    assert!(
+        observe(&state, &attempt, Observation::Completed, 6)
+            .changes
+            .is_empty()
+    );
+    let next = submit(&state, 7, FollowUp::Queue);
+    assert!(matches!(
+        &next.actions[..],
+        [Action::Prepare {
+            stage: PreparationStage::Provider,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn switching_provider_keeps_the_root_and_rebuilds_the_binding_from_confirmed_history() {
+    let state = state();
+    let mut input = content(FollowUp::Queue);
+    input.model = Some(ModelRef {
+        provider: ProviderKind::Codex,
+        id: "selected".into(),
+    });
+    let switched = command(
+        &state,
+        3,
+        Command::Submit {
+            id: Uuid::from_u128(3).to_string().into(),
+            content: input.clone(),
+        },
+    );
+    let next = state.apply(&switched.changes);
+    assert_eq!(next.thread.provider, ProviderKind::Codex);
+    assert!(matches!(
+        &switched.actions[..],
+        [Action::Prepare {
+            provider: ProviderKind::Codex,
+            stage: PreparationStage::Provider,
+            ..
+        }]
+    ));
+    let (busy, _) = running();
+    assert!(matches!(
+        command(
+            &busy,
+            3,
+            Command::Submit {
+                id: Uuid::from_u128(3).to_string().into(),
+                content: input
+            }
+        )
+        .outcome,
+        Outcome::Rejected(_)
+    ));
 }
 
 #[test]
@@ -173,9 +609,17 @@ fn events_before_the_start_ack_prove_delivery_and_the_late_ack_is_harmless() {
     assert!(state.inputs.is_empty());
     assert_eq!(state.items.len(), 1);
     assert!(
-        step(&state, Event::Delivered { id, action }, context(3))
-            .changes
-            .is_empty()
+        step(
+            &state,
+            Event::Delivered {
+                native_turn: None,
+                id,
+                action
+            },
+            context(3)
+        )
+        .changes
+        .is_empty()
     );
 }
 
@@ -210,7 +654,15 @@ fn steering_joins_the_current_attempt_without_overtaking_queued_turns() {
         Action::Deliver { id, action, .. } => (id.clone(), *action),
         _ => unreachable!(),
     };
-    let ack = step(&state, Event::Delivered { id, action }, context(5));
+    let ack = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id,
+            action,
+        },
+        context(5),
+    );
     let state = state.apply(&ack.changes);
     assert_eq!(state.turns.len(), 1);
     assert_eq!(state.items.len(), 2);
@@ -232,6 +684,7 @@ fn an_unsupported_steer_queues_and_failed_steering_keeps_the_live_attempt() {
         &state,
         event.clone(),
         Context {
+            external_busy: false,
             steers: false,
             ..context(3)
         },
@@ -283,6 +736,7 @@ fn restart_never_resends_an_ambiguous_start_and_rejects_its_late_evidence() {
         step(
             &state,
             Event::Delivered {
+                native_turn: None,
                 id: id.clone(),
                 action
             },
@@ -298,8 +752,10 @@ fn restart_never_resends_an_ambiguous_start_and_rejects_its_late_evidence() {
     let state = state.apply(&resolved.changes);
     assert!(step(&state, Event::Wake, context(6)).actions.is_empty());
     let resumed = command(&state, 7, Command::ResumeQueue);
+    let delivered = deliver_after_rebuilding(&state, &resumed, 8);
     assert!(
-        matches!(&resumed.actions[..], [Action::Deliver { attempt: next, .. }] if next.id != attempt.id)
+        matches!(&delivered.actions[..], [Action::Deliver { attempt: next, .. }]
+            if next.id != attempt.id && next.source != attempt.source)
     );
 }
 
@@ -352,7 +808,7 @@ fn recovery_continuation_is_once_and_respects_settings_and_explicit_interrupts()
         );
         assert!(again.continuations.is_empty());
     }
-    let interrupted = command(&state, 5, Command::Interrupt);
+    let interrupted = command(&state, 5, Command::Interrupt { turn: None });
     let state = state.apply(&interrupted.changes);
     let recovered = step(
         &state,
@@ -420,6 +876,7 @@ fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
         &state,
         Event::Wake,
         Context {
+            external_busy: false,
             now: 199,
             ..context(5)
         },
@@ -430,6 +887,7 @@ fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
         &state,
         Event::Wake,
         Context {
+            external_busy: false,
             now: 200,
             ..context(6)
         },
@@ -444,6 +902,47 @@ fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
         observe(&state, &attempt, Observation::Completed, 8),
         Step::default()
     );
+}
+
+#[test]
+fn due_retry_without_a_connection_or_workspace_finishes_and_holds_the_queue() {
+    for missing_workspace in [false, true] {
+        let (state, attempt) = running();
+        let state = state.apply(&submit(&state, 2, FollowUp::Queue).changes);
+        let mut state =
+            state.apply(&observe(&state, &attempt, Observation::Retry { at: 200 }, 3).changes);
+        if missing_workspace {
+            state.thread.workspace = Workspace::Missing;
+        } else {
+            state.bindings.clear();
+        }
+        let recovered = step(
+            &state,
+            Event::Restart {
+                updating: false,
+                continue_after_restart: false,
+            },
+            context(4),
+        );
+        let state = state.apply(&recovered.changes);
+        let due = step(
+            &state,
+            Event::Wake,
+            Context {
+                now: 200,
+                ..context(5)
+            },
+        );
+        let settled = state.apply(&due.changes);
+        assert!(settled.active_turn().is_none());
+        assert!(matches!(
+            settled.turns[&attempt.turn].state,
+            TurnState::Failed(_)
+        ));
+        assert!(due.actions.is_empty());
+        assert!(settled.thread.queue_held);
+        assert!(settled.has_queued_inputs());
+    }
 }
 
 #[test]
@@ -463,7 +962,7 @@ fn preparation_resumes_the_saved_stage_and_discards_old_action_results() {
     else {
         panic!("workspace")
     };
-    let worktree = step(
+    let provider = step(
         &state,
         Event::Prepared {
             id: id.clone(),
@@ -474,13 +973,14 @@ fn preparation_resumes_the_saved_stage_and_discards_old_action_results() {
         context(2),
     );
     assert!(matches!(
-        &worktree.actions[..],
+        &provider.actions[..],
         [Action::Prepare {
-            stage: PreparationStage::Worktree,
+            stage: PreparationStage::Provider,
             ..
         }]
     ));
-    let state = state.apply(&worktree.changes);
+    let state = state.apply(&provider.changes);
+    assert_eq!(state.thread.workspace, Workspace::Ready("/prepared".into()));
     let recovered = step(
         &state,
         Event::Restart {
@@ -492,7 +992,7 @@ fn preparation_resumes_the_saved_stage_and_discards_old_action_results() {
     assert!(matches!(
         &recovered.actions[..],
         [Action::Prepare {
-            stage: PreparationStage::Worktree,
+            stage: PreparationStage::Provider,
             ..
         }]
     ));
@@ -545,6 +1045,7 @@ fn failed_preparation_retries_the_same_stage_with_a_new_action() {
 fn completed_item_updates_keep_their_position_without_reopening_the_turn() {
     let (state, attempt) = running();
     let item = Observation::Item {
+        deferred: false,
         id: "assistant".into(),
         status: ItemStatus::Running,
         body: ItemBody::AssistantText {
@@ -561,6 +1062,7 @@ fn completed_item_updates_keep_their_position_without_reopening_the_turn() {
         &state,
         &attempt,
         Observation::Item {
+            deferred: false,
             id: "assistant".into(),
             status: ItemStatus::Completed,
             body: ItemBody::AssistantText {
@@ -576,19 +1078,20 @@ fn completed_item_updates_keep_their_position_without_reopening_the_turn() {
 }
 
 #[test]
-fn recovery_discards_partial_bindings_and_serialization_preserves_state() {
+fn recovery_preserves_ready_bindings_and_fork_hints_with_serialization() {
     let mut state = state();
     state.bindings.insert(
         ProviderKind::Codex,
         Binding::Ready {
+            covered: 0,
             source: "ready".into(),
         },
     );
     state.bindings.insert(
         ProviderKind::Claude,
-        Binding::Injecting {
-            source: "partial".into(),
-            action: Uuid::nil(),
+        Binding::Fork {
+            source: "original".into(),
+            through: "prefix".into(),
         },
     );
     let recovered = step(
@@ -601,7 +1104,13 @@ fn recovery_discards_partial_bindings_and_serialization_preserves_state() {
     );
     let state = state.apply(&recovered.changes);
     assert!(state.bindings.contains_key(&ProviderKind::Codex));
-    assert!(!state.bindings.contains_key(&ProviderKind::Claude));
+    assert_eq!(
+        state.bindings.get(&ProviderKind::Claude),
+        Some(&Binding::Fork {
+            source: "original".into(),
+            through: "prefix".into()
+        })
+    );
     let bytes = crate::protocol::encode(&state).unwrap();
     let decoded: State = crate::protocol::decode(&bytes).unwrap();
     assert_eq!(decoded, state);
@@ -794,13 +1303,14 @@ fn an_interrupt_before_the_start_ack_is_preserved_and_sent_once() {
         state.attempts.is_empty(),
         "unstarted turns have no execution rows"
     );
-    let stop = command(&state, 2, Command::Interrupt);
+    let stop = command(&state, 2, Command::Interrupt { turn: None });
     let state = state.apply(&stop.changes);
     assert_eq!(stop.outcome, Outcome::Accepted);
     assert!(stop.actions.is_empty());
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action,
         },
@@ -813,21 +1323,29 @@ fn an_interrupt_before_the_start_ack_is_preserved_and_sent_once() {
     assert!(!state.thread.queue_held);
     assert!(state.permits(&delivered.actions[0]));
     assert_eq!(
-        step(&state, Event::Delivered { id, action }, context(4)),
+        step(
+            &state,
+            Event::Delivered {
+                native_turn: None,
+                id,
+                action
+            },
+            context(4)
+        ),
         Step::default()
     );
     let replay = step(
         &state,
         Event::Command {
             id: OperationId::Client(Uuid::from_u128(2)),
-            command: Command::Interrupt,
+            command: Command::Interrupt { turn: None },
             receipt: Some(Outcome::Accepted),
         },
         context(5),
     );
     assert!(replay.actions.is_empty());
     assert!(matches!(
-        &command(&state, 6, Command::Interrupt).actions[..],
+        &command(&state, 6, Command::Interrupt { turn: None }).actions[..],
         [Action::Interrupt { .. }]
     ));
 }
@@ -835,7 +1353,7 @@ fn an_interrupt_before_the_start_ack_is_preserved_and_sent_once() {
 #[test]
 fn completion_before_the_start_ack_does_not_send_an_obsolete_interrupt() {
     let (state, _, _, attempt) = starting(&state(), 1);
-    let stop = command(&state, 2, Command::Interrupt);
+    let stop = command(&state, 2, Command::Interrupt { turn: None });
     let state = state.apply(&stop.changes);
     let completed = observe(&state, &attempt, Observation::Completed, 3);
     assert!(completed.actions.is_empty());
@@ -861,6 +1379,7 @@ fn ending_a_turn_with_a_steer_in_flight_leaves_no_stuck_delivery() {
         step(
             &state,
             Event::Delivered {
+                native_turn: None,
                 id: id.clone(),
                 action: *action
             },
@@ -887,6 +1406,7 @@ fn steering_waits_for_in_flight_delivery_but_keeps_its_original_attempt() {
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action: *action,
         },
@@ -909,7 +1429,7 @@ fn cancelling_preparation_keeps_the_saved_stage_and_fences_its_late_completion()
     let Action::Prepare { id, action, .. } = &submitted.actions[0] else {
         unreachable!()
     };
-    let cancelled = command(&state, 2, Command::Interrupt);
+    let cancelled = command(&state, 2, Command::Interrupt { turn: None });
     assert_eq!(
         cancelled.actions,
         vec![Action::CancelPreparation { action: *action }]
@@ -970,11 +1490,67 @@ fn provider_preparation_persists_the_binding_before_starting_the_turn() {
     assert_eq!(
         state.bindings[&ProviderKind::Claude],
         Binding::Ready {
+            covered: 0,
             source: "prepared-native".into()
         }
     );
     assert!(state.turns.is_empty());
     assert!(state.attempts.is_empty());
+}
+
+#[test]
+fn restarting_during_history_injection_rebuilds_the_source_and_rejects_its_old_reply() {
+    let mut state = state();
+    state.bindings.clear();
+    let preparing = submit(&state, 1, FollowUp::Queue);
+    let Action::Prepare { id, action, .. } = &preparing.actions[0] else {
+        panic!("provider preparation")
+    };
+    let state = state.apply(&preparing.changes);
+    let injecting = step(
+        &state,
+        Event::AligningProvider {
+            id: id.clone(),
+            action: *action,
+            source: "uncertain-source".into(),
+        },
+        context(2),
+    );
+    assert_eq!(injecting.outcome, Outcome::Accepted);
+    let state = state.apply(&injecting.changes);
+    assert_eq!(
+        state.bindings[&ProviderKind::Claude],
+        Binding::Aligning {
+            source: "uncertain-source".into()
+        }
+    );
+    let state: State = crate::protocol::decode(&crate::protocol::encode(state).unwrap()).unwrap();
+    let restarted = step(
+        &state,
+        Event::Restart {
+            updating: false,
+            continue_after_restart: false,
+        },
+        context(3),
+    );
+    let state = state.apply(&restarted.changes);
+    assert!(!state.bindings.contains_key(&ProviderKind::Claude));
+    assert!(
+        matches!(&restarted.actions[..],[Action::Prepare {action:next,stage:PreparationStage::Provider,..}] if next!=action)
+    );
+    assert_eq!(
+        step(
+            &state,
+            Event::Prepared {
+                id: id.clone(),
+                action: *action,
+                cwd: None,
+                source: Some("uncertain-source".into())
+            },
+            context(4)
+        ),
+        Step::default()
+    );
 }
 
 #[test]
@@ -994,6 +1570,7 @@ fn an_empty_background_roster_completes_and_failure_marks_running_items_failed()
         &state,
         &attempt,
         Observation::Item {
+            deferred: false,
             id: "tool".into(),
             status: ItemStatus::Running,
             body: ItemBody::Plan {
@@ -1035,7 +1612,7 @@ fn new_input_can_use_the_provider_process_while_its_previous_turn_waits_on_backg
     assert!(
         matches!(&next.actions[..], [Action::Deliver { attempt: next, steer: false, .. }] if next.turn != attempt.turn)
     );
-    let stop = command(&state, 5, Command::Interrupt);
+    let stop = command(&state, 5, Command::Interrupt { turn: None });
     assert!(
         matches!(&stop.actions[..], [Action::Interrupt { attempt: target, .. }] if target == &attempt)
     );
@@ -1056,6 +1633,7 @@ fn counters_and_positions_survive_removal_and_each_step_contains_one_change_per_
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action: *action,
         },
@@ -1080,9 +1658,6 @@ fn sending_answers_on_a_retrying_turn_recover_as_unknown_instead_of_being_resent
             body: approval(),
             state: RequestState::Sending {
                 action: Uuid::nil(),
-                answer: Answer::Approval {
-                    choice_id: "allow".into(),
-                },
             },
         },
     );
@@ -1121,6 +1696,7 @@ fn recovery_keeps_an_empty_queue_unheld_and_drops_old_callbacks() {
         &state,
         &attempt,
         Observation::Item {
+            deferred: false,
             id: "late".into(),
             status: ItemStatus::Completed,
             body: ItemBody::Plan {
@@ -1145,7 +1721,7 @@ fn inputs_during_workspace_preparation_queue_without_launching_a_second_preparat
     assert!(second.actions.is_empty());
     let state = state.apply(&second.changes);
     assert_eq!(state.inputs.len(), 2);
-    let cancelled = command(&state, 3, Command::Interrupt);
+    let cancelled = command(&state, 3, Command::Interrupt { turn: None });
     let state = state.apply(&cancelled.changes);
     let removed = command(
         &state,
@@ -1196,6 +1772,7 @@ fn retry_fences_an_in_flight_steer_and_cannot_be_ended_by_old_callbacks() {
         step(
             &state,
             Event::Delivered {
+                native_turn: None,
                 id: id.clone(),
                 action: *action
             },
@@ -1207,6 +1784,7 @@ fn retry_fences_an_in_flight_steer_and_cannot_be_ended_by_old_callbacks() {
         &state,
         Event::Wake,
         Context {
+            external_busy: false,
             now: 200,
             ..context(6)
         },
@@ -1229,6 +1807,7 @@ fn retry_fences_an_in_flight_steer_and_cannot_be_ended_by_old_callbacks() {
         step(
             &stale_view,
             Event::Delivered {
+                native_turn: None,
                 id: id.clone(),
                 action: *action
             },
@@ -1362,6 +1941,7 @@ fn provider_item_ids_are_scoped_to_attempts_and_existing_mappings_keep_legacy_id
         &state,
         &attempt,
         Observation::Item {
+            deferred: false,
             id: "legacy-item".into(),
             status: ItemStatus::Running,
             body: ItemBody::Plan {
@@ -1375,6 +1955,7 @@ fn provider_item_ids_are_scoped_to_attempts_and_existing_mappings_keep_legacy_id
         &state,
         &attempt,
         Observation::Item {
+            deferred: false,
             id: "legacy-item".into(),
             status: ItemStatus::Completed,
             body: ItemBody::Plan {
@@ -1413,9 +1994,8 @@ fn retrying_a_failed_input_uses_the_workspace_and_binding_established_by_later_i
     let mut state = state.apply(&second.changes);
     let mut action = second.actions[0].clone();
     for (seed, cwd, source) in [
-        (4, Some("/base"), None),
-        (5, Some("/worktree"), None),
-        (6, None, Some("native-second")),
+        (4, Some("/worktree"), None),
+        (5, None, Some("native-second")),
     ] {
         let Action::Prepare {
             id, action: token, ..
@@ -1448,6 +2028,7 @@ fn retrying_a_failed_input_uses_the_workspace_and_binding_established_by_later_i
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: second_id,
             action: token,
         },
@@ -1571,57 +2152,48 @@ fn an_idle_persisted_queue_is_held_on_restart() {
 }
 
 #[test]
-fn preparation_completion_drains_the_head_after_retry_or_resume_changes_queue_order() {
-    for resume in [false, true] {
-        let mut initial = state();
-        initial.bindings.clear();
-        let first = submit(&initial, 1, FollowUp::Queue);
-        let state = initial.apply(&first.changes);
-        let Action::Prepare {
-            id: first_id,
-            action,
-            ..
-        } = &first.actions[0]
-        else {
-            unreachable!()
-        };
-        let failed = step(
-            &state,
-            Event::PreparationFailed {
-                id: first_id.clone(),
-                action: *action,
-                error: ExecutionError::default(),
-            },
-            context(2),
-        );
-        let state = state.apply(&failed.changes);
-        let second = submit(&state, 3, FollowUp::Queue);
-        let mut state = state.apply(&second.changes);
-        let retried = command(&state, 4, Command::RetryInput(first_id.clone()));
-        assert!(retried.actions.is_empty());
-        state = state.apply(&retried.changes);
-        if resume {
-            let held = command(&state, 5, Command::HoldQueue);
-            state = state.apply(&held.changes);
-            let resumed = command(&state, 6, Command::ResumeQueue);
-            assert!(resumed.actions.is_empty());
-            state = state.apply(&resumed.changes);
-        }
-        let Action::Prepare { id, action, .. } = &second.actions[0] else {
-            unreachable!()
-        };
-        let prepared = step(
-            &state,
-            Event::Prepared {
-                id: id.clone(),
-                action: *action,
-                cwd: None,
-                source: Some("ready".into()),
-            },
-            context(7),
-        );
-        assert!(matches!(&prepared.actions[..], [Action::Deliver { id, .. }] if id == first_id));
-    }
+fn preparation_completion_drains_the_head_after_retry_changes_queue_order() {
+    let mut initial = state();
+    initial.bindings.clear();
+    let first = submit(&initial, 1, FollowUp::Queue);
+    let state = initial.apply(&first.changes);
+    let Action::Prepare {
+        id: first_id,
+        action,
+        ..
+    } = &first.actions[0]
+    else {
+        unreachable!()
+    };
+    let failed = step(
+        &state,
+        Event::PreparationFailed {
+            id: first_id.clone(),
+            action: *action,
+            error: ExecutionError::default(),
+        },
+        context(2),
+    );
+    let state = state.apply(&failed.changes);
+    let second = submit(&state, 3, FollowUp::Queue);
+    let mut state = state.apply(&second.changes);
+    let retried = command(&state, 4, Command::RetryInput(first_id.clone()));
+    assert!(retried.actions.is_empty());
+    state = state.apply(&retried.changes);
+    let Action::Prepare { id, action, .. } = &second.actions[0] else {
+        unreachable!()
+    };
+    let prepared = step(
+        &state,
+        Event::Prepared {
+            id: id.clone(),
+            action: *action,
+            cwd: None,
+            source: Some("ready".into()),
+        },
+        context(7),
+    );
+    assert!(matches!(&prepared.actions[..], [Action::Deliver { id, .. }] if id == first_id));
 }
 
 #[test]
@@ -1634,7 +2206,7 @@ fn a_pending_interrupt_survives_retry_and_background_events_before_and_after_the
             } else {
                 running()
             };
-            let stop = command(&state, 3, Command::Interrupt);
+            let stop = command(&state, 3, Command::Interrupt { turn: None });
             let state = state.apply(&stop.changes);
             let observation = if retry {
                 Observation::Retry { at: 200 }
@@ -1657,6 +2229,7 @@ fn a_pending_interrupt_survives_retry_and_background_events_before_and_after_the
                         &state,
                         Event::Wake,
                         Context {
+                            external_busy: false,
                             now: 200,
                             ..context(5)
                         }
@@ -1712,8 +2285,11 @@ fn update_continues_a_turn_with_an_unknown_steer_but_not_a_later_unknown_start()
         )
     };
     let resumed = resume(&state, 5);
-    assert!(matches!(&resumed.actions[..], [Action::Deliver { id, .. }]
-        if id.as_str() == job.id.to_string()));
+    let delivered = deliver_after_rebuilding(&state, &resumed, 50);
+    assert!(
+        matches!(&delivered.actions[..], [Action::Deliver { id, .. }]
+        if id.as_str() == job.id.to_string())
+    );
     let later = submit(&state, 6, FollowUp::Queue);
     let state = state.apply(&later.changes);
     assert!(resume(&state, 7).changes.is_empty());
@@ -1736,6 +2312,7 @@ fn the_first_native_user_message_proves_delivery_without_duplicating_the_input()
         &state,
         &attempt,
         Observation::Item {
+            deferred: false,
             id: provider_item_id(attempt.id, "native-user"),
             status: ItemStatus::Completed,
             body: ItemBody::UserMessage {
@@ -1755,7 +2332,7 @@ fn the_first_native_user_message_proves_delivery_without_duplicating_the_input()
 #[test]
 fn an_empty_background_roster_finishes_a_turn_even_when_an_interrupt_is_pending() {
     let (state, attempt) = running();
-    let stopped = command(&state, 3, Command::Interrupt);
+    let stopped = command(&state, 3, Command::Interrupt { turn: None });
     let state = state.apply(&stopped.changes);
     let finished = observe(
         &state,
@@ -1795,12 +2372,41 @@ fn stopping_an_unacknowledged_foreground_start_does_not_target_an_older_backgrou
     else {
         panic!("start")
     };
-    let stopped = command(&state, 5, Command::Interrupt);
+    let unknown = step(
+        &state,
+        Event::DeliveryFailed {
+            id: id.clone(),
+            action: *action,
+            unknown: true,
+            error: Default::default(),
+        },
+        context(55),
+    );
+    let unknown = state.apply(&unknown.changes);
+    let background_stop = command(
+        &unknown,
+        56,
+        Command::Interrupt {
+            turn: Some(old.turn.clone()),
+        },
+    );
+    assert_eq!(background_stop.outcome, Outcome::Accepted);
+    assert!(
+        matches!(&background_stop.actions[..],[Action::Interrupt {attempt,background:true,..}] if attempt==&old)
+    );
+    let stopped = command(
+        &state,
+        5,
+        Command::Interrupt {
+            turn: Some(id.to_string().into()),
+        },
+    );
     assert!(stopped.actions.is_empty());
     let state = state.apply(&stopped.changes);
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action: *action,
         },
@@ -1819,6 +2425,7 @@ fn stopping_an_unacknowledged_foreground_start_does_not_target_an_older_backgrou
 fn a_live_unknown_start_accepts_late_delivery_proof_and_can_be_stopped() {
     for observation in [
         Observation::Item {
+            deferred: false,
             id: "reply".into(),
             status: ItemStatus::Running,
             body: ItemBody::AssistantText {
@@ -1853,13 +2460,21 @@ fn a_live_unknown_start_accepts_late_delivery_proof_and_can_be_stopped() {
             Observation::Request { id, body } => assert_eq!(state.requests[&id].body, body),
             _ => unreachable!(),
         }
-        let stopped = command(&state, 4, Command::Interrupt);
+        let stopped = command(&state, 4, Command::Interrupt { turn: None });
         assert!(
             matches!(&stopped.actions[..], [Action::Interrupt { attempt: target, .. }]
             if target == &attempt)
         );
         assert_eq!(
-            step(&state, Event::Delivered { id, action }, context(5)),
+            step(
+                &state,
+                Event::Delivered {
+                    native_turn: None,
+                    id,
+                    action
+                },
+                context(5)
+            ),
             Step::default()
         );
     }
@@ -1879,7 +2494,7 @@ fn stopping_a_live_unknown_start_is_remembered_until_delivery_is_proved() {
         context(2),
     );
     let state = state.apply(&failed.changes);
-    let stopped = command(&state, 3, Command::Interrupt);
+    let stopped = command(&state, 3, Command::Interrupt { turn: None });
     assert_eq!(stopped.outcome, Outcome::Accepted);
     assert!(stopped.actions.is_empty());
     let state = state.apply(&stopped.changes);
@@ -1959,6 +2574,7 @@ fn an_unknown_delivery_must_be_fenced_before_the_user_can_remove_or_retry_it() {
             step(
                 &state,
                 Event::Delivered {
+                    native_turn: None,
                     id: id.clone(),
                     action
                 },
@@ -2039,6 +2655,7 @@ fn a_queued_steer_cannot_block_older_input_after_its_target_enters_background_wo
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action: *action,
         },
@@ -2083,9 +2700,17 @@ fn an_unknown_steer_does_not_hide_or_block_a_later_foreground_start() {
     );
     let state = state.apply(&background.changes);
     let (state, id, action, foreground) = starting(&state, 6);
-    let stopped = command(&state, 7, Command::Interrupt);
+    let stopped = command(&state, 7, Command::Interrupt { turn: None });
     let state = state.apply(&stopped.changes);
-    let delivered = step(&state, Event::Delivered { id, action }, context(8));
+    let delivered = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id,
+            action,
+        },
+        context(8),
+    );
     assert!(
         matches!(&delivered.actions[..], [Action::Interrupt { attempt: target, .. }]
         if target == &foreground)
@@ -2094,6 +2719,119 @@ fn an_unknown_steer_does_not_hide_or_block_a_later_foreground_start() {
         state.turns[&attempt.turn].state,
         TurnState::Waiting(Wait::Background { .. })
     ));
+}
+
+#[test]
+fn fencing_an_unknown_steer_ends_only_its_execution_and_keeps_a_newer_source_user() {
+    for foreground in [0, 1, 2] {
+        let (state, old) = running();
+        let request = observe(
+            &state,
+            &old,
+            Observation::Request {
+                id: "old-request".into(),
+                body: approval(),
+            },
+            3,
+        );
+        let state = state.apply(&request.changes);
+        let steering = submit(&state, 4, FollowUp::Steer);
+        let Action::Deliver { id, action, .. } = &steering.actions[0] else {
+            panic!("steer")
+        };
+        let state = state.apply(&steering.changes);
+        let unknown = step(
+            &state,
+            Event::DeliveryFailed {
+                id: id.clone(),
+                action: *action,
+                error: ExecutionError::default(),
+                unknown: true,
+            },
+            context(5),
+        );
+        let mut state = state.apply(&unknown.changes);
+        let mut newer = None;
+        if foreground > 0 {
+            let waiting = observe(
+                &state,
+                &old,
+                Observation::Background {
+                    tasks: vec![BackgroundTask {
+                        id: "old-command".into(),
+                        kind: crate::execution::BackgroundTaskKind::Command,
+                        description: None,
+                    }],
+                },
+                6,
+            );
+            state = state.apply(&waiting.changes);
+            let (pending, input, token, attempt) = starting(&state, 7);
+            state = pending;
+            if foreground == 2 {
+                let delivered = step(
+                    &state,
+                    Event::Delivered {
+                        id: input,
+                        action: token,
+                        native_turn: None,
+                    },
+                    context(8),
+                );
+                state = state.apply(&delivered.changes);
+            }
+            newer = Some(attempt);
+        }
+        assert_eq!(
+            state.source_in_use(old.provider, &old.source, old.id),
+            foreground > 0
+        );
+        let retained_binding = state.bindings.get(&old.provider).cloned();
+        let resolved = command(
+            &state,
+            9,
+            Command::ResolveUnknown {
+                id: id.clone(),
+                retry: false,
+            },
+        );
+        let state = state.apply(&resolved.changes);
+        if foreground == 0 {
+            assert!(!state.bindings.contains_key(&old.provider));
+            assert!(
+                submit(&state, 10, FollowUp::Steer).actions.is_empty(),
+                "fencing cannot admit another steer to the same execution"
+            );
+        }
+        let fenced = step(
+            &state,
+            Event::DeliveryFenced {
+                id: id.clone(),
+                action: *action,
+            },
+            context(11),
+        );
+        let state = state.apply(&fenced.changes);
+        assert!(!state.inputs.contains_key(id));
+        assert_eq!(state.turns[&old.turn].state, TurnState::Interrupted);
+        assert!(!state.requests.contains_key(&RequestId::from("old-request")));
+        assert!(!state.attempts.contains_key(&old.turn));
+        if let Some(newer) = newer {
+            assert_eq!(state.bindings.get(&old.provider), retained_binding.as_ref());
+            if foreground == 2 {
+                assert_eq!(
+                    state.turns[&newer.turn].state,
+                    TurnState::Running { interrupt: None }
+                );
+            } else {
+                assert!(state.inputs.values().any(|input| {
+                    input
+                        .live_delivery()
+                        .is_some_and(|delivery| delivery.attempt == newer)
+                }));
+            }
+        }
+    }
 }
 
 #[test]
@@ -2124,6 +2862,20 @@ fn user_resolution_of_a_live_unknown_is_saved_then_applied_after_fencing_or_rest
         }] if target == &id && *token == action && generation == &attempt));
         let state = state.apply(&resolved.changes);
         assert!(state.permits(&resolved.actions[0]));
+        let retried = command(
+            &state,
+            44,
+            Command::ResolveUnknown {
+                id: id.clone(),
+                retry,
+            },
+        );
+        assert_eq!(retried.outcome, Outcome::Accepted);
+        assert_eq!(
+            retried.actions, resolved.actions,
+            "a failed fence may be requested again with the saved disposition"
+        );
+        assert!(retried.changes.is_empty());
         let duplicate = command(
             &state,
             4,
@@ -2159,9 +2911,28 @@ fn user_resolution_of_a_live_unknown_is_saved_then_applied_after_fencing_or_rest
                 assert!(state.thread.queue_held);
                 assert!(step(&state, Event::Wake, context(7)).actions.is_empty());
                 let resumed = command(&state, 8, Command::ResumeQueue);
+                let delivery = match &resumed.actions[..] {
+                    [
+                        Action::Prepare {
+                            id,
+                            action,
+                            stage: PreparationStage::Provider,
+                            ..
+                        },
+                    ] => step(
+                        &state.apply(&resumed.changes),
+                        Event::Prepared {
+                            id: id.clone(),
+                            action: *action,
+                            cwd: None,
+                            source: Some("replacement-native".into()),
+                        },
+                        context(9),
+                    ),
+                    _ => resumed,
+                };
                 assert!(
-                    matches!(&resumed.actions[..], [Action::Deliver { attempt: next, .. }]
-                    if next.id != attempt.id)
+                    matches!(&delivery.actions[..], [Action::Deliver { attempt: next, .. }] if next.id != attempt.id)
                 );
             } else {
                 assert!(state.inputs.is_empty());
@@ -2272,6 +3043,7 @@ fn a_steer_still_being_delivered_can_be_acknowledged_after_its_turn_completes() 
     let delivered = step(
         &state,
         Event::Delivered {
+            native_turn: None,
             id: id.clone(),
             action: *action,
         },
@@ -2306,7 +3078,15 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
         );
         let state = state.apply(&background.changes);
         let (state, id, action, foreground) = starting(&state, 4);
-        let delivered = step(&state, Event::Delivered { id, action }, context(5));
+        let delivered = step(
+            &state,
+            Event::Delivered {
+                native_turn: None,
+                id,
+                action,
+            },
+            context(5),
+        );
         let state = state.apply(&delivered.changes);
         let waiting = observe(&state, &old, Observation::Retry { at: 200 }, 6);
         let state = state.apply(&waiting.changes);
@@ -2314,6 +3094,7 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
             &state,
             Event::Wake,
             Context {
+                external_busy: false,
                 now: 200,
                 ..context(7)
             },
@@ -2326,6 +3107,7 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
             &state,
             Event::Wake,
             Context {
+                external_busy: false,
                 now: 201,
                 ..context(9)
             },
@@ -2342,7 +3124,7 @@ fn stopping_a_retry_wait_prevents_the_due_timer_from_starting_a_new_attempt() {
     let (state, attempt) = running();
     let waiting = observe(&state, &attempt, Observation::Retry { at: 200 }, 3);
     let state = state.apply(&waiting.changes);
-    let stopped = command(&state, 4, Command::Interrupt);
+    let stopped = command(&state, 4, Command::Interrupt { turn: None });
     let state = state.apply(&stopped.changes);
     assert_eq!(state.turns[&attempt.turn].state, TurnState::Interrupted);
     assert!(
@@ -2350,6 +3132,7 @@ fn stopping_a_retry_wait_prevents_the_due_timer_from_starting_a_new_attempt() {
             &state,
             Event::Wake,
             Context {
+                external_busy: false,
                 now: 201,
                 ..context(5)
             }
@@ -2364,7 +3147,7 @@ fn removing_all_held_input_does_not_hold_the_next_new_message() {
     let (state, attempt) = running();
     let queued = submit(&state, 3, FollowUp::Queue);
     let state = state.apply(&queued.changes);
-    let held = command(&state, 4, Command::HoldQueue);
+    let held = command(&state, 4, Command::Interrupt { turn: None });
     let state = state.apply(&held.changes);
     let removed = command(
         &state,
@@ -2434,7 +3217,7 @@ fn a_resume_action_expires_when_stopped_completed_or_superseded_by_another_attem
         panic!("resume")
     };
     assert!(state.permits(action));
-    let stopped = command(&state, 5, Command::Interrupt);
+    let stopped = command(&state, 5, Command::Interrupt { turn: None });
     assert!(!state.apply(&stopped.changes).permits(action));
     let completed = observe(&state, current, Observation::Completed, 6);
     assert!(!state.apply(&completed.changes).permits(action));
@@ -2460,7 +3243,15 @@ fn a_restart_continuation_cannot_be_admitted_after_a_later_message_finishes() {
     let state = state.apply(&restarted.changes);
     let job = &restarted.continuations[0];
     let (state, id, action, later) = starting(&state, 4);
-    let delivered = step(&state, Event::Delivered { id, action }, context(5));
+    let delivered = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id,
+            action,
+        },
+        context(5),
+    );
     let state = state.apply(&delivered.changes);
     for terminal in [Observation::Completed, Observation::Interrupted] {
         let ended = observe(&state, &later, terminal, 6);
@@ -2501,7 +3292,15 @@ fn a_restart_continuation_yields_to_a_surviving_retry_and_unheld_queued_input() 
     );
     let state = state.apply(&background.changes);
     let (state, id, action, source) = starting(&state, 4);
-    let delivered = step(&state, Event::Delivered { id, action }, context(5));
+    let delivered = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id,
+            action,
+        },
+        context(5),
+    );
     let state = state.apply(&delivered.changes);
     let retry = observe(&state, &old, Observation::Retry { at: 200 }, 6);
     let state = state.apply(&retry.changes);
@@ -2531,7 +3330,7 @@ fn a_restart_continuation_yields_to_a_surviving_retry_and_unheld_queued_input() 
         )
     };
     assert!(continue_step(&state, 8).changes.is_empty());
-    let stopped = command(&state, 9, Command::Interrupt);
+    let stopped = command(&state, 9, Command::Interrupt { turn: None });
     let mut state = state.apply(&stopped.changes);
     // An idle owner can load queued rows before receiving its next Wake.
     let id: ClientInputId = Uuid::from_u128(10).to_string().into();
@@ -2582,7 +3381,15 @@ fn an_older_unknown_steer_does_not_prevent_continuing_the_newest_interrupted_tur
     );
     let state = state.apply(&background.changes);
     let (state, input, action, source) = starting(&state, 6);
-    let delivered = step(&state, Event::Delivered { id: input, action }, context(7));
+    let delivered = step(
+        &state,
+        Event::Delivered {
+            native_turn: None,
+            id: input,
+            action,
+        },
+        context(7),
+    );
     let state = state.apply(&delivered.changes);
     let restarted = step(
         &state,
@@ -2609,7 +3416,8 @@ fn an_older_unknown_steer_does_not_prevent_continuing_the_newest_interrupted_tur
         },
         context(9),
     );
-    assert!(matches!(&resumed.actions[..], [Action::Deliver { id: target, .. }] if target != id));
+    let delivered = deliver_after_rebuilding(&state, &resumed, 10);
+    assert!(matches!(&delivered.actions[..], [Action::Deliver { id: target, .. }] if target != id));
     assert!(state.apply(&resumed.changes).inputs.contains_key(id));
 }
 
@@ -2646,6 +3454,7 @@ fn finishing_a_turn_closes_its_requests_and_only_finishes_its_running_items() {
             &state,
             &old,
             Observation::Item {
+                deferred: false,
                 id: "old-reply".into(),
                 status: ItemStatus::Running,
                 body: ItemBody::AssistantText {
@@ -2683,6 +3492,7 @@ fn finishing_a_turn_closes_its_requests_and_only_finishes_its_running_items() {
         let delivered = step(
             &state,
             Event::Delivered {
+                native_turn: None,
                 id: user.clone(),
                 action,
             },
@@ -2693,6 +3503,7 @@ fn finishing_a_turn_closes_its_requests_and_only_finishes_its_running_items() {
             &state,
             &foreground,
             Observation::Item {
+                deferred: false,
                 id: "new-reply".into(),
                 status: ItemStatus::Running,
                 body: ItemBody::AssistantText {
@@ -2724,5 +3535,283 @@ fn finishing_a_turn_closes_its_requests_and_only_finishes_its_running_items() {
             state.turns[&old.turn].state,
             TurnState::Waiting(Wait::Background { .. })
         ));
+    }
+}
+
+fn codex_running() -> (State, Attempt) {
+    let (mut state, mut attempt) = running();
+    state.thread.provider = ProviderKind::Codex;
+    state.turns.get_mut(&attempt.turn).unwrap().provider = ProviderKind::Codex;
+    state.bindings.insert(
+        ProviderKind::Codex,
+        Binding::Ready {
+            covered: state.history_end(),
+            source: attempt.source.clone(),
+        },
+    );
+    attempt.provider = ProviderKind::Codex;
+    state.attempts.insert(attempt.turn.clone(), attempt.clone());
+    (state, attempt)
+}
+fn overload() -> ExecutionError {
+    ExecutionError {
+        provider_code: Some("serverOverloaded".into()),
+        message: "capacity".into(),
+        ..Default::default()
+    }
+}
+#[test]
+fn capacity_retries_have_five_exact_delays_and_keep_one_canonical_turn() {
+    let (mut state, mut attempt) = codex_running();
+    for (index, delay) in [2_000, 4_000, 8_000, 16_000, 30_000]
+        .into_iter()
+        .enumerate()
+    {
+        let failed = observe(
+            &state,
+            &attempt,
+            Observation::Failed(overload()),
+            100 + index as u128,
+        );
+        assert_eq!(failed.actions, [Action::WaitUntil(100 + delay)]);
+        state = state.apply(&failed.changes);
+        assert_eq!(state.turns.len(), 1);
+        assert_eq!(state.turns[&attempt.turn].retry_count, index as u8 + 1);
+        let next = step(
+            &state,
+            Event::Wake,
+            Context {
+                external_busy: false,
+                now: 100 + delay,
+                ..context(200 + index as u128)
+            },
+        );
+        let [Action::Resume { attempt: fresh, .. }] = &next.actions[..] else {
+            panic!("native continuation")
+        };
+        let fresh = fresh.clone();
+        assert_ne!(fresh.id, attempt.id);
+        state = state.apply(&next.changes);
+        assert_eq!(
+            observe(&state, &attempt, Observation::Completed, 300),
+            Step::default()
+        );
+        attempt = fresh;
+    }
+    let final_failure = observe(&state, &attempt, Observation::Failed(overload()), 500);
+    assert!(final_failure.actions.is_empty());
+    assert!(matches!(
+        state.apply(&final_failure.changes).turns[&attempt.turn].state,
+        TurnState::Failed(_)
+    ));
+}
+#[test]
+fn other_errors_and_provider_owned_retries_never_start_a_host_capacity_retry() {
+    for (provider, code, retrying) in [
+        (ProviderKind::Claude, "serverOverloaded", false),
+        (ProviderKind::Codex, "503", false),
+        (ProviderKind::Codex, "serverOverloaded", true),
+    ] {
+        let (mut state, attempt) = codex_running();
+        state.turns.get_mut(&attempt.turn).unwrap().provider = provider;
+        let error = ExecutionError {
+            provider_code: Some(code.into()),
+            retry: Some(crate::execution::RetryEvidence {
+                retrying,
+                attempt: None,
+                max_attempts: None,
+            }),
+            ..Default::default()
+        };
+        let result = observe(&state, &attempt, Observation::Failed(error), 3);
+        assert!(result.actions.is_empty());
+        assert!(matches!(
+            state.apply(&result.changes).turns[&attempt.turn].state,
+            TurnState::Failed(_)
+        ));
+    }
+}
+#[test]
+fn manual_input_cancels_a_capacity_wait_and_keeps_queued_input_held() {
+    let (state, attempt) = codex_running();
+    let queued = submit(&state, 10, FollowUp::Queue);
+    let state = state.apply(&queued.changes);
+    let waiting = observe(&state, &attempt, Observation::Failed(overload()), 11);
+    let state = state.apply(&waiting.changes);
+    let manual = submit(&state, 12, FollowUp::Queue);
+    let next = state.apply(&manual.changes);
+    assert!(matches!(
+        next.turns[&attempt.turn].state,
+        TurnState::Failed(_)
+    ));
+    assert!(matches!(
+        next.inputs[Uuid::from_u128(10).to_string().as_str()].state,
+        InputState::Queued { .. }
+    ));
+    assert!(next.thread.queue_held);
+    assert!(
+        matches!(&manual.actions[..], [Action::Deliver { id, .. }] if id.as_str() == Uuid::from_u128(12).to_string())
+    );
+    assert!(
+        step(
+            &next,
+            Event::Wake,
+            Context {
+                external_busy: false,
+                now: 50_000,
+                ..context(13)
+            }
+        )
+        .actions
+        .is_empty()
+    );
+}
+#[test]
+fn generated_titles_cannot_replace_a_name_the_user_has_already_chosen() {
+    let initial = state();
+    let named = command(&initial, 1, Command::Rename("Chosen".into()));
+    let named = initial.apply(&named.changes);
+    assert_eq!(
+        step(&named, Event::Title("Automatic".into()), context(2)),
+        Step::default()
+    );
+    let mut empty = initial;
+    empty.thread.name.clear();
+    let generated = step(&empty, Event::Title("Automatic".into()), context(3));
+    assert_eq!(empty.apply(&generated.changes).thread.name, "Automatic");
+}
+
+#[test]
+fn native_status_only_accepts_the_current_provider_and_ready_source() {
+    let ready = Binding::Ready {
+        covered: 0,
+        source: "current".into(),
+    };
+    assert!(current_source(
+        ProviderKind::Codex,
+        Some(&ready),
+        ProviderKind::Codex,
+        "current"
+    ));
+    assert!(!current_source(
+        ProviderKind::Claude,
+        Some(&ready),
+        ProviderKind::Codex,
+        "current"
+    ));
+    assert!(!current_source(
+        ProviderKind::Codex,
+        Some(&ready),
+        ProviderKind::Claude,
+        "current"
+    ));
+    assert!(!current_source(
+        ProviderKind::Codex,
+        Some(&ready),
+        ProviderKind::Codex,
+        "previous"
+    ));
+    assert!(!current_source(
+        ProviderKind::Codex,
+        None,
+        ProviderKind::Codex,
+        "current"
+    ));
+    let fork = Binding::Fork {
+        source: "current".into(),
+        through: "turn".into(),
+    };
+    assert!(!current_source(
+        ProviderKind::Codex,
+        Some(&fork),
+        ProviderKind::Codex,
+        "current"
+    ));
+}
+
+#[test]
+fn admission_failures_keep_a_receipt_and_replay_the_original_outcome() {
+    let state = state();
+    let operation = OperationId::Client(Uuid::from_u128(900));
+    let rejected = Outcome::Rejected("selected account is unavailable".into());
+    let result = step(
+        &state,
+        Event::RejectedCommand {
+            id: operation,
+            reason: "selected account is unavailable".into(),
+            receipt: None,
+        },
+        context(900),
+    );
+    assert_eq!(result.outcome, rejected);
+    assert_eq!(result.receipt, Some((operation, rejected.clone())));
+    assert!(
+        result.changes.is_empty() && result.actions.is_empty() && result.continuations.is_empty()
+    );
+    for original in [rejected, Outcome::Accepted, Outcome::DeliveryUnknown] {
+        let replay = step(
+            &state,
+            Event::RejectedCommand {
+                id: operation,
+                reason: "a later account failure".into(),
+                receipt: Some(original.clone()),
+            },
+            context(901),
+        );
+        assert_eq!(replay.outcome, original);
+        assert!(replay.receipt.is_none() && replay.changes.is_empty() && replay.actions.is_empty());
+    }
+}
+
+#[test]
+fn unmaterialized_external_work_blocks_start_and_steering_until_the_current_source_is_idle() {
+    for follow_up in [FollowUp::Queue, FollowUp::Steer] {
+        let initial = state();
+        let id = Uuid::from_u128(902).to_string().into();
+        let admitted = step(
+            &initial,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(902)),
+                receipt: None,
+                command: Command::Submit {
+                    id,
+                    content: content(follow_up),
+                },
+            },
+            Context {
+                external_busy: true,
+                ..context(902)
+            },
+        );
+        assert_eq!(admitted.outcome, Outcome::Accepted);
+        assert!(admitted.actions.is_empty());
+        let queued = initial.apply(&admitted.changes);
+        assert!(queued.turns.is_empty());
+        assert!(matches!(
+            queued.inputs.values().next().unwrap().state,
+            InputState::Queued { .. }
+        ));
+        let other = step(
+            &queued,
+            Event::NativeStatus {
+                provider: ProviderKind::Claude,
+                source: "previous-source".into(),
+                status: crate::models::SessionStatus::Idle,
+            },
+            context(903),
+        );
+        assert!(other.actions.is_empty() && other.changes.is_empty());
+        let ready = step(
+            &queued,
+            Event::NativeStatus {
+                provider: ProviderKind::Claude,
+                source: "native-session".into(),
+                status: crate::models::SessionStatus::Idle,
+            },
+            context(904),
+        );
+        assert!(
+            matches!(&ready.actions[..],[Action::Deliver {attempt,steer:false,..}] if attempt.source=="native-session")
+        );
     }
 }

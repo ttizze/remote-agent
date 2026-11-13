@@ -1,0 +1,1656 @@
+use super::*;
+use crate::{
+    ProjectStore,
+    host_rpc::runtime::native_fixture::{NativeAgent, call},
+};
+use agent_protocol::{
+    protocol::{self, Call, Response},
+    sync::Scope,
+};
+
+fn content() -> decision::InputContent {
+    decision::InputContent {
+        parts: vec![op::Input::Text {
+            text: "run once".into(),
+        }],
+        model: None,
+        effort: Some("high".into()),
+        service_tier: Some("priority".into()),
+        follow_up: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn child_discovery_uses_the_public_parent_and_preserves_already_received_work() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let service = HostRpcService::new(
+            [agent.backend()],
+            ProjectStore::new(directory.path().join("projects.json")),
+        );
+        let connection = service.open_session();
+        let parent = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let _: records::Opened = call(
+            &service,
+            connection.id(),
+            Call::CreateConversation(records::Create {
+                provider: ProviderKind::Codex,
+                session: parent.clone(),
+                subscription: Uuid::new_v4(),
+                cwd: Some(directory.path().to_str().unwrap().into()),
+                selection: Default::default(),
+                initial: Some((Uuid::new_v4().to_string().into(), content())),
+            }),
+        )
+        .await
+        .unwrap();
+        completed(&service, &parent, 1).await;
+        let native_parent = service
+            .inner
+            .conversation
+            .storage
+            .active_source(&parent)
+            .unwrap()
+            .unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child-native".into()).unwrap();
+        let discovered = || AgentChange::TaskParent {
+            session: child.clone(),
+            parent: native_parent.clone(),
+        };
+        Runtime::observe(&service, discovered(), None)
+            .await
+            .unwrap();
+        let execution = Uuid::new_v4();
+        Runtime::observe(
+            &service,
+            AgentChange::Session {
+                session: child.clone(),
+                change: SessionChange::Turn {
+                    turn: agent_protocol::models::Turn {
+                        id: "child-turn".into(),
+                        status: agent_protocol::models::TurnStatus::Running,
+                        ..Default::default()
+                    },
+                    completed: false,
+                },
+            },
+            Some(execution),
+        )
+        .await
+        .unwrap();
+        Runtime::observe(
+            &service,
+            AgentChange::Session {
+                session: child.clone(),
+                change: SessionChange::Turn {
+                    turn: agent_protocol::models::Turn {
+                        id: "child-turn".into(),
+                        status: agent_protocol::models::TurnStatus::Completed,
+                        items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                            "child-answer".into(),
+                            agent_protocol::models::ItemStatus::Completed,
+                            agent_protocol::items::ItemBody::AssistantText {
+                                text: "Child result".into(),
+                                phase: agent_protocol::items::AssistantPhase::Final,
+                            },
+                        ))]),
+                        ..Default::default()
+                    },
+                    completed: true,
+                },
+            },
+            Some(execution),
+        )
+        .await
+        .unwrap();
+        let before = service
+            .inner
+            .conversation
+            .storage
+            .history(&child, 0)
+            .unwrap();
+        assert_eq!(before.thread.parent_id, Some(parent));
+        assert_eq!(before.thread.can_accept_direct_input, Some(false));
+        assert_eq!(before.thread.turns.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            before.thread.turns.as_ref().unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        Runtime::observe(&service, discovered(), None)
+            .await
+            .unwrap();
+        let after = service
+            .inner
+            .conversation
+            .storage
+            .history(&child, 0)
+            .unwrap();
+        assert_eq!(after.thread.turns, before.thread.turns);
+        assert_eq!(after.thread.parent_id, before.thread.parent_id);
+    })
+    .await
+    .expect("child observation commits before following native work");
+}
+
+#[tokio::test]
+async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for compacted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+            Arc::get_mut(&mut codex).unwrap().metadata_only_state = compacted;
+            let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+            let service = HostRpcService::new(
+                [codex.backend(), claude.backend()],
+                ProjectStore::new(directory.path().join("projects.json")),
+            );
+            let connection = service.open_session();
+            let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+            let input = |provider, text: &str| decision::InputContent {
+                parts: vec![op::Input::Text { text: text.into() }],
+                model: Some(agent_protocol::models::ModelRef {
+                    provider,
+                    id: "fixture".into(),
+                }),
+                ..content()
+            };
+            let _: records::Opened = call(
+                &service,
+                connection.id(),
+                Call::CreateConversation(records::Create {
+                    provider: ProviderKind::Codex,
+                    session: target.clone(),
+                    subscription: Uuid::new_v4(),
+                    cwd: Some(directory.path().to_str().unwrap().into()),
+                    selection: Default::default(),
+                    initial: Some((
+                        Uuid::new_v4().to_string().into(),
+                        input(ProviderKind::Codex, "first-provider-marker"),
+                    )),
+                }),
+            )
+            .await
+            .unwrap();
+            completed(&service, &target, 1).await;
+            let original = service
+                .inner
+                .conversation
+                .storage
+                .active_source(&target)
+                .unwrap()
+                .unwrap();
+            for (provider, text, count) in [
+                (ProviderKind::Claude, "second-provider-marker", 2),
+                (ProviderKind::Codex, "third-provider-marker", 3),
+            ] {
+                let operation = Uuid::new_v4();
+                let acknowledged: records::Acknowledged = call(
+                    &service,
+                    connection.id(),
+                    Call::ChangeConversation(records::Change {
+                        session: target.clone(),
+                        operation,
+                        command: Command::Submit {
+                            id: operation.to_string().into(),
+                            content: input(provider, text),
+                        },
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(acknowledged.outcome, Outcome::Accepted);
+                completed(&service, &target, count).await;
+            }
+            assert_eq!(
+                service
+                    .inner
+                    .conversation
+                    .storage
+                    .active_source(&target)
+                    .unwrap(),
+                Some(original.clone())
+            );
+            assert_eq!(
+                codex.records.lock().unwrap().len(),
+                1,
+                "returning and native compaction do not create another source"
+            );
+            let injected = codex.injected.lock().unwrap();
+            assert_eq!(injected.len(), 1);
+            assert_eq!(injected[0].0, original.id);
+            let context = injected[0].1.render();
+            assert!(context.contains("second-provider-marker"));
+            assert!(!context.contains("first-provider-marker"));
+            assert!(!context.contains("third-provider-marker"));
+            assert!(codex.released.lock().unwrap().contains(&original.id));
+            assert_eq!(claude.released.lock().unwrap().len(), 1);
+        }
+    })
+    .await
+    .expect("provider round trip settles");
+}
+
+#[tokio::test]
+async fn missing_providerless_conversations_keep_durable_rejections_without_a_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = HostRpcService::new(
+        [],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let operation = Uuid::new_v4();
+    let request = records::Change {
+        session: target.clone(),
+        operation,
+        command: Command::Rename("missing".into()),
+    };
+    let first: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(request.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(first.outcome, Outcome::Rejected(_)));
+    let replay: records::Acknowledged =
+        call(&service, connection.id(), Call::ChangeConversation(request))
+            .await
+            .unwrap();
+    assert_eq!(replay.outcome, first.outcome);
+    assert_eq!(replay.cursor, first.cursor);
+    let receipts: records::Receipts = call(
+        &service,
+        connection.id(),
+        Call::CheckConversationCommands(records::CheckCommands {
+            session: target,
+            operations: vec![operation],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].1.outcome, first.outcome);
+    assert!(
+        service
+            .inner
+            .conversation
+            .storage
+            .identities()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn expanded_commands_stream_bounded_tails_until_completion() {
+    command_output_case(false).await;
+}
+#[tokio::test]
+async fn expanded_commands_stream_bounded_tails_until_provider_stop() {
+    command_output_case(true).await;
+}
+
+async fn command_output_case(stopped: bool) {
+    use agent_protocol::{
+        execution::{ItemStatus, TurnStatus},
+        items::{Item, ItemBody},
+        sync::{Output, OutputUpdate},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            provider: ProviderKind::Codex,
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((Uuid::new_v4().to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    completed(&service, &target, 1).await;
+    let native = service
+        .inner
+        .conversation
+        .storage
+        .active_source(&target)
+        .unwrap()
+        .unwrap();
+    let execution = Uuid::new_v4();
+    let send = |change| {
+        Runtime::observe(
+            &service,
+            AgentChange::Session {
+                session: native.clone(),
+                change,
+            },
+            Some(execution),
+        )
+    };
+    send(SessionChange::Turn {
+        turn: agent_protocol::models::Turn {
+            id: "tools".into(),
+            status: TurnStatus::Running,
+            ..Default::default()
+        },
+        completed: false,
+    })
+    .await
+    .unwrap();
+    send(SessionChange::Item {
+        turn_id: "tools".into(),
+        item: Arc::new(Item::new(
+            "command".into(),
+            ItemStatus::Running,
+            ItemBody::CommandExecution {
+                command: "echo output".into(),
+                cwd: None,
+                output: "initial".into(),
+                output_omitted: false,
+                exit_code: None,
+            },
+        )),
+    })
+    .await
+    .unwrap();
+    let key = records::OutputKey {
+        session: target.clone(),
+        item: decision::provider_item_id(execution, "command"),
+    };
+    tokio::time::pause();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
+    let reply = service
+        .dispatch(
+            connection.id(),
+            &Call::SubscribeCommandOutput(records::SubscribeOutput {
+                key: key.clone(),
+                subscription: Uuid::new_v4(),
+            }),
+        )
+        .await
+        .unwrap();
+    let Response::Success { result: opened } =
+        protocol::decode::<Response<records::OpenedOutput>>(&reply.initial).unwrap()
+    else {
+        panic!("output subscription failed")
+    };
+    assert_eq!(opened.initial.text, "initial");
+    let mut updates = reply.updates.unwrap();
+    let before = service
+        .inner
+        .conversation
+        .storage
+        .snapshot(&target, None, None)
+        .unwrap();
+    send(SessionChange::Text {
+        turn_id: "tools".into(),
+        item_id: "command".into(),
+        field: agent_protocol::session::TextField::CommandOutput,
+        delta: "日".repeat(30_000),
+    })
+    .await
+    .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(99)).await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::ZERO, updates.recv())
+            .await
+            .is_err()
+    );
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    let frame = updates.recv().await.unwrap();
+    let update: OutputUpdate = protocol::decode(&frame).unwrap();
+    assert!(
+        matches!(update, OutputUpdate::Tail(_)),
+        "a subscriber behind the retained range receives the new tail"
+    );
+    let tail = opened.initial.apply(update).unwrap();
+    assert!(tail.offset > 0);
+    assert!(tail.text.len() <= 64 * 1024);
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .snapshot(&target, None, None)
+            .unwrap(),
+        before,
+        "live bytes never advance row versions or the resumable cursor"
+    );
+    let late: records::OpenedOutput = call(
+        &service,
+        connection.id(),
+        Call::SubscribeCommandOutput(records::SubscribeOutput {
+            key: key.clone(),
+            subscription: Uuid::new_v4(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(late.initial, tail);
+    if stopped {
+        Runtime::observe(
+            &service,
+            AgentChange::Stopped {
+                provider: ProviderKind::Codex,
+                error: agent_protocol::execution::ExecutionError {
+                    message: "provider stopped".into(),
+                    category: agent_protocol::execution::ErrorCategory::Network,
+                    ..Default::default()
+                },
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    } else {
+        send(SessionChange::Turn {
+            turn: agent_protocol::models::Turn {
+                id: "tools".into(),
+                status: TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        })
+        .await
+        .unwrap();
+    }
+    let stored = service
+        .inner
+        .conversation
+        .storage
+        .item(&target, &key.item)
+        .unwrap()
+        .unwrap();
+    let ItemBody::CommandExecution {
+        output,
+        output_omitted,
+        ..
+    } = stored.body
+    else {
+        panic!("command missing")
+    };
+    assert_eq!(
+        Output {
+            offset: tail.offset,
+            text: output
+        },
+        tail
+    );
+    assert!(output_omitted);
+    assert_eq!(
+        stored.status,
+        if stopped {
+            ItemStatus::Failed
+        } else {
+            ItemStatus::Completed
+        }
+    );
+    assert!(updates.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn native_reply_before_submit_ack_commits_one_turn_and_replay_never_sends_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let operation = Uuid::new_v4();
+    let request = records::Create {
+        provider: agent_protocol::session::ProviderKind::Codex,
+        subscription: Uuid::new_v4(),
+        session: target.clone(),
+        cwd: Some(directory.path().to_str().unwrap().into()),
+        selection: Default::default(),
+        initial: Some((operation.to_string().into(), content())),
+    };
+    let reply = service
+        .dispatch(connection.id(), &Call::CreateConversation(request))
+        .await
+        .unwrap();
+    let Response::Success { result: opened } =
+        protocol::decode::<Response<records::Opened>>(&reply.initial).unwrap()
+    else {
+        panic!(
+            "create failed: {:?}",
+            protocol::decode::<serde_json::Value>(&reply.initial)
+        );
+    };
+    let mut replica = records::Replica::new(Scope::Conversation(target.clone()), 1)
+        .apply(1, opened.initial)
+        .unwrap();
+    let mut stream = reply.updates.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let projected = records::project(&replica).unwrap();
+            if projected.thread.turns.as_ref().is_some_and(|turns| {
+                turns.len() == 1
+                    && turns[0].status == agent_protocol::execution::TurnStatus::Completed
+            }) {
+                break;
+            }
+            let frame = stream.recv().await.unwrap();
+            replica = replica.apply(1, protocol::decode(&frame).unwrap()).unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let acknowledged: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: target.clone(),
+            operation,
+            command: Command::Submit {
+                id: operation.to_string().into(),
+                content: content(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(acknowledged.outcome, Outcome::Accepted);
+    let stored = service
+        .inner
+        .conversation
+        .storage
+        .history(&target, 0)
+        .unwrap();
+    let turns = stored.thread.turns.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].items.as_ref().unwrap().len(), 2);
+    assert_eq!(
+        turns[0].items.as_ref().unwrap()[0].id.as_str(),
+        operation.to_string()
+    );
+    assert_eq!(agent.inputs.lock().unwrap().len(), 1);
+    assert_eq!(stored.effort.as_deref(), Some("high"));
+    assert_eq!(stored.service_tier.as_deref(), Some("priority"));
+}
+
+async fn completed(
+    service: &HostRpcService,
+    target: &SessionRef,
+    count: usize,
+) -> agent_protocol::models::ThreadResponse {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let history = service
+                .inner
+                .conversation
+                .storage
+                .history(target, 0)
+                .unwrap();
+            if history.thread.turns.as_ref().is_some_and(|turns| {
+                turns.len() == count
+                    && turns.last().unwrap().status
+                        == agent_protocol::execution::TurnStatus::Completed
+            }) {
+                return history;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resources() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let first = Uuid::new_v4();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((first.to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    let original = completed(&service, &target, 1).await;
+    let through = original.thread.turns.as_ref().unwrap()[0].id.clone();
+    let mut sources = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let fork = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let request = records::Fork {
+            source: target.clone(),
+            target: fork.clone(),
+            through: through.clone(),
+        };
+        for _ in 0..2 {
+            let accepted: SessionRef = call(
+                &service,
+                connection.id(),
+                Call::ForkConversation(request.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(accepted, fork);
+        }
+        let operation = Uuid::new_v4();
+        let ack: records::Acknowledged = call(
+            &service,
+            connection.id(),
+            Call::ChangeConversation(records::Change {
+                session: fork.clone(),
+                operation,
+                command: Command::Submit {
+                    id: operation.to_string().into(),
+                    content: content(),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack.outcome, Outcome::Accepted);
+        let continued = completed(&service, &fork, 2).await;
+        assert_eq!(
+            continued.thread.turns.as_ref().unwrap()[0],
+            original.thread.turns.as_ref().unwrap()[0]
+        );
+        let native = service
+            .inner
+            .conversation
+            .storage
+            .active_source(&fork)
+            .unwrap()
+            .unwrap();
+        assert!(sources.insert(native.clone()));
+        let saved = agent.records.lock().unwrap()[&native.id].clone();
+        assert_eq!(
+            saved.thread.turns.unwrap().len(),
+            2,
+            "native fork retains the selected tool context before continuing"
+        );
+    }
+    assert_eq!(agent.inputs.lock().unwrap().len(), 3);
+    assert_eq!(
+        completed(&service, &target, 1).await.thread.turns,
+        original.thread.turns
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let operation = Uuid::new_v4();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((operation.to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    let initial = completed(&service, &target, 1).await;
+    let native = service
+        .inner
+        .conversation
+        .storage
+        .active_source(&target)
+        .unwrap()
+        .unwrap();
+    let attempt = service
+        .inner
+        .conversation
+        .storage
+        .state(&target)
+        .unwrap()
+        .attempts
+        .into_values()
+        .next()
+        .unwrap();
+    let text = |delta: &str| AgentChange::Session {
+        session: native.clone(),
+        change: SessionChange::Text {
+            turn_id: "turn-0".into(),
+            item_id: "answer-0".into(),
+            field: agent_protocol::session::TextField::AssistantText,
+            delta: delta.into(),
+        },
+    };
+    for delta in [" 一", "文"] {
+        Runtime::observe(&service, text(delta), Some(attempt.id))
+            .await
+            .unwrap();
+    }
+    let unchanged = service
+        .inner
+        .conversation
+        .storage
+        .history(&target, 0)
+        .unwrap();
+    assert_eq!(
+        unchanged.thread.turns, initial.thread.turns,
+        "partial chunks do not each rewrite the database"
+    );
+    Runtime::observe(&service, text("。\n\n"), Some(attempt.id))
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(400)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            if matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with(" 一文。\n\n")) { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let paragraph = service
+        .inner
+        .conversation
+        .storage
+        .history(&target, 0)
+        .unwrap()
+        .thread
+        .turns;
+    Runtime::observe(&service, text("unfinished suffix"), Some(attempt.id))
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(799)).await;
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .history(&target, 0)
+            .unwrap()
+            .thread
+            .turns,
+        paragraph
+    );
+    Runtime::observe(&service, text(" more"), Some(attempt.id))
+        .await
+        .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .history(&target, 0)
+            .unwrap()
+            .thread
+            .turns,
+        paragraph,
+        "new text resets the idle deadline"
+    );
+    tokio::time::advance(std::time::Duration::from_millis(799)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            if matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with("unfinished suffix more")) { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let partial = service
+        .inner
+        .conversation
+        .storage
+        .history(&target, 0)
+        .unwrap()
+        .thread
+        .turns;
+    for delta in [" paragraph\n", "\n"] {
+        Runtime::observe(&service, text(delta), Some(attempt.id))
+            .await
+            .unwrap();
+    }
+    tokio::time::advance(std::time::Duration::from_millis(399)).await;
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .history(&target, 0)
+            .unwrap()
+            .thread
+            .turns,
+        partial,
+        "a paragraph does not bypass the minimum commit interval"
+    );
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    Runtime::observe(&service, text(" final pending"), Some(attempt.id))
+        .await
+        .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: "turn-0".into(),
+                    status: agent_protocol::execution::TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        },
+        Some(attempt.id),
+    )
+    .await
+    .unwrap();
+    let saved = service
+        .inner
+        .conversation
+        .storage
+        .history(&target, 0)
+        .unwrap();
+    assert!(
+        matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with(" paragraph\n\n final pending")),
+        "completion flushes the last partial body"
+    );
+}
+
+#[tokio::test]
+async fn an_update_restart_continues_each_interrupted_root_once_in_its_original_conversation() {
+    let directory = tempfile::tempdir().unwrap();
+    let projects = directory.path().join("projects.json");
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let service = HostRpcService::new([agent.backend()], ProjectStore::new(projects.clone()));
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let operation = Uuid::new_v4();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((operation.to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    completed(&service, &target, 1).await;
+    let native = service
+        .inner
+        .conversation
+        .storage
+        .active_source(&target)
+        .unwrap()
+        .unwrap();
+    let execution = Uuid::new_v4();
+    let ongoing = agent_protocol::models::Turn {
+        id: "ongoing".into(),
+        status: agent_protocol::execution::TurnStatus::Running,
+        ..Default::default()
+    };
+    agent
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&native.id)
+        .unwrap()
+        .thread
+        .turns
+        .as_mut()
+        .unwrap()
+        .push(Arc::new(ongoing.clone()));
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native,
+            change: SessionChange::Turn {
+                turn: ongoing,
+                completed: false,
+            },
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    service
+        .inner
+        .conversation
+        .storage
+        .set_updating(true)
+        .unwrap();
+    let owner = Arc::downgrade(&service.inner);
+    drop(connection);
+    drop(service);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while owner.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let restarted = agent.restarted();
+    let service = HostRpcService::new([restarted.backend()], ProjectStore::new(projects));
+    service.start().unwrap();
+    let history = completed(&service, &target, 3).await;
+    assert_eq!(
+        service.inner.conversation.storage.identities().unwrap(),
+        vec![target.clone()]
+    );
+    assert_eq!(history.effort.as_deref(), Some("high"));
+    assert_eq!(history.service_tier.as_deref(), Some("priority"));
+    let turns = history.thread.turns.unwrap();
+    assert_eq!(
+        turns[1].status,
+        agent_protocol::execution::TurnStatus::Interrupted
+    );
+    assert_eq!(restarted.inputs.lock().unwrap().len(), 2);
+    let text = restarted.inputs.lock().unwrap()[1].input.clone();
+    assert!(matches!(&text[..], [op::Input::Text { text }] if text == super::recovery::CONTINUE));
+    for _ in 0..3 {
+        Runtime::recover(&service, &target, ProviderKind::Codex)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        restarted.inputs.lock().unwrap().len(),
+        2,
+        "replayed recovery never repeats the user request or creates another conversation"
+    );
+}
+
+#[tokio::test]
+async fn explicit_native_imports_preserve_host_turns_and_refresh_external_text_once() {
+    use agent_protocol::{
+        execution::ItemStatus,
+        items::{Item, ItemBody},
+        models::{Turn, TurnStatus},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((Uuid::new_v4().to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    let original = completed(&service, &target, 1).await;
+    let native = service
+        .inner
+        .conversation
+        .storage
+        .active_source(&target)
+        .unwrap()
+        .unwrap();
+    let external = |text: &str| Turn {
+        id: "external".into(),
+        status: TurnStatus::Completed,
+        items: Some(vec![
+            Arc::new(Item::new(
+                "external-answer".into(),
+                ItemStatus::Completed,
+                ItemBody::AssistantText {
+                    text: text.into(),
+                    phase: Default::default(),
+                },
+            )),
+            Arc::new(Item::new(
+                "external-tool".into(),
+                ItemStatus::Completed,
+                ItemBody::CommandExecution {
+                    output_omitted: false,
+                    command: "private tool details".into(),
+                    cwd: None,
+                    output: "not imported".into(),
+                    exit_code: Some(0),
+                },
+            )),
+        ]),
+        ..Default::default()
+    };
+    agent
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&native.id)
+        .unwrap()
+        .thread
+        .turns
+        .as_mut()
+        .unwrap()
+        .push(Arc::new(external("external answer")));
+    let storage = &service.inner.conversation.storage;
+    for _ in 0..2 {
+        storage.queue_import(&target, &native, now()).unwrap();
+    }
+    let imported = completed(&service, &target, 2).await;
+    let turns = imported.thread.turns.as_ref().unwrap();
+    assert_eq!(turns[0], original.thread.turns.as_ref().unwrap()[0]);
+    assert_eq!(
+        turns[1].items.as_ref().unwrap().len(),
+        1,
+        "explicit imports copy conversation text only"
+    );
+    let id = turns[1].id.clone();
+    let item = turns[1].items.as_ref().unwrap()[0].id.clone();
+    agent
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&native.id)
+        .unwrap()
+        .thread
+        .turns
+        .as_mut()
+        .unwrap()[1] = Arc::new(external("updated answer"));
+    storage.queue_import(&target, &native, now()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let history = storage.history(&target, 0).unwrap();
+            let turns = history.thread.turns.unwrap();
+            if matches!(turns.last().unwrap().items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "updated answer") {
+                assert_eq!(turns.len(), 2);
+                assert_eq!(turns[1].id, id);
+                assert_eq!(turns[1].items.as_ref().unwrap()[0].id, item);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert_eq!(
+        agent.inputs.lock().unwrap().len(),
+        1,
+        "importing never sends an input"
+    );
+}
+
+#[tokio::test]
+async fn registering_a_project_updates_open_conversations_and_the_shared_list_after_restart() {
+    use agent_protocol::sync::{Content, Key};
+    let directory = tempfile::tempdir().unwrap();
+    let state_file = directory.path().join("projects.json");
+    let root = directory.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let cwd = dunce::canonicalize(&root)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let service = HostRpcService::new([], ProjectStore::new(&state_file));
+    let id = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    service
+        .inner
+        .conversation
+        .storage
+        .create(
+            &id,
+            &records::Header {
+                state: decision::Thread {
+                    name: "Already open".into(),
+                    workspace: decision::Workspace::Ready(cwd.clone()),
+                    provider: ProviderKind::Codex,
+                    queue_held: false,
+                },
+                details: Default::default(),
+            },
+        )
+        .unwrap();
+    let connection = service.open_session();
+    let reply = service
+        .dispatch(
+            connection.id(),
+            &Call::SubscribeConversation(records::Subscribe {
+                session: id.clone(),
+                subscription: Uuid::new_v4(),
+                cached: None,
+                window: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let Response::Success { result } =
+        protocol::decode::<Response<records::Opened>>(&reply.initial).unwrap()
+    else {
+        panic!("open")
+    };
+    let mut replica = records::Replica::new(Scope::Conversation(id.clone()), 1)
+        .apply(1, result.initial)
+        .unwrap();
+    let mut updates = reply.updates.unwrap();
+    service.inner.projects.register(&root).await.unwrap();
+    let project = service
+        .inner
+        .conversation
+        .storage
+        .projects()
+        .unwrap()
+        .remove(0);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let message: records::Message =
+                protocol::decode(&updates.recv().await.unwrap()).unwrap();
+            replica = replica.clone().apply(1, message).unwrap();
+            if records::project(&replica)
+                .unwrap()
+                .thread
+                .project_id
+                .as_deref()
+                == Some(project.id.as_str())
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("registration updates the existing subscription");
+    let records::Message::Snapshot { rows, .. } =
+        service.inner.conversation.storage.list(None).unwrap()
+    else {
+        panic!("list")
+    };
+    let listed = rows
+        .iter()
+        .find(|row| row.key == Key::Thread(id.clone()))
+        .unwrap();
+    assert_eq!(
+        listed.version,
+        replica.rows()[&Key::Thread(id.clone())].version
+    );
+    assert!(
+        matches!(&listed.content,Content::Full(record) if matches!(record.as_ref(),records::Record::Thread(header) if header.details.project.as_deref()==Some(project.id.as_str())))
+    );
+    drop(updates);
+    drop(connection);
+    drop(service);
+    let restarted = HostRpcService::new([], ProjectStore::new(&state_file));
+    assert_eq!(
+        restarted
+            .inner
+            .conversation
+            .storage
+            .header(&id)
+            .unwrap()
+            .details
+            .project
+            .as_deref(),
+        Some(project.id.as_str())
+    );
+    assert_eq!(
+        restarted.inner.conversation.storage.projects().unwrap()[0].id,
+        project.id
+    );
+}
+
+#[tokio::test]
+async fn opening_native_history_subscribes_before_import_and_publishes_the_latest_window() {
+    use agent_protocol::{
+        models::{Thread, ThreadResponse, Turn},
+        session::HistoryReadKind,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+    let target = SessionRef::new(ProviderKind::Codex, "slow-history".into()).unwrap();
+    agent.records.lock().unwrap().insert(
+        target.id.clone(),
+        ThreadResponse {
+            thread: Thread {
+                id: Some(target.clone()),
+                turns: Some(
+                    (0..25)
+                        .map(|index| {
+                            Arc::new(Turn {
+                                id: format!("native-{index}").into(),
+                                status: agent_protocol::models::TurnStatus::Completed,
+                                ..Default::default()
+                            })
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let held = agent.open_gate.acquire().await.unwrap();
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        service.dispatch(
+            connection.id(),
+            &Call::SubscribeConversation(records::Subscribe {
+                session: target.clone(),
+                subscription: Uuid::new_v4(),
+                cached: None,
+                window: None,
+            }),
+        ),
+    )
+    .await
+    .expect("opening does not wait for the provider")
+    .unwrap();
+    let Response::Success { result } =
+        protocol::decode::<Response<records::Opened>>(&reply.initial).unwrap()
+    else {
+        panic!("subscription")
+    };
+    let mut replica = records::Replica::new(Scope::Conversation(target.clone()), 1)
+        .apply(1, result.initial)
+        .unwrap();
+    assert_eq!(
+        records::project(&replica)
+            .unwrap()
+            .thread
+            .history_read_state
+            .unwrap()
+            .kind,
+        HistoryReadKind::Loading
+    );
+    let mut updates = reply.updates.unwrap();
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            replica = replica
+                .clone()
+                .apply(1, protocol::decode(&updates.recv().await.unwrap()).unwrap())
+                .unwrap();
+            let thread = records::project(&replica).unwrap().thread;
+            if thread
+                .history_read_state
+                .as_ref()
+                .is_some_and(|state| state.kind == HistoryReadKind::Loading)
+            {
+                continue;
+            }
+            assert_eq!(
+                thread
+                    .turns
+                    .unwrap()
+                    .iter()
+                    .map(|turn| turn.id.as_str())
+                    .collect::<Vec<_>>(),
+                (15..25)
+                    .map(|index| format!("native-{index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(thread.history_has_more, Some(true));
+            break;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(service.inner.conversation.storage.loaded(&target).unwrap());
+    assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_another_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let connection = service.open_session();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            provider: ProviderKind::Codex,
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((Uuid::new_v4().to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    completed(&service, &target, 1).await;
+    let first = service
+        .inner
+        .conversation
+        .storage
+        .state(&target)
+        .unwrap()
+        .attempts
+        .into_values()
+        .next()
+        .unwrap();
+    let native = SessionRef::new(first.provider, first.source.clone()).unwrap();
+    for count in 2..=20 {
+        let operation = Uuid::new_v4();
+        let receipt: records::Acknowledged = call(
+            &service,
+            connection.id(),
+            Call::ChangeConversation(records::Change {
+                session: target.clone(),
+                operation,
+                command: Command::Submit {
+                    id: operation.to_string().into(),
+                    content: content(),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.outcome, Outcome::Accepted);
+        completed(&service, &target, count).await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !service
+            .inner
+            .conversation
+            .resources
+            .lock()
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completed native I/O resources retire");
+    let before = service
+        .inner
+        .conversation
+        .storage
+        .history(&target, 0)
+        .unwrap();
+    let native_turn = service
+        .inner
+        .conversation
+        .storage
+        .execution(&target, first.id)
+        .unwrap()
+        .unwrap()
+        .native_turn
+        .unwrap();
+    service
+        .inner
+        .conversation
+        .storage
+        .fence_execution(&target, first.id)
+        .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: native_turn.clone(),
+                    status: agent_protocol::models::TurnStatus::Running,
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        },
+        Some(first.id),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::Item {
+                turn_id: native_turn.clone(),
+                item: Arc::new(agent_protocol::items::Item::new(
+                    "late-after-fence".into(),
+                    agent_protocol::execution::ItemStatus::Completed,
+                    agent_protocol::items::ItemBody::AssistantText {
+                        text: "must stay fenced".into(),
+                        phase: Default::default(),
+                    },
+                )),
+            },
+        },
+        Some(first.id),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native,
+            change: SessionChange::Item {
+                turn_id: native_turn,
+                item: Arc::new(agent_protocol::items::Item::new(
+                    "late-command".into(),
+                    agent_protocol::execution::ItemStatus::Running,
+                    agent_protocol::items::ItemBody::CommandExecution {
+                        output_omitted: false,
+                        command: "ignored".into(),
+                        cwd: None,
+                        output: "fenced bytes".into(),
+                        exit_code: None,
+                    },
+                )),
+            },
+        },
+        Some(first.id),
+    )
+    .await
+    .unwrap();
+    assert!(
+        service
+            .inner
+            .conversation
+            .outputs
+            .subscribe(
+                &records::OutputKey {
+                    session: target.clone(),
+                    item: decision::provider_item_id(first.id, "late-command")
+                },
+                None
+            )
+            .is_none(),
+        "a fenced callback cannot open a command output resource"
+    );
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .history(&target, 0)
+            .unwrap(),
+        before
+    );
+    assert!(
+        service
+            .inner
+            .conversation
+            .resources
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn discovery_cannot_publish_a_private_source_before_its_creation_receipt() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        use crate::host_rpc::storage::jobs::Work;
+        let directory = tempfile::tempdir().unwrap();
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+        let held = agent.create_response_gate.acquire().await.unwrap();
+        let service = HostRpcService::new(
+            [agent.backend()],
+            ProjectStore::new(directory.path().join("projects.json")),
+        );
+        service
+            .inner
+            .conversation
+            .storage
+            .queue_catalog(ProviderKind::Codex, now())
+            .unwrap();
+        let claim = service
+            .inner
+            .conversation
+            .storage
+            .claim(now(), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(matches!(claim.work, Work::Catalog { .. }));
+        let connection = service.open_session();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let _: records::Opened = call(
+            &service,
+            connection.id(),
+            Call::CreateConversation(records::Create {
+                provider: ProviderKind::Codex,
+                session: target.clone(),
+                subscription: Uuid::new_v4(),
+                cwd: Some(directory.path().to_str().unwrap().into()),
+                selection: Default::default(),
+                initial: Some((Uuid::new_v4().to_string().into(), content())),
+            }),
+        )
+        .await
+        .unwrap();
+        agent.created.notified().await;
+        assert_eq!(
+            agent.records.lock().unwrap().len(),
+            1,
+            "the native identity already exists before its creation reply"
+        );
+        let mut catalog = Box::pin(Runtime::run_job(&service, claim));
+        assert!(
+            futures_util::poll!(&mut catalog).is_pending(),
+            "catalog discovery waits until private ownership is recorded"
+        );
+        drop(held);
+        catalog.await;
+        completed(&service, &target, 1).await;
+        assert_eq!(
+            service
+                .inner
+                .conversation
+                .storage
+                .summaries("", false)
+                .unwrap()
+                .into_iter()
+                .filter_map(|thread| thread.id)
+                .collect::<Vec<_>>(),
+            vec![target]
+        );
+    })
+    .await
+    .expect("native creation and discovery settle");
+}
+
+#[tokio::test]
+async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notification() {
+    use super::native_fixture::AnswerResource;
+    use crate::providers::RequestOrigin;
+    use agent_protocol::requests::{Request, RequestBody, RequestTarget};
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = NativeAgent::new(ProviderKind::Codex,directory.path().into());
+        let service = HostRpcService::new([agent.backend()],ProjectStore::new(directory.path().join("projects.json")));
+        let connection = service.open_session();
+        let target = SessionRef::new(None,Uuid::new_v4().to_string()).unwrap();
+        let _: records::Opened = call(&service,connection.id(),Call::CreateConversation(records::Create {
+            provider:ProviderKind::Codex,session:target.clone(),subscription:Uuid::new_v4(),cwd:Some(directory.path().to_str().unwrap().into()),selection:Default::default(),initial:Some((Uuid::new_v4().to_string().into(),content())),
+        })).await.unwrap();
+        completed(&service,&target,1).await;
+        let native = service.inner.conversation.storage.active_source(&target).unwrap().unwrap();
+        let execution = Uuid::new_v4();
+        let turn = |completed| AgentChange::Session {session:native.clone(),change:SessionChange::Turn {
+            turn:agent_protocol::models::Turn {id:"request-turn".into(),status:if completed {agent_protocol::models::TurnStatus::Completed} else {agent_protocol::models::TurnStatus::Running},..Default::default()},completed,
+        }};
+        Runtime::observe(&service,turn(false),Some(execution)).await.unwrap();
+        let other=SessionRef::new(ProviderKind::Codex,"superseded-source".into()).unwrap();
+        let _other=service.inner.conversation.register_native(&target,&other);
+        Runtime::observe(&service,AgentChange::Session {session:other.clone(),change:SessionChange::Item {
+            turn_id:"request-turn".into(),item:Arc::new(agent_protocol::items::Item::new("wrong-source".into(),agent_protocol::execution::ItemStatus::Completed,
+                agent_protocol::items::ItemBody::AssistantText {text:"must not apply".into(),phase:Default::default()})),
+        }},Some(execution)).await.unwrap();
+        assert!(!service.inner.conversation.storage.state(&target).unwrap().items.contains_key(&decision::provider_item_id(execution,"wrong-source")));
+        assert!(Runtime::observe(&service,AgentChange::Request {
+            session:other,origin:RequestOrigin {instance:Uuid::new_v4(),native_id:serde_json::json!(3),provider:ProviderKind::Codex,source:Arc::new(AnswerResource)},
+            request:Request {id:"wrong-source-request".into(),target:RequestTarget::Turn {turn_id:"request-turn".into(),item_id:None},delivery:agent_protocol::session::RequestDelivery::Awaiting,
+                body:RequestBody::ToolExecution {tool:"wrong source".into(),namespace:None,arguments:serde_json::Value::Null}},
+        },Some(execution)).await.is_err());
+        assert!(service.inner.conversation.storage.state(&target).unwrap().requests.is_empty());
+
+        let resource = Arc::new(AnswerResource);
+        let retained = Arc::downgrade(&resource);
+        Runtime::observe(&service,AgentChange::Request {
+            session:native.clone(),origin:RequestOrigin {instance:Uuid::new_v4(),native_id:serde_json::json!(1),provider:ProviderKind::Codex,source:resource},
+            request:Request {id:"native-request".into(),target:RequestTarget::Turn {turn_id:"request-turn".into(),item_id:None},delivery:agent_protocol::session::RequestDelivery::Awaiting,
+                body:RequestBody::ToolExecution {tool:"inspect".into(),namespace:None,arguments:serde_json::Value::Null}},
+        },Some(execution)).await.unwrap();
+        assert!(retained.upgrade().is_some(),"the pending native answer remains addressable");
+        assert_eq!(service.inner.conversation.storage.state(&target).unwrap().requests.len(),1);
+        Runtime::observe(&service,turn(true),Some(execution)).await.unwrap();
+        assert!(service.inner.conversation.storage.state(&target).unwrap().requests.is_empty());
+        assert!(retained.upgrade().is_none(),"terminal canonical state releases the private answer handle even without a native Resolved frame");
+        let rejected = Runtime::observe(&service,AgentChange::Request {
+            session:native.clone(),origin:RequestOrigin {instance:Uuid::new_v4(),native_id:serde_json::json!(2),provider:ProviderKind::Codex,source:Arc::new(AnswerResource)},
+            request:Request {id:"late-request".into(),target:RequestTarget::Turn {turn_id:"request-turn".into(),item_id:None},delivery:agent_protocol::session::RequestDelivery::Awaiting,
+                body:RequestBody::ToolExecution {tool:"late".into(),namespace:None,arguments:serde_json::Value::Null}},
+        },Some(execution)).await;
+        assert!(rejected.is_err(),"the adapter must receive an error instead of leaving its permission prompt unanswered");
+        assert!(service.inner.conversation.requests.lock().unwrap().is_empty());
+
+    }).await.expect("request lifecycle settles");
+}

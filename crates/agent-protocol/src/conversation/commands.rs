@@ -46,10 +46,6 @@ pub(super) fn command(
             })]);
             append_advance(state, result, context)
         }
-        Command::HoldQueue => accepted(vec![Change::Thread(Thread {
-            queue_held: state.has_queued_inputs(),
-            ..state.thread.clone()
-        })]),
         Command::RemoveInput(id) => match state.inputs.get(&id) {
             None => reject("input does not exist"),
             Some(input)
@@ -67,9 +63,139 @@ pub(super) fn command(
             enabled,
             content,
         } => continue_after_restart(state, operation, &source, enabled, content, context),
-        Command::Interrupt => interrupt(state, context),
+        Command::Interrupt { turn } => interrupt(state, turn.as_ref(), context),
         Command::Answer { id, answer } => answer_request(state, id, answer, context),
+        Command::EditInput { id, parts } => edit_input(state, &id, parts),
+        Command::MoveInput { id, before } => move_input(state, &id, before.as_ref()),
+        Command::SteerInput(id) => steer_input(state, &id, context),
+        Command::Rewind(id) => rewind(state, &id, context.external_busy),
     }
+}
+
+fn queued<'a>(state: &'a State, id: &ClientInputId) -> Option<&'a PendingInput> {
+    state
+        .inputs
+        .get(id)
+        .filter(|input| matches!(input.state, InputState::Queued { .. }))
+}
+
+fn edit_input(state: &State, id: &ClientInputId, parts: Vec<InputPart>) -> Step {
+    let Some(input) = queued(state, id) else {
+        return reject("input is no longer queued");
+    };
+    if parts.is_empty() {
+        return reject("input is empty");
+    }
+    accepted(vec![Change::Input(PendingInput {
+        content: InputContent {
+            parts,
+            ..input.content.clone()
+        },
+        ..input.clone()
+    })])
+}
+
+fn move_input(state: &State, id: &ClientInputId, before: Option<&ClientInputId>) -> Step {
+    if queued(state, id).is_none() || before.is_some_and(|id| queued(state, id).is_none()) {
+        return reject("input is no longer queued");
+    }
+    if before == Some(id) {
+        return accepted(Vec::new());
+    }
+    let mut inputs: Vec<_> = state
+        .inputs
+        .values()
+        .filter(|input| matches!(input.state, InputState::Queued { .. }))
+        .collect();
+    inputs.sort_by_key(|input| input.position);
+    let positions: Vec<_> = inputs.iter().map(|input| input.position).collect();
+    let selected = inputs.remove(
+        inputs
+            .iter()
+            .position(|input| &input.id == id)
+            .expect("queued input"),
+    );
+    let destination = before
+        .and_then(|id| inputs.iter().position(|input| &input.id == id))
+        .unwrap_or(inputs.len());
+    inputs.insert(destination, selected);
+    accepted(
+        inputs
+            .into_iter()
+            .zip(positions)
+            .filter(|(input, position)| input.position != *position)
+            .map(|(input, position)| {
+                Change::Input(PendingInput {
+                    position,
+                    ..input.clone()
+                })
+            })
+            .collect(),
+    )
+}
+
+fn steer_input(state: &State, id: &ClientInputId, context: Context) -> Step {
+    let Some(input) = queued(state, id) else {
+        return reject("input is no longer queued");
+    };
+    let Some(attempt) = state.steerable_attempt().filter(|_| context.steers) else {
+        return reject("active steering is unavailable");
+    };
+    let result = accepted(vec![Change::Input(PendingInput {
+        state: InputState::Queued {
+            steer: Some(attempt.id),
+        },
+        ..input.clone()
+    })]);
+    append_advance(state, result, context)
+}
+
+fn rewind(state: &State, id: &TurnId, external_busy: bool) -> Step {
+    if external_busy
+        || state.active_turn().is_some()
+        || !state.requests.is_empty()
+        || state.inputs.values().any(|input| {
+            matches!(
+                input.state,
+                InputState::Preparing { .. }
+                    | InputState::Delivering(_)
+                    | InputState::Unknown { .. }
+            )
+        })
+    {
+        return reject("conversation is busy");
+    }
+    let Some(turn) = state
+        .turns
+        .get(id)
+        .filter(|turn| turn.state != TurnState::RolledBack)
+    else {
+        return reject("turn is unavailable");
+    };
+    let mut changes: Vec<_> = state
+        .turns
+        .values()
+        .filter(|row| row.ordinal >= turn.ordinal && row.state != TurnState::RolledBack)
+        .map(|row| {
+            Change::Turn(Turn {
+                state: TurnState::RolledBack,
+                ..row.clone()
+            })
+        })
+        .collect();
+    changes.extend(state.bindings.keys().map(|provider| Change::Binding {
+        provider: *provider,
+        value: None,
+    }));
+    changes.extend(state.attempts.keys().map(|turn| Change::Attempt {
+        turn: turn.clone(),
+        value: None,
+    }));
+    changes.push(Change::Thread(Thread {
+        queue_held: state.has_queued_inputs(),
+        ..state.thread.clone()
+    }));
+    accepted(changes)
 }
 
 fn resolve_unknown(state: &State, id: &ClientInputId, retry: bool) -> Step {
@@ -79,8 +205,19 @@ fn resolve_unknown(state: &State, id: &ClientInputId, retry: bool) -> Step {
     let InputState::Unknown { delivery, status } = &input.state else {
         return reject("input delivery is not unknown");
     };
-    if matches!(status, UnknownState::Resolving { .. }) {
-        return reject("input resolution is in progress");
+    if let UnknownState::Resolving { retry: selected } = status {
+        if *selected != retry {
+            return reject("input resolution is in progress");
+        }
+        return Step {
+            actions: vec![Action::FenceDelivery {
+                id: id.clone(),
+                action: delivery.action,
+                attempt: delivery.attempt.clone(),
+            }],
+            outcome: Outcome::Accepted,
+            ..Step::default()
+        };
     }
     let mut result = if *status == UnknownState::Live {
         Step {
@@ -102,6 +239,15 @@ fn resolve_unknown(state: &State, id: &ClientInputId, retry: bool) -> Step {
     } else {
         accepted(vec![input.resolved(retry)])
     };
+    if *status == UnknownState::Live
+        && !state.source_in_use(delivery.attempt.provider, &delivery.attempt.source, delivery.attempt.id)
+        && state.bindings.get(&delivery.attempt.provider).is_some_and(|binding|
+            matches!(binding, Binding::Ready { source, .. } if source == &delivery.attempt.source))
+    {
+        // Remove eligibility before I/O: a concurrently admitted input must
+        // create a new resource instead of racing the old source's unload.
+        result.changes.push(Change::Binding { provider: delivery.attempt.provider, value: None });
+    }
     // Resolution is not permission to drain the other held inputs.
     if retry {
         result.changes.push(Change::Thread(Thread {
@@ -169,6 +315,34 @@ fn submit(
     content: InputContent,
     context: Context,
 ) -> Step {
+    if let Some(turn) = state
+        .active_turn()
+        .filter(|turn| matches!(turn.state, TurnState::Waiting(Wait::Retry { .. })))
+    {
+        let mut ended = execution::finish(
+            state,
+            turn,
+            TurnState::Failed(
+                turn.error
+                    .clone()
+                    .map(|mut error| {
+                        error.retry = None;
+                        error
+                    })
+                    .unwrap_or_default(),
+            ),
+            context.now,
+        );
+        let next = state.apply(&ended.changes);
+        let admitted = submit(&next, operation, id, content, context);
+        if matches!(admitted.outcome, Outcome::Rejected(_)) {
+            return admitted;
+        }
+        ended.changes.extend(admitted.changes);
+        ended.actions.extend(admitted.actions);
+        ended.outcome = admitted.outcome;
+        return ended;
+    }
     let operation_uuid = match operation {
         OperationId::Client(id) | OperationId::Job(id) => id,
     };
@@ -191,8 +365,15 @@ fn submit(
         .model
         .as_ref()
         .is_some_and(|model| model.provider != state.thread.provider)
+        && (context.external_busy
+            || state.active_turn().is_some()
+            || !state.requests.is_empty()
+            || state
+                .inputs
+                .values()
+                .any(|input| !matches!(input.state, InputState::Failed(_))))
     {
-        return reject("model belongs to another provider");
+        return reject("conversation is busy; cannot switch provider");
     }
     let Some(position) = state.counters.input.checked_add(1) else {
         return reject("input positions exhausted");
@@ -228,19 +409,32 @@ fn submit(
     result
 }
 
-fn interrupt(state: &State, context: Context) -> Step {
+fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step {
     let unstarted = state.inputs.values().find(|input| match &input.state {
         InputState::Preparing { .. } => true,
         _ => input
             .live_delivery()
             .is_some_and(|delivery| !delivery.steer),
     });
-    if let Some(input) = unstarted {
+    let targeting_active = expected
+        .is_some_and(|expected| state.active_turn().is_some_and(|turn| &turn.id == expected));
+    if !targeting_active && let Some(input) = unstarted {
+        if expected.is_some_and(|turn| {
+            turn.as_str() != input.id.as_str()
+                && input
+                    .live_delivery()
+                    .is_none_or(|delivery| &delivery.attempt.turn != turn)
+        }) {
+            return reject("interrupt target has changed");
+        }
         return interrupt_input(state, input, context);
     }
     let Some(turn) = state.active_turn() else {
         return reject("no active turn");
     };
+    if expected.is_some_and(|expected| expected != &turn.id) {
+        return reject("interrupt target has changed");
+    }
     match &turn.state {
         TurnState::Running { .. } | TurnState::Waiting(Wait::Background { .. }) => {
             let Some(attempt) = state.attempts.get(&turn.id) else {
@@ -263,13 +457,14 @@ fn interrupt(state: &State, context: Context) -> Step {
                 actions: vec![Action::Interrupt {
                     attempt: attempt.clone(),
                     action,
+                    background: matches!(turn.state, TurnState::Waiting(Wait::Background { .. })),
                 }],
                 outcome: Outcome::Accepted,
                 ..Step::default()
             }
         }
         TurnState::Waiting(Wait::Retry { .. }) => {
-            execution::finish(state, turn, TurnState::Interrupted)
+            execution::finish(state, turn, TurnState::Interrupted, context.now)
         }
         _ => reject("no active turn"),
     }
@@ -336,10 +531,7 @@ fn answer_request(state: &State, id: RequestId, answer: Answer, context: Context
     let action = allocate(context.seed, "answer");
     Step {
         changes: vec![Change::Request(Request {
-            state: RequestState::Sending {
-                action,
-                answer: answer.clone(),
-            },
+            state: RequestState::Sending { action },
             ..request.clone()
         })],
         actions: vec![Action::Answer {
@@ -384,6 +576,9 @@ pub(super) fn dispatch(
     context: Context,
     mode: DeliveryMode,
 ) -> Step {
+    if context.external_busy {
+        return Step::default();
+    }
     if state.inputs.values().any(|input| {
         matches!(
             input.state,
@@ -420,6 +615,22 @@ pub(super) fn dispatch(
     if !steer && blocked {
         return Step::default();
     }
+    let provider = input
+        .content
+        .model
+        .as_ref()
+        .map_or(state.thread.provider, |model| model.provider);
+    if provider != state.thread.provider {
+        let mut result = accepted(vec![Change::Thread(Thread {
+            provider,
+            ..state.thread.clone()
+        })]);
+        let next = state.apply(&result.changes);
+        let delivery = dispatch(&next, id, context, mode);
+        result.changes.extend(delivery.changes);
+        result.actions.extend(delivery.actions);
+        return result;
+    }
     let cwd = match &state.thread.workspace {
         Workspace::Missing => {
             return prepare(
@@ -443,10 +654,10 @@ pub(super) fn dispatch(
         }
         Workspace::Ready(cwd) => cwd,
     };
-    let Some(Binding::Ready { source }) = state
+    let Some(Binding::Ready { source, .. }) = state
         .bindings
         .get(&state.thread.provider)
-        .filter(|binding| matches!(binding, Binding::Ready { source } if !source.is_empty()))
+        .filter(|binding| matches!(binding, Binding::Ready { source, covered } if !source.is_empty() && *covered == state.history_end()))
     else {
         return prepare(
             input,
@@ -485,6 +696,7 @@ pub(super) fn dispatch(
             ordinal,
             interrupt: None,
             steer,
+            queued: mode == DeliveryMode::Queued,
         }),
         ..input.clone()
     })];

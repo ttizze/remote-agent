@@ -84,6 +84,9 @@ mod tests {
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
     #[serde(default)]
+    input_recoveries:
+        Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<crate::state::InputRecovery>>>,
+    #[serde(default)]
     connection_disabled: bool,
     #[serde(default)]
     project_preferences: Arc<BTreeMap<String, BTreeMap<String, crate::state::ProjectPreferences>>>,
@@ -91,6 +94,8 @@ pub struct PersistedState {
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
     drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
+    #[serde(default)]
+    new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
     pending_submissions: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     navigation: Arc<Navigation>,
@@ -98,11 +103,13 @@ pub struct PersistedState {
 
 impl Same for PersistedState {
     fn same(&self, other: &Self) -> bool {
-        self.connection_disabled == other.connection_disabled
+        self.input_recoveries.same(&other.input_recoveries)
+            && self.connection_disabled == other.connection_disabled
             && self.project_preferences.same(&other.project_preferences)
             && self.storage_scope == other.storage_scope
             && self.archived_scopes.same(&other.archived_scopes)
             && self.drafts.same(&other.drafts)
+            && self.new_drafts.same(&other.new_drafts)
             && self.pending_submissions.same(&other.pending_submissions)
             && self.file_drafts.same(&other.file_drafts)
             && self.navigation.same(&other.navigation)
@@ -112,11 +119,13 @@ impl Same for PersistedState {
 impl PersistedState {
     pub fn capture(snapshot: &Snapshot) -> Self {
         Self {
+            input_recoveries: snapshot.input.input_recoveries.clone(),
             connection_disabled: snapshot.connection.connection_disabled,
             project_preferences: snapshot.lists.project_preferences.clone(),
             storage_scope: snapshot.connection.storage_scope.clone(),
             archived_scopes: snapshot.lists.archived_scopes.clone(),
             drafts: snapshot.input.drafts.clone(),
+            new_drafts: snapshot.input.new_drafts.clone(),
             pending_submissions: snapshot.sessions.pending_submissions.clone(),
             file_drafts: snapshot.files.file_drafts.clone(),
             navigation: snapshot.panes.primary().navigation.clone(),
@@ -132,7 +141,22 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     if bytes.is_empty() {
         return Ok(Snapshot::default());
     }
-    let saved: PersistedState = serde_json::from_slice(bytes)?;
+    let mut saved: PersistedState = serde_json::from_slice(bytes)?;
+    assign_draft_addresses(
+        &mut saved.drafts,
+        &mut saved.new_drafts,
+        &mut saved.navigation,
+        &mut saved.pending_submissions,
+    );
+    for scope in Arc::make_mut(&mut saved.archived_scopes).values_mut() {
+        let scope = Arc::make_mut(scope);
+        assign_draft_addresses(
+            &mut scope.drafts,
+            &mut scope.new_drafts,
+            &mut scope.navigation,
+            &mut scope.pending_submissions,
+        );
+    }
     Ok(Snapshot {
         files: crate::state::Files {
             file_drafts: saved.file_drafts,
@@ -149,7 +173,9 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
             ..Default::default()
         },
         input: crate::state::Input {
+            input_recoveries: saved.input_recoveries,
             drafts: saved.drafts,
+            new_drafts: saved.new_drafts,
             ..Default::default()
         },
         sessions: crate::state::Sessions {
@@ -164,6 +190,56 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         )),
         ..Default::default()
     })
+}
+
+// Pre-cutover drafts have no Host address yet. Allocate it once on restore,
+// including archived Host scopes, before any view or pending send sees them.
+fn assign_draft_addresses(
+    drafts: &mut Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
+    new_drafts: &mut Arc<BTreeMap<String, crate::session::SessionRef>>,
+    navigation: &mut Arc<Navigation>,
+    pending: &mut Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
+) {
+    use crate::state::DraftKey;
+    let keys: Vec<_> = drafts
+        .keys()
+        .chain(std::iter::once(&navigation.draft_key))
+        .filter_map(|key| match key {
+            DraftKey::Local { key: value } => value
+                .strip_prefix("new:")
+                .map(|suffix| (key.clone(), suffix.to_owned())),
+            _ => None,
+        })
+        .collect();
+    for (old, suffix) in keys {
+        let project = suffix
+            .split_once(':')
+            .filter(|(slot, _)| slot.parse::<u64>().is_ok())
+            .map_or_else(
+                || format!("0:{suffix}"),
+                |(slot, cwd)| format!("{slot}:{cwd}"),
+            );
+        let session = Arc::make_mut(new_drafts)
+            .entry(project)
+            .or_insert_with(|| crate::session::SessionRef {
+                provider: None,
+                id: uuid::Uuid::new_v4().to_string(),
+            })
+            .clone();
+        let key = DraftKey::from(session);
+        if let Some(draft) = Arc::make_mut(drafts).remove(&old) {
+            Arc::make_mut(drafts).insert(key.clone(), draft);
+        }
+        if navigation.draft_key == old {
+            Arc::make_mut(navigation).draft_key = key.clone();
+        }
+        for input in Arc::make_mut(pending)
+            .values_mut()
+            .filter(|input| input.draft_key == old)
+        {
+            Arc::make_mut(input).draft_key = key.clone();
+        }
+    }
 }
 
 /// Structured domain keys are stored as entries, without encoding keys into strings.

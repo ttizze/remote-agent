@@ -101,9 +101,9 @@ impl Operation for ImportProjects {
             }
         }
         state.result = Some(output);
-        vec![Effect::execute(ListSessions::new(
-            (*snapshot.lists.list_query).clone(),
-        ))]
+        vec![Effect::execute(super::super::list_sync::SubscribeCatalog {
+            refresh: false,
+        })]
     }
 }
 

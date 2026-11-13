@@ -1,5 +1,6 @@
 //! DeepSeek Harness owns inference, tools, credentials and native sessions.
 //! BEX speaks its standard ACP v1 stdio interface and checkpoints display state.
+use crate::providers::Discovery as _;
 use crate::providers::{
     AccountCommand, AccountReply, Agent, AgentChange, AgentEvent, AnswerSource, Failure, Identity,
     RequestOrigin, SessionListScope, SessionPage, SessionSummary, SubmissionState,
@@ -51,6 +52,7 @@ type Pending = HashMap<u64, oneshot::Sender<Result<Value, String>>>;
 #[derive(Clone)]
 pub struct DeepSeek(Arc<Inner>);
 struct Inner {
+    scopes: super::scopes::Scopes,
     program: PathBuf,
     directory: PathBuf,
     home: Option<PathBuf>,
@@ -123,7 +125,7 @@ fn unsupported() -> Failure {
 }
 fn session(id: &str) -> SessionRef {
     SessionRef {
-        provider: PROVIDER,
+        provider: Some(PROVIDER),
         id: id.into(),
     }
 }
@@ -159,6 +161,7 @@ impl DeepSeek {
         }
         let (events, receiver) = mpsc::channel(256);
         Ok(Self(Arc::new(Inner {
+            scopes: Default::default(),
             program,
             directory,
             home,
@@ -433,15 +436,14 @@ impl DeepSeek {
         record.thread.updated_at = Some(now());
         self.save(&records).await?;
         drop(records);
-        emit(
-            &self.0.events,
-            AgentChange::Session {
-                session: session(id),
-                change,
-            },
-        )
-        .await
-        .map_err(failure)
+        let change = AgentChange::Session {
+            session: session(id),
+            change,
+        };
+        let execution = self.0.scopes.observe(&change);
+        crate::providers::emit_for(&self.0.events, change, execution)
+            .await
+            .map_err(failure)
     }
     async fn ensure_loaded(&self, rpc: &Rpc, record: &ThreadResponse) -> Result<(), Failure> {
         let id = &record
@@ -575,7 +577,13 @@ impl DeepSeek {
                 choices,
             },
         };
-        emit(
+        let execution = self.0.scopes.observe(&AgentChange::Session {
+            session: session(id),
+            change: SessionChange::Status {
+                status: SessionStatus::Running,
+            },
+        });
+        crate::providers::emit_for(
             &self.0.events,
             AgentChange::Request {
                 session: session(id),
@@ -587,6 +595,7 @@ impl DeepSeek {
                 },
                 request,
             },
+            execution,
         )
         .await
         .map_err(failure)
@@ -881,28 +890,124 @@ impl Identity for DeepSeek {
 }
 
 #[async_trait::async_trait]
-impl Agent for DeepSeek {
+impl crate::providers::Configuration for DeepSeek {
     fn data_recipient(&self) -> &'static str {
         "DeepSeek Harness（選択したAPI事業者：DeepSeek / OpenRouter / NanoGPT / OpenCode / OpenAI / Google / Anthropic / Groq / Mistral AI / xAI、およびモデル提供元）"
     }
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            steer: false,
-            fork: false,
-            rename: true,
-            model_change: true,
-        }
-    }
-    fn availability(&self) -> Result<(), Failure> {
-        self.validate_create()
-    }
-    fn validate_create(&self) -> Result<(), Failure> {
-        if self.0.stop.is_cancelled() {
-            Err(failure("Harness is shutting down"))
+    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
+        let rpc = self.rpc().await?;
+        let data = if params.cursor.is_some() {
+            vec![]
         } else {
-            Ok(())
+            let credentials = self.dsh_credentials().await?;
+            let created = rpc
+                .call(
+                    "session/new",
+                    json!({"cwd":self.0.directory,"mcpServers":[]}),
+                    Some(Duration::from_secs(90)),
+                )
+                .await?;
+            let mut models = catalog(&created, &credentials.routes);
+            if let Some(id) = created["sessionId"].as_str() {
+                let known = rpc.model_settings.lock().await;
+                for model in &mut models {
+                    if let Some(settings) = known.get(&model.model.id) {
+                        model.settings = Some(settings.clone());
+                    }
+                }
+                drop(known);
+                rpc.call(
+                    "session/close",
+                    json!({"sessionId":id}),
+                    Some(Duration::from_secs(30)),
+                )
+                .await?;
+            }
+            models
+        };
+        Ok(op::ModelPage {
+            data,
+            next_cursor: None,
+            provider_errors: None,
+        })
+    }
+    async fn model_settings(
+        &self,
+        model_id: &str,
+    ) -> Result<agent_protocol::models::ModelSettings, Failure> {
+        let rpc = self.rpc().await?;
+        if let Some(settings) = rpc.model_settings.lock().await.get(model_id).cloned() {
+            return Ok(settings);
+        }
+        let created = rpc
+            .call(
+                "session/new",
+                json!({"cwd":self.0.directory,"mcpServers":[]}),
+                Some(Duration::from_secs(90)),
+            )
+            .await?;
+        let id = created["sessionId"]
+            .as_str()
+            .ok_or_else(|| failure("Model discovery returned no session"))?;
+        let result = async {
+            let credentials = self.dsh_credentials().await?;
+            if !catalog(&created, &credentials.routes)
+                .iter()
+                .any(|model| model.model.id == model_id)
+            {
+                return Err(failure("The requested model is not available"));
+            }
+            let config = rpc
+                .call(
+                    "session/set_config_option",
+                    json!({"sessionId":id,"configId":"model","value":model_id}),
+                    Some(Duration::from_secs(30)),
+                )
+                .await?;
+            resolved_model_settings(model_id, &config)
+        }
+        .await;
+        let closed = rpc
+            .call(
+                "session/close",
+                json!({"sessionId":id}),
+                Some(Duration::from_secs(30)),
+            )
+            .await;
+        let settings = result?;
+        closed?;
+        rpc.model_settings
+            .lock()
+            .await
+            .insert(model_id.to_owned(), settings.clone());
+        Ok(settings)
+    }
+    async fn catalog(&self, cwd: &str) -> ComposerCatalog {
+        ComposerCatalog {
+            cwd: cwd.into(),
+            ..Default::default()
         }
     }
+    async fn read_permissions(&self) -> Result<PermissionSettings, Failure> {
+        Ok(PermissionSettings {
+            mode: None,
+            version: "deepseek-native".into(),
+        })
+    }
+    async fn update_permissions(
+        &self,
+        _: PermissionMode,
+        _: &str,
+    ) -> Result<PermissionSettings, Failure> {
+        Err(Failure::new(
+            "native_permissions",
+            "Harness の権限設定を使用します。必要な操作はBexの承認画面に表示されます。",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::providers::Discovery for DeepSeek {
     fn storage_directory(&self) -> &Path {
         &self.0.directory
     }
@@ -983,16 +1088,27 @@ impl Agent for DeepSeek {
             transfer: None,
         })
     }
-    async fn read_turn_items(&self, id: &str, turn_id: &TurnId) -> Result<Vec<Arc<Item>>, Failure> {
-        let record = self.open(id, usize::MAX, true).await?;
-        record
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .find(|t| &t.id == turn_id)
-            .and_then(|t| t.items.clone())
-            .ok_or_else(|| failure("Turn not found"))
+}
+
+#[async_trait::async_trait]
+impl Agent for DeepSeek {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            steer: false,
+            fork: false,
+            model_change: true,
+            ..Default::default()
+        }
+    }
+    fn availability(&self) -> Result<(), Failure> {
+        self.validate_create()
+    }
+    fn validate_create(&self) -> Result<(), Failure> {
+        if self.0.stop.is_cancelled() {
+            Err(failure("Harness is shutting down"))
+        } else {
+            Ok(())
+        }
     }
     async fn create(
         &self,
@@ -1074,6 +1190,7 @@ impl Agent for DeepSeek {
         route: SubmissionTarget<'_>,
         _: bool,
         _: Option<Value>,
+        execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
         if !matches!(route, SubmissionTarget::Start { .. }) {
             return Err(Failure::new(
@@ -1116,6 +1233,8 @@ impl Agent for DeepSeek {
             self.save(&records).await?;
         }
         let turn_id: TurnId = uuid::Uuid::new_v4().to_string().into();
+        self.0.scopes.reserve(&id, execution);
+        self.0.scopes.bind(&id, turn_id.clone(), execution);
         let mut user = Item::new(
             input.client_user_message_id.as_str().into(),
             ItemStatus::Completed,
@@ -1212,100 +1331,6 @@ impl Agent for DeepSeek {
             .await?;
         Ok(Empty {})
     }
-    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let rpc = self.rpc().await?;
-        let data = if params.cursor.is_some() {
-            vec![]
-        } else {
-            let credentials = self.dsh_credentials().await?;
-            let created = rpc
-                .call(
-                    "session/new",
-                    json!({"cwd":self.0.directory,"mcpServers":[]}),
-                    Some(Duration::from_secs(90)),
-                )
-                .await?;
-            let mut models = catalog(&created, &credentials.routes);
-            if let Some(id) = created["sessionId"].as_str() {
-                let known = rpc.model_settings.lock().await;
-                for model in &mut models {
-                    if let Some(settings) = known.get(&model.model.id) {
-                        model.settings = Some(settings.clone());
-                    }
-                }
-                drop(known);
-                rpc.call(
-                    "session/close",
-                    json!({"sessionId":id}),
-                    Some(Duration::from_secs(30)),
-                )
-                .await?;
-            }
-            models
-        };
-        Ok(op::ModelPage {
-            data,
-            next_cursor: None,
-            provider_errors: None,
-        })
-    }
-    async fn model_settings(
-        &self,
-        model_id: &str,
-    ) -> Result<agent_protocol::models::ModelSettings, Failure> {
-        let rpc = self.rpc().await?;
-        if let Some(settings) = rpc.model_settings.lock().await.get(model_id).cloned() {
-            return Ok(settings);
-        }
-        let created = rpc
-            .call(
-                "session/new",
-                json!({"cwd":self.0.directory,"mcpServers":[]}),
-                Some(Duration::from_secs(90)),
-            )
-            .await?;
-        let id = created["sessionId"]
-            .as_str()
-            .ok_or_else(|| failure("Model discovery returned no session"))?;
-        let result = async {
-            let credentials = self.dsh_credentials().await?;
-            if !catalog(&created, &credentials.routes)
-                .iter()
-                .any(|model| model.model.id == model_id)
-            {
-                return Err(failure("The requested model is not available"));
-            }
-            let config = rpc
-                .call(
-                    "session/set_config_option",
-                    json!({"sessionId":id,"configId":"model","value":model_id}),
-                    Some(Duration::from_secs(30)),
-                )
-                .await?;
-            resolved_model_settings(model_id, &config)
-        }
-        .await;
-        let closed = rpc
-            .call(
-                "session/close",
-                json!({"sessionId":id}),
-                Some(Duration::from_secs(30)),
-            )
-            .await;
-        let settings = result?;
-        closed?;
-        rpc.model_settings
-            .lock()
-            .await
-            .insert(model_id.to_owned(), settings.clone());
-        Ok(settings)
-    }
-    async fn catalog(&self, cwd: &str) -> ComposerCatalog {
-        ComposerCatalog {
-            cwd: cwd.into(),
-            ..Default::default()
-        }
-    }
     async fn discard_workspace_processes(&self, dir: &Path) -> Result<(), Failure> {
         let ids: Vec<_> = self
             .0
@@ -1340,46 +1365,11 @@ impl Agent for DeepSeek {
                 rpc.loaded.lock().await.remove(id);
             }
         }
+        self.0.scopes.forget(id);
         Ok(())
-    }
-    async fn read_permissions(&self) -> Result<PermissionSettings, Failure> {
-        Ok(PermissionSettings {
-            mode: None,
-            version: "deepseek-native".into(),
-        })
-    }
-    async fn update_permissions(
-        &self,
-        _: PermissionMode,
-        _: &str,
-    ) -> Result<PermissionSettings, Failure> {
-        Err(Failure::new(
-            "native_permissions",
-            "Harness の権限設定を使用します。必要な操作はBexの承認画面に表示されます。",
-        ))
     }
     async fn fork(&self, _: &str, _: &str, _: Option<Value>) -> Result<ThreadResponse, Failure> {
         Err(unsupported())
-    }
-    async fn rename(&self, id: &str, name: &str) -> Result<Empty, Failure> {
-        let mut records = self.0.records.lock().await;
-        records
-            .get_mut(id)
-            .ok_or_else(|| failure("Unknown conversation"))?
-            .thread
-            .name = Some(name.into());
-        self.save(&records).await?;
-        drop(records);
-        emit(
-            &self.0.events,
-            AgentChange::Renamed {
-                session: session(id),
-                name: Some(name.into()),
-            },
-        )
-        .await
-        .map_err(failure)?;
-        Ok(Empty {})
     }
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.0.receiver.lock().unwrap().take()
@@ -1440,6 +1430,7 @@ fn permission_choice(option: &Value) -> Option<Choice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::Configuration as _;
     use proptest::prelude::*;
 
     #[tokio::test]
@@ -1466,7 +1457,7 @@ mod tests {
                 ThreadResponse {
                     thread: Thread {
                         id: Some(SessionRef {
-                            provider: PROVIDER,
+                            provider: Some(PROVIDER),
                             id: id.into(),
                         }),
                         name: name.map(str::to_owned),
@@ -1499,7 +1490,9 @@ mod tests {
                 ("i\u{307}staN", vec!["b"]),
                 ("missing", vec![]),
             ] {
-                let result = Agent::list(&adapter, query, None, scope, 10).await.unwrap();
+                let result = crate::providers::Discovery::list(&adapter, query, None, scope, 10)
+                    .await
+                    .unwrap();
                 let actual = result
                     .data
                     .into_iter()
@@ -1557,9 +1550,15 @@ mod tests {
                 None,
             ),
         ] {
-            let result = Agent::list(&adapter, query, cursor.map(str::to_owned), scope, limit)
-                .await
-                .unwrap();
+            let result = crate::providers::Discovery::list(
+                &adapter,
+                query,
+                cursor.map(str::to_owned),
+                scope,
+                limit,
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 result
                     .data
@@ -1572,7 +1571,9 @@ mod tests {
         }
         for (id, record) in records {
             assert_eq!(
-                Agent::open(&adapter, &id, usize::MAX, true).await.unwrap(),
+                crate::providers::Discovery::open(&adapter, &id, usize::MAX, true)
+                    .await
+                    .unwrap(),
                 record
             );
         }
@@ -1764,7 +1765,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             "a rejected model must close the new native session"
         );
         assert_eq!(
-            Agent::list(&adapter, "", None, SessionListScope::All, 100)
+            crate::providers::Discovery::list(&adapter, "", None, SessionListScope::All, 100)
                 .await
                 .unwrap()
                 .data
@@ -1874,13 +1875,12 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             .await
             .unwrap();
         let id = created.thread.id.as_ref().unwrap().id.clone();
-        adapter.rename(&id, "Harness smoke check").await.unwrap();
         adapter.reset_rpc().await.unwrap();
         let rpc = adapter.rpc().await.unwrap();
         adapter.ensure_loaded(&rpc, &created).await.unwrap();
         assert!(rpc.loaded.lock().await.contains(&id));
         let reopened = adapter.open(&id, 100, true).await.unwrap();
-        assert_eq!(reopened.thread.name.as_deref(), Some("Harness smoke check"));
+        assert_eq!(reopened.thread.id, created.thread.id);
         assert_eq!(reopened.model.unwrap().id, DEFAULT_MODEL);
         rpc.call(
             "session/close",

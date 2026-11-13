@@ -63,7 +63,7 @@ impl Snapshot {
         let slot = (1..=used.len() as u64 + 1)
             .find(|slot| !used.contains(slot))
             .unwrap();
-        let draft_key = DraftKey::new_chat(&cwd, slot);
+        let draft_key = self.input.new_chat(&cwd, slot);
         Arc::make_mut(&mut self.panes.0).insert(
             id,
             Arc::new(PaneState {
@@ -98,6 +98,7 @@ impl Snapshot {
                     .get(id)
                     .is_some_and(|thread| !thread.requests.is_empty())
         });
+        super::outputs::retire(self);
     }
     pub(crate) fn selected_in_any_pane(&self, id: &crate::session::SessionRef) -> bool {
         self.panes

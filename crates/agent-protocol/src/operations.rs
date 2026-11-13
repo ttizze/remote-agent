@@ -364,8 +364,6 @@ pub struct AccountLoginStatus {
     pub account_id: Option<String>,
 }
 
-use crate::requests::Answer;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
     pub cols: u16,
@@ -396,15 +394,8 @@ pub struct ListProjectSessions {
 /// provider sessions or read conversation bodies again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ListDecorationScope {
-    Root {
-        part: Option<crate::models::ListPart>,
-    },
-    Project {
-        project_id: String,
-    },
-    Task {
-        session: crate::session::SessionRef,
-    },
+    Root,
+    Project { project_id: String },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadListDecorations {
@@ -517,13 +508,6 @@ pub struct TerminalWrite {
 pub struct TerminalKill {
     pub process_handle: String,
 }
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionAnswer {
-    pub request_id: crate::ids::RequestId,
-    pub answer: Answer,
-}
-
 /// Shared xterm palette, also used for Host-owned terminal-query replies.
 pub fn terminal_color(index: u16) -> u32 {
     const PALETTE: [u32; 16] = [
@@ -572,12 +556,6 @@ impl ForkSession {
             last_turn_id,
         }
     }
-    pub(crate) fn validate(
-        &self,
-        output: &crate::models::ThreadResponse,
-    ) -> Result<(), &'static str> {
-        validate_thread(output, None)
-    }
 }
 
 /// Returns a conversation to just before `turn_id`, which is removed with
@@ -593,21 +571,6 @@ impl RewindSession {
     pub fn new(thread_id: crate::session::SessionRef, turn_id: crate::ids::TurnId) -> Self {
         Self { thread_id, turn_id }
     }
-    pub(crate) fn validate(
-        &self,
-        output: &crate::models::ThreadResponse,
-    ) -> Result<(), &'static str> {
-        validate_thread(output, Some(&self.thread_id))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateSession {
-    pub provider: crate::session::ProviderKind,
-    pub cwd: Option<String>,
-    pub model: Option<crate::models::ModelRef>,
-    pub initial_input: Option<InitialInput>,
 }
 
 /// Creating a task admits its first input before workspace/provider preparation.
@@ -623,23 +586,8 @@ pub struct InitialInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryPreparation {
+    pub input_id: crate::ids::ClientInputId,
     pub thread_id: crate::session::SessionRef,
-}
-
-impl RpcMethod for CreateSession {
-    rpc_contract!(CreateSession);
-    fn params(&self) -> Result<Self, PeerError> {
-        Ok(self.clone())
-    }
-    fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
-        output.subscription_id = id;
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.session.provider != self.provider {
-            return Err("created session provider does not match");
-        }
-        validate_thread(&output.response, Some(&output.session))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -700,16 +648,6 @@ pub struct ReadAccountUsage {
 impl ListSessions {
     pub fn new(query: crate::models::ListQuery) -> Self {
         Self { query }
-    }
-}
-
-impl ReadItem {
-    pub(crate) fn validate(&self, output: &ItemResponse) -> Result<(), &'static str> {
-        if output.item.id == self.item_id {
-            Ok(())
-        } else {
-            Err("item ID does not match")
-        }
     }
 }
 

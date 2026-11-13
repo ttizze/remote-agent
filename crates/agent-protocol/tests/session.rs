@@ -33,6 +33,13 @@ proptest::proptest! {
     fn owned_deltas_preserve_unicode_order_and_reuse_unique_items(prefix in proptest::prelude::any::<String>(), deltas in proptest::collection::vec(proptest::prelude::any::<String>(), 0..20)) {
         use agent_protocol::{session::{SessionChange, TextField}, items::ItemBody};
         let mut timeline = timeline_with_text(prefix.clone());
+        let text_ptr={
+            let turn=std::sync::Arc::get_mut(&mut timeline.turns.as_mut().unwrap()[0]).unwrap();
+            let item=std::sync::Arc::get_mut(&mut turn.items.as_mut().unwrap()[0]).unwrap();
+            let ItemBody::AssistantText {text,..}=item.body_mut() else {panic!("text")};
+            text.reserve(deltas.iter().map(String::len).sum());
+            text.as_ptr()
+        };
         let item_ptr = std::sync::Arc::as_ptr(&timeline.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0]);
         let mut expected = prefix;
         for delta in deltas {
@@ -44,6 +51,7 @@ proptest::proptest! {
             proptest::prop_assert_eq!(std::sync::Arc::as_ptr(item), item_ptr);
             let ItemBody::AssistantText { text, .. } = item.body() else { panic!("body changed"); };
             proptest::prop_assert_eq!(text, &expected);
+            proptest::prop_assert_eq!(text.as_ptr(),text_ptr,"owned streaming must append to its reserved buffer");
         }
     }
 }
@@ -80,7 +88,7 @@ fn invalid_owned_delta_preserves_state_and_shared_readers() {
 }
 
 #[test]
-fn thread_updates_publish_status_requests_and_delivery_without_changing_metadata() {
+fn native_updates_preserve_host_delivery_and_metadata() {
     use agent_protocol::{
         models::{SessionStatus, Thread},
         requests::Request,
@@ -89,6 +97,7 @@ fn thread_updates_publish_status_requests_and_delivery_without_changing_metadata
     let thread = Thread {
         name: Some("original metadata".into()),
         cwd: Some("/workspace".into()),
+        submissions: [("input".into(), SubmissionDelivery::Sending)].into(),
         ..Default::default()
     };
     let active = SessionChange::Status {
@@ -99,24 +108,17 @@ fn thread_updates_publish_status_requests_and_delivery_without_changing_metadata
     assert_eq!(active.status, SessionStatus::Running);
     assert_eq!(active.name, thread.name);
     assert_eq!(active.cwd, thread.cwd);
-    let submitted = SessionChange::Submission {
-        id: "input".into(),
-        delivery: SubmissionDelivery::Sending,
-    }
-    .apply(&active)
-    .unwrap();
-    assert_eq!(submitted.submissions["input"], SubmissionDelivery::Sending);
-    assert_eq!(submitted.status, SessionStatus::Running);
+    assert_eq!(active.submissions["input"], SubmissionDelivery::Sending);
     let request: Request = serde_json::from_value(json!({"id":"request","target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"","details":"","choices":[{"id":"allow","label":"Allow","description":"","effect":"allow"}]}}})).unwrap();
     let requested = SessionChange::Request {
         request: request.clone(),
     }
-    .apply(&submitted)
+    .apply(&active)
     .unwrap();
     assert_eq!(requested.requests[&request.id].as_ref(), &request);
     assert_eq!(requested.submissions["input"], SubmissionDelivery::Sending);
     assert!(thread.requests.is_empty());
-    assert!(thread.submissions.is_empty());
+    assert_eq!(requested.submissions, thread.submissions);
 }
 #[test]
 fn an_owned_item_update_replaces_its_existing_position() {
@@ -130,4 +132,27 @@ fn an_owned_item_update_replaces_its_existing_position() {
     .apply_timeline(timeline);
     assert!(result.is_ok());
     assert_eq!(next, timeline_with_text("complete".into()));
+}
+
+#[test]
+fn native_event_corpus() {
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/events.json")).unwrap();
+    assert_eq!(
+        cases.len(),
+        7,
+        "the complete native lifecycle corpus must remain covered"
+    );
+    for case in cases {
+        let mut thread: agent_protocol::models::Thread =
+            serde_json::from_value(case["previous"].clone()).unwrap();
+        for event in case["events"].as_array().unwrap() {
+            let change: agent_protocol::session::SessionChange =
+                serde_json::from_value(event["change"].clone()).unwrap();
+            thread = change.apply(&thread).unwrap();
+        }
+        let expected: agent_protocol::models::Thread =
+            serde_json::from_value(case["expected"].clone()).unwrap();
+        assert_eq!(thread, expected, "{}", case["name"]);
+    }
 }

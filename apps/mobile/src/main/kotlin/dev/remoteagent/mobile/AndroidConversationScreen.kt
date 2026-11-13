@@ -205,7 +205,7 @@ private fun ConversationContent(
                 forkPhase = forkPhase,
             )
         is ConversationRowContent.Activity ->
-            ThreadActivityCard(content.item, cwd, perform) { itemId ->
+            ThreadActivityCard(content.item, threadId, cwd, perform) { itemId ->
                 if (threadId != null) perform(Intent.ReadItem(ReadItem(threadId, content.turnId, itemId))) {}
             }
         is ConversationRowContent.ActivityHeader -> activityHeader(content.activity)

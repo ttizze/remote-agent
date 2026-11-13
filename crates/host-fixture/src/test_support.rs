@@ -44,6 +44,7 @@ pub struct HostFixture {
     pub credentials: Arc<HostCredentials>,
     pub memory: Arc<Memory>,
     pub ticket: Ticket,
+    pub projects: ProjectStore,
     pub stop: CancellationToken,
     pub running: tokio::task::JoinHandle<Result<()>>,
     _stop_on_drop: DropGuard,
@@ -125,10 +126,8 @@ impl HostFixture {
             );
         }
         eprintln!("Host fixture: providers ready; starting RPC");
-        let service = HostRpcService::new(
-            backends,
-            ProjectStore::new(directory.join("bex-worktrees.json")),
-        );
+        let projects = ProjectStore::new(directory.join("bex-worktrees.json"));
+        let service = HostRpcService::new(backends, projects.clone());
         #[cfg(unix)]
         service
             .enable_browser(directory.join("browser"))
@@ -150,6 +149,7 @@ impl HostFixture {
         // without spending a production minute between each test phase.
         let running = tokio::spawn(runtime.run(stop.clone(), Duration::from_millis(100)));
         Ok(Self {
+            projects,
             server: server.ok(),
             credentials,
             memory,

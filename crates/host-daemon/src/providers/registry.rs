@@ -1,6 +1,6 @@
 //! Started providers, providers that failed to start, and reads fanned out
 //! across all of them. One provider's failure never hides the others.
-use super::{Agent, Backend, Failure, Identity};
+use super::{Agent, Backend, Configuration, Discovery, Failure, Identity, Provider};
 use crate::dictation::Dictation;
 use agent_protocol::{
     composer::{ComposerCandidate, ComposerCatalog},
@@ -34,7 +34,7 @@ fn ordered_candidates(mut candidates: Vec<ComposerCandidate>) -> Vec<ComposerCan
 }
 
 pub(crate) struct Registry {
-    agents: HashMap<ProviderKind, Arc<dyn Agent>>,
+    agents: HashMap<ProviderKind, Arc<dyn Provider>>,
     startup_errors: BTreeMap<ProviderKind, Failure>,
 }
 
@@ -66,7 +66,7 @@ impl Registry {
         )
     }
 
-    pub(crate) fn get(&self, provider: ProviderKind) -> Result<Arc<dyn Agent>, Failure> {
+    fn provider(&self, provider: ProviderKind) -> Result<Arc<dyn Provider>, Failure> {
         self.agents.get(&provider).cloned().ok_or_else(|| {
             self.startup_errors
                 .get(&provider)
@@ -80,8 +80,28 @@ impl Registry {
         })
     }
 
+    pub(crate) fn get(&self, provider: ProviderKind) -> Result<Arc<dyn Agent>, Failure> {
+        self.provider(provider).map(|agent| agent as Arc<dyn Agent>)
+    }
+    pub(crate) fn identity(&self, provider: ProviderKind) -> Result<Arc<dyn Identity>, Failure> {
+        self.provider(provider)
+            .map(|agent| agent as Arc<dyn Identity>)
+    }
+    pub(crate) fn configuration(
+        &self,
+        provider: ProviderKind,
+    ) -> Result<Arc<dyn Configuration>, Failure> {
+        self.provider(provider)
+            .map(|agent| agent as Arc<dyn Configuration>)
+    }
+
+    pub(crate) fn discovery(&self, provider: ProviderKind) -> Result<Arc<dyn Discovery>, Failure> {
+        self.provider(provider)
+            .map(|agent| agent as Arc<dyn Discovery>)
+    }
+
     /// Started providers in provider order.
-    pub(crate) fn all(&self) -> Vec<(ProviderKind, Arc<dyn Agent>)> {
+    pub(crate) fn all(&self) -> Vec<(ProviderKind, Arc<dyn Provider>)> {
         let mut agents: Vec<_> = self.agents.iter().map(|(p, a)| (*p, a.clone())).collect();
         agents.sort_by_key(|(p, _)| *p);
         agents
@@ -161,7 +181,7 @@ impl Registry {
             return Ok(op::ModelPage::default());
         }
         let result = tokio::time::timeout(MODEL_LIST_TIMEOUT, async {
-            self.get(params.provider)?.models(params).await
+            self.configuration(params.provider)?.models(params).await
         })
         .await
         .unwrap_or_else(|_| {

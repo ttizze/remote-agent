@@ -2,13 +2,26 @@ use super::*;
 
 pub(super) fn restart(state: &State, continue_running: bool, context: Context) -> Step {
     let mut result = Step {
-        changes: vec![Change::Thread(Thread {
-            queue_held: state.has_queued_inputs(),
-            ..state.thread.clone()
-        })],
+        changes: (state.thread.queue_held != state.has_queued_inputs())
+            .then(|| {
+                Change::Thread(Thread {
+                    queue_held: state.has_queued_inputs(),
+                    ..state.thread.clone()
+                })
+            })
+            .into_iter()
+            .collect(),
         outcome: Outcome::Accepted,
         ..Step::default()
     };
+    for (provider, binding) in &state.bindings {
+        if matches!(binding, Binding::Aligning { .. }) {
+            result.changes.push(Change::Binding {
+                provider: *provider,
+                value: None,
+            });
+        }
+    }
     for input in state.inputs.values() {
         match &input.state {
             InputState::Preparing { stage, mode, .. } => {
@@ -44,10 +57,21 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
             | InputState::Failed(_) => {}
         }
     }
+    for input in state.inputs.values() {
+        if let InputState::Delivering(delivery) | InputState::Unknown { delivery, .. } =
+            &input.state
+            && matches!(state.bindings.get(&delivery.attempt.provider), Some(Binding::Ready { source, .. }) if source == &delivery.attempt.source)
+        {
+            result.changes.push(Change::Binding {
+                provider: delivery.attempt.provider,
+                value: None,
+            });
+        }
+    }
     for turn in state.turns.values() {
         match &turn.state {
             TurnState::Running { interrupt } => {
-                let finished = execution::finish(state, turn, TurnState::Interrupted);
+                let finished = execution::finish(state, turn, TurnState::Interrupted, context.now);
                 result.changes.extend(finished.changes);
                 if continue_running && interrupt.is_none() {
                     result.continuations.push(Continuation {
@@ -56,9 +80,9 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
                     });
                 }
             }
-            TurnState::Waiting(Wait::Background { .. }) => result
-                .changes
-                .extend(execution::finish(state, turn, TurnState::Interrupted).changes),
+            TurnState::Waiting(Wait::Background { .. }) => result.changes.extend(
+                execution::finish(state, turn, TurnState::Interrupted, context.now).changes,
+            ),
             TurnState::Waiting(Wait::Retry { at }) => {
                 result
                     .actions
@@ -101,14 +125,6 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
                     .push(Change::RemoveRequest(request.id.clone())),
                 RequestState::Unknown => {}
             }
-        }
-    }
-    for (provider, binding) in &state.bindings {
-        if matches!(binding, Binding::Injecting { .. }) {
-            result.changes.push(Change::Binding {
-                provider: *provider,
-                value: None,
-            });
         }
     }
     result

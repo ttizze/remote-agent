@@ -1,88 +1,83 @@
 //! The Host's RPC entry point. Dispatch admits each call, then routes it to the
 //! owner of its resource; workflows that span owners live in the domain files.
 mod activity;
-mod capacity;
-mod conversations;
-pub(super) mod model_selections;
-mod preparation;
 mod project_import;
-mod queue;
 mod sessions;
 mod titles;
-mod transcripts;
 mod update;
 mod worktrees;
 
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
 use crate::ProjectStore;
-use crate::providers::{
-    Agent, Backend, Failure, SessionListScope, read_session_page, session_pages,
-};
+use crate::providers::{Agent, Backend, Failure, SessionListScope, session_pages};
 use agent_protocol::{
-    models::{Thread, ThreadResponse},
+    models::Thread,
     operations as op,
     protocol::{Body, Call, Response},
     session::ProviderKind,
 };
 use futures_util::{StreamExt, TryStreamExt};
 use sessions::describe_thread;
-use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
-};
-use worktrees::worktree_active;
+use std::sync::{Arc, OnceLock};
 
 const SESSION_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct HostRpcService {
-    inner: Arc<ServiceInner>,
+    pub(super) inner: Arc<ServiceInner>,
 }
 
-struct ServiceInner {
+pub(super) struct ServiceInner {
     browser: OnceLock<Arc<crate::browser::Browser>>,
-    providers: crate::providers::Registry,
+    pub(super) providers: crate::providers::Registry,
     provider_settings: crate::providers::Settings,
-    projects: ProjectStore,
-    router: SessionRouter,
+    pub(super) projects: ProjectStore,
+    pub(super) conversation: super::runtime::Runtime,
+    pub(super) router: SessionRouter,
     event_pumps: std::sync::Once,
     files: crate::workspace_files::WorkspaceFiles,
     editors: crate::editors::Editors,
-    worktrees: crate::worktrees::Worktrees,
-    worktree_access: tokio::sync::RwLock<()>,
+    pub(super) worktrees: crate::worktrees::Worktrees,
+    pub(super) worktree_access: tokio::sync::RwLock<()>,
     worktree_cleanup: tokio::sync::Notify,
     permission_settings_access: tokio::sync::Mutex<()>,
     terminals: crate::terminals::Terminals,
     dictation: crate::dictation::Dictation,
-    conversations: super::conversations::Conversations,
-    store: Arc<super::store::ConversationStore>,
-    imports: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, transcripts::Import>>,
-    model_selections: model_selections::ModelSelections,
-    capacity: std::sync::Mutex<HashMap<agent_protocol::session::SessionRef, capacity::Run>>,
     history_scope: OnceLock<(std::path::PathBuf, bool)>,
     updating: std::sync::atomic::AtomicBool,
 }
 
 impl HostRpcService {
+    pub(in crate::host_rpc) fn require_not_updating(&self) -> Result<(), Failure> {
+        if self
+            .inner
+            .updating
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Err(Failure::new(
+                "host_updating",
+                "Bexを更新しています。再接続後にもう一度お試しください。",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn new(backends: impl IntoIterator<Item = Backend>, projects: ProjectStore) -> Self {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
-        let store = Arc::new(super::store::ConversationStore::open(
-            &projects.path().with_file_name("bex-transcripts.sqlite"),
-        ));
-        let conversations = super::conversations::Conversations::new(store.clone());
-        let router = SessionRouter::new().with_store(store.clone());
+        let router = SessionRouter::new();
         let (providers, dictation) = crate::providers::Registry::new(backends);
+        let conversation = super::runtime::Runtime::new(
+            projects.storage.clone(),
+            providers.all().into_iter().map(|(provider, _)| provider),
+        );
         Self {
             inner: Arc::new(ServiceInner {
                 history_scope: OnceLock::new(),
+                conversation,
                 updating: std::sync::atomic::AtomicBool::new(false),
-                conversations,
-                store: store.clone(),
-                imports: Default::default(),
-                capacity: Default::default(),
-                model_selections: model_selections::ModelSelections::new(store),
                 browser: OnceLock::new(),
                 provider_settings: crate::providers::Settings::new(
                     projects.path().with_file_name("bex-providers.json"),
@@ -104,8 +99,17 @@ impl HostRpcService {
     }
 
     /// Clients compare this with cached state at the start of every connection.
-    pub(crate) fn storage_scope(&self) -> Result<String, serde_json::Error> {
-        self.inner.providers.storage_scope()
+    pub(crate) fn storage_scope(&self) -> anyhow::Result<String> {
+        let database = self
+            .inner
+            .conversation
+            .storage
+            .identity()
+            .map_err(anyhow::Error::msg)?;
+        Ok(format!(
+            "{}:{database}",
+            self.inner.providers.storage_scope()?
+        ))
     }
 
     async fn account_request(&self, request: Call) -> Result<Body, Failure> {
@@ -129,7 +133,13 @@ impl HostRpcService {
             _ => return Err(Failure::new("invalid_params", "not an account request")),
         };
         Ok(
-            match self.inner.providers.get(provider)?.account(command).await? {
+            match self
+                .inner
+                .providers
+                .identity(provider)?
+                .account(command)
+                .await?
+            {
                 AccountReply::Selection(value) => value.into(),
                 AccountReply::Login(value) => value.into(),
                 AccountReply::Status(value) => value.into(),
@@ -146,7 +156,10 @@ impl HostRpcService {
             .map_err(|_| "BEX browser is already configured".to_owned())
     }
 
-    fn browser_config(&self, thread: &str) -> Result<Option<serde_json::Value>, Failure> {
+    pub(super) fn browser_config(
+        &self,
+        thread: &str,
+    ) -> Result<Option<serde_json::Value>, Failure> {
         self.inner
             .browser
             .get()
@@ -163,7 +176,6 @@ impl HostRpcService {
             browser.shutdown().await;
         }
         self.inner.terminals.shutdown().await;
-        self.inner.router.record_running();
         self.inner.providers.shutdown().await;
     }
 
@@ -184,6 +196,7 @@ impl HostRpcService {
     }
 
     pub fn close_session(&self, session: SessionId) {
+        self.inner.conversation.owners.disconnect(session);
         self.inner.router.close_session(session);
         self.inner.terminals.close_session(session);
         self.inner.files.clear_session(session);
@@ -201,7 +214,7 @@ impl HostRpcService {
     }
 
     pub fn start(&self) -> Result<(), String> {
-        self.inner.store.check_ready()?;
+        self.inner.conversation.storage.check_ready()?;
         self.start_event_pumps();
         Ok(())
     }
@@ -209,130 +222,36 @@ impl HostRpcService {
     /// Dispatch a classified message from an authenticated session.
     pub async fn dispatch(&self, session: SessionId, message: &Call) -> Result<HostReply, String> {
         self.inner.router.ensure_session(session)?;
-        if let Call::OpenSession(params) = message {
-            return self.session_open(session, params).await;
-        }
-        if let Call::CreateSession(params) = message {
-            let result = async {
-                let (response, prepare) = if params.initial_input.is_some() {
-                    self.admit_task(params).await?
-                } else {
-                    let _workspace = self.inner.worktree_access.read().await;
-                    (self.create_session(params.clone()).await?, false)
-                };
-                let target = response.thread.id.clone().ok_or_else(|| {
-                    Failure::new("invalid_thread", "created session ID is missing")
-                })?;
-                let read = self
-                    .inner
-                    .router
-                    .retain_execution(target.clone())
-                    .map_err(|error| Failure::new("invalid_thread", error))?;
-                let reply = self
-                    .inner
-                    .router
-                    .finish_session_read(read, session, response, false)
-                    .map_err(|error| Failure::new("session_create_failed", error));
-                // Attach the creating client before work can complete. A
-                // disconnected caller still owns an admitted durable task.
-                if prepare {
-                    self.schedule_preparation(target);
-                }
-                reply
+        let _workspace = if matches!(
+            message,
+            Call::CreateConversation(_)
+                | Call::StartTerminal(_)
+                | Call::StartAccountTerminal(_)
+                | Call::WriteFile(_)
+                | Call::WriteWorkspaceFile(_)
+                | Call::Upload(_)
+                | Call::ReviewWorkspace(_)
+        ) {
+            Some(self.inner.worktree_access.read().await)
+        } else {
+            None
+        };
+        let result = if _workspace.is_some()
+            && self
+                .inner
+                .updating
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Err(Failure::new(
+                "host_updating",
+                "Bexを更新しています。再接続後にもう一度お試しください。",
+            ))
+        } else {
+            if let Some(reply) = super::runtime::Runtime::dispatch(self, session, message).await? {
+                return Ok(reply);
             }
-            .await;
-            return match result {
-                Ok(reply) => Ok(reply),
-                Err(error) => Ok(Response::from_result::<(), _>(Err(error)).into()),
-            };
-        }
-        let result = async {
-            let (target, input_id) = session_target(message);
-            let target = target.cloned();
-            let submission = target.as_ref().zip(input_id);
-            let serialized = target.as_ref().filter(|_| {
-                matches!(
-                    message,
-                    Call::Submit(_)
-                        | Call::ChangeQueue(_)
-                        | Call::RenameSession(_)
-                        | Call::ForkSession(_)
-                        | Call::RewindSession(_)
-                        | Call::RetryPreparation(_)
-                )
-            });
-            // Retain the actor before locking: idle reads must not prune it
-            // and let a concurrent operation acquire a different mutex.
-            let _execution = serialized
-                .map(|target| self.inner.router.retain_execution(target.clone()))
-                .transpose()
-                .map_err(|error| Failure::new("invalid_params", error))?;
-            let _serial = if let Some(target) = serialized {
-                Some(self.inner.router.submission_lock(target).lock_owned().await)
-            } else {
-                None
-            };
-            let _workspace_read = if matches!(
-                message,
-                Call::Submit(_)
-                    | Call::ChangeQueue(_)
-                    | Call::ForkSession(_)
-                    | Call::RewindSession(_)
-                    | Call::AnswerSession(_)
-                    | Call::StartTerminal(_)
-                    | Call::StartAccountTerminal(_)
-                    | Call::WriteFile(_)
-                    | Call::WriteWorkspaceFile(_)
-                    | Call::Upload(_)
-                    | Call::ReviewWorkspace(_)
-            ) {
-                Some(self.inner.worktree_access.read().await)
-            } else {
-                None
-            };
-            if _workspace_read.is_some()
-                && self
-                    .inner
-                    .updating
-                    .load(std::sync::atomic::Ordering::Acquire)
-            {
-                return Err(Failure::new(
-                    "host_updating",
-                    "Bexを更新しています。再接続後にもう一度お試しください。",
-                ));
-            }
-            if let Some((target, id)) = submission {
-                if matches!(message, Call::Submit(_))
-                    && let Some(receipt) = self.inner.router.submission_receipt(target, id)
-                {
-                    return Ok(receipt.into());
-                }
-                self.inner.router.begin_submission(target, id)?;
-            }
-            let result = if let Call::Submit(input) = message {
-                self.submit_input(target.as_ref().expect("submission target"), input)
-                    .await
-                    .map(Into::into)
-            } else {
-                self.request(session, message, target.as_ref()).await
-            };
-            if let Some((target, id)) = submission {
-                use agent_protocol::session::SubmissionDelivery;
-                let delivery = match &result {
-                    Ok(Body::Submission(receipt)) => SubmissionDelivery::Accepted {
-                        turn_id: receipt.turn_id.clone(),
-                    },
-                    Ok(_) => unreachable!("only submission returns delivery evidence"),
-                    Err(error) if error.delivery == agent_transport::peer::Delivery::NotSent => {
-                        SubmissionDelivery::Rejected
-                    }
-                    Err(_) => SubmissionDelivery::Unknown,
-                };
-                self.inner.router.finish_submission(target, id, delivery);
-            }
-            result
-        }
-        .await;
+            self.request(session, message).await
+        };
         if let Err(error) = &result {
             agent_transport::diagnostics::rpc_error(
                 message.method(),
@@ -343,12 +262,7 @@ impl HostRpcService {
         Ok(Response::from_result(result).into())
     }
 
-    async fn request(
-        &self,
-        session: SessionId,
-        request: &Call,
-        target_session: Option<&agent_protocol::session::SessionRef>,
-    ) -> Result<Body, Failure> {
+    async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
         if let Call::Browser(params) = request {
             let browser = self.inner.browser.get().ok_or_else(|| {
                 Failure::new(
@@ -362,16 +276,18 @@ impl HostRpcService {
                 .map(Into::into)
                 .map_err(|e| Failure::new("browser_failed", e));
         }
-        if let Call::ReadItem(params) = request {
-            let Some(target) = target_session else {
-                return Err(Failure::new("invalid_params", "session ID is required"));
-            };
-            return self
-                .read_item(session, params, target)
-                .await
-                .map(Into::into);
-        }
         let response = match request {
+            Call::SearchList(params) => self.search_list(params).await?.into(),
+            Call::SubscribeList(_)
+            | Call::SubscribeConversation(_)
+            | Call::CreateConversation(_)
+            | Call::ChangeConversation(_)
+            | Call::ExtendConversation(_)
+            | Call::HydrateConversation(_)
+            | Call::CheckConversationCommands(_)
+            | Call::ForkConversation(_) => {
+                unreachable!("conversation owner dispatches its contracts")
+            }
             Call::ReadFileOpenCapabilities(_) => self
                 .inner
                 .editors
@@ -395,27 +311,29 @@ impl HostRpcService {
                 ));
             }
             Call::MarkSessionRead(params) => {
-                self.inner.router.mark_session_read(params)?;
+                self.inner
+                    .conversation
+                    .owners
+                    .mark_read(&params.session, params.turn_id.clone())
+                    .await
+                    .map_err(super::runtime::storage_failure)?;
                 agent_protocol::models::Empty {}.into()
             }
-            Call::ReadTaskActivity(_) => self.read_task_activity(false).await?.into(),
             Call::RegisterLiveActivity(params) => {
                 self.register_live_activity(session, params)?.into()
             }
             Call::UnregisterLiveActivity(params) => {
                 self.unregister_live_activity(session, params)?.into()
             }
-            Call::ReadTurnItems(params) => self.read_turn_items(session, params).await?.into(),
-            Call::ReadHistory(params) => self.read_history(params).await?.into(),
 
-            Call::RequestSession(params) => (self
+            Call::RequestSession(params) => self
                 .inner
-                .router
-                .request_session(&params.request_id.to_string())
-                .ok_or_else(|| {
-                    Failure::new("request_unavailable", "request is no longer pending")
-                })?)
-            .into(),
+                .conversation
+                .storage
+                .request_owner(&params.request_id)
+                .map_err(super::runtime::storage_failure)?
+                .ok_or_else(|| Failure::new("request_unavailable", "request is no longer pending"))?
+                .into(),
             Call::ConnectionPerformance(performance) => {
                 let performance = performance.clone();
                 tokio::task::spawn_blocking(move || {
@@ -425,10 +343,6 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("diagnostic_write_failed", error.to_string()))?;
                 agent_protocol::models::Empty {}.into()
             }
-            Call::AnswerSession(params) => (self
-                .answer_request(session, params.request_id.clone(), params.answer.clone())
-                .await?)
-                .into(),
             Call::AddProject(params) => (self
                 .inner
                 .projects
@@ -439,8 +353,6 @@ impl HostRpcService {
             Call::ScanProjects(_) => self.scan_projects().await?.into(),
             Call::ImportProjects(params) => self.import_projects(&params.paths).await?.into(),
             Call::ReadListDecorations(params) => self.list_decorations(params).await?.into(),
-            Call::ListSessions(params) => self.list_sessions(params).await?.into(),
-            Call::ListProjectSessions(params) => self.list_project_sessions(params).await?.into(),
             Call::ListAgents(params) => self.list_agents(params).await?.into(),
             Call::ReadWorktreeSettings(_) => (self
                 .inner
@@ -459,10 +371,6 @@ impl HostRpcService {
                 (self.remove_worktree(params.path.clone()).await?).into()
             }
 
-            Call::CreateSession(_) => unreachable!("creation owns its subscription"),
-            Call::RetryPreparation(params) => {
-                self.retry_preparation(&params.thread_id).await?.into()
-            }
             Call::StartTerminal(params) => {
                 let launch = crate::terminals::Launch::shell(params.cwd.clone());
                 (self
@@ -483,7 +391,7 @@ impl HostRpcService {
                 let launch = self
                     .inner
                     .providers
-                    .get(params.provider)?
+                    .identity(params.provider)?
                     .account_terminal(&params.id)
                     .await?;
                 self.inner
@@ -546,32 +454,9 @@ impl HostRpcService {
             | Call::ReadVisualization(_) => {
                 self.inner.files.request(session, request.clone()).await?
             }
-            Call::ForkSession(_)
-            | Call::RewindSession(_)
-            | Call::Interrupt(_)
-            | Call::ChangeQueue(_)
-            | Call::RenameSession(_) => {
-                let target = target_session.expect("session-scoped conversation change");
-                self.change_conversation(target, request).await?
-            }
             _ => self.provider_request(request).await?,
         };
         Ok(response)
-    }
-
-    async fn change_conversation(
-        &self,
-        target: &agent_protocol::session::SessionRef,
-        request: &Call,
-    ) -> Result<Body, Failure> {
-        Ok(match request {
-            Call::ForkSession(params) => self.fork_session(target, params).await?.into(),
-            Call::RewindSession(params) => self.rewind_session(target, params).await?.into(),
-            Call::Interrupt(params) => self.interrupt(target, params).await?.into(),
-            Call::ChangeQueue(params) => self.change_queue(target, &params.change).await?.into(),
-            Call::RenameSession(params) => self.rename_session(target, params).await?.into(),
-            _ => unreachable!("only conversation changes are routed here"),
-        })
     }
 
     /// Dispatch remaining provider requests; unknown requests return method_not_found.
@@ -581,7 +466,7 @@ impl HostRpcService {
                 let _guard = self.inner.permission_settings_access.lock().await;
                 self.inner
                     .providers
-                    .get(params.provider)?
+                    .configuration(params.provider)?
                     .read_permissions()
                     .await?
                     .into()
@@ -590,7 +475,7 @@ impl HostRpcService {
                 let _guard = self.inner.permission_settings_access.lock().await;
                 self.inner
                     .providers
-                    .get(params.provider)?
+                    .configuration(params.provider)?
                     .update_permissions(params.mode, &params.version)
                     .await?
                     .into()
@@ -609,7 +494,7 @@ impl HostRpcService {
             Call::ReadAccountUsage(params) => self
                 .inner
                 .providers
-                .get(params.provider)?
+                .identity(params.provider)?
                 .usage(&params.id)
                 .await?
                 .into(),
@@ -624,28 +509,28 @@ impl HostRpcService {
             Call::CodexCli(params) => self
                 .inner
                 .providers
-                .get(ProviderKind::Codex)?
+                .configuration(ProviderKind::Codex)?
                 .codex_cli(params.update)
                 .await?
                 .into(),
             Call::ReadModelSettings(params) => self
                 .inner
                 .providers
-                .get(params.model.provider)?
+                .configuration(params.model.provider)?
                 .model_settings(&params.model.id)
                 .await?
                 .into(),
             Call::ReadDshCredentials(_) => self
                 .inner
                 .providers
-                .get(ProviderKind::DeepSeek)?
+                .identity(ProviderKind::DeepSeek)?
                 .dsh_credentials()
                 .await?
                 .into(),
             Call::UpdateDshCredential(update) => self
                 .inner
                 .providers
-                .get(ProviderKind::DeepSeek)?
+                .identity(ProviderKind::DeepSeek)?
                 .update_dsh_credential(update.clone())
                 .await?
                 .into(),
@@ -697,7 +582,10 @@ impl HostRpcService {
         &self.inner.files
     }
 
-    fn require_provider_enabled(&self, provider: ProviderKind) -> Result<(), Failure> {
+    pub(in crate::host_rpc) fn require_provider_enabled(
+        &self,
+        provider: ProviderKind,
+    ) -> Result<(), Failure> {
         if !self.inner.provider_settings.read()?.enabled(provider) {
             return Err(Failure::new(
                 "provider_disabled",
@@ -709,69 +597,21 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
-            if let Err(message) = self.inner.store.interrupt_running() {
-                tracing::error!(target: "agent", operation = "host.transcript.write", message);
-            }
-            self.restore_queues();
-            if self.inner.router.apns().is_some() {
-                let owner = Arc::downgrade(&self.inner);
-                tokio::spawn(async move {
-                    let mut delay = 1;
-                    loop {
-                        let Some(inner) = owner.upgrade() else { break };
-                        let service = Self { inner };
-                        let Some(apns) = service.inner.router.apns() else {
-                            break;
-                        };
-                        if apns.is_ready() {
-                            break;
-                        }
-                        let _ = service.read_task_activity(false).await;
-                        if apns.is_ready() {
-                            break;
-                        }
-                        drop(apns);
-                        drop(service);
-                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                        delay = (delay * 2).min(60);
-                    }
-                });
-            }
-
+            super::runtime::Runtime::start(self);
             for (_, agent) in self.inner.providers.all() {
                 if let Some(mut events) = agent.event_stream() {
-                    let supports_fork = agent.capabilities().fork;
                     let owner = Arc::downgrade(&self.inner);
                     tokio::spawn(async move {
                         while let Some(event) = events.recv().await {
                             let Some(inner) = owner.upgrade() else {
                                 break;
                             };
-                            let bindings = if matches!(
+                            let result = super::runtime::Runtime::observe(
+                                &Self { inner },
                                 event.change,
-                                crate::providers::AgentChange::Stopped { .. }
-                            ) {
-                                inner.conversations.active_bindings()
-                            } else {
-                                Ok(Vec::new())
-                            };
-                            let result = bindings
-                                .and_then(|bindings| {
-                                    inner
-                                        .conversations
-                                        .route(event.change, supports_fork)
-                                        .map(|event| (bindings, event))
-                                })
-                                .map_err(|error| error.to_string())
-                                .and_then(|(bindings, event)| {
-                                    event.map_or(Ok(()), |mut event| {
-                                        let service = Self {
-                                            inner: inner.clone(),
-                                        };
-                                        service.capacity_event(&mut event);
-                                        service.apply_change(event, &bindings)
-                                    })
-                                });
+                                event.execution,
+                            )
+                            .await;
                             if let Some(applied) = event.applied {
                                 let _ = applied.send(result);
                             }
@@ -787,30 +627,11 @@ fn invalid_message(error: impl std::fmt::Display) -> String {
     format!("invalid request: {error}")
 }
 
-// Serialize the sorted map directly: a JSON Value's object ordering can vary
-// with serde_json features unified by unrelated client dependencies.
-// Every session-scoped operation provides its target here. Submission IDs
-// additionally identify the operations whose delivery must be tracked.
-fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRef>, Option<&str>) {
-    match request {
-        Call::Submit(p) => (Some(&p.thread_id), Some(p.client_user_message_id.as_str())),
-        Call::ForkSession(p) => (Some(&p.thread_id), None),
-        Call::RewindSession(p) => (Some(&p.thread_id), None),
-        Call::Interrupt(p) => (Some(&p.thread_id), None),
-        Call::ChangeQueue(p) => (Some(&p.thread_id), None),
-        Call::RetryPreparation(p) => (Some(&p.thread_id), None),
-        Call::ReadItem(p) => (Some(&p.thread_id), None),
-        Call::ReadTurnItems(p) => (Some(&p.session), None),
-        Call::RenameSession(p) => (Some(&p.thread_id), None),
-        _ => (None, None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[tokio::test]
     async fn provider_switches_broadcast_and_gate_new_work_while_retaining_history_access() {
-        use super::conversations::tests::{NativeAgent, call};
+        use super::super::runtime::native_fixture::{NativeAgent, call};
         use super::*;
         use agent_protocol::{
             protocol::Notification,
@@ -896,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_failures_are_classified_without_losing_visualization_recovery() {
-        use super::conversations::tests::call;
+        use super::super::runtime::native_fixture::call;
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
@@ -939,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_providers_are_read_in_parallel_without_blocking_conversation_lists() {
-        use super::conversations::tests::{NativeAgent, call};
+        use super::super::runtime::native_fixture::{NativeAgent, call};
         use super::*;
         let directory = tempfile::tempdir().unwrap();
         let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -965,16 +786,20 @@ mod tests {
         }
         let list = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            call::<agent_protocol::models::ThreadList>(
+            call::<agent_protocol::conversation::records::OpenedList>(
                 &host,
                 client.id(),
-                Call::ListSessions(op::ListSessions::new(Default::default())),
+                Call::SubscribeList(agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None,
+                }),
             ),
         )
         .await
         .expect("conversation lists must not wait for accounts")
         .unwrap();
-        assert!(list.provider_errors.is_none());
+        agent_protocol::conversation::records::validate_list(&list.initial).unwrap();
         a.accounts_gate.add_permits(1);
         b.accounts_gate.add_permits(1);
         assert!(accounts.await.unwrap().errors.is_empty());
@@ -982,7 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_read_failures_keep_their_provider_alongside_startup_errors() {
-        use super::conversations::tests::{NativeAgent, call};
+        use super::super::runtime::native_fixture::{NativeAgent, call};
         use super::*;
         use std::sync::atomic::Ordering;
         let directory = tempfile::tempdir().unwrap();
@@ -1095,25 +920,35 @@ mod tests {
         let response = service
             .dispatch(
                 session.id(),
-                &Call::CreateSession(op::CreateSession {
-                    initial_input: None,
-                    provider: ProviderKind::Claude,
+                &Call::CreateConversation(agent_protocol::conversation::records::Create {
+                    provider: agent_protocol::session::ProviderKind::Claude,
+                    session: agent_protocol::session::SessionRef::new(
+                        None,
+                        uuid::Uuid::new_v4().to_string(),
+                    )
+                    .unwrap(),
+                    subscription: uuid::Uuid::new_v4(),
                     cwd: Some(root.path().to_string_lossy().into_owned()),
-                    model: None,
+                    selection: Default::default(),
+                    initial: None,
                 }),
             )
             .await
             .unwrap();
         let Response::Success { result: response } = agent_protocol::protocol::decode::<
-            Response<agent_protocol::session::OpenedSession>,
+            Response<agent_protocol::conversation::records::Opened>,
         >(&response.initial)
         .unwrap() else {
             panic!("provider did not recover");
         };
-        assert_eq!(
-            response.response.thread.id.unwrap().provider,
-            ProviderKind::Claude
-        );
+        assert_eq!(response.session.provider, None);
+        let header = service
+            .inner
+            .conversation
+            .storage
+            .header(&response.session)
+            .unwrap();
+        assert_eq!(header.state.provider, ProviderKind::Claude);
     }
 
     #[test]
@@ -1140,65 +975,105 @@ mod tests {
             }
         }
     }
-    #[tokio::test]
-    async fn provider_capabilities_are_checked_before_provider_availability() {
-        use super::*;
-        let root = tempfile::tempdir().unwrap();
-        let claude = crate::providers::Claude::load(
-            root.path().join("missing-claude"),
-            root.path().join("claude"),
-            Some(root.path().join("native")),
-        )
-        .await
-        .unwrap();
-        let service = HostRpcService::new(
-            [claude.into()],
-            ProjectStore::new(root.path().join("bex-worktrees.json")),
-        );
-        let session = service.open_session();
-        for (method, expected) in [
-            ("host/session/rename", "unsupported_operation"),
-            ("host/session/submit", "provider_unavailable"),
-        ] {
-            let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":{"provider":"claude","id":"native"},"clientUserMessageId":method,"lastTurnId":"turn","name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
-            let response = service.dispatch(session.id(), &call).await.unwrap();
-            let response = agent_protocol::protocol::decode::<
-                agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
-            >(&response.initial)
-            .unwrap()
-            .into_value();
-            assert_eq!(response["error"]["code"], expected, "{method}");
-            if expected == "unsupported_operation" {
-                assert_eq!(
-                    response["error"]["message"],
-                    format!("{method} is unsupported by this provider")
-                );
-            }
+    fn stored_header(
+        provider: agent_protocol::session::ProviderKind,
+        cwd: &std::path::Path,
+    ) -> agent_protocol::conversation::records::Header {
+        agent_protocol::conversation::records::Header {
+            state: agent_protocol::conversation::Thread {
+                name: String::new(),
+                workspace: agent_protocol::conversation::Workspace::Ready(
+                    cwd.to_string_lossy().into_owned(),
+                ),
+                provider,
+                queue_held: false,
+            },
+            details: Default::default(),
         }
     }
-
     #[tokio::test]
-    async fn unavailable_provider_does_not_retain_a_submission_as_in_flight() {
+    async fn host_names_do_not_depend_on_provider_availability_and_failed_input_is_not_in_flight() {
         use super::*;
+        use crate::host_rpc::runtime::native_fixture::call;
+        use agent_protocol::conversation::{Command, InputContent, records};
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             [Backend::unavailable(ProviderKind::Codex, "unavailable")],
-            ProjectStore::new(root.path().join("bex-worktrees.json")),
+            ProjectStore::new(root.path().join("projects.json")),
         );
+        let target = agent_protocol::session::SessionRef::new(
+            ProviderKind::Codex,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+        service
+            .inner
+            .conversation
+            .storage
+            .create(&target, &stored_header(ProviderKind::Codex, root.path()))
+            .unwrap();
         let session = service.open_session();
-        for method in ["host/session/submit"] {
-            let call = agent_protocol::protocol::json_boundary::call(
-                method,
-                serde_json::json!({"threadId":{"provider":"codex","id":"native"},"clientUserMessageId":"input","input":[],"expectedTurnId":"turn"}),
-            ).unwrap();
-            for _ in 0..2 {
-                let response = service.dispatch(session.id(), &call).await.unwrap();
-                let response = agent_protocol::protocol::decode::<Response<()>>(&response.initial)
+        let renamed: records::Acknowledged = call(
+            &service,
+            session.id(),
+            Call::ChangeConversation(records::Change {
+                session: target.clone(),
+                operation: uuid::Uuid::new_v4(),
+                command: Command::Rename("Renamed".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            renamed.outcome,
+            agent_protocol::conversation::Outcome::Accepted
+        );
+        assert_eq!(
+            service
+                .inner
+                .conversation
+                .storage
+                .header(&target)
+                .unwrap()
+                .state
+                .name,
+            "Renamed"
+        );
+        let input = uuid::Uuid::new_v4();
+        let request = Call::ChangeConversation(records::Change {
+            session: target.clone(),
+            operation: input,
+            command: Command::Submit {
+                id: input.to_string().into(),
+                content: InputContent {
+                    parts: vec![op::Input::Text {
+                        text: "unsent".into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
+            },
+        });
+        for _ in 0..2 {
+            let error = call::<records::Acknowledged>(&service, session.id(), request.clone())
+                .await
+                .unwrap()
+                .accepted()
+                .unwrap_err();
+            assert_eq!(error.code, "command_rejected");
+            assert_eq!(error.delivery, agent_protocol::error::Delivery::NotSent);
+            assert!(
+                service
+                    .inner
+                    .conversation
+                    .storage
+                    .state(&target)
                     .unwrap()
-                    .into_value();
-                assert_eq!(response["error"]["code"], "provider_unavailable");
-                assert_eq!(response["error"]["delivery"], "notSent");
-            }
+                    .inputs
+                    .is_empty()
+            );
         }
     }
 

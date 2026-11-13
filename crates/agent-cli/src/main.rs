@@ -37,9 +37,9 @@ enum Command {
     Send {
         thread_id: agent_protocol::session::SessionRef,
         text: String,
-        /// Stable identity for this submission, distinct from the RPC ID.
+        /// Stable UUID for this submission, distinct from the conversation ID.
         #[arg(long)]
-        client_message_id: String,
+        client_message_id: uuid::Uuid,
         #[arg(long)]
         model: Option<String>,
         /// Switch provider within the same conversation on this submission.
@@ -75,7 +75,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 limit: *limit,
                 project_limit: ListQuery::default().project_limit,
                 search_term: search.clone(),
-                ..Default::default()
             })
         }
         Command::Send { thread_id, .. } => {
@@ -122,13 +121,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
         loop {
             {
                 let snapshot = updates.borrow_and_update();
-                let ready = match &args.command {
-                    Command::List { .. } => snapshot.lists.threads.is_some(),
-                    Command::Send { thread_id, .. } => {
-                        snapshot.sessions.conversations.contains_key(thread_id)
-                    }
-                    Command::Approve { .. } => true,
-                };
+                let ready =
+                    match &args.command {
+                        Command::List { search, .. } => {
+                            snapshot.lists.threads.is_some()
+                                && snapshot.lists.replica.as_deref().is_some_and(
+                                    agent_protocol::conversation::records::catalog_ready,
+                                )
+                                && (search.trim().is_empty()
+                                    || snapshot
+                                        .lists
+                                        .search_results
+                                        .as_ref()
+                                        .is_some_and(|(term, _)| term == search))
+                        }
+                        Command::Send { thread_id, .. } => {
+                            snapshot.sessions.conversations.contains_key(thread_id)
+                        }
+                        Command::Approve { .. } => true,
+                    };
                 if ready {
                     return Ok::<_, anyhow::Error>(());
                 }
@@ -161,7 +172,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let key = thread_id.clone().into();
             let provider = provider
                 .or_else(|| snapshot.model_provider_for_draft(key))
-                .unwrap_or(thread_id.provider);
+                .or(thread_id.provider)
+                .context("cannot determine the conversation provider")?;
             store
                 .dispatch(Intent::SetDraft {
                     thread_id: thread_id.clone().into(),
@@ -173,17 +185,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     },
                 })
                 .await?;
-            let Outcome::Submitted { turn_id: id } = store
+            let input = agent_protocol::ids::ClientInputId::from(client_message_id.to_string());
+            let Outcome::Submitted = store
                 .dispatch(Intent::Submit {
-                    thread_id: Some(thread_id),
-                    client_user_message_id: client_message_id.into(),
+                    thread_id: Some(thread_id.clone()),
+                    client_user_message_id: input.clone(),
                     alternate: false,
                 })
                 .await?
             else {
                 unreachable!("submit outcome")
             };
-            println!("{}", serde_json::to_string(&id)?);
+            let turn =
+                wait_for_submission(&mut updates, &thread_id, &input, Duration::from_secs(30))
+                    .await?;
+            println!("{}", serde_json::to_string(&turn)?);
         }
         Command::Approve {
             request_id,
@@ -194,10 +210,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     request_id: request_id.clone().into(),
                 }))
                 .await?;
-            let snapshot = store.snapshot();
-            let request = snapshot
-                .request(request_id.as_str())
-                .ok_or_else(|| anyhow::anyhow!("request is unavailable"))?;
+            let request = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if let Some(request) = updates
+                        .borrow_and_update()
+                        .request(request_id.as_str())
+                        .cloned()
+                    {
+                        return Ok::<_, anyhow::Error>(request);
+                    }
+                    updates.changed().await?;
+                }
+            })
+            .await
+            .context("request could not be loaded")??;
             let choice_id = request
                 .body
                 .choices()
@@ -230,4 +256,106 @@ async fn run(args: Args) -> anyhow::Result<()> {
 fn parse_provider(value: &str) -> Result<agent_protocol::session::ProviderKind, String> {
     serde_json::from_value(serde_json::Value::String(value.into()))
         .map_err(|_| "provider must be codex, claude or deepseek".into())
+}
+
+async fn wait_for_submission(
+    updates: &mut tokio::sync::watch::Receiver<Arc<Snapshot>>,
+    thread_id: &agent_protocol::session::SessionRef,
+    input: &agent_protocol::ids::ClientInputId,
+    budget: Duration,
+) -> anyhow::Result<Option<agent_protocol::ids::TurnId>> {
+    use agent_protocol::session::{PreparationStatus, SubmissionDelivery};
+    let result = tokio::time::timeout(budget, async {
+        loop {
+            {
+                let snapshot = updates.borrow_and_update();
+                if let Some(thread) = snapshot.sessions.conversations.get(thread_id) {
+                    if let Some(preparation) = thread.preparations.iter().find(|preparation|&preparation.submission.client_user_message_id==input)
+                        && let PreparationStatus::Failed {error} = &preparation.status {
+                        return Err(anyhow::Error::msg(error.message.clone()));
+                    }
+                    match thread.submissions.get(input) {
+                        Some(SubmissionDelivery::Accepted {turn_id}) => return Ok(turn_id.clone()),
+                        Some(SubmissionDelivery::Unknown) => anyhow::bail!("input delivery result is unknown; resolve it in the conversation before retrying"),
+                        Some(SubmissionDelivery::Rejected) => anyhow::bail!("input was rejected"),
+                        Some(SubmissionDelivery::Withdrawn) => anyhow::bail!("input was withdrawn before it ran"),
+                        _ => {},
+                    }
+                    if let Some(turn) = thread.turns.iter().flatten().find(|turn|
+                        turn.items.iter().flatten().any(|item|item.client_input_id.as_ref()==Some(input))) {
+                        return Ok(Some(turn.id.clone()));
+                    }
+
+                }
+            }
+            updates.changed().await?;
+        }
+    }).await;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            let snapshot = updates.borrow();
+            match snapshot
+                .sessions
+                .conversations
+                .get(thread_id)
+                .and_then(|thread| thread.submissions.get(input))
+            {
+                Some(SubmissionDelivery::Sending) => Ok(None),
+                Some(SubmissionDelivery::Unknown) => anyhow::bail!(
+                    "input delivery result is unknown; resolve it in the conversation before retrying"
+                ),
+                _ => anyhow::bail!(
+                    "could not confirm the input state; check the conversation before retrying"
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_protocol::{
+        models::Thread,
+        session::{ProviderKind, SessionRef, SubmissionDelivery},
+    };
+
+    #[tokio::test]
+    async fn accepted_cli_input_reports_null_while_preparing_and_distinguishes_unknown_delivery() {
+        for (delivery, expected) in [
+            (SubmissionDelivery::Sending, Ok(None)),
+            (SubmissionDelivery::Accepted { turn_id: None }, Ok(None)),
+            (
+                SubmissionDelivery::Accepted {
+                    turn_id: Some("started".into()),
+                },
+                Ok(Some("started".into())),
+            ),
+            (
+                SubmissionDelivery::Unknown,
+                Err("delivery result is unknown"),
+            ),
+            (SubmissionDelivery::Rejected, Err("rejected")),
+            (SubmissionDelivery::Withdrawn, Err("withdrawn")),
+        ] {
+            let id = SessionRef::new(ProviderKind::Codex, "conversation".into()).unwrap();
+            let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+            let mut snapshot = Snapshot::default();
+            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+                id.clone(),
+                Arc::new(Thread {
+                    id: Some(id.clone()),
+                    submissions: [(input.clone(), delivery)].into(),
+                    ..Default::default()
+                }),
+            );
+            let (_sender, mut updates) = tokio::sync::watch::channel(Arc::new(snapshot));
+            let result = wait_for_submission(&mut updates, &id, &input, Duration::ZERO).await;
+            match expected {
+                Ok(turn) => assert_eq!(result.unwrap(), turn),
+                Err(message) => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+        }
+    }
 }

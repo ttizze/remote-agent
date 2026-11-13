@@ -68,15 +68,14 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
     use ErrorScope::*;
     use OperationKey::*;
     Some(match key {
+        InputRecovery { .. } => (Application, "入力を復元できませんでした"),
         History { .. }
+        | CommandOutput { .. }
         | Request { .. }
         | AccountLogin { .. }
         | DshCredentials
         | Permissions { .. }
         | Fork { .. }
-        | TurnItems { .. }
-        | ProjectList { .. }
-        | TaskActivity
         | LiveActivity { .. } => return None,
         Item { item } => (
             Conversation {
@@ -126,9 +125,12 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
             },
             "エージェントを読み込めませんでした",
         ),
-        SessionList | SessionPage { .. } => (Projects, "会話一覧を読み込めませんでした"),
+        SessionList | ListSearch => (Projects, "会話一覧を読み込めませんでした"),
         // Project icons and worktree states have no control of their own: an
         // unreadable reply would otherwise leave every project a monogram.
+        ListDecorations {
+            scope: agent_protocol::operations::ListDecorationScope::Project { .. },
+        } => return None,
         ListDecorations { .. } => (
             Projects,
             "プロジェクトのアイコンと変更状態を読み込めませんでした",
@@ -191,7 +193,7 @@ impl Snapshot {
             ),
             OperationKey::ProjectScan => ("再検索", Intent::ScanProjects(op::ScanProjects {})),
             OperationKey::SessionList
-            | OperationKey::SessionPage { .. }
+            | OperationKey::ListSearch
             | OperationKey::ListDecorations { .. } => (
                 "会話一覧を再読み込み",
                 Intent::ListSessions(op::ListSessions::new((*self.lists.list_query).clone())),
@@ -1093,7 +1095,7 @@ mod notice_tests {
     fn unreadable_list_decorations_are_a_project_notice_that_rereads_the_list() {
         let mut snapshot = Snapshot::default();
         let key = OperationKey::ListDecorations {
-            scope: agent_protocol::operations::ListDecorationScope::Root { part: None },
+            scope: agent_protocol::operations::ListDecorationScope::Root,
         };
         failed(
             &mut snapshot,

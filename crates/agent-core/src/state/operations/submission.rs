@@ -1,8 +1,10 @@
+mod recovery;
 use super::{
     sessions::{open_thread, refresh_thread},
     *,
 };
 use crate::client::ClientExt;
+pub(crate) use recovery::{reconnect_input_recovery, resolve_local_input, resolve_saved_input};
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,81 +114,124 @@ impl Operation for Respond {
             id: self.request_id.clone(),
         })
     }
-    type Input = Arc<Request>;
+    type Input = (crate::session::SessionRef, Arc<Request>);
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
         snapshot
-            .request(&self.request_id)
-            .cloned()
+            .sessions
+            .conversations
+            .iter()
+            .find_map(|(id, thread)| {
+                thread
+                    .requests
+                    .get(&self.request_id)
+                    .map(|request| (id.clone(), request.clone()))
+            })
             .ok_or_else(|| PeerError::InvalidMessage("server request is no longer pending".into()))
     }
     type Output = ();
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     async fn run(
         &self,
-        request: Self::Input,
+        (session, request): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        context.client.respond(&request, &self.answer).await
+        context
+            .client
+            .respond(&session, &request, &self.answer)
+            .await
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSubmission {
+    pub thread_id: crate::session::SessionRef,
     pub provider: crate::session::ProviderKind,
-    pub draft_key: DraftKey,
     pub cwd: Option<String>,
     pub client_user_message_id: agent_protocol::ids::ClientInputId,
     pub draft: Arc<Draft>,
 }
 impl Operation for StartSubmission {
+    fn subscription_scope(
+        &self,
+    ) -> Option<agent_protocol::sync::Scope<crate::session::SessionRef>> {
+        Some(agent_protocol::sync::Scope::Conversation(
+            self.thread_id.clone(),
+        ))
+    }
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Submission {
-            draft_key: self.draft_key.clone(),
+            draft_key: self.thread_id.clone().into(),
         })
     }
-    no_input!();
+    type Input = Arc<agent_protocol::conversation::records::Replica>;
+    fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
+        snapshot
+            .sessions
+            .replicas
+            .get(&self.thread_id)
+            .cloned()
+            .ok_or_else(|| {
+                PeerError::InvalidMessage("conversation creation was not scheduled".into())
+            })
+    }
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
-    type Output = crate::session::OpenedSession;
+    type Output = super::super::conversations::Opened;
     fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.sessions.subscriptions)
-            .insert(output.session, output.subscription_id);
-        self.complete(snapshot, pane_id, output.response.thread, false)
+        let Some(response) = super::super::conversations::install(snapshot, output) else {
+            return Vec::new();
+        };
+        self.complete(snapshot, pane_id, response.thread, false)
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
-            id: output.session.clone(),
+            id: match output.replica.scope() {
+                agent_protocol::sync::Scope::Conversation(id) => id.clone(),
+                _ => unreachable!("conversation operation"),
+            },
         }
     }
     async fn run(
         &self,
-        _: Self::Input,
+        replica: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        context
-            .call(&CreateSession {
+        let response = context
+            .call(&agent_protocol::conversation::records::Create {
                 provider: self.provider,
+                session: self.thread_id.clone(),
+                subscription: uuid::Uuid::nil(),
                 cwd: self.cwd.clone(),
-                model: self.draft.model.clone(),
-                initial_input: Some(rpc::InitialInput {
-                    client_user_message_id: self.client_user_message_id.clone(),
-                    input: submission_input(
-                        &self.draft.text,
-                        &self.draft.attachments,
-                        &self.draft.invocations,
-                        Some(self.provider),
-                    ),
+                selection: agent_protocol::conversation::records::Selection {
+                    model: self.draft.model.clone(),
                     effort: self.draft.effort.clone(),
                     service_tier: self.draft.service_tier.clone(),
-                }),
+                },
+                initial: Some((
+                    self.client_user_message_id.clone(),
+                    agent_protocol::conversation::InputContent {
+                        parts: submission_input(
+                            &self.draft.text,
+                            &self.draft.attachments,
+                            &self.draft.invocations,
+                            Some(self.provider),
+                        ),
+                        model: self.draft.model.clone(),
+                        effort: self.draft.effort.clone(),
+                        service_tier: self.draft.service_tier.clone(),
+                        follow_up: Default::default(),
+                    },
+                )),
             })
-            .await
+            .await?;
+        super::super::conversations::opened(&replica, response)
     }
     fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.sessions.subscriptions)
-            .insert(output.session, output.subscription_id);
-        self.complete(snapshot, pane_id, output.response.thread, true)
+        let Some(response) = super::super::conversations::install(snapshot, output) else {
+            return Vec::new();
+        };
+        self.complete(snapshot, pane_id, response.thread, true)
     }
 }
 
@@ -195,68 +240,23 @@ impl StartSubmission {
         self,
         snapshot: &mut Snapshot,
         pane_id: &str,
-        mut thread: Thread,
+        thread: Thread,
         current_view: bool,
     ) -> Vec<Effect> {
-        let Self {
-            draft_key,
-            client_user_message_id,
-            draft,
-            ..
-        } = self;
         let Some(id) = thread.id.clone() else {
             if let Some(pane) = snapshot.panes.get_mut(pane_id) {
                 Arc::make_mut(pane).error = Some("thread ID is missing".into());
             }
             return Vec::new();
         };
-        thread
-            .submissions
-            .entry(client_user_message_id.clone())
-            .or_insert(crate::session::SubmissionDelivery::Accepted { turn_id: None });
-        Arc::make_mut(&mut snapshot.sessions.draft_sessions).insert(draft_key.clone(), id.clone());
-        let current = snapshot.input.drafts.get(&draft_key);
-        let empty = Arc::new(Draft {
-            text: String::new(),
-            attachments: Vec::new(),
-            invocations: Vec::new(),
-            ..draft.as_ref().clone()
-        });
-        let remove_original = current_view || current == Some(&empty);
-        let target = if current_view {
-            current.unwrap_or(&empty).clone()
-        } else {
-            empty
-        };
-        if let Some(pane) = snapshot.panes.get_mut(pane_id) {
-            let pane = Arc::make_mut(pane);
-            if current_view {
-                let location = pane.workspace.location(pane.navigation.cwd.clone());
-                Arc::make_mut(&mut pane.workspaces).insert(id.clone().into(), location);
-            } else if let Some(workspace) = Arc::make_mut(&mut pane.workspaces).remove(&draft_key) {
-                Arc::make_mut(&mut pane.workspaces).insert(id.clone().into(), workspace);
-            }
-        }
+        debug_assert_eq!(self.thread_id, id);
+        Arc::make_mut(&mut snapshot.input.new_drafts).retain(|_, target| target != &id);
         let effects = if current_view {
             open_thread(snapshot, pane_id, thread, None, None, None)
         } else {
             refresh_thread(snapshot, pane_id, thread);
             Vec::new()
         };
-        if remove_original && let Some(pane) = snapshot.panes.get_mut(pane_id) {
-            Arc::make_mut(&mut Arc::make_mut(pane).workspaces).remove(&draft_key);
-        }
-        let drafts = Arc::make_mut(&mut snapshot.input.drafts);
-        if remove_original {
-            drafts.remove(&draft_key);
-        }
-        drafts.insert(id.clone().into(), target);
-        if let Some(pending) = Arc::make_mut(&mut snapshot.sessions.pending_submissions)
-            .get_mut(&client_user_message_id)
-        {
-            Arc::make_mut(pending).draft_key = id.clone().into();
-        }
-        // Keep the accepted local input until the provider echoes its body.
         reconcile_pending(snapshot, &id);
         effects
     }
@@ -268,99 +268,73 @@ pub struct SendSubmission {
     pub draft: Arc<Draft>,
     pub follow_up: agent_protocol::operations::FollowUp,
 }
-#[derive(Debug)]
-pub enum SubmissionProgress {
-    Opened(Box<crate::session::OpenedSession>),
-    Sent(Option<agent_protocol::ids::TurnId>),
-}
 impl Operation for SendSubmission {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Submission {
             draft_key: self.thread_id.clone().into(),
         })
     }
-    type Input = (bool, Option<crate::session::ProviderKind>);
+    type Input = Option<crate::session::ProviderKind>;
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
-        Ok((
-            !snapshot
-                .sessions
-                .subscriptions
-                .contains_key(&self.thread_id),
-            snapshot.draft_provider(&self.thread_id.clone().into(), self.draft.model.as_ref()),
-        ))
+        Ok(snapshot.draft_provider(&self.thread_id.clone().into(), self.draft.model.as_ref()))
     }
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
-    type Output = SubmissionProgress;
-    fn outcome(output: &mut Self::Output) -> Outcome {
-        match output {
-            SubmissionProgress::Opened(_) => Outcome::Applied,
-            SubmissionProgress::Sent(turn_id) => Outcome::Submitted {
-                turn_id: turn_id.clone(),
-            },
-        }
+    type Output = agent_protocol::sync::Cursor;
+    fn outcome(_: &mut Self::Output) -> Outcome {
+        Outcome::Submitted
     }
     async fn run(
         &self,
-        (needs_subscription, provider): Self::Input,
+        provider: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        if needs_subscription {
-            let read = ReadThread::new(self.thread_id.clone());
-            return context
-                .call(&OpenThread {
-                    read: &read,
-                    known_version: None,
-                })
-                .await
-                .map(|opened| SubmissionProgress::Opened(Box::new(opened)));
-        }
+        let operation = uuid::Uuid::parse_str(self.client_user_message_id.as_str())
+            .map_err(|_| PeerError::InvalidMessage("input ID is not a UUID".into()))?;
         let reply = context
-            .client
-            .call(&Submission {
-                thread_id: self.thread_id.clone(),
-                client_user_message_id: self.client_user_message_id.clone(),
-                input: submission_input(
-                    &self.draft.text,
-                    &self.draft.attachments,
-                    &self.draft.invocations,
-                    provider,
-                ),
-                model: self.draft.model.clone(),
-                effort: self.draft.effort.clone(),
-                service_tier: self.draft.service_tier.clone(),
-                follow_up: self.follow_up,
+            .call(&agent_protocol::conversation::records::Change {
+                session: self.thread_id.clone(),
+                operation,
+                command: agent_protocol::conversation::Command::Submit {
+                    id: self.client_user_message_id.clone(),
+                    content: agent_protocol::conversation::InputContent {
+                        parts: submission_input(
+                            &self.draft.text,
+                            &self.draft.attachments,
+                            &self.draft.invocations,
+                            provider,
+                        ),
+                        model: self.draft.model.clone(),
+                        effort: self.draft.effort.clone(),
+                        service_tier: self.draft.service_tier.clone(),
+                        follow_up: self.follow_up,
+                    },
+                },
             })
             .await?;
-        Ok(SubmissionProgress::Sent(reply.turn_id))
+        crate::client::command_result(reply)
     }
-    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        let turn_id = match output {
-            SubmissionProgress::Opened(opened) => {
-                let mut effects =
-                    ReadThread::new(self.thread_id.clone()).apply(snapshot, pane_id, *opened);
-                effects.push(Effect::execute(self));
-                return effects;
-            }
-            SubmissionProgress::Sent(turn_id) => turn_id,
-        };
-        let Self {
-            thread_id,
-            client_user_message_id,
-            ..
-        } = self;
-
-        if let Some(thread) = shared_mut(&mut snapshot.sessions.conversations, &thread_id) {
-            thread.submissions.insert(
-                client_user_message_id,
-                crate::session::SubmissionDelivery::Accepted { turn_id },
-            );
+    fn apply(self, snapshot: &mut Snapshot, _pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        if let Some(pending) = shared_mut(
+            &mut snapshot.sessions.pending_submissions,
+            &self.client_user_message_id,
+        ) {
+            pending.accepted = true;
+            pending.delivery_unknown = false;
+            pending.cursor = Some(output);
         }
-        reconcile_pending(snapshot, &thread_id);
-
-        Vec::new()
+        reconcile_pending(snapshot, &self.thread_id);
+        if !snapshot
+            .sessions
+            .subscriptions
+            .contains_key(&self.thread_id)
+        {
+            vec![Effect::execute(ReadThread::new(self.thread_id))]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -449,11 +423,11 @@ mod startup_identity_tests {
     fn completed_startup_keeps_the_panel_identity_after_pending_input_is_gone(
         #[values(true, false)] current_view: bool,
     ) {
-        let draft_key = DraftKey::from("local");
         let session = crate::session::SessionRef {
-            provider: crate::session::ProviderKind::Codex,
-            id: "created".into(),
+            provider: None,
+            id: uuid::Uuid::new_v4().to_string(),
         };
+        let draft_key = DraftKey::from(&session);
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
             if current_view {
@@ -465,8 +439,8 @@ mod startup_identity_tests {
         let thread: Thread =
             serde_json::from_value(serde_json::json!({"id":session, "cwd":"/project"})).unwrap();
         let effects = StartSubmission {
-            provider: session.provider,
-            draft_key: draft_key.clone(),
+            thread_id: session.clone(),
+            provider: crate::session::ProviderKind::Codex,
             cwd: Some("/project".into()),
             client_user_message_id: "submitted".into(),
             draft: Arc::default(),
@@ -475,8 +449,12 @@ mod startup_identity_tests {
         assert!(effects.is_empty(), "the Host owns the admitted first input");
         assert!(snapshot.sessions.pending_submissions.is_empty());
         assert_eq!(
-            snapshot.sessions.draft_sessions.get(&draft_key),
-            Some(&session)
+            snapshot.panes.primary().navigation.draft_key,
+            if current_view {
+                draft_key.clone()
+            } else {
+                DraftKey::from("other")
+            }
         );
         if current_view {
             assert_eq!(
@@ -488,7 +466,10 @@ mod startup_identity_tests {
         }
         let restored =
             crate::persistence::decode(&crate::persistence::encode(&snapshot).unwrap()).unwrap();
-        assert!(restored.sessions.draft_sessions.is_empty());
+        assert_eq!(
+            restored.panes.primary().navigation.draft_key,
+            snapshot.panes.primary().navigation.draft_key
+        );
     }
 }
 

@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod output;
-mod receipts;
 pub use output::{Output, OutputError, OutputUpdate};
-pub use receipts::{Admission, Receipt, admit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -39,6 +37,7 @@ pub enum Key<C> {
     Item { thread: C, id: ItemId },
     Request { thread: C, id: RequestId },
     Project(String),
+    Catalog(crate::session::ProviderKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +118,8 @@ pub enum ApplyError {
     Position,
     #[error("an item has no matching turn in the scope")]
     Parent,
+    #[error("row identity does not match its content")]
+    Identity,
 }
 
 /// The cache owner allocates a fresh subscription generation whenever it opens
@@ -155,6 +156,16 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
 
     pub fn scope(&self) -> &Scope<C> {
         &self.scope
+    }
+    pub fn subscription(&self) -> u64 {
+        self.subscription
+    }
+    pub fn snapshot(&self) -> Option<Message<C, T>> {
+        Some(Message::Snapshot {
+            cursor: self.cursor?,
+            window: self.window,
+            rows: self.rows.values().cloned().collect(),
+        })
     }
     pub fn window(&self) -> Option<Window> {
         self.window
@@ -230,13 +241,6 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                     next.remove(removal);
                 }
                 next.cursor = Some(through);
-                let had_items = self.rows.keys().any(|key| matches!(key, Key::Item { .. }));
-                if had_items && !next.rows.keys().any(|key| matches!(key, Key::Item { .. })) {
-                    // Discard the invalid range. A new snapshot reanchors it.
-                    next.rows.clear();
-                    next.cursor = None;
-                    next.window = None;
-                }
             }
             Message::Extend {
                 cursor,
@@ -254,7 +258,9 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                 next.insert(rows, 0, cursor.sequence)?;
             }
             Message::Hydrate { cursor, row } => {
-                if self.cursor != Some(cursor) {
+                if !self.cursor.is_some_and(|current| {
+                    current.store == cursor.store && cursor.sequence <= current.sequence
+                }) {
                     return Err(ApplyError::Discontinuity);
                 }
                 // A resend cannot introduce a new row to an already-complete
@@ -357,21 +363,25 @@ fn check_position<C>(key: &Key<C>, position: &Position) -> Result<(), ApplyError
             Ok(())
         }
         (
-            Key::Thread(_) | Key::Project(_) | Key::Input { .. } | Key::Request { .. },
+            Key::Thread(_)
+            | Key::Project(_)
+            | Key::Catalog(_)
+            | Key::Input { .. }
+            | Key::Request { .. },
             Position::Unordered,
         ) => Ok(()),
         _ => Err(ApplyError::Position),
     }
 }
 
-fn contains<C: Eq>(
+pub fn contains<C: Eq>(
     scope: &Scope<C>,
     window: Option<Window>,
     key: &Key<C>,
     position: &Position,
 ) -> bool {
     match (scope, key) {
-        (Scope::List, Key::Thread(_) | Key::Project(_)) => true,
+        (Scope::List, Key::Thread(_) | Key::Project(_) | Key::Catalog(_)) => true,
         (Scope::Conversation(owner), Key::Thread(thread) | Key::Input { thread, .. } | Key::Request { thread, .. }) => owner == thread,
         (Scope::Conversation(owner), Key::Turn { thread, .. }) => owner == thread && window.is_some_and(|floor| matches!(position, Position::Turn { ordinal } if *ordinal >= floor.turn)),
         (Scope::Conversation(owner), Key::Item { thread, .. }) => owner == thread && window.is_some_and(|floor| matches!(position, Position::Item { position, ordinal, .. } if *ordinal > floor.turn || (*ordinal == floor.turn && *position >= floor.item))),

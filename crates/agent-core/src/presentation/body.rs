@@ -265,6 +265,7 @@ pub(super) fn detail_blocks(
             cwd,
             output,
             exit_code,
+            output_omitted,
         } => {
             let mut blocks = vec![code(command, Some("sh"), "コマンド")];
             if let Some(cwd) = cwd {
@@ -275,7 +276,12 @@ pub(super) fn detail_blocks(
                 )));
             }
             if !output.is_empty() {
-                blocks.push(code(output, None, "出力"));
+                let text = if *output_omitted {
+                    format!("…\n{output}")
+                } else {
+                    output.clone()
+                };
+                blocks.push(code(&text, None, "出力"));
             }
             if let Some(exit_code) = exit_code {
                 blocks.extend(markdown_blocks(localized_ui_format(
@@ -415,6 +421,7 @@ mod tests {
             "command".into(),
             ItemStatus::Completed,
             WireBody::CommandExecution {
+                output_omitted: false,
                 command: "設定\n{0}".into(),
                 cwd: Some("/設定/{0}".into()),
                 output: "詳細を表示\n{0}".into(),

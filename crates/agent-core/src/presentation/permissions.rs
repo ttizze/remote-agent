@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(control.label, "読み込み中…");
         assert_eq!(control.version, None);
         let session = crate::session::SessionRef {
-            provider: ProviderKind::Claude,
+            provider: Some(ProviderKind::Claude),
             id: "native".into(),
         };
         let key = crate::state::DraftKey::from(session);

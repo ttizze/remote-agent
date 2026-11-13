@@ -201,15 +201,10 @@ impl Host {
     fn deliver_one(&mut self, client: &mut Replica<String, String>) {
         if let Some(message) = self.pending.pop_front() {
             *client = client.apply(self.generation, message).unwrap();
-            if client.cursor.is_none() {
-                self.reconnect(client);
-            }
         }
     }
 
     fn deliver_all(&mut self, client: &mut Replica<String, String>) {
-        // A rollback may replace the remaining queue with one fresh snapshot.
-        // Assert bounded progress instead of hanging if fencing is broken.
         for _ in 0..=self.pending.len() {
             if self.pending.is_empty() {
                 break;

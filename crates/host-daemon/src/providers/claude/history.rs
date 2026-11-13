@@ -106,7 +106,7 @@ pub(super) fn list_page(
                 Err(error) => {
                     let mut thread = Thread {
                         id: Some(SessionRef {
-                            provider: ProviderKind::Claude,
+                            provider: Some(ProviderKind::Claude),
                             id,
                         }),
                         updated_at: Some(timestamp as f64),
@@ -279,7 +279,7 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
         .context("invalid native transcript filename")?;
     let mut thread = Thread {
         id: Some(SessionRef {
-            provider: ProviderKind::Claude,
+            provider: Some(ProviderKind::Claude),
             id: id.into(),
         }),
         updated_at: metadata
@@ -433,7 +433,7 @@ pub(super) fn read_related(
     }
     let mut thread = Thread {
         id: Some(SessionRef {
-            provider: ProviderKind::Claude,
+            provider: Some(ProviderKind::Claude),
             id: session_id.to_string(),
         }),
         ..Default::default()
@@ -1195,7 +1195,7 @@ mod tests {
         }
         let running = Thread {
             id: Some(SessionRef {
-                provider: ProviderKind::Claude,
+                provider: Some(ProviderKind::Claude),
                 id: Uuid::from_u128(6).to_string(),
             }),
             ..Default::default()
@@ -1920,7 +1920,7 @@ mod tests {
         let response = convert(
             Thread {
                 id: Some(SessionRef {
-                    provider: ProviderKind::Claude,
+                    provider: Some(ProviderKind::Claude),
                     id: ID.into(),
                 }),
                 ..Default::default()
@@ -1956,7 +1956,7 @@ mod tests {
         let history = convert(
             Thread {
                 id: Some(SessionRef {
-                    provider: ProviderKind::Claude,
+                    provider: Some(ProviderKind::Claude),
                     id: ID.into(),
                 }),
                 ..Default::default()

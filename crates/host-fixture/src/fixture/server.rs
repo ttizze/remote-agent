@@ -271,6 +271,25 @@ fn thread_id(params: &Value) -> &str {
 }
 
 impl Threads {
+    fn allocate_id(&mut self, context: &Context) -> Result<String> {
+        loop {
+            self.next_thread = self
+                .next_thread
+                .checked_add(1)
+                .ok_or("fixture thread IDs exhausted")?;
+            let id = format!("fixture-thread-{}", self.next_thread);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(context.home.join(format!("{id}.reserved")))
+            {
+                Ok(_) => return Ok(id),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     fn turn_suffix(&mut self, thread_id: &str, observed_turns: usize) -> String {
         // List fixtures replace native history while the Host retains its
         // imported transcript. Each conversation's live IDs stay unique across resets.
@@ -506,7 +525,7 @@ impl Threads {
                 turns: &[],
             })
             .collect();
-        context.trace(method, json!({"useStateDbOnly":params["useStateDbOnly"] == true,"count":page.len(),"ancestorThreadId":params["ancestorThreadId"]}))?;
+        context.trace(method, json!({"useStateDbOnly":params["useStateDbOnly"] == true,"count":page.len(),"ancestorThreadId":params["ancestorThreadId"],"sourceKinds":params["sourceKinds"]}))?;
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Page<'a> {
@@ -554,8 +573,7 @@ impl Threads {
             return Ok(());
         }
         let thread_id = loop {
-            self.next_thread += 1;
-            let id = format!("fixture-thread-{}", self.next_thread);
+            let id = self.allocate_id(context)?;
             if !self.by_id.contains_key(&id) {
                 break id;
             }
@@ -618,8 +636,7 @@ impl Threads {
             context.error(id, -32602, "completed turn required")?;
             return Ok(());
         }
-        self.next_thread += 1;
-        let thread_id = format!("fixture-thread-{}", self.next_thread);
+        let thread_id = self.allocate_id(context)?;
         let mut thread = Thread {
             metadata: source.metadata.clone(),
             turns: source.turns[..=boundary]
@@ -1010,6 +1027,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let Some(id) = message.get("id") else { continue };
             let method = message["method"].as_str().unwrap_or("");
             let params = &mut owned_params;
+            threads.refresh(&context.home)?;
             match method {
                 "initialize" => {
                     if params["capabilities"]["experimentalApi"] != true {

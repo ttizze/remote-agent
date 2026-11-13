@@ -2,7 +2,56 @@ use super::*;
 
 pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
     match event {
+        Event::AligningProvider { id, action, source } => {
+            if source.is_empty() || state.source_in_use(state.thread.provider,&source,Uuid::nil()) || !state.inputs.get(&id).is_some_and(|input|
+                matches!(input.state, InputState::Preparing { stage: PreparationStage::Provider, action: current, .. } if current == action)) {
+                return Step::default();
+            }
+            Step {
+                changes: vec![Change::Binding {
+                    provider: state.thread.provider,
+                    value: Some(Binding::Aligning { source }),
+                }],
+                outcome: Outcome::Accepted,
+                ..Step::default()
+            }
+        }
+        Event::ExecutionLost { attempt, error } => {
+            provider(state, attempt, Observation::Failed(error), context)
+        }
+        Event::Title(name) => {
+            if !state.thread.name.trim().is_empty() || name.trim().is_empty() {
+                return Step::default();
+            }
+            Step {
+                changes: vec![Change::Thread(Thread {
+                    name,
+                    ..state.thread.clone()
+                })],
+                outcome: Outcome::Accepted,
+                ..Default::default()
+            }
+        }
         Event::Wake => wake(state, context),
+        Event::NativeStatus {
+            provider, source, ..
+        } => {
+            if current_source(
+                state.thread.provider,
+                state.bindings.get(&provider),
+                provider,
+                &source,
+            ) {
+                wake(state, context)
+            } else {
+                Step::default()
+            }
+        }
+        Event::ObservedStart {
+            execution,
+            provider,
+            source,
+        } => observed_start(state, execution, provider, source, context),
         Event::Prepared {
             id,
             action,
@@ -12,12 +61,43 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
         Event::PreparationFailed { id, action, error } => {
             preparation_failed(state, &id, action, error)
         }
-        Event::Delivered { id, action } => {
+        Event::Delivered { id, action, .. } => {
             let result = delivered(state, &id, action, context);
             if result.outcome == Outcome::Accepted {
                 return commands::append_advance(state, result, context);
             }
             result
+        }
+        Event::InterruptResult {
+            attempt,
+            action,
+            error,
+            background,
+        } => {
+            let Some(attempt) = state
+                .attempts
+                .values()
+                .find(|current| current.id == attempt)
+            else {
+                return Step::default();
+            };
+            let Some(turn) = state.turns.get(&attempt.turn).filter(|turn| matches!(turn.state, TurnState::Running { interrupt: Some(current) } if current == action)) else { return Step::default(); };
+            if error.is_none() && background.is_empty() {
+                return finish(state, turn, TurnState::Completed, context.now);
+            }
+            Step {
+                changes: vec![Change::Turn(Turn {
+                    state: if background.is_empty() {
+                        TurnState::Running { interrupt: None }
+                    } else {
+                        TurnState::Waiting(Wait::Background { tasks: background })
+                    },
+                    error,
+                    ..turn.clone()
+                })],
+                outcome: Outcome::Accepted,
+                ..Step::default()
+            }
         }
         Event::DeliveryFailed {
             id,
@@ -33,19 +113,36 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
             }) else {
                 return Step::default();
             };
-            Step {
-                changes: vec![
-                    input.fenced().expect("selected live delivery"),
-                    Change::Thread(Thread {
-                        queue_held: state.has_queued_inputs(),
-                        ..state.thread.clone()
-                    }),
-                ],
-                outcome: Outcome::Accepted,
-                ..Step::default()
+            let delivery = input.live_delivery().expect("selected live delivery");
+            let mut result = state
+                .turns
+                .get(&delivery.attempt.turn)
+                .filter(|turn| {
+                    state.attempts.get(&turn.id) == Some(&delivery.attempt)
+                        && matches!(
+                            turn.state,
+                            TurnState::Running { .. } | TurnState::Waiting(_)
+                        )
+                })
+                .map(|turn| finish(state, turn, TurnState::Interrupted, context.now))
+                .unwrap_or_default();
+            result.changes.extend([
+                input.fenced().expect("selected live delivery"),
+                Change::Thread(Thread {
+                    queue_held: state.has_queued_inputs(),
+                    ..state.thread.clone()
+                }),
+            ]);
+            if !state.source_in_use(delivery.attempt.provider, &delivery.attempt.source, delivery.attempt.id)
+                && state.bindings.get(&delivery.attempt.provider).is_some_and(|binding| matches!(binding, Binding::Ready { source, .. } if source == &delivery.attempt.source)) {
+                result.changes.push(Change::Binding { provider: delivery.attempt.provider, value: None });
             }
+            result.outcome = Outcome::Accepted;
+            result
         }
         Event::Provider {
+            native_items: _,
+            native_turn: _,
             attempt,
             observation,
         } => provider(state, attempt, observation, context),
@@ -67,7 +164,9 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
                 ..Step::default()
             }
         }
-        Event::Command { .. } | Event::Restart { .. } => unreachable!("handled by step"),
+        Event::Command { .. } | Event::RejectedCommand { .. } | Event::Restart { .. } => {
+            unreachable!("handled by step")
+        }
     }
 }
 
@@ -84,11 +183,20 @@ fn wake(state: &State, context: Context) -> Step {
             ..Step::default()
         };
     }
-    let Workspace::Ready(cwd) = &state.thread.workspace else {
-        return Step::default();
-    };
-    let Some(Binding::Ready { source }) = state.bindings.get(&state.thread.provider) else {
-        return Step::default();
+    let binding = state.bindings.get(&state.thread.provider);
+    let (Workspace::Ready(cwd), Some(Binding::Ready { source, .. })) =
+        (&state.thread.workspace, binding)
+    else {
+        return finish(
+            state,
+            turn,
+            TurnState::Failed(ExecutionError {
+                message: "再試行の接続先を復元できませんでした。入力を確認して再送してください。"
+                    .into(),
+                ..Default::default()
+            }),
+            context.now,
+        );
     };
     let attempt = Attempt {
         id: allocate(context.seed, "attempt"),
@@ -100,6 +208,7 @@ fn wake(state: &State, context: Context) -> Step {
         changes: vec![
             Change::Turn(Turn {
                 state: TurnState::Running { interrupt: None },
+                error: None,
                 ..turn.clone()
             }),
             Change::Attempt {
@@ -110,6 +219,7 @@ fn wake(state: &State, context: Context) -> Step {
         actions: vec![Action::Resume {
             attempt,
             cwd: cwd.clone(),
+            error: turn.error.clone(),
         }],
         outcome: Outcome::Accepted,
         ..Step::default()
@@ -199,13 +309,15 @@ fn prepared(
         );
     };
     let next_stage = match stage {
-        PreparationStage::Workspace => Some(PreparationStage::Worktree),
-        PreparationStage::Worktree => Some(PreparationStage::Provider),
+        PreparationStage::Workspace | PreparationStage::Worktree => {
+            Some(PreparationStage::Provider)
+        }
         PreparationStage::Provider => None,
     };
     let workspace = match stage {
-        PreparationStage::Workspace => Workspace::Folder(cwd.clone()),
-        PreparationStage::Worktree => Workspace::Ready(cwd.clone()),
+        // The default chat directory is already prepared. Only an explicitly
+        // selected folder goes through automatic worktree creation.
+        PreparationStage::Workspace | PreparationStage::Worktree => Workspace::Ready(cwd.clone()),
         PreparationStage::Provider => {
             if state.thread.workspace.cwd() != Some(cwd.as_str()) {
                 return preparation_failed(
@@ -255,6 +367,7 @@ fn prepared(
             provider: state.thread.provider,
             value: Some(Binding::Ready {
                 source: source.expect("provider source checked above"),
+                covered: state.history_end(),
             }),
         });
         let next = state.apply(&result.changes);
@@ -297,6 +410,8 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
             turn: turn.clone(),
             position,
             status: ItemStatus::Completed,
+            deferred: false,
+            input: None,
             body: ItemBody::UserMessage {
                 text: None,
                 content: InputPart::message_parts(&input.content.parts),
@@ -311,7 +426,14 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
         changes.push(Change::Turn(Turn {
             id: turn.clone(),
             ordinal: delivery.ordinal,
-            started_at: context.now,
+            provider: attempt.provider,
+            queued: delivery.queued,
+            observed: false,
+            started_at: Some(context.now),
+            completed_at: None,
+            duration_ms: None,
+            retry_count: 0,
+            error: None,
             state: TurnState::Running {
                 interrupt: delivery.interrupt,
             },
@@ -319,6 +441,13 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
         changes.push(Change::Attempt {
             turn: turn.clone(),
             value: Some(attempt.clone()),
+        });
+        changes.push(Change::Binding {
+            provider: attempt.provider,
+            value: Some(Binding::Ready {
+                source: attempt.source.clone(),
+                covered: delivery.ordinal,
+            }),
         });
     }
     Step {
@@ -328,6 +457,7 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
             .map(|action| Action::Interrupt {
                 attempt: attempt.clone(),
                 action,
+                background: false,
             })
             .into_iter()
             .collect(),
@@ -377,6 +507,17 @@ fn delivery_failed(
 }
 
 fn provider(state: &State, attempt: Uuid, observation: Observation, context: Context) -> Step {
+    if let Observation::RequestResolved(id) = &observation {
+        return if state.requests.contains_key(id) {
+            Step {
+                changes: vec![Change::RemoveRequest(id.clone())],
+                outcome: Outcome::Accepted,
+                ..Step::default()
+            }
+        } else {
+            Step::default()
+        };
+    }
     if let Some(execution) = state
         .attempts
         .values()
@@ -418,64 +559,56 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
     if !matches!(
         turn.state,
         TurnState::Running { .. } | TurnState::Waiting(_)
-    ) && !(turn.state == TurnState::Completed && matches!(observation, Observation::Item { .. }))
+    ) && !(turn.state == TurnState::Completed
+        && matches!(
+            observation,
+            Observation::Item { .. } | Observation::RemoveItem(_) | Observation::Timing { .. }
+        ))
     {
         return Step::default();
     }
     let completed = matches!(observation, Observation::Completed);
     let stopping = matches!(turn.state, TurnState::Running { interrupt: Some(_) });
     let result = match observation {
-        Observation::Retry { .. } if stopping => finish(state, turn, TurnState::Interrupted),
+        Observation::Timing {
+            started_at,
+            completed_at,
+            duration_ms,
+        } => Step {
+            changes: vec![Change::Turn(Turn {
+                started_at: started_at.or(turn.started_at),
+                completed_at: completed_at.or(turn.completed_at),
+                duration_ms: duration_ms.or(turn.duration_ms),
+                ..turn.clone()
+            })],
+            outcome: Outcome::Accepted,
+            ..Step::default()
+        },
+        Observation::Retry { .. } if stopping => {
+            finish(state, turn, TurnState::Interrupted, context.now)
+        }
         Observation::Background { tasks }
             if stopping && crate::execution::background_holds_completion(&tasks) =>
         {
             Step::default()
         }
-        Observation::Completed => finish(state, turn, TurnState::Completed),
-        Observation::Failed(error) => finish(state, turn, TurnState::Failed(error)),
-        Observation::Interrupted => finish(state, turn, TurnState::Interrupted),
-        Observation::Retry { at } => {
-            let mut changes = vec![
-                Change::Turn(Turn {
-                    state: TurnState::Waiting(Wait::Retry { at }),
-                    ..turn.clone()
-                }),
-                Change::Attempt {
-                    turn: turn.id.clone(),
-                    value: None,
-                },
-            ];
-            changes.extend(
-                state
-                    .requests
-                    .values()
-                    .filter(|request| request.turn == turn.id)
-                    .filter_map(|request| match request.state {
-                        RequestState::Awaiting => Some(Change::RemoveRequest(request.id.clone())),
-                        RequestState::Sending { .. } => Some(Change::Request(Request {
-                            state: RequestState::Unknown,
-                            ..request.clone()
-                        })),
-                        RequestState::Unknown => None,
-                    }),
-            );
-            changes.extend(fence_inputs(&state.inputs, &turn.id, true));
-            changes.push(Change::Thread(Thread {
-                queue_held: state.has_queued_inputs(),
-                ..state.thread.clone()
-            }));
-            Step {
-                changes,
-                actions: vec![Action::WaitUntil(at)],
-                outcome: Outcome::Accepted,
-                ..Step::default()
-            }
-        }
+        Observation::Completed => finish(state, turn, TurnState::Completed, context.now),
+        Observation::Failed(error) => failed(state, turn, error, context),
+        Observation::Notice(error) => Step {
+            changes: vec![Change::Turn(Turn {
+                error: Some(error),
+                ..turn.clone()
+            })],
+            outcome: Outcome::Accepted,
+            ..Default::default()
+        },
+        Observation::Interrupted => finish(state, turn, TurnState::Interrupted, context.now),
+        Observation::Retry { at } => retry(state, turn, at, turn.error.clone()),
         Observation::Background { tasks } => {
-            if !crate::execution::background_holds_completion(&tasks) {
+            if tasks.is_empty() {
                 return commands::append_advance(
                     state,
-                    finish(state, turn, TurnState::Completed),
+                    finish(state, turn, TurnState::Completed, context.now),
                     context,
                 );
             }
@@ -489,7 +622,25 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
             };
             commands::append_advance(state, result, context)
         }
-        Observation::Item { id, status, body } => item(state, turn, id, status, body),
+        Observation::RemoveItem(id) => {
+            if state.items.get(&id).is_some_and(|item| {
+                item.turn == turn.id && !matches!(item.body, ItemBody::UserMessage { .. })
+            }) {
+                Step {
+                    changes: vec![Change::RemoveItem(id)],
+                    outcome: Outcome::Accepted,
+                    ..Default::default()
+                }
+            } else {
+                Step::default()
+            }
+        }
+        Observation::Item {
+            id,
+            status,
+            deferred,
+            body,
+        } => item(state, turn, id, status, deferred, body),
         Observation::Request { id, body } => {
             if state.requests.contains_key(&id) {
                 return Step::default();
@@ -505,6 +656,9 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
                 ..Step::default()
             }
         }
+        Observation::RequestResolved(_) => {
+            unreachable!("resolved requests are independent of the active attempt")
+        }
     };
     if completed {
         return commands::append_advance(state, result, context);
@@ -512,13 +666,27 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
     result
 }
 
-fn item(state: &State, turn: &Turn, id: ItemId, status: ItemStatus, body: ItemBody) -> Step {
+fn item(
+    state: &State,
+    turn: &Turn,
+    id: ItemId,
+    status: ItemStatus,
+    deferred: bool,
+    body: ItemBody,
+) -> Step {
+    if state
+        .items
+        .get(&id)
+        .is_some_and(|item| item.turn == turn.id && item.status == status && item.body == body)
+    {
+        return Step::default();
+    }
     if state.items.get(&id).is_some_and(|item| {
         item.turn != turn.id || matches!(item.body, ItemBody::UserMessage { .. })
     }) {
         return Step::default();
     }
-    if matches!(body, ItemBody::UserMessage { .. }) {
+    if !turn.observed && matches!(body, ItemBody::UserMessage { .. }) {
         return Step::default();
     }
     let position = if let Some(item) = state.items.get(&id) {
@@ -535,6 +703,8 @@ fn item(state: &State, turn: &Turn, id: ItemId, status: ItemStatus, body: ItemBo
                 turn: turn.id.clone(),
                 position,
                 status,
+                deferred,
+                input: None,
                 body,
             }),
             Change::Counters(Counters {
@@ -547,7 +717,7 @@ fn item(state: &State, turn: &Turn, id: ItemId, status: ItemStatus, body: ItemBo
     }
 }
 
-pub(super) fn finish(state: &State, turn: &Turn, terminal: TurnState) -> Step {
+pub(super) fn finish(state: &State, turn: &Turn, terminal: TurnState, now: i64) -> Step {
     let held = !matches!(terminal, TurnState::Completed);
     let item_status = match &terminal {
         TurnState::Completed => ItemStatus::Completed,
@@ -556,6 +726,13 @@ pub(super) fn finish(state: &State, turn: &Turn, terminal: TurnState) -> Step {
     };
     let mut changes = vec![Change::Turn(Turn {
         state: terminal,
+        error: None,
+        completed_at: turn.completed_at.or(Some(now)),
+        duration_ms: turn.duration_ms.or_else(|| {
+            turn.started_at
+                .and_then(|started| now.checked_sub(started))
+                .and_then(|elapsed| u64::try_from(elapsed).ok())
+        }),
         ..turn.clone()
     })];
     if held {
@@ -631,4 +808,131 @@ fn fence_inputs(
             input.fenced()
         })
         .collect()
+}
+
+fn retry(state: &State, turn: &Turn, at: i64, error: Option<ExecutionError>) -> Step {
+    let mut changes = vec![
+        Change::Turn(Turn {
+            state: TurnState::Waiting(Wait::Retry { at }),
+            retry_count: turn.retry_count.saturating_add(1),
+            error,
+            ..turn.clone()
+        }),
+        Change::Attempt {
+            turn: turn.id.clone(),
+            value: None,
+        },
+    ];
+    changes.extend(
+        state
+            .requests
+            .values()
+            .filter(|request| request.turn == turn.id)
+            .filter_map(|request| match request.state {
+                RequestState::Awaiting => Some(Change::RemoveRequest(request.id.clone())),
+                RequestState::Sending { .. } => Some(Change::Request(Request {
+                    state: RequestState::Unknown,
+                    ..request.clone()
+                })),
+                RequestState::Unknown => None,
+            }),
+    );
+    changes.extend(fence_inputs(&state.inputs, &turn.id, true));
+    changes.push(Change::Thread(Thread {
+        queue_held: state.has_queued_inputs(),
+        ..state.thread.clone()
+    }));
+    Step {
+        changes,
+        actions: vec![Action::WaitUntil(at)],
+        outcome: Outcome::Accepted,
+        ..Step::default()
+    }
+}
+
+fn failed(state: &State, turn: &Turn, error: ExecutionError, context: Context) -> Step {
+    const DELAYS: [i64; 5] = [2_000, 4_000, 8_000, 16_000, 30_000];
+    if matches!(turn.state, TurnState::Running { interrupt: Some(_) }) {
+        return finish(state, turn, TurnState::Interrupted, context.now);
+    }
+    if turn.provider == ProviderKind::Codex
+        && error.provider_code.as_deref() == Some("serverOverloaded")
+        && !error.retry.as_ref().is_some_and(|retry| retry.retrying)
+        && let Some(delay) = DELAYS.get(usize::from(turn.retry_count))
+    {
+        let mut error = error;
+        error.retry = Some(crate::execution::RetryEvidence {
+            retrying: true,
+            attempt: Some(u32::from(turn.retry_count) + 1),
+            max_attempts: Some(5),
+        });
+        return retry(state, turn, context.now.saturating_add(*delay), Some(error));
+    }
+    let mut error = error;
+    error.retry = None;
+    finish(state, turn, TurnState::Failed(error), context.now)
+}
+
+fn observed_start(
+    state: &State,
+    execution: Uuid,
+    provider: ProviderKind,
+    source: String,
+    context: Context,
+) -> Step {
+    if provider != state.thread.provider
+        || state
+            .attempts
+            .values()
+            .any(|attempt| attempt.id == execution)
+        || !matches!(state.bindings.get(&provider), Some(Binding::Ready { source: current, .. }) if current == &source)
+        || state
+            .active_turn()
+            .is_some_and(|turn| !matches!(turn.state, TurnState::Waiting(Wait::Background { .. })))
+    {
+        return Step::default();
+    }
+    let Some(ordinal) = state.counters.turn.checked_add(1) else {
+        return Step::default();
+    };
+    let turn: TurnId = allocate(context.seed, "turn").to_string().into();
+    Step {
+        changes: vec![
+            Change::Turn(Turn {
+                id: turn.clone(),
+                ordinal,
+                provider,
+                queued: false,
+                observed: true,
+                started_at: Some(context.now),
+                completed_at: None,
+                duration_ms: None,
+                retry_count: 0,
+                error: None,
+                state: TurnState::Running { interrupt: None },
+            }),
+            Change::Binding {
+                provider,
+                value: Some(Binding::Ready {
+                    source: source.clone(),
+                    covered: ordinal,
+                }),
+            },
+            Change::Attempt {
+                turn: turn.clone(),
+                value: Some(Attempt {
+                    id: execution,
+                    turn,
+                    provider,
+                    source,
+                }),
+            },
+            Change::Counters(Counters {
+                turn: ordinal,
+                ..state.counters.clone()
+            }),
+        ],
+        outcome: Outcome::Accepted,
+        ..Default::default()
+    }
 }

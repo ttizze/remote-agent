@@ -767,10 +767,7 @@ mod tests {
         )
     }
 
-    #[allow(dead_code)]
-    mod host_fixture {
-        include!("../../tests/support/host.rs");
-    }
+    use crate::test_host as host_fixture;
 
     async fn incoming(
         host: &crate::transport::Endpoint,

@@ -321,12 +321,12 @@ impl Snapshot {
     ) -> Option<String> {
         let thread = self.thread_metadata(session)?;
         crate::session::direct_input_unavailable_reason(thread.can_accept_direct_input).or_else(|| {
-            let active = thread.active_provider.unwrap_or(session.provider);
+            let active = thread.active_provider.or(session.provider);
             let busy = agent_protocol::models::task_active(None, thread.status)
                 || thread.active_turn_id().is_some()
                 || !thread.requests.is_empty()
-                || thread.preparation.is_some();
-            if selected.is_some_and(|provider| provider != active) && busy {
+                || !thread.preparations.is_empty();
+            if selected.is_some_and(|provider| Some(provider) != active) && busy {
                 Some("AIを切り替えて送信するには、現在の応答・確認・送信の完了を待つか、新しいチャットを開いてください。".into())
             } else {
                 None
@@ -476,7 +476,7 @@ mod availability_tests {
             ("conversation not loaded", |s| {
                 Arc::make_mut(&mut Arc::make_mut(s.panes.primary_mut()).navigation).thread_id =
                     Some(crate::session::SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "unloaded".into(),
                     });
             }),

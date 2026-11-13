@@ -4,39 +4,10 @@ use crate::models::Item;
 
 pub use agent_protocol::operations::ReadItem;
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoadTurnItems {
-    pub thread_id: crate::session::SessionRef,
-    pub turn_id: agent_protocol::ids::TurnId,
+#[derive(Debug, Clone)]
+pub struct ReadHistory {
+    pub session: crate::session::SessionRef,
 }
-
-impl Operation for LoadTurnItems {
-    fn key(&self) -> Option<OperationKey> {
-        Some(OperationKey::TurnItems {
-            session: self.thread_id.clone(),
-            turn: self.turn_id.clone(),
-        })
-    }
-    no_input!();
-    type Output = crate::models::Empty;
-    async fn run(
-        &self,
-        _: Self::Input,
-        context: &mut Execution<'_>,
-    ) -> Result<Self::Output, PeerError> {
-        context
-            .client
-            .call(&agent_protocol::session::ReadTurnItems {
-                session: self.thread_id.clone(),
-                turn_id: self.turn_id.clone(),
-            })
-            .await
-    }
-}
-
-pub use agent_protocol::session::ReadHistory;
 
 impl Operation for ReadHistory {
     fn navigation_bound(&self) -> bool {
@@ -47,40 +18,71 @@ impl Operation for ReadHistory {
             session: self.session.clone(),
         })
     }
-    type Input = Option<uuid::Uuid>;
-    fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
-        Ok(snapshot.sessions.subscriptions.get(&self.session).copied())
+    type Input = super::super::conversations::ReadScope;
+    fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
+        super::super::conversations::read_scope(snapshot, &self.session)
     }
-    type Output = (agent_protocol::session::HistoryPage, Option<uuid::Uuid>);
+    type Output = super::super::conversations::ReadRows;
     async fn run(
         &self,
-        subscription: Self::Input,
+        scope: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        Ok((context.call(self).await?, subscription))
+        let result = context
+            .call(&agent_protocol::conversation::records::Extend {
+                session: self.session.clone(),
+                subscription: scope.subscription,
+                cached: scope.cursor,
+            })
+            .await;
+        Ok(super::super::conversations::ReadRows { scope, result })
     }
-    fn apply(
+    fn complete(
         self,
         snapshot: &mut Snapshot,
-        _pane_id: &str,
-        (page, subscription): Self::Output,
-    ) -> Vec<Effect> {
-        if subscription != snapshot.sessions.subscriptions.get(&self.session).copied()
-            || snapshot
-                .sessions
-                .conversations
-                .get(&self.session)
-                .is_none_or(|thread| thread.history_cursor.as_deref() != Some(&self.cursor))
-        {
-            return Vec::new();
+        _pane: &str,
+        output: Self::Output,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        use super::super::conversations::ReadResult;
+        match super::super::conversations::finish_read(snapshot, &self.session, output, current)? {
+            ReadResult::Applied(effects) => Ok(effects),
+            ReadResult::Retry
+                if snapshot
+                    .sessions
+                    .replicas
+                    .get(&self.session)
+                    .and_then(|replica| replica.window())
+                    .is_some_and(|window| window.turn != 0 || window.item != 0) =>
+            {
+                Ok(vec![Effect::continuation(self)])
+            }
+            _ => Ok(Vec::new()),
         }
-        let details = item_details(&self.session, &page.turns);
-        page.prepend_to(shared_mut(&mut snapshot.sessions.conversations, &self.session).unwrap());
-        reconcile_pending(snapshot, &self.session);
-        details
     }
 }
 
+pub(crate) fn item_detail(
+    session: &crate::session::SessionRef,
+    turn: &agent_protocol::ids::TurnId,
+    item: &Item,
+) -> Option<Effect> {
+    (item.is_deferred()
+        && matches!(
+            item.body(),
+            crate::models::ItemBody::UserMessage { .. }
+                | crate::models::ItemBody::AssistantText { .. }
+                | crate::models::ItemBody::ImageGeneration { .. }
+                | crate::models::ItemBody::ImageView { .. }
+        ))
+    .then(|| {
+        Effect::execute(ReadItem {
+            thread_id: session.clone(),
+            turn_id: turn.clone(),
+            item_id: item.id.clone(),
+        })
+    })
+}
 pub(crate) fn item_details(
     session: &crate::session::SessionRef,
     turns: &[Arc<crate::models::Turn>],
@@ -91,34 +93,9 @@ pub(crate) fn item_details(
             turn.items
                 .iter()
                 .flatten()
-                .filter(|item| {
-                    item.is_deferred()
-                        && matches!(
-                            item.body(),
-                            crate::models::ItemBody::UserMessage { .. }
-                                | crate::models::ItemBody::AssistantText { .. }
-                                | crate::models::ItemBody::ImageGeneration { .. }
-                                | crate::models::ItemBody::ImageView { .. }
-                        )
-                })
-                .map(|item| {
-                    Effect::execute(ReadItem {
-                        thread_id: session.clone(),
-                        turn_id: turn.id.clone(),
-                        item_id: item.id.clone(),
-                    })
-                })
+                .filter_map(|item| item_detail(session, &turn.id, item))
         })
         .collect()
-}
-
-/// The item Arc is its local source generation. Session updates replace this
-/// Arc even when the new value happens to equal the old one.
-#[derive(Debug)]
-pub struct ItemRead {
-    source: Option<Arc<Item>>,
-    subscription: Option<uuid::Uuid>,
-    response: Result<rpc::ItemResponse, PeerError>,
 }
 
 fn item_source<'a>(request: &ReadItem, snapshot: &'a Snapshot) -> Option<&'a Arc<Item>> {
@@ -138,84 +115,58 @@ impl Operation for ReadItem {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Item { item: self.clone() })
     }
-    type Input = (Option<Arc<Item>>, Option<uuid::Uuid>);
-    fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
-        Ok((
-            item_source(self, snapshot).cloned(),
-            snapshot
-                .sessions
-                .subscriptions
-                .get(&self.thread_id)
-                .copied(),
-        ))
+    type Input = super::super::conversations::ReadScope;
+    fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
+        if item_source(self, snapshot).is_none() {
+            return Err(PeerError::InvalidMessage(
+                "item does not belong to the requested turn".into(),
+            ));
+        }
+        super::super::conversations::read_scope(snapshot, &self.thread_id)
     }
     fn scheduling(&self) -> Scheduling {
         Scheduling::Item(self.clone())
     }
-    type Output = ItemRead;
+    type Output = super::super::conversations::ReadRows;
     async fn run(
         &self,
-        (source, subscription): Self::Input,
+        scope: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        let response = context.call(self).await?;
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::transfers::resolve_item(response, context.session),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(PeerError::RequestTimeout {
-                method: "item body transfer".into(),
+        let result = context
+            .call(&agent_protocol::conversation::records::Hydrate {
+                session: self.thread_id.clone(),
+                subscription: scope.subscription,
+                cached: scope.cursor,
+                item: self.item_id.clone(),
             })
-        });
-        Ok(ItemRead {
-            source,
-            subscription,
-            response,
-        })
+            .await;
+        let result = match result {
+            Ok(response) => {
+                crate::client::resolve_hydration(response, &self.item_id, context.session).await
+            }
+            Err(error) => Err(error),
+        };
+        Ok(super::super::conversations::ReadRows { scope, result })
     }
-
     fn complete(
         self,
         snapshot: &mut Snapshot,
-        _pane_id: &str,
+        _pane: &str,
         output: Self::Output,
-        current_epoch: bool,
+        current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        let current = item_source(&self, snapshot);
-        if !current_epoch
-            || output.subscription
-                != snapshot
-                    .sessions
-                    .subscriptions
-                    .get(&self.thread_id)
-                    .copied()
-            || !current
-                .zip(output.source.as_ref())
-                .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+        use super::super::conversations::ReadResult;
+        match super::super::conversations::finish_read(snapshot, &self.thread_id, output, current)?
         {
-            // Full Item updates already supply the new body. A delta preserves
-            // the deferred marker, so retry once this transfer has finished.
-            return match current {
-                Some(item) if item.is_deferred() => Ok(vec![Effect::continuation(self)]),
-                Some(_) => Ok(Vec::new()),
-                None => Err(PeerError::InvalidMessage(
-                    "item is no longer available".into(),
-                )),
-            };
+            ReadResult::Applied(effects) => Ok(effects),
+            ReadResult::Retry
+                if item_source(&self, snapshot).is_some_and(|item| item.is_deferred()) =>
+            {
+                Ok(vec![Effect::continuation(self)])
+            }
+            _ => Ok(Vec::new()),
         }
-        let response = output.response?;
-        let thread = crate::session::SessionChange::Item {
-            turn_id: self.turn_id,
-            item: Arc::new(response.item),
-        }
-        .apply(&snapshot.sessions.conversations[&self.thread_id])
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        Arc::make_mut(&mut snapshot.sessions.conversations)
-            .insert(self.thread_id.clone(), Arc::new(thread));
-        reconcile_pending(snapshot, &self.thread_id);
-        Ok(Vec::new())
     }
 }
 
@@ -226,12 +177,6 @@ pub struct ReadThread {
     pub thread_id: crate::session::SessionRef,
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub open: bool,
-    #[serde(default)]
-    // UniFFI defaults must be literals; keep this equal to HISTORY_WINDOW_TURNS.
-    #[cfg_attr(feature = "bindings", uniffi(default = 10))]
-    pub limit: u32,
-    #[cfg_attr(feature = "bindings", uniffi(default = false))]
-    pub replace_history: bool,
 }
 /// Turns an opened conversation shows first, and each older page adds.
 pub const HISTORY_WINDOW_TURNS: u32 = 10;
@@ -240,8 +185,6 @@ impl ReadThread {
         Self {
             thread_id,
             open: false,
-            limit: HISTORY_WINDOW_TURNS,
-            replace_history: false,
         }
     }
     pub fn open(thread_id: crate::session::SessionRef) -> Self {
@@ -250,100 +193,50 @@ impl ReadThread {
             ..Self::new(thread_id)
         }
     }
-    fn replacement(thread_id: crate::session::SessionRef) -> Self {
-        Self {
-            replace_history: true,
-            ..Self::new(thread_id)
-        }
-    }
 }
-/// The request for a ReadThread: the Host omits a window the client holds.
-#[derive(Debug, Serialize)]
-pub struct OpenThread<'a> {
-    pub read: &'a ReadThread,
-    pub known_version: Option<u64>,
-}
-impl rpc::RpcMethod for OpenThread<'_> {
-    agent_protocol::operations::rpc_contract!(OpenSession);
-    fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
-        output.subscription_id = id;
-    }
-    fn params(
-        &self,
-    ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
-        Ok(crate::session::OpenSession {
-            session: self.read.thread_id.clone(),
-            limit: self.read.limit as usize,
-            include_activity: false,
-            known_version: self.known_version,
-        })
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.session != self.read.thread_id {
-            return Err("session identity does not match");
-        }
-        if output.unchanged {
-            return Ok(());
-        }
-        rpc::validate_thread(&output.response, Some(&self.read.thread_id))
-    }
-}
-
-/// An unchanged reply keeps the held window's turns and paging.
-fn held_window(
-    snapshot: &Snapshot,
-    id: &crate::session::SessionRef,
-    output: &mut crate::session::OpenedSession,
-) {
-    if !output.unchanged {
-        return;
-    }
-    if let Some(held) = snapshot.sessions.conversations.get(id) {
-        let thread = &mut output.response.thread;
-        thread.turns = held.turns.clone();
-        thread.history_cursor = held.history_cursor.clone();
-        thread.history_has_more = held.history_has_more;
-        thread.history_read_state = held.history_read_state.clone();
-    }
-}
-
 impl Operation for ReadThread {
+    fn subscription_scope(
+        &self,
+    ) -> Option<agent_protocol::sync::Scope<crate::session::SessionRef>> {
+        Some(agent_protocol::sync::Scope::Conversation(
+            self.thread_id.clone(),
+        ))
+    }
     fn navigation_bound(&self) -> bool {
         self.open
     }
-
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::History {
             session: self.thread_id.clone(),
         })
     }
-    /// A held window's version, when it has the requested size.
-    type Input = Option<u64>;
+    type Input = Arc<agent_protocol::conversation::records::Replica>;
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
-        if self.replace_history {
-            return Ok(None);
-        }
-        Ok(snapshot
+        snapshot
             .sessions
-            .conversations
+            .replicas
             .get(&self.thread_id)
-            .filter(|thread| {
-                thread.turns.is_some() && thread.history_limit == Some(u64::from(self.limit))
+            .cloned()
+            .ok_or_else(|| {
+                PeerError::InvalidMessage("conversation subscription was not scheduled".into())
             })
-            .and_then(|thread| thread.transcript_version))
     }
-    type Output = crate::session::OpenedSession;
+
+    type Output = super::super::conversations::Opened;
     async fn run(
         &self,
-        known_version: Self::Input,
+        replica: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        context
-            .call(&OpenThread {
-                read: self,
-                known_version,
+        let response = context
+            .call(&agent_protocol::conversation::records::Subscribe {
+                session: self.thread_id.clone(),
+                subscription: uuid::Uuid::nil(),
+                cached: replica.cursor(),
+                window: replica.window(),
             })
-            .await
+            .await?;
+        super::super::conversations::opened(&replica, response)
     }
     fn invalidates(&self) -> bool {
         self.open
@@ -352,102 +245,46 @@ impl Operation for ReadThread {
         if self.open {
             let cwd = snapshot
                 .thread_metadata(&self.thread_id)
-                .and_then(|thread| thread.cwd.as_ref())
-                .cloned()
+                .and_then(|thread| thread.cwd.clone())
                 .unwrap_or_default();
             select_thread(snapshot, pane_id, self.thread_id.clone(), cwd);
         }
         Ok(())
     }
-    fn apply(
-        self,
-        snapshot: &mut Snapshot,
-        pane_id: &str,
-        mut output: Self::Output,
-    ) -> Vec<Effect> {
-        if self.replace_history {
-            Arc::make_mut(&mut snapshot.sessions.conversations).remove(&self.thread_id);
-        }
-        held_window(snapshot, &self.thread_id, &mut output);
-        if output
-            .response
-            .thread
-            .history_read_state
-            .as_ref()
-            .is_some_and(|state| state.kind == crate::session::HistoryReadKind::Unavailable)
-            && let Some(cached) = snapshot.sessions.conversations.get(&self.thread_id)
-        {
-            let live = output.response.thread.turns.get_or_insert_default();
-            let mut turns: Vec<_> = cached
-                .turns
-                .iter()
-                .flatten()
-                .filter(|turn| turn.status != agent_protocol::execution::TurnStatus::Running)
-                .cloned()
-                .collect();
-            for current in live.drain(..) {
-                if let Some(index) = turns
-                    .iter()
-                    .rposition(|turn| turn.matches_occurrence(&current))
-                {
-                    turns[index] = current;
-                } else {
-                    turns.push(current);
-                }
-            }
-            *live = turns;
-        }
-        let mut effects = if self.open {
+    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        let Some(response) = super::super::conversations::install(snapshot, output) else {
+            return Vec::new();
+        };
+        let mut effects = item_details(
+            &self.thread_id,
+            response.thread.turns.as_deref().unwrap_or_default(),
+        );
+        effects.extend(if self.open {
             open_thread(
                 snapshot,
                 pane_id,
-                output.response.thread,
-                output.response.model,
-                output.response.effort,
-                output.response.service_tier,
+                response.thread,
+                response.model,
+                response.effort,
+                response.service_tier,
             )
         } else {
-            refresh_thread(snapshot, pane_id, output.response.thread);
             Vec::new()
-        };
-        effects.extend(item_details(
+        });
+        effects.extend(super::super::conversations::receipt_check(
+            snapshot,
             &self.thread_id,
-            snapshot
-                .sessions
-                .conversations
-                .get(&self.thread_id)
-                .and_then(|thread| thread.turns.as_deref())
-                .unwrap_or_default(),
         ));
-        Arc::make_mut(&mut snapshot.sessions.subscriptions)
-            .insert(self.thread_id, output.subscription_id);
         effects
     }
-    fn stale(
-        self,
-        snapshot: &mut Snapshot,
-        pane_id: &str,
-        mut output: Self::Output,
-    ) -> Vec<Effect> {
-        if snapshot
-            .sessions
-            .conversations
-            .get(&self.thread_id)
-            .is_some_and(|held| held.transcript_version > output.response.thread.transcript_version)
-        {
-            return Vec::new();
+    fn stale(self, snapshot: &mut Snapshot, _pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        if super::super::conversations::install(snapshot, output).is_some() {
+            super::super::conversations::receipt_check(snapshot, &self.thread_id)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
         }
-        held_window(snapshot, &self.thread_id, &mut output);
-        // A late navigation result can warm the cache, but must never replace
-        // an already subscribed, more recent view or change the selected draft.
-        if !snapshot
-            .sessions
-            .subscriptions
-            .contains_key(&self.thread_id)
-        {
-            refresh_thread(snapshot, pane_id, output.response.thread);
-        }
-        Vec::new()
     }
 }
 
@@ -533,12 +370,10 @@ pub(super) fn open_thread(
             model,
             effort,
             tier,
-            Some(
-                snapshot
-                    .thread_metadata(&id)
-                    .and_then(|thread| thread.active_provider)
-                    .unwrap_or(id.provider),
-            ),
+            snapshot
+                .thread_metadata(&id)
+                .and_then(|thread| thread.active_provider)
+                .or(id.provider),
             &snapshot.catalog.models,
             &snapshot.catalog.model_errors,
             snapshot.allows_custom_codex_models(),
@@ -577,57 +412,24 @@ pub(crate) fn refresh_thread(snapshot: &mut Snapshot, pane_id: &str, incoming: T
         }
         return;
     };
-    let mut thread = incoming;
-    if let Some(cached) = snapshot.sessions.conversations.get(&id)
-        && cached.list_revision > thread.list_revision
-    {
-        thread.name = cached.name.clone();
-        thread.list_revision = cached.list_revision;
-    }
-    if let Some(cached) = snapshot.sessions.conversations.get(&id)
-        && let Some(turns) = crate::session::retained_history(
-            cached.turns.as_deref().unwrap_or_default(),
-            thread.turns.as_deref().unwrap_or_default(),
-        )
-    {
-        let count = thread.turns.as_ref().map_or(0, Vec::len);
-        if thread.history_cursor.is_some() && turns.len() > count {
-            let managed_start = thread
-                .active_provider
-                .and_then(|_| thread.history_cursor.as_ref()?.parse::<usize>().ok())
-                .and_then(|start| start.checked_add(count)?.checked_sub(turns.len()));
-            thread.turns = Some(turns);
-            let pagination_state = if let Some(start) = managed_start {
-                thread.history_cursor = (start > 0).then(|| start.to_string());
-                thread.history_has_more = Some(start > 0);
-                Some(crate::session::HistoryReadState::new(
-                    if start > 0 {
-                        crate::session::HistoryReadKind::Partial
-                    } else {
-                        crate::session::HistoryReadKind::Complete
-                    },
-                    vec![],
-                ))
-            } else {
-                thread.history_cursor = cached.history_cursor.clone();
-                thread.history_has_more = cached.history_has_more;
-                cached.history_read_state.clone()
-            };
-            if thread.history_read_state.as_ref().is_none_or(|state| {
-                matches!(
-                    state.kind,
-                    crate::session::HistoryReadKind::Complete
-                        | crate::session::HistoryReadKind::Partial
-                ) && state.issues.is_empty()
-            }) {
-                thread.history_read_state = pagination_state;
-            }
-        } else {
-            thread.turns = Some(turns[turns.len() - count..].to_vec());
-        }
-    }
-    Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(thread));
+    Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(incoming));
     reconcile_pending(snapshot, &id);
+}
+
+async fn command(
+    context: &mut Execution<'_>,
+    session: &crate::session::SessionRef,
+    command: agent_protocol::conversation::Command,
+) -> Result<agent_protocol::sync::Cursor, PeerError> {
+    crate::client::command_result(
+        context
+            .call(&agent_protocol::conversation::records::Change {
+                session: session.clone(),
+                operation: uuid::Uuid::new_v4(),
+                command,
+            })
+            .await?,
+    )
 }
 
 pub use agent_protocol::operations::ForkSession;
@@ -639,43 +441,57 @@ impl Operation for ForkSession {
             turn: self.last_turn_id.clone(),
         })
     }
-    rpc_operation!();
+    type Input = crate::session::SessionRef;
+    fn capture(&self, _: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
+        Ok(crate::session::SessionRef {
+            provider: None,
+            id: uuid::Uuid::new_v4().to_string(),
+        })
+    }
+    type Output = crate::session::SessionRef;
+    async fn run(
+        &self,
+        target: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        let returned = context
+            .call(&agent_protocol::conversation::records::Fork {
+                source: self.thread_id.clone(),
+                target: target.clone(),
+                through: self.last_turn_id.clone(),
+            })
+            .await?;
+        if returned != target {
+            return Err(PeerError::InvalidMessage(
+                "fork conversation identity changed".into(),
+            ));
+        }
+        Ok(target)
+    }
     fn invalidates(&self) -> bool {
         true
     }
-    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        let id = output.thread.id.clone().expect("validated thread ID");
-        let draft = snapshot
+    fn apply(self, snapshot: &mut Snapshot, _: &str, id: Self::Output) -> Vec<Effect> {
+        if let Some(draft) = snapshot
             .input
             .drafts
-            .get(&DraftKey::from(self.thread_id.clone()))
-            .cloned();
-        if let Some(draft) = draft {
+            .get(&DraftKey::from(self.thread_id))
+            .cloned()
+        {
             Arc::make_mut(&mut snapshot.input.drafts)
                 .entry(id.clone().into())
                 .or_insert(draft);
         }
-        let mut effects = open_thread(
-            snapshot,
-            pane_id,
-            output.thread,
-            output.model,
-            output.effort,
-            output.service_tier,
-        );
-        effects.push(Effect::execute(ReadThread::new(id)));
-        effects
+        vec![Effect::execute(ReadThread::open(id))]
     }
-    fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        refresh_thread(snapshot, pane_id, output.thread);
+    fn stale(self, _snapshot: &mut Snapshot, _pane: &str, _id: Self::Output) -> Vec<Effect> {
         Vec::new()
     }
-    fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::StartedThread {
-            id: output.thread.id.clone().expect("validated thread ID"),
-        }
+    fn outcome(id: &mut Self::Output) -> Outcome {
+        Outcome::StartedThread { id: id.clone() }
     }
 }
+
 pub use agent_protocol::operations::RewindSession;
 
 /// What the user sent in `turn`: its text and the files that can be attached again.
@@ -725,56 +541,6 @@ fn file_name(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
 }
 
-/// A committed replacement must also refresh its subscription: global notices
-/// and live updates travel on different streams. The fresh read replaces the
-/// window so an older stream cannot merge removed turns back into it.
-pub(crate) fn replace_history(
-    snapshot: &mut Snapshot,
-    pane: &str,
-    incoming: Thread,
-    force_read: bool,
-) -> Vec<Effect> {
-    let Some(id) = incoming.id.clone() else {
-        return Vec::new();
-    };
-    let subscribed = snapshot.sessions.subscriptions.contains_key(&id);
-    let key = OperationKey::History {
-        session: id.clone(),
-    };
-    let reading = snapshot.operations.contains_key(&key);
-    let already_current = incoming.transcript_version.is_some_and(|version| {
-        snapshot
-            .sessions
-            .conversations
-            .get(&id)
-            .is_some_and(|held| held.transcript_version.is_some_and(|held| held >= version))
-    });
-    let reload = if already_current {
-        force_read && !subscribed && !reading
-    } else {
-        force_read || subscribed || reading
-    };
-    if !already_current {
-        Arc::make_mut(&mut snapshot.operations).retain(|key, _| match key {
-            OperationKey::History { session } | OperationKey::TurnItems { session, .. } => {
-                session != &id
-            }
-            OperationKey::Item { item } => item.thread_id != id,
-            _ => true,
-        });
-        let cached = Arc::make_mut(&mut snapshot.sessions.conversations)
-            .remove(&id)
-            .is_some();
-        if cached || reload {
-            refresh_thread(snapshot, pane, incoming);
-        }
-    }
-    reload
-        .then(|| Effect::execute(ReadThread::replacement(id)))
-        .into_iter()
-        .collect()
-}
-
 impl Operation for RewindSession {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Rewind {
@@ -782,7 +548,7 @@ impl Operation for RewindSession {
         })
     }
     type Input = (String, Option<(String, Vec<Attachment>)>);
-    type Output = (Self::Input, crate::models::ThreadResponse);
+    type Output = (Self::Input, agent_protocol::sync::Cursor);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
         let turns = snapshot
             .sessions
@@ -800,7 +566,15 @@ impl Operation for RewindSession {
         input: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        Ok((input, context.call(self).await?))
+        Ok((
+            input,
+            command(
+                context,
+                &self.thread_id,
+                agent_protocol::conversation::Command::Rewind(self.turn_id.clone()),
+            )
+            .await?,
+        ))
     }
     fn invalidates(&self) -> bool {
         true
@@ -808,8 +582,8 @@ impl Operation for RewindSession {
     fn complete(
         self,
         snapshot: &mut Snapshot,
-        pane_id: &str,
-        ((scope, original), output): Self::Output,
+        _pane_id: &str,
+        ((scope, original), _cursor): Self::Output,
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
         if scope != snapshot.connection.storage_scope {
@@ -826,30 +600,32 @@ impl Operation for RewindSession {
                 }
             }
         }
-        let superseded = snapshot
-            .sessions
-            .conversations
-            .get(&id)
-            .is_some_and(|held| held.transcript_version > output.thread.transcript_version);
-        let mut effects = replace_history(snapshot, pane_id, output.thread, current);
-        if current
-            && !superseded
-            && let Some(thread) = snapshot.sessions.conversations.get(&id).cloned()
-        {
-            effects.extend(open_thread(
-                snapshot,
-                pane_id,
-                (*thread).clone(),
-                output.model,
-                output.effort,
-                output.service_tier,
-            ));
-        }
+        let effects = if !snapshot.sessions.subscriptions.contains_key(&id) {
+            vec![Effect::execute(if current {
+                ReadThread::open(id)
+            } else {
+                ReadThread::new(id)
+            })]
+        } else {
+            Vec::new()
+        };
         Ok(effects)
     }
 }
 
-pub use agent_protocol::operations::CreateSession;
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSession {
+    pub provider: crate::session::ProviderKind,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct StartConversation {
+    pub target: crate::session::SessionRef,
+    pub request: CreateSession,
+}
 pub use agent_protocol::operations::RetryPreparation;
 
 impl Operation for RetryPreparation {
@@ -858,35 +634,88 @@ impl Operation for RetryPreparation {
             draft_key: self.thread_id.clone().into(),
         })
     }
-    rpc_operation!();
+    no_input!();
+    type Output = agent_protocol::sync::Cursor;
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        command(
+            context,
+            &self.thread_id,
+            agent_protocol::conversation::Command::RetryInput(self.input_id.clone()),
+        )
+        .await
+    }
 }
 
-impl Operation for CreateSession {
-    // Creation flows present their returned error. Do not also leave an
-    // unrelated application notice behind after the user successfully retries.
+impl Operation for StartConversation {
     const REPORT_ERROR: bool = false;
-    rpc_operation!();
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::History {
+            session: self.target.clone(),
+        })
+    }
+    fn subscription_scope(
+        &self,
+    ) -> Option<agent_protocol::sync::Scope<crate::session::SessionRef>> {
+        Some(agent_protocol::sync::Scope::Conversation(
+            self.target.clone(),
+        ))
+    }
+    type Input = Arc<agent_protocol::conversation::records::Replica>;
+    fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
+        snapshot
+            .sessions
+            .replicas
+            .get(&self.target)
+            .cloned()
+            .ok_or_else(|| {
+                PeerError::InvalidMessage("conversation creation was not scheduled".into())
+            })
+    }
+    type Output = super::super::conversations::Opened;
+    async fn run(
+        &self,
+        replica: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        let response = context
+            .call(&agent_protocol::conversation::records::Create {
+                provider: self.request.provider,
+                session: self.target.clone(),
+                subscription: uuid::Uuid::nil(),
+                cwd: self.request.cwd.clone(),
+                selection: Default::default(),
+                initial: None,
+            })
+            .await?;
+        super::super::conversations::opened(&replica, response)
+    }
     fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.sessions.subscriptions)
-            .insert(output.session, output.subscription_id);
+        let Some(response) = super::super::conversations::install(snapshot, output) else {
+            return Vec::new();
+        };
         open_thread(
             snapshot,
             pane_id,
-            output.response.thread,
-            output.response.model,
-            output.response.effort,
-            output.response.service_tier,
+            response.thread,
+            response.model,
+            response.effort,
+            response.service_tier,
         )
     }
-    fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.sessions.subscriptions)
-            .insert(output.session, output.subscription_id);
-        refresh_thread(snapshot, pane_id, output.response.thread);
+    fn stale(self, snapshot: &mut Snapshot, _pane: &str, output: Self::Output) -> Vec<Effect> {
+        super::super::conversations::install(snapshot, output);
         Vec::new()
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
-            id: output.session.clone(),
+            id: match output.replica.scope() {
+                agent_protocol::sync::Scope::Conversation(id) => id.clone(),
+                _ => unreachable!("conversation operation"),
+            },
         }
     }
 }
@@ -903,7 +732,22 @@ impl Operation for Interrupt {
             turn: self.turn_id.clone(),
         })
     }
-    rpc_operation!();
+    no_input!();
+    type Output = agent_protocol::sync::Cursor;
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        command(
+            context,
+            &self.thread_id,
+            agent_protocol::conversation::Command::Interrupt {
+                turn: Some(self.turn_id.clone()),
+            },
+        )
+        .await
+    }
 }
 
 pub use agent_protocol::operations::ChangeQueue;
@@ -914,262 +758,104 @@ impl Operation for ChangeQueue {
             session: self.thread_id.clone(),
         })
     }
-    rpc_operation!();
+    no_input!();
+    type Output = agent_protocol::sync::Cursor;
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        use agent_protocol::{conversation::Command, operations::QueueChange};
+        let change = match &self.change {
+            QueueChange::Edit {
+                client_user_message_id,
+                input,
+            } => Command::EditInput {
+                id: client_user_message_id.clone(),
+                parts: input.clone(),
+            },
+            QueueChange::Remove {
+                client_user_message_id,
+            } => Command::RemoveInput(client_user_message_id.clone()),
+            QueueChange::Move {
+                client_user_message_id,
+                before,
+            } => Command::MoveInput {
+                id: client_user_message_id.clone(),
+                before: before.clone(),
+            },
+            QueueChange::Steer {
+                client_user_message_id,
+            } => Command::SteerInput(client_user_message_id.clone()),
+            QueueChange::Resume => Command::ResumeQueue,
+        };
+        command(context, &self.thread_id, change).await
+    }
 }
 
 pub use agent_protocol::operations::OpenRequest;
 
 impl Operation for OpenRequest {
     no_input!();
-    type Output = crate::session::OpenedSession;
+    type Output = crate::session::SessionRef;
     async fn run(
         &self,
         _: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        let id = context.client.call(self).await?;
-        let read = ReadThread::new(id);
-        context
-            .call(&OpenThread {
-                read: &read,
-                known_version: None,
-            })
-            .await
+        context.client.call(self).await
     }
-    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        ReadThread::new(output.session.clone()).apply(snapshot, pane_id, output)
-    }
-    fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        ReadThread::new(output.session.clone()).stale(snapshot, pane_id, output)
+    fn apply(self, _snapshot: &mut Snapshot, _pane_id: &str, id: Self::Output) -> Vec<Effect> {
+        vec![Effect::execute(ReadThread::open(id))]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{HistoryReadKind, ProviderKind, SessionRef};
+    use crate::session::{ProviderKind, SessionRef};
 
     #[test]
-    fn a_held_current_window_is_reused_and_only_its_metadata_refreshes() {
-        let id = SessionRef::new(ProviderKind::Codex, "held".into()).unwrap();
-        let held = Thread {
-            id: Some(id.clone()),
-            name: Some("old".into()),
-            history_limit: Some(u64::from(HISTORY_WINDOW_TURNS)),
-            history_cursor: Some("t3".into()),
-            history_has_more: Some(true),
-            transcript_version: Some(5),
-            turns: Some(vec![Arc::new(crate::models::Turn {
-                id: "turn".into(),
-                ..Default::default()
-            })]),
-            ..Default::default()
-        };
+    fn item_reads_require_the_items_actual_turn() {
+        let id = SessionRef::new(ProviderKind::Codex, "details".into()).unwrap();
         let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(held));
-        let open = ReadThread::open(id.clone());
-        assert_eq!(open.capture(&snapshot, "").unwrap(), Some(5));
-        let other_size = ReadThread {
-            limit: 5,
-            ..ReadThread::open(id.clone())
-        };
-        assert_eq!(other_size.capture(&snapshot, "").unwrap(), None);
-        open.apply(
+        crate::test_conversations::open(
             &mut snapshot,
-            "",
-            crate::session::OpenedSession {
-                session: id.clone(),
-                subscription_id: uuid::Uuid::new_v4(),
-                unchanged: true,
-                response: crate::models::ThreadResponse {
-                    thread: Thread {
-                        id: Some(id.clone()),
-                        name: Some("renamed".into()),
-                        history_limit: Some(u64::from(HISTORY_WINDOW_TURNS)),
-                        transcript_version: Some(5),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            },
-        );
-        let thread = &snapshot.sessions.conversations[&id];
-        assert_eq!(thread.name.as_deref(), Some("renamed"));
-        assert_eq!(thread.turns.as_ref().unwrap()[0].id, "turn".into());
-        assert_eq!(thread.history_cursor.as_deref(), Some("t3"));
-        assert_eq!(thread.history_has_more, Some(true));
-    }
-
-    #[test]
-    fn replacement_read_removes_late_live_turns_and_replaces_the_subscription() {
-        let id = SessionRef::new(ProviderKind::Codex, "rewound".into()).unwrap();
-        let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
-            id.clone(),
-            Arc::new(Thread {
-                id: Some(id.clone()),
-                transcript_version: Some(9),
-                history_limit: Some(u64::from(HISTORY_WINDOW_TURNS)),
-                turns: Some(vec![Arc::new(crate::models::Turn {
-                    id: "removed-late-event".into(),
-                    ..Default::default()
-                })]),
-                ..Default::default()
-            }),
-        );
-        Arc::make_mut(&mut snapshot.sessions.subscriptions)
-            .insert(id.clone(), uuid::Uuid::new_v4());
-        let read = ReadThread::replacement(id.clone());
-        assert_eq!(
-            read.capture(&snapshot, "").unwrap(),
-            None,
-            "the replacement must fetch an authoritative window"
-        );
-        let subscription = uuid::Uuid::new_v4();
-        read.apply(
-            &mut snapshot,
-            "",
-            crate::session::OpenedSession {
-                session: id.clone(),
-                subscription_id: subscription,
-                unchanged: false,
-                response: crate::models::ThreadResponse {
-                    thread: Thread {
-                        id: Some(id.clone()),
-                        transcript_version: Some(10),
-                        turns: Some(Vec::new()),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-            },
-        );
-        let held = &snapshot.sessions.conversations[&id];
-        assert!(held.turns.as_ref().unwrap().is_empty());
-        assert_eq!(held.transcript_version, Some(10));
-        assert_eq!(snapshot.sessions.subscriptions[&id], subscription);
-    }
-
-    #[rstest::rstest]
-    #[case(HistoryReadKind::Incomplete, vec!["claude: Claude failed to start".into()])]
-    #[case(HistoryReadKind::Incomplete, vec![])]
-    #[case(HistoryReadKind::Unavailable, vec![])]
-    #[case(HistoryReadKind::Partial, vec!["claude: Claude failed to start".into()])]
-    fn retaining_older_pages_preserves_source_errors_until_a_successful_refresh(
-        #[case] kind: HistoryReadKind,
-        #[case] issues: Vec<String>,
-    ) {
-        use crate::{presentation::conversation::history_notice, session::HistoryReadState};
-        use agent_protocol::{execution::TurnStatus, models::Turn};
-        let id = SessionRef {
-            provider: ProviderKind::Codex,
-            id: "conversation".into(),
-        };
-        let turns: Vec<_> = ["one", "two", "three"]
-            .into_iter()
-            .map(|id| {
-                Arc::new(Turn {
-                    id: id.into(),
-                    status: TurnStatus::Completed,
-                    ..Default::default()
-                })
-            })
-            .collect();
-        let mut snapshot = Snapshot::default();
-        let cached = Thread {
-            id: Some(id.clone()),
-            active_provider: Some(ProviderKind::Claude),
-            turns: Some(turns.clone()),
-            ..Default::default()
-        };
-        Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(cached));
-        let source_state = HistoryReadState::new(kind, issues);
-        let mut incoming = Thread {
-            id: Some(id.clone()),
-            active_provider: Some(ProviderKind::Claude),
-            turns: Some(turns[1..].to_vec()),
-            history_cursor: Some("1".into()),
-            history_has_more: Some(true),
-            history_read_state: Some(source_state.clone()),
-            ..Default::default()
-        };
-        refresh_thread(&mut snapshot, "", incoming.clone());
-        let retained = &snapshot.sessions.conversations[&id];
-        assert_eq!(retained.turns.as_ref().unwrap().len(), 3);
-        assert!(retained.history_cursor.is_none());
-        assert_eq!(retained.history_read_state.as_ref(), Some(&source_state));
-        assert!(history_notice(crate::localization::UiLanguage::Japanese, retained).is_some());
-        incoming.history_read_state = Some(HistoryReadState::new(HistoryReadKind::Partial, vec![]));
-        refresh_thread(&mut snapshot, "", incoming);
-        assert_eq!(
-            history_notice(
-                crate::localization::UiLanguage::Japanese,
-                &snapshot.sessions.conversations[&id]
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn unavailable_history_keeps_distinct_occurrences_of_a_reused_turn_id() {
-        use crate::models::{ItemBody, Turn, TurnStatus};
-        for same_occurrence in [false, true] {
-            let id = SessionRef::new(ProviderKind::Codex, "offline".into()).unwrap();
-            let turn = |item: &str, status| {
-                Arc::new(Turn {
-                    id: "reused".into(),
-                    status,
-                    items: Some(vec![Arc::new(Item::new(
-                        item.into(),
-                        Default::default(),
-                        ItemBody::Sleep {},
-                    ))]),
-                    ..Default::default()
-                })
-            };
-            let cached = turn("old", TurnStatus::Completed);
-            let live = turn(
-                if same_occurrence { "old" } else { "new" },
-                TurnStatus::Running,
-            );
-            let mut snapshot = Snapshot::default();
-            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
-                id.clone(),
-                Arc::new(Thread {
+            crate::models::ThreadResponse {
+                thread: Thread {
                     id: Some(id.clone()),
-                    turns: Some(vec![cached.clone()]),
-                    ..Default::default()
-                }),
-            );
-            ReadThread::new(id.clone()).apply(
-                &mut snapshot,
-                "",
-                crate::session::OpenedSession {
-                    session: id.clone(),
-                    subscription_id: uuid::Uuid::new_v4(),
-                    unchanged: false,
-                    response: crate::models::ThreadResponse {
-                        thread: Thread {
-                            id: Some(id.clone()),
-                            status: crate::models::SessionStatus::Running,
-                            history_read_state: Some(crate::session::HistoryReadState::new(
-                                HistoryReadKind::Unavailable,
-                                vec![],
-                            )),
-                            turns: Some(vec![live.clone()]),
-                            ..Default::default()
-                        },
+                    turns: Some(vec![Arc::new(crate::models::Turn {
+                        id: "correct".into(),
+                        items: Some(vec![Arc::new(Item::new(
+                            "item".into(),
+                            crate::models::ItemStatus::Completed,
+                            crate::models::ItemBody::ImageView {
+                                path: "image.png".into(),
+                            },
+                        ))]),
                         ..Default::default()
-                    },
+                    })]),
+                    ..Default::default()
                 },
-            );
-            let turns = snapshot.sessions.conversations[&id].turns.as_ref().unwrap();
-            assert_eq!(turns.len(), if same_occurrence { 1 } else { 2 });
-            if !same_occurrence {
-                assert!(Arc::ptr_eq(&turns[0], &cached));
+                ..Default::default()
+            },
+        );
+        let request = ReadItem {
+            thread_id: id,
+            turn_id: "wrong".into(),
+            item_id: "item".into(),
+        };
+        assert!(
+            matches!(request.capture(&snapshot,""),Err(PeerError::InvalidMessage(message)) if message=="item does not belong to the requested turn")
+        );
+        assert!(
+            ReadItem {
+                turn_id: "correct".into(),
+                ..request
             }
-            assert_eq!(turns.last().unwrap().as_ref(), live.as_ref());
-        }
+            .capture(&snapshot, "")
+            .is_ok()
+        );
     }
 
     #[rstest::rstest]
@@ -1179,7 +865,7 @@ mod tests {
         let id = SessionRef::new(ProviderKind::Codex, "missing-options".into()).unwrap();
         let key = DraftKey::from(id.clone());
         let model = |name: &str| crate::models::ModelRef {
-            provider: id.provider,
+            provider: id.provider.unwrap(),
             id: name.into(),
         };
         let mut snapshot = Snapshot::default();
@@ -1226,7 +912,7 @@ mod tests {
         let id = SessionRef::new(ProviderKind::Codex, "local-settings".into()).unwrap();
         let key = DraftKey::from(id.clone());
         let model = crate::models::ModelRef {
-            provider: id.provider,
+            provider: id.provider.unwrap(),
             id: "model".into(),
         };
         let mut snapshot = Snapshot::default();
@@ -1287,8 +973,34 @@ mod tests {
             .apply(
                 &mut snapshot,
                 "",
-                SubmissionProgress::Sent(Some("turn".into())),
+                agent_protocol::sync::Cursor {
+                    store: uuid::Uuid::from_u128(1),
+                    sequence: 7,
+                },
             );
+            let mut response = crate::models::ThreadResponse {
+                thread: Thread {
+                    id: Some(id.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let pending = snapshot.sessions.pending_submissions["input"].clone();
+            response
+                .thread
+                .queue
+                .inputs
+                .push(agent_protocol::operations::Submission {
+                    thread_id: id.clone(),
+                    client_user_message_id: "input".into(),
+                    input: vec![],
+                    model: pending.draft.model.clone(),
+                    effort: pending.draft.effort.clone(),
+                    service_tier: pending.draft.service_tier.clone(),
+                    follow_up: Default::default(),
+                });
+            let opened = crate::test_conversations::opened(response, &mut snapshot);
+            super::super::conversations::install(&mut snapshot, opened);
         } else {
             snapshot = reduce(&snapshot, "", Event::SubmissionFailed("input".into())).0;
             assert_eq!(snapshot.input.drafts[&key].text, "Continue");
@@ -1379,22 +1091,16 @@ mod tests {
             provider,
             id: "saved".into(),
         };
-        open.apply(
+        crate::test_conversations::open(
             &mut snapshot,
-            "",
-            crate::session::OpenedSession {
-                session: id.clone(),
-                subscription_id: uuid::Uuid::new_v4(),
-                unchanged: false,
-                response: crate::models::ThreadResponse {
-                    thread: Thread {
-                        id: Some(id.clone()),
-                        ..Default::default()
-                    },
-                    model: Some(model.clone()),
-                    effort: Some("high".into()),
-                    service_tier: Some("priority".into()),
+            crate::models::ThreadResponse {
+                thread: Thread {
+                    id: Some(id.clone()),
+                    ..Default::default()
                 },
+                model: Some(model.clone()),
+                effort: Some("high".into()),
+                service_tier: Some("priority".into()),
             },
         );
         if catalog_at == "after" {
@@ -1438,7 +1144,7 @@ mod tests {
         provider: ProviderKind,
     ) {
         let id = SessionRef {
-            provider,
+            provider: Some(provider),
             id: "existing".into(),
         };
         let key = DraftKey::from(id.clone());
@@ -1476,58 +1182,9 @@ mod tests {
     }
 
     #[test]
-    fn managed_refresh_retains_loaded_turns_and_recomputes_the_older_cursor() {
-        let id = SessionRef {
-            provider: ProviderKind::Codex,
-            id: "managed".into(),
-        };
-        let turn = |number: usize| {
-            Arc::new(crate::models::Turn {
-                id: number.to_string().into(),
-                ..Default::default()
-            })
-        };
-        let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
-            id.clone(),
-            Arc::new(Thread {
-                id: Some(id.clone()),
-                turns: Some((10..20).map(turn).collect()),
-                history_cursor: Some("native-cursor".into()),
-                history_has_more: Some(true),
-                ..Default::default()
-            }),
-        );
-        refresh_thread(
-            &mut snapshot,
-            "",
-            Thread {
-                id: Some(id.clone()),
-                active_provider: Some(ProviderKind::Claude),
-                turns: Some((16..21).map(turn).collect()),
-                history_cursor: Some("16".into()),
-                history_has_more: Some(true),
-                ..Default::default()
-            },
-        );
-        let updated = &snapshot.sessions.conversations[&id];
-        assert_eq!(
-            updated
-                .turns
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|turn| turn.id.as_str())
-                .collect::<Vec<_>>(),
-            (10..21).map(|n| n.to_string()).collect::<Vec<_>>()
-        );
-        assert_eq!(updated.history_cursor.as_deref(), Some("10"));
-    }
-
-    #[test]
     fn navigating_back_keeps_an_unsent_provider_change() {
         let id = SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "existing".into(),
         };
         let key = DraftKey::from(id.clone());
@@ -1805,250 +1462,5 @@ mod tests {
                 .model,
             expected_model
         );
-    }
-}
-
-#[cfg(test)]
-mod item_read_tests {
-    use crate::models::{ItemBody, Turn};
-
-    fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
-        match item.body() {
-            agent_protocol::items::ItemBody::AssistantText { text, .. } => Some(text),
-            agent_protocol::items::ItemBody::UserMessage { text, .. } => text.as_deref(),
-            agent_protocol::items::ItemBody::Reasoning { content, .. } => {
-                content.first().map(String::as_str)
-            }
-            _ => None,
-        }
-    }
-
-    use super::*;
-    use crate::session::{SessionChange, TextField};
-
-    #[test]
-    fn older_items_hydrate_without_changing_a_later_turn_with_the_same_id() {
-        let (mut snapshot, request) = fixture();
-        let latest = Arc::new(Turn {
-            id: request.turn_id.clone(),
-            status: crate::models::TurnStatus::Completed,
-            items: Some(vec![Arc::new(Item::new(
-                "latest".into(),
-                Default::default(),
-                ItemBody::Sleep {},
-            ))]),
-            ..Default::default()
-        });
-        Arc::make_mut(
-            Arc::make_mut(&mut snapshot.sessions.conversations)
-                .get_mut(&request.thread_id)
-                .unwrap(),
-        )
-        .turns
-        .as_mut()
-        .unwrap()
-        .push(latest.clone());
-        let captured = request.capture(&snapshot, "").unwrap();
-        assert!(
-            captured.0.is_some(),
-            "the requested older item must be captured"
-        );
-        let response = read(&snapshot, &request);
-        assert!(
-            request
-                .clone()
-                .complete(&mut snapshot, "", response, true)
-                .unwrap()
-                .is_empty()
-        );
-        let turns = snapshot.sessions.conversations[&request.thread_id]
-            .turns
-            .as_ref()
-            .unwrap();
-        assert!(!turns[0].items.as_ref().unwrap()[0].is_deferred());
-        assert_eq!(
-            item_text(&turns[0].items.as_ref().unwrap()[0]),
-            Some("old full body")
-        );
-        assert!(Arc::ptr_eq(&turns[1], &latest));
-    }
-
-    fn fixture() -> (Snapshot, ReadItem) {
-        let thread = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"chat"},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":{"deferred":{"summary":{"assistantText":{"text":"summary","phase":"unknown"}}}}}]}]})).unwrap();
-        let snapshot = Snapshot {
-            sessions: crate::state::Sessions {
-                conversations: Arc::new(BTreeMap::from([(
-                    agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        id: "chat".into(),
-                    },
-                    Arc::new(thread),
-                )])),
-                subscriptions: Arc::new(BTreeMap::from([(
-                    agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        id: "chat".into(),
-                    },
-                    uuid::Uuid::new_v4(),
-                )])),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        (
-            snapshot,
-            ReadItem {
-                thread_id: agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    id: "chat".into(),
-                },
-                turn_id: "turn".into(),
-                item_id: "item".into(),
-            },
-        )
-    }
-    fn read(snapshot: &Snapshot, request: &ReadItem) -> ItemRead {
-        ItemRead { source: item_source(request, snapshot).cloned(), subscription: snapshot.sessions.subscriptions.get(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "chat".into() }).copied(), response: Ok(rpc::ItemResponse {item: serde_json::from_value(serde_json::json!({"id":"item","status":"running","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old full body","phase":"unknown"}}}}})).unwrap(), transfer:None,}) }
-    }
-    fn update(snapshot: &mut Snapshot, change: SessionChange) {
-        let session = agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: "chat".into(),
-        };
-        let subscription_id = snapshot.sessions.subscriptions[&session];
-        let (next, effects) = crate::state::reduce(
-            snapshot,
-            "",
-            crate::state::Event::SessionUpdate(Box::new(crate::session::SessionUpdate {
-                subscription_id,
-                change,
-            })),
-        );
-        if next.panes.primary().error.is_some() {
-            assert_eq!(effects.len(), 1);
-            assert!(!next.sessions.subscriptions.contains_key(&session));
-        }
-        *snapshot = next;
-    }
-    #[test]
-    fn full_item_update_wins_over_late_body_and_its_status() {
-        let (mut snapshot, request) = fixture();
-        let old = read(&snapshot, &request);
-        update(&mut snapshot, SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(serde_json::json!({"id":"item","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new full body","phase":"unknown"}}}}})).unwrap()});
-        let current = snapshot.sessions.conversations.clone();
-        assert!(
-            request
-                .complete(&mut snapshot, "", old, true)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(Arc::ptr_eq(&current, &snapshot.sessions.conversations));
-    }
-    #[test]
-    fn delta_and_reopen_invalidate_body_and_coalesce_into_one_retry() {
-        for reopen in [false, true] {
-            let (mut snapshot, request) = fixture();
-            let old = read(&snapshot, &request);
-            if reopen {
-                // Even a read failure retaining cached Item Arcs changes the subscription.
-                Arc::make_mut(&mut snapshot.sessions.subscriptions).insert(
-                    agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        id: "chat".into(),
-                    },
-                    uuid::Uuid::new_v4(),
-                );
-            } else {
-                update(
-                    &mut snapshot,
-                    SessionChange::Text {
-                        turn_id: "turn".into(),
-                        item_id: "item".into(),
-                        field: TextField::AssistantText,
-                        delta: "delta".into(),
-                    },
-                );
-            }
-            assert!(snapshot.panes.primary().error.is_none());
-            assert!(
-                snapshot
-                    .sessions
-                    .subscriptions
-                    .contains_key(&request.thread_id)
-            );
-            let effects = request
-                .clone()
-                .complete(&mut snapshot, "", old, true)
-                .unwrap();
-            assert_eq!(effects.len(), 1);
-            assert!(item_source(&request, &snapshot).unwrap().is_deferred());
-            assert_ne!(
-                item_text(item_source(&request, &snapshot).unwrap()),
-                Some("old full body")
-            );
-        }
-    }
-    #[test]
-    fn deletion_rejects_completion_and_epoch_change_retries() {
-        for deleted in [false, true] {
-            let (mut snapshot, request) = fixture();
-            let old = read(&snapshot, &request);
-            if deleted {
-                update(
-                    &mut snapshot,
-                    SessionChange::RemoveItem {
-                        turn_id: "turn".into(),
-                        item_id: "item".into(),
-                    },
-                );
-            }
-            let result = request.complete(&mut snapshot, "", old, deleted);
-            if deleted {
-                assert!(result.is_err());
-            } else {
-                assert_eq!(result.unwrap().len(), 1);
-            }
-        }
-    }
-    #[test]
-    fn transfer_failure_keeps_deferred_and_new_delta_still_gets_a_retry() {
-        for (changed, error) in [
-            (false, PeerError::InvalidMessage("digest mismatch".into())),
-            (true, PeerError::InvalidMessage("digest mismatch".into())),
-            (
-                false,
-                PeerError::RequestTimeout {
-                    method: "item body transfer".into(),
-                },
-            ),
-            (
-                true,
-                PeerError::RequestTimeout {
-                    method: "item body transfer".into(),
-                },
-            ),
-        ] {
-            let (mut snapshot, request) = fixture();
-            let mut old = read(&snapshot, &request);
-            old.response = Err(error);
-            if changed {
-                update(
-                    &mut snapshot,
-                    SessionChange::Text {
-                        turn_id: "turn".into(),
-                        item_id: "item".into(),
-                        field: TextField::AssistantText,
-                        delta: "delta".into(),
-                    },
-                );
-            }
-            let result = request.clone().complete(&mut snapshot, "", old, true);
-            if changed {
-                assert_eq!(result.unwrap().len(), 1);
-            } else {
-                assert!(result.is_err());
-            }
-            assert!(item_source(&request, &snapshot).unwrap().is_deferred());
-        }
     }
 }

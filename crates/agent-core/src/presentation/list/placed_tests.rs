@@ -107,7 +107,6 @@ fn fixture() -> Snapshot {
     snapshot.lists.task_activity =
         Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
             attention: Vec::new(),
-            revision: 1,
             statuses: vec![],
             waiting: vec![session("live")],
             background: Vec::new(),
@@ -209,13 +208,11 @@ fn project_preferences_keep_pinned_section_order_ties_and_hidden_labels() {
     })
     .into();
     let input = crate::models::ThreadList {
-        revision: 1,
         limit: 5,
         data: vec![],
         projects,
         has_more: false,
         has_more_projects: false,
-        project_pages: Default::default(),
         provider_errors: None,
     };
     let mut snapshot = Snapshot {
@@ -748,8 +745,10 @@ fn expanded_projects_keep_connection_and_operation_errors_without_affecting_coll
                     expected
                 );
                 assert!(!project.loading);
-                let key = OperationKey::ProjectList {
-                    project_id: "destination".into(),
+                let key = OperationKey::ListDecorations {
+                    scope: agent_protocol::operations::ListDecorationScope::Project {
+                        project_id: "destination".into(),
+                    },
                 };
                 Arc::make_mut(&mut snapshot.operations).insert(
                     key.clone(),

@@ -18,6 +18,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,6 +33,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MarkdownFileKind
 import dev.remoteagent.core.MarkdownFileReference
@@ -161,6 +163,7 @@ internal fun MessageFooter(text: String, timestampMs: ULong?, fork: (() -> Unit)
 @Composable
 internal fun ThreadActivityCard(
     item: RenderedItem,
+    threadId: SessionRef?,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     loadDetails: (String) -> Unit,
@@ -168,6 +171,12 @@ internal fun ThreadActivityCard(
     val content = remember(item) { item.presentation() }
     var expanded by remember(content.id) { mutableStateOf(false) }
     val detail = remember(item, expanded) { if (expanded) item.expandedBody() else null }
+    DisposableEffect(threadId, content.nativeId, content.kind, expanded) {
+        val watching = expanded && content.kind == "command" && threadId != null && content.nativeId != null
+        if (watching) perform(Intent.WatchCommandOutput(threadId!!, content.nativeId!!, true)) {}
+        onDispose { if (watching) perform(Intent.WatchCommandOutput(threadId!!, content.nativeId!!, false)) {} }
+    }
+
     Card(
         Modifier.fillMaxWidth()
             .then(

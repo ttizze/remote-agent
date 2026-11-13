@@ -28,7 +28,6 @@ struct Fixture {
     requests: mpsc::Receiver<host_fixture::Request>,
     server: tokio::task::JoinHandle<()>,
     files: WorkspaceFiles,
-    subscription: uuid::Uuid,
     _directory: tempfile::TempDir,
 }
 
@@ -118,7 +117,6 @@ impl Fixture {
         );
         let store = store.unwrap();
         let output: Output = Arc::new(Mutex::new(writer));
-        let subscription = uuid::Uuid::new_v4();
         let (send_request, requests) = mpsc::channel(32);
         let server = tokio::spawn({
             let output = output.clone();
@@ -126,24 +124,21 @@ impl Fixture {
             async move {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
-                        "host/session/list" => {
+                        "host/list/subscribe" => {
                             json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})
                         }
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/taskActivity/read" => {
-                            json!({"revision":0,"statuses":[],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
-                        }
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
-                        "host/session/open" => {
+                        "host/conversation/subscribe" => {
                             let items = if automatic_reads {
                                 (0..count).map(|i| item(i, false)).collect::<Vec<_>>()
                             } else {
                                 vec![deferred_command("")]
                             };
-                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"id":{"provider":"codex","id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}}})
+                            json!({"thread":{"id":{"provider":"codex","id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}})
                         }
-                        "host/session/item/read" if automatic_reads => {
-                            let id: usize = request["params"]["itemId"]
+                        "host/conversation/hydrate" if automatic_reads => {
+                            let id: usize = request["params"]["item"]
                                 .as_str()
                                 .unwrap()
                                 .strip_prefix("item-")
@@ -193,7 +188,6 @@ impl Fixture {
             requests,
             server,
             files,
-            subscription,
             _directory: directory,
         }
     }
@@ -201,7 +195,7 @@ impl Fixture {
         self.store
             .dispatch(Intent::ReadThread(op::ReadThread::new(
                 agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "A".into(),
                 },
             )))
@@ -209,7 +203,7 @@ impl Fixture {
             .unwrap();
     }
     async fn update(&self, change: SessionChange) {
-        self.output.lock().await.notify(json!({"method":"host/session/update","params":{"subscriptionId":self.subscription,"change":change}})).await.unwrap();
+        self.output.lock().await.notify(json!({"method":"fixture/session/change","session":{"provider":"codex","id":"A"},"change":change})).await.unwrap();
     }
     async fn close(self) {
         self.store.close().await.unwrap();
@@ -532,15 +526,15 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
         if let agent_protocol::items::ItemBody::AssistantText {text, ..} = changed.body_mut() {*text = "live update".into();}
         fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed.into()}).await;
         fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": "", "effect": "allow"}, {"id": "choice-1", "label": "このセッションで承認", "description": "", "effect": "allowLasting"}, {"id": "choice-2", "label": "拒否", "description": "", "effect": "deny"}]}}})).unwrap() }).await;
-        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.sessions.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
+        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
         for intent in [
             Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),
-            Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {provider:agent_protocol::session::ProviderKind::Codex,id:"A".into()},turn_id:"turn".into()}),
+            Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {provider:Some(agent_protocol::session::ProviderKind::Codex),id:"A".into()},turn_id:"turn".into()}),
         ] {
             let completion = fixture.store.dispatch(intent);
             let request = fixture.requests.recv().await.unwrap();
-            assert!(matches!(request["method"].as_str(), Some("host/session/answer" | "host/session/interrupt")));
-            fixture.output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
+            assert!(matches!(request["method"].as_str(), Some("host/conversation/change")));
+            fixture.output.lock().await.reply(&request, json!({"result":{"outcome":"Accepted","cursor":{"store":"00000000-0000-0000-0000-000000000001","sequence":8}}})).await.unwrap();
             completion.await.unwrap();
         }
         assert_eq!(fixture.files.grants.lock().unwrap().len(), 4, "stalled bodies must retain their slots");
@@ -555,10 +549,10 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
                 fixture.files.transfer(OWNER, stream).await.unwrap();
             }
         };
-        let complete = wait_for(&fixture.store, |s| s.sessions.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().all(|item| !item.is_deferred()));
+        let complete = wait_for(&fixture.store, |s| s.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().all(|item| !item.is_deferred()));
         tokio::select! { _ = serving => unreachable!(), _ = complete => {} }
         let snapshot = fixture.store.snapshot();
-        let items = snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+        let items = snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 12);
         for (id, actual) in items.iter().enumerate() {
             let expected: agent_protocol::models::Item = serde_json::from_value(item(id, true)).unwrap();
@@ -576,7 +570,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         fixture.open().await;
         let completion = fixture.store.dispatch(Intent::ReadItem(op::ReadItem {
             thread_id: agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
                 id: "A".into(),
             },
             turn_id: "turn".into(),
@@ -584,7 +578,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         }));
         for iteration in 0..=12 {
             let request = fixture.requests.recv().await.unwrap();
-            assert_eq!(request["method"], "host/session/item/read");
+            assert_eq!(request["method"], "host/conversation/hydrate");
             let body = command(&format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE)));
             let grant = fixture
                 .files
@@ -611,7 +605,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
                 wait_for(&fixture.store, |s| {
                     command_output(
                         &s.sessions.conversations[&agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
+                            provider: Some(agent_protocol::session::ProviderKind::Codex),
                             id: "A".into(),
                         }]
                             .turns
@@ -641,7 +635,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         completion.await.unwrap();
         let snapshot = fixture.store.snapshot();
         let turn = &snapshot.sessions.conversations[&agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            provider: Some(agent_protocol::session::ProviderKind::Codex),
             id: "A".into(),
         }]
             .turns

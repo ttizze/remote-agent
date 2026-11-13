@@ -12,7 +12,7 @@ fn changes(snapshot: &Snapshot, previous: Arc<Snapshot>) -> PresentationChanges 
 #[test]
 fn list_publication_tracks_visible_operation_phases_without_reacting_to_generations() {
     use crate::{
-        models::{ListPart, Project, ThreadList},
+        models::{Project, ThreadList},
         state::operations::{OperationKey, OperationPhase, OperationState},
     };
     for count in [0, 1, 16, 512] {
@@ -22,30 +22,26 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
                 ..Default::default()
             })
             .collect();
-        let keys: Vec<_> = [
-            OperationKey::SessionList,
-            OperationKey::SessionPage {
-                part: ListPart::Projects,
-            },
-            OperationKey::SessionPage {
-                part: ListPart::Chats,
-            },
-        ]
-        .into_iter()
-        .chain(projects.iter().map(|project| OperationKey::ProjectList {
-            project_id: project.id.clone(),
-        }))
-        .collect();
+        let keys: Vec<_> = [OperationKey::SessionList, OperationKey::ListSearch]
+            .into_iter()
+            .chain(
+                projects
+                    .iter()
+                    .map(|project| OperationKey::ListDecorations {
+                        scope: agent_protocol::operations::ListDecorationScope::Project {
+                            project_id: project.id.clone(),
+                        },
+                    }),
+            )
+            .collect();
         let previous = Arc::new(Snapshot {
             lists: crate::state::Lists {
                 threads: Some(Arc::new(ThreadList {
-                    revision: 1,
                     limit: 5,
                     data: Vec::new(),
                     projects,
                     has_more: false,
                     has_more_projects: false,
-                    project_pages: Default::default(),
                     provider_errors: None,
                 })),
                 ..Default::default()
@@ -96,8 +92,10 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
             OperationKey::WorkspaceReview {
                 pane: String::new(),
             },
-            OperationKey::ProjectList {
-                project_id: "not-visible".into(),
+            OperationKey::ListDecorations {
+                scope: agent_protocol::operations::ListDecorationScope::Project {
+                    project_id: "not-visible".into(),
+                },
             },
         ] {
             let mut next = previous.as_ref().clone();
@@ -124,8 +122,7 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
 #[test]
 fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
     use agent_protocol::{
-        live_activity::{TaskActivityState, TaskActivitySummary},
-        models::SessionStatus,
+        conversation::records,
         session::{ProviderKind, SessionRef},
     };
     let id = SessionRef::new(ProviderKind::Codex, "question".into()).unwrap();
@@ -143,34 +140,29 @@ fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
         },
         ..Default::default()
     };
-    Arc::make_mut(&mut snapshot.lists.activity)
-        .active
-        .insert(id.clone(), true);
-    for (revision, waiting, changed) in [
-        (1, false, false),
-        (2, true, true),
-        (3, true, false),
-        (4, false, true),
-    ] {
-        let before = Arc::new(snapshot.clone());
-        let _ = snapshot.accept_task_activity(TaskActivityState {
-            attention: Vec::new(),
-            revision,
-            statuses: vec![(id.clone(), SessionStatus::Running)],
-            waiting: if waiting {
-                vec![id.clone()]
-            } else {
-                Vec::new()
-            },
-            background: Vec::new(),
-            unread: Vec::new(),
-            display: TaskActivitySummary {
-                waiting: u32::from(waiting),
-                running: u32::from(!waiting),
+    crate::state::list_sync::set_activity(
+        &mut snapshot,
+        vec![(
+            id.clone(),
+            records::Activity {
+                status: agent_protocol::execution::SessionStatus::Running,
                 ..Default::default()
-            }
-            .display(),
-        });
+            },
+        )],
+    );
+    for (waiting, changed) in [(false, false), (true, true), (true, false), (false, true)] {
+        let before = Arc::new(snapshot.clone());
+        crate::state::list_sync::set_activity(
+            &mut snapshot,
+            vec![(
+                id.clone(),
+                records::Activity {
+                    status: agent_protocol::execution::SessionStatus::Running,
+                    waiting,
+                    ..Default::default()
+                },
+            )],
+        );
         assert!(Arc::ptr_eq(
             &snapshot.lists.activity,
             &before.lists.activity
@@ -230,7 +222,6 @@ fn waiting_publication_keeps_distinct_state_and_empty_state_comparisons() {
     let activity = |count| {
         Arc::new(TaskActivityState {
             attention: Vec::new(),
-            revision: 1,
             statuses: vec![],
             waiting: (0..count)
                 .map(|index| SessionRef::new(ProviderKind::Codex, format!("task{index}")).unwrap())
@@ -250,14 +241,18 @@ fn waiting_publication_keeps_distinct_state_and_empty_state_comparisons() {
         });
         let mut next = previous.as_ref().clone();
         assert!(next.list_source().equivalent(&previous.list_source()));
-        Arc::make_mut(next.lists.task_activity.as_mut().unwrap()).revision += 1;
+        next.lists.task_activity = next
+            .lists
+            .task_activity
+            .as_ref()
+            .map(|activity| Arc::new(activity.as_ref().clone()));
         assert!(next.list_source().equivalent(&previous.list_source()));
         if count > 0 {
             Arc::make_mut(next.lists.task_activity.as_mut().unwrap())
                 .waiting
                 .last_mut()
                 .unwrap()
-                .provider = ProviderKind::Claude;
+                .provider = Some(ProviderKind::Claude);
             assert!(!next.list_source().equivalent(&previous.list_source()));
         }
         next.lists.task_activity = None;

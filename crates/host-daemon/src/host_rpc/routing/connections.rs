@@ -1,8 +1,8 @@
 //! Client connections: outbound byte budgets, delivery and connection-wide notifications.
 use super::*;
 
-pub(super) const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
-pub(super) fn frame_cost(capacity: usize) -> usize {
+pub(in crate::host_rpc) const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+pub(in crate::host_rpc) fn frame_cost(capacity: usize) -> usize {
     capacity + std::mem::size_of::<Vec<u8>>()
 }
 pub struct HostSession {
@@ -74,36 +74,8 @@ impl Outbound {
 }
 
 fn close_session(state: &Mutex<State>, session: SessionId) {
-    let actors: HashMap<_, _> = {
-        let mut state = lock_state(state);
-        if let Some(connection) = state.sessions.remove(&session) {
-            connection.alive.store(false, Relaxed);
-        }
-        let targets: Vec<_> = state
-            .subscriptions
-            .values()
-            .filter(|(_, owner)| *owner == session)
-            .map(|(target, _)| target.clone())
-            .collect();
-        state
-            .subscriptions
-            .retain(|_, (_, owner)| *owner != session);
-        targets
-            .into_iter()
-            .filter_map(|target| {
-                state
-                    .executions
-                    .get(&target)
-                    .cloned()
-                    .map(|actor| (target, actor))
-            })
-            .collect()
-    };
-    for (target, actor) in actors {
-        lock_state(&actor)
-            .subscriptions
-            .retain(|_, (owner, _)| *owner != session);
-        prune(state, &target, &actor);
+    if let Some(connection) = lock_state(state).sessions.remove(&session) {
+        connection.alive.store(false, Relaxed);
     }
 }
 
@@ -157,6 +129,14 @@ impl SessionRouter {
             .map(|output| output.principal)
             .ok_or_else(|| "connection is closed".into())
     }
+    pub(in crate::host_rpc) fn queue_budget(
+        &self,
+        session: SessionId,
+    ) -> Result<Arc<AtomicUsize>, String> {
+        self.connection(session)
+            .map(|outbound| outbound.bytes)
+            .ok_or_else(|| "connection is closed".into())
+    }
     pub(super) fn connection(&self, session: SessionId) -> Option<Outbound> {
         lock_state(&self.state)
             .sessions
@@ -207,29 +187,29 @@ impl SessionRouter {
             .filter_map(|(id, output)| output.try_send(id, frame.clone()).is_err().then_some(id))
             .collect()
     }
-    pub(in crate::host_rpc) fn list_revision(&self) -> u64 {
-        lock_state(&self.state).list_revision
-    }
-    pub(crate) fn broadcast(&self, mut notification: Notification) {
-        if matches!(
-            notification,
-            Notification::SessionUpdated { .. } | Notification::SessionRenamed { .. }
-        ) {
-            let mut state = lock_state(&self.state);
-            state.list_revision += 1;
-            match &mut notification {
-                Notification::SessionUpdated { thread, project } => {
-                    thread.list_revision = state.list_revision;
-                    if let Some(project) = project {
-                        project.list_revision = state.list_revision;
-                    }
-                }
-                Notification::SessionRenamed { revision, .. } => *revision = state.list_revision,
-                _ => unreachable!(),
-            }
-        }
+    pub(crate) fn broadcast(&self, notification: Notification) {
         let failed =
             self.broadcast_frames(protocol::encode(notification).expect("notification encodes"));
         self.close_failed(failed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn byte_budget_disconnects_only_the_slow_connection() {
+        let router = SessionRouter::new();
+        let slow = router.open_session();
+        let mut healthy = router.open_session();
+        let capacity = MAX_QUEUED_BYTES - std::mem::size_of::<Vec<u8>>();
+        router
+            .send_frame(slow.id(), Vec::with_capacity(capacity))
+            .unwrap();
+        assert!(router.send_frame(slow.id(), vec![1]).is_err());
+        assert!(router.ensure_session(slow.id()).is_err());
+        router.send_frame(healthy.id(), vec![2]).unwrap();
+        assert_eq!(healthy.recv().await, Some(vec![2]));
+        assert!(router.ensure_session(healthy.id()).is_ok());
     }
 }

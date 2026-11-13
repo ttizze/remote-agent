@@ -113,8 +113,6 @@ impl Pane {
                 pane.dispatch(Intent::CreateSession(op::CreateSession {
                     provider,
                     cwd: Some(state.navigation.cwd.clone()),
-                    model: None,
-                    initial_input: None,
                 }))
             };
             let outcome = creation.await.map_err(error)?;

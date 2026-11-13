@@ -427,6 +427,7 @@ pub(super) fn content_item(
             let string = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
             match block["name"].as_str() {
                 Some("Bash") => ItemBody::CommandExecution {
+                    output_omitted: false,
                     command: string("command"),
                     cwd: cwd.map(str::to_owned),
                     output: String::new(),
@@ -571,6 +572,7 @@ pub(super) fn tool_result_body(body: &ItemBody, content: &Value, metadata: &Valu
             exit_code,
             ..
         } => ItemBody::CommandExecution {
+            output_omitted: false,
             command: command.clone(),
             cwd: cwd.clone(),
             output: output(),

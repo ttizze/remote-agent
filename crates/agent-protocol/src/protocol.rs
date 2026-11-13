@@ -16,15 +16,6 @@ pub enum Notification {
     ProviderSettings {
         settings: crate::providers::ProviderSettings,
     },
-    #[serde(rename = "host/taskActivity/changed")]
-    TaskActivity {
-        state: crate::live_activity::TaskActivityState,
-    },
-    #[serde(rename = "host/session/activity")]
-    Activity {
-        session: crate::session::SessionRef,
-        active: bool,
-    },
     #[serde(rename = "host/terminal/output")]
     Output {
         #[serde(rename = "processHandle")]
@@ -60,19 +51,6 @@ pub enum Notification {
         #[serde(rename = "processHandle")]
         handle: String,
     },
-    #[serde(rename = "host/session/renamed")]
-    SessionRenamed {
-        session: crate::session::SessionRef,
-        name: Option<String>,
-        revision: u64,
-    },
-    #[serde(rename = "host/session/updated")]
-    SessionUpdated {
-        thread: Box<crate::models::Thread>,
-        project: Option<crate::models::Project>,
-    },
-    #[serde(rename = "host/session/historyReplaced")]
-    SessionHistoryReplaced { thread: Box<crate::models::Thread> },
     #[serde(other)]
     Unsupported,
 }
@@ -123,17 +101,19 @@ macro_rules! results {
     }
 }
 results! {
+    List(crate::conversation::records::OpenedList),
+    CommandOutput(crate::conversation::records::OpenedOutput),
+    ConversationHydration(crate::conversation::records::Hydrated),
+    ConversationReceipts(crate::conversation::records::Receipts),
     ProviderSettings(crate::providers::ProviderSettings),
     HostSoftware(crate::operations::HostSoftware),
     FileMetadataEntries(crate::file_metadata::FileMetadataEntries),
     HostUpdate(crate::operations::HostUpdate), HostIdentity(crate::operations::HostIdentity),
     HandoffHistory(crate::handoff::Page),
-    TaskActivity(crate::live_activity::TaskActivityState),
     LiveActivity(crate::live_activity::LiveActivityRegistration),
     Browser(crate::browser::BrowserFrame),
-    Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
-    History(crate::session::HistoryPage),
-    Thread(crate::models::ThreadResponse), Threads(crate::models::ThreadList),
+    Conversation(crate::conversation::records::Opened), ConversationAck(crate::conversation::records::Acknowledged), ConversationRows(Vec<crate::conversation::records::Message>),
+    Threads(crate::models::ThreadList),
     Decorations(crate::operations::ListDecorations),
     ProjectScan(crate::project_import::ProjectScan),
     ProjectImport(crate::project_import::ProjectImportResult),
@@ -154,7 +134,6 @@ results! {
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
-    Submission(crate::operations::SubmissionReceipt),
     Unit(()), Text(String), CodexCli(crate::operations::CodexCliStatus)
 }
 #[derive(Debug, Serialize, Deserialize)]

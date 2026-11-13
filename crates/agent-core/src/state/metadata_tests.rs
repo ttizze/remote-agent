@@ -11,10 +11,10 @@ fn batch_metadata_keeps_first_rows_provider_identity_and_absent_results() {
     let claude = id(ProviderKind::Claude, "same");
     let read = id(ProviderKind::Codex, "read");
     let missing = id(ProviderKind::Codex, "missing");
-    let make = |id: Option<SessionRef>, name: &str, revision| Thread {
+    let make = |id: Option<SessionRef>, name: &str, updated_at| Thread {
         id,
         name: Some(name.into()),
-        list_revision: revision,
+        updated_at: Some(updated_at as f64),
         ..Default::default()
     };
     let conversations = [(read.clone(), Arc::new(make(None, "Read conversation", 1)))].into();

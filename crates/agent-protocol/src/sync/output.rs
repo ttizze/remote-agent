@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 const TAIL_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
     pub offset: u64,
     pub text: String,

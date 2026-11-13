@@ -265,7 +265,7 @@ private extension ProjectSummary {
 
 private extension ThreadSummary {
     var listKey: String {
-        "\(hostId):\(id.provider.bexKey):\(id.id)"
+        "\(hostId):\((id.provider?.bexKey ?? "bex")):\(id.id)"
     }
 }
 
@@ -295,7 +295,7 @@ private struct ThreadListRow: View {
     let open: () -> Void
 
     private var accessibilityID: String {
-        "\(thread.id.provider.bexKey):\(thread.id.id)"
+        "\((thread.id.provider?.bexKey ?? "bex")):\(thread.id.id)"
     }
 
     var body: some View {

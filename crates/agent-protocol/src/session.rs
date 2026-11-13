@@ -3,10 +3,7 @@
 use crate::execution::ExecutionError;
 use crate::models::{Item, ItemBody, SessionStatus, Thread, Turn, TurnStatus};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,18 +24,20 @@ impl ProviderKind {
     }
 }
 
-/// A conversation address, scoped by its originating provider. The Host may
-/// bind an admitted task to a native provider session after issuing its address.
+/// Native conversations retain their provider-qualified addresses. Bex-created
+/// conversations have provider-independent UUIDs before the first submission.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "SessionIdentity")]
 pub struct SessionRef {
-    pub provider: ProviderKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderKind>,
     pub id: String,
 }
 
 #[derive(Deserialize)]
 struct SessionIdentity {
-    provider: ProviderKind,
+    #[serde(default)]
+    provider: Option<ProviderKind>,
     id: String,
 }
 impl TryFrom<SessionIdentity> for SessionRef {
@@ -49,12 +48,24 @@ impl TryFrom<SessionIdentity> for SessionRef {
 }
 
 impl SessionRef {
-    pub fn new(provider: ProviderKind, id: String) -> Result<Self, &'static str> {
-        let session = Self { provider, id };
+    pub fn new(
+        provider: impl Into<Option<ProviderKind>>,
+        id: String,
+    ) -> Result<Self, &'static str> {
+        let session = Self {
+            provider: provider.into(),
+            id,
+        };
         session.validate()?;
         Ok(session)
     }
+    pub fn native_provider(&self) -> Result<ProviderKind, &'static str> {
+        self.provider.ok_or("native session requires a provider")
+    }
     pub fn validate(&self) -> Result<(), &'static str> {
+        if self.provider.is_none() && uuid::Uuid::parse_str(&self.id).is_err() {
+            return Err("Bex conversation ID must be a UUID");
+        }
         if self.id.is_empty() || self.id.len() > 4096 || self.id.trim() != self.id {
             return Err("native session ID is required");
         }
@@ -119,17 +130,6 @@ pub enum SessionChange {
     Workspace {
         cwd: String,
     },
-    Preparation {
-        preparation: Option<SessionPreparation>,
-    },
-    Submission {
-        id: crate::ids::ClientInputId,
-        delivery: SubmissionDelivery,
-    },
-    /// The whole queue of input waiting for the running turn, in order.
-    Queue {
-        queue: crate::operations::InputQueue,
-    },
     Request {
         request: crate::requests::Request,
     },
@@ -154,10 +154,6 @@ pub enum SessionChange {
     Item {
         turn_id: crate::ids::TurnId,
         item: Arc<Item>,
-    },
-    TurnItems {
-        turn_id: crate::ids::TurnId,
-        items: Vec<Arc<Item>>,
     },
     RemoveItem {
         turn_id: crate::ids::TurnId,
@@ -248,11 +244,6 @@ pub struct Timeline {
     pub status: SessionStatus,
     pub turns: Option<Vec<Arc<Turn>>>,
     pub requests: std::collections::BTreeMap<crate::ids::RequestId, Arc<crate::requests::Request>>,
-    pub submissions: std::collections::BTreeMap<crate::ids::ClientInputId, SubmissionDelivery>,
-    /// Input waiting for the running turn, in the order it will start.
-    pub queue: crate::operations::InputQueue,
-    /// None means no observation; Some(None) explicitly clears preparation.
-    pub preparation: Option<Option<SessionPreparation>>,
     pub background: Vec<crate::execution::BackgroundTask>,
 }
 
@@ -316,7 +307,6 @@ impl SessionChange {
         match self {
             Self::Turn { turn, .. } => Some(&turn.id),
             Self::Item { turn_id, .. }
-            | Self::TurnItems { turn_id, .. }
             | Self::RemoveItem { turn_id, .. }
             | Self::Text { turn_id, .. }
             | Self::ReasoningPart { turn_id, .. }
@@ -324,9 +314,6 @@ impl SessionChange {
             Self::Status { .. }
             | Self::Background { .. }
             | Self::Workspace { .. }
-            | Self::Preparation { .. }
-            | Self::Submission { .. }
-            | Self::Queue { .. }
             | Self::Request { .. }
             | Self::RequestDelivery { .. }
             | Self::ResolveRequest { .. }
@@ -340,9 +327,6 @@ impl SessionChange {
             status: next.status,
             turns: next.turns,
             requests: next.requests,
-            submissions: next.submissions,
-            queue: next.queue,
-            preparation: Some(next.preparation),
             background: next.background,
         });
         result?;
@@ -351,9 +335,6 @@ impl SessionChange {
             status: timeline.status,
             turns: timeline.turns,
             requests: timeline.requests,
-            submissions: timeline.submissions,
-            queue: timeline.queue,
-            preparation: timeline.preparation.flatten(),
             background: timeline.background,
             ..next
         })
@@ -368,18 +349,6 @@ impl SessionChange {
                 Self::Unsupported => return Ok(()),
                 Self::Workspace { cwd } => {
                     next.cwd = Some(cwd.clone());
-                    return Ok(());
-                }
-                Self::Preparation { preparation } => {
-                    next.preparation = Some(preparation.clone());
-                    return Ok(());
-                }
-                Self::Submission { id, delivery } => {
-                    next.submissions.insert(id.clone(), delivery.clone());
-                    return Ok(());
-                }
-                Self::Queue { queue } => {
-                    next.queue = queue.clone();
                     return Ok(());
                 }
                 Self::Request { request } => {
@@ -433,17 +402,10 @@ impl SessionChange {
                 };
                 return Ok(());
             }
-            if index.is_none() && matches!(self, Self::TurnItems { .. }) {
-                return Ok(());
-            }
             let index = index.ok_or(UpdateError::MissingTurn)?;
             let previous_status = next.turns.as_ref().unwrap()[index].status;
             let turn = Arc::make_mut(&mut next.turns.as_mut().unwrap()[index]);
             match self {
-                Self::TurnItems { items, .. } => {
-                    turn.items = Some(items.clone());
-                    turn.items_summary = false;
-                }
                 Self::Item { item, .. } => {
                     let items = turn.items.get_or_insert_default();
                     if let Some(index) = items.iter().position(|current| current.id == item.id) {
@@ -472,24 +434,7 @@ impl SessionChange {
                     if item.is_deferred() {
                         return Ok(());
                     }
-                    match (field, item.body_mut()) {
-                        (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => {
-                            text.push_str(delta)
-                        }
-                        (TextField::CommandOutput, ItemBody::CommandExecution { output, .. })
-                        | (TextField::FileOutput, ItemBody::FileChange { output, .. }) => {
-                            output.push_str(delta)
-                        }
-                        (
-                            TextField::ReasoningContent { index },
-                            ItemBody::Reasoning { content, .. },
-                        ) => append_part(content, *index, delta)?,
-                        (
-                            TextField::ReasoningSummary { index },
-                            ItemBody::Reasoning { summary, .. },
-                        ) => append_part(summary, *index, delta)?,
-                        _ => return Err(UpdateError::WrongBody),
-                    }
+                    text_delta(item.body_mut(), *field, delta)?;
                 }
                 Self::ReasoningPart {
                     item_id,
@@ -539,9 +484,6 @@ impl SessionChange {
                     turn.error = Some(error);
                 }
                 Self::Workspace { .. }
-                | Self::Preparation { .. }
-                | Self::Submission { .. }
-                | Self::Queue { .. }
                 | Self::Status { .. }
                 | Self::Background { .. }
                 | Self::Turn { .. }
@@ -1179,34 +1121,6 @@ pub fn append_items(mut previous: Vec<Arc<Item>>, incoming: &[Arc<Item>]) -> Vec
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OpenSession {
-    pub session: SessionRef,
-    pub limit: usize,
-    #[serde(default)]
-    pub include_activity: bool,
-    /// The transcript version of the window the client already holds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub known_version: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadHistory {
-    pub session: SessionRef,
-    pub cursor: String,
-    #[serde(default)]
-    pub include_activity: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadTurnItems {
-    pub session: SessionRef,
-    pub turn_id: crate::ids::TurnId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct HistoryPage {
     pub turns: Vec<Arc<Turn>>,
     /// Availability of the source ranges, independent of the continuation cursor.
@@ -1214,118 +1128,9 @@ pub struct HistoryPage {
     pub next_cursor: Option<String>,
 }
 
-impl HistoryPage {
-    /// Join this older page before the thread's turns and advance its cursor.
-    pub fn prepend_to(&self, thread: &mut crate::models::Thread) {
-        thread.turns = Some(prepend_history(
-            &self.turns,
-            thread.turns.as_deref().unwrap_or_default(),
-        ));
-        thread.history_cursor = self.next_cursor.clone();
-        thread.history_has_more = Some(thread.history_cursor.is_some());
-        thread.history_read_state = self.history_read_state.clone().or_else(|| {
-            Some(HistoryReadState::new(
-                if thread.history_cursor.is_some() {
-                    HistoryReadKind::Partial
-                } else {
-                    HistoryReadKind::Complete
-                },
-                Vec::new(),
-            ))
-        });
-    }
-}
-
 /// Native turn cursors prove adjacency; repeated IDs remain separate occurrences.
 pub fn prepend_history(older: &[Arc<Turn>], current: &[Arc<Turn>]) -> Vec<Arc<Turn>> {
     older.iter().chain(current).cloned().collect()
-}
-
-/// Retain an older cache only when the refreshed window overlaps in order.
-/// Repeated identities cannot prove which historical occurrence overlaps.
-pub fn retained_history(previous: &[Arc<Turn>], incoming: &[Arc<Turn>]) -> Option<Vec<Arc<Turn>>> {
-    let overlap = ordered_overlap(previous, incoming);
-    if overlap == 0 {
-        return None;
-    }
-    let prefix = previous.len() - overlap;
-    let mut hydrated = incoming.to_vec();
-    for (index, cached) in previous[prefix..].iter().enumerate() {
-        let fresh = &mut hydrated[index];
-        if (fresh.items_summary || fresh.items.is_none()) && cached.items.is_some() {
-            let cached_ids: HashSet<_> =
-                cached.items.iter().flatten().map(|item| &item.id).collect();
-            let changed = fresh.items.is_some()
-                && (fresh.status == TurnStatus::Running
-                    || fresh.status != cached.status
-                    || fresh.duration_ms != cached.duration_ms
-                    || fresh
-                        .items
-                        .iter()
-                        .flatten()
-                        .any(|item| !cached_ids.contains(&item.id)));
-            let fresh = Arc::make_mut(fresh);
-            let updates: Vec<_> = fresh
-                .items
-                .iter()
-                .flatten()
-                .filter(|item| !item.is_deferred() || changed || !cached_ids.contains(&item.id))
-                .cloned()
-                .collect();
-            fresh.items = Some(append_items(
-                cached.items.clone().unwrap_or_default(),
-                &updates,
-            ));
-            fresh.items_summary = cached.items_summary || changed;
-        }
-    }
-    Some(prepend_history(&previous[..prefix], &hydrated))
-}
-
-fn ordered_overlap(previous: &[Arc<Turn>], incoming: &[Arc<Turn>]) -> usize {
-    if previous
-        .iter()
-        .map(|turn| &turn.id)
-        .collect::<HashSet<_>>()
-        .len()
-        != previous.len()
-        || incoming
-            .iter()
-            .map(|turn| &turn.id)
-            .collect::<HashSet<_>>()
-            .len()
-            != incoming.len()
-    {
-        return 0;
-    }
-    (1..=previous.len().min(incoming.len()))
-        .rev()
-        .find(|&count| {
-            previous[previous.len() - count..]
-                .iter()
-                .map(|turn| &turn.id)
-                .eq(incoming[..count].iter().map(|turn| &turn.id))
-        })
-        .unwrap_or(0)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenedSession {
-    pub session: SessionRef,
-    #[serde(skip)]
-    pub subscription_id: uuid::Uuid,
-    pub response: crate::models::ThreadResponse,
-    /// The known window is current: the response omits its turns and paging.
-    #[serde(default)]
-    pub unchanged: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionUpdate {
-    pub subscription_id: uuid::Uuid,
-    pub change: SessionChange,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1346,6 +1151,7 @@ pub fn direct_input_unavailable_reason(can_accept_direct_input: Option<bool>) ->
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HistoryReadKind {
+    Loading,
     Complete,
     Partial,
     Incomplete,
@@ -1362,6 +1168,24 @@ impl HistoryReadState {
     pub fn new(kind: HistoryReadKind, issues: Vec<String>) -> Self {
         Self { kind, issues }
     }
+}
+
+/// Apply one native text fragment to its typed body. Owners decide where the
+/// returned body is saved; this function has no state or I/O dependencies.
+pub fn text_delta(body: &mut ItemBody, field: TextField, delta: &str) -> Result<(), UpdateError> {
+    match (field, body) {
+        (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => text.push_str(delta),
+        (TextField::CommandOutput, ItemBody::CommandExecution { output, .. })
+        | (TextField::FileOutput, ItemBody::FileChange { output, .. }) => output.push_str(delta),
+        (TextField::ReasoningContent { index }, ItemBody::Reasoning { content, .. }) => {
+            append_part(content, index, delta)?
+        }
+        (TextField::ReasoningSummary { index }, ItemBody::Reasoning { summary, .. }) => {
+            append_part(summary, index, delta)?
+        }
+        _ => return Err(UpdateError::WrongBody),
+    }
+    Ok(())
 }
 
 fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), UpdateError> {
@@ -1381,13 +1205,11 @@ fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), U
 mod history_tests {
     use super::*;
     use proptest::prelude::*;
-    use std::slice::from_ref;
 
-    fn turn(id: usize, range: std::ops::Range<usize>, summary: bool) -> Arc<Turn> {
+    fn turn(id: usize, range: std::ops::Range<usize>) -> Arc<Turn> {
         Arc::new(Turn {
             id: format!("turn-{id}").into(),
             status: TurnStatus::Completed,
-            items_summary: summary,
             items: Some(
                 range
                     .map(|item| {
@@ -1405,8 +1227,8 @@ mod history_tests {
 
     #[test]
     fn item_updates_keep_positions_and_use_the_last_incoming_body() {
-        let old = turn(0, 0..3, false).items.clone().unwrap();
-        let mut incoming = turn(0, 2..5, false).items.clone().unwrap();
+        let old = turn(0, 0..3).items.clone().unwrap();
+        let mut incoming = turn(0, 2..5).items.clone().unwrap();
         let last = Arc::new(Item::new(
             "item-2".into(),
             Default::default(),
@@ -1469,167 +1291,10 @@ mod history_tests {
         fn cursor_pages_preserve_every_turn_and_item_occurrence(
             sizes in prop::collection::vec(1usize..25, 1..12), cut in 0usize..12,
         ) {
-            let full: Vec<_> = sizes.iter().enumerate().map(|(id, size)| turn(id % 2, 0..*size, true)).collect();
+            let full: Vec<_> = sizes.iter().enumerate().map(|(id, size)| turn(id % 2, 0..*size)).collect();
             let cut = cut.min(full.len());
             prop_assert_eq!(prepend_history(&full[..cut], &full[cut..]), full);
         }
 
-        #[test]
-        fn summary_refresh_keeps_details_only_in_an_overlapping_window(
-            count in 1usize..64, added in 0usize..12,
-        ) {
-            let cached: Vec<_> = (0..count).map(|id| turn(id, 0..8, false)).collect();
-            let first = (count + added).saturating_sub(5);
-            let fresh: Vec<_> = (first..count+added).map(|id| turn(id, 0..1, true)).collect();
-            let retained = retained_history(&cached, &fresh);
-            if added >= 5 {
-                prop_assert!(retained.is_none());
-            } else {
-                let retained = retained.unwrap();
-                prop_assert_eq!(retained.len(), count + added);
-                for (id, actual) in retained.iter().enumerate() {
-                    prop_assert_eq!(&actual.id, &format!("turn-{id}").into());
-                    prop_assert_eq!(actual.items.as_ref().unwrap().len(), if id < count {8} else {1});
-                    prop_assert_eq!(actual.items_summary, id >= count);
-                }
-            }
-            prop_assert!(cached.iter().all(|turn| !turn.items_summary && turn.items.as_ref().unwrap().len() == 8));
-        }
-    }
-
-    #[test]
-    fn changed_summaries_and_repeated_boundaries_do_not_claim_complete_details() {
-        let cached = turn(0, 0..8, false);
-        let fresh = turn(0, 7..9, true);
-        let retained = retained_history(from_ref(&cached), &[fresh]).unwrap();
-        assert!(retained[0].items_summary);
-        assert_eq!(retained[0].items.as_ref().unwrap().len(), 9);
-        assert_eq!(
-            retained_history(&[cached.clone(), cached.clone()], &[cached]),
-            None
-        );
-    }
-
-    #[test]
-    fn refresh_keeps_unchanged_bodies_but_includes_new_deferred_items_and_reloads_running_activity()
-    {
-        let cached = turn(0, 0..1, false);
-        let mut fresh = turn(0, 0..2, true);
-        crate::models::defer_item_details(std::slice::from_mut(&mut fresh), 0);
-        let retained = retained_history(from_ref(&cached), &[fresh]).unwrap();
-        assert_eq!(retained[0].items.as_ref().unwrap().len(), 2);
-        assert!(retained[0].items.as_ref().unwrap()[0].is_deferred());
-        assert!(retained[0].items_summary);
-
-        let mut running = cached.clone();
-        Arc::make_mut(&mut running).status = TurnStatus::Running;
-        let mut summary = running.clone();
-        Arc::make_mut(&mut summary).items_summary = true;
-        assert!(retained_history(&[running], &[summary]).unwrap()[0].items_summary);
-
-        let mut unchanged = turn(0, 0..1, true);
-        crate::models::defer_item_details(std::slice::from_mut(&mut unchanged), 0);
-        let retained = retained_history(from_ref(&cached), &[unchanged]).unwrap();
-        assert_eq!(retained[0].items, cached.items);
-        assert!(!retained[0].items_summary);
-        let mut update = turn(0, 0..1, true);
-        Arc::make_mut(&mut update).items = Some(vec![Arc::new(Item::new(
-            "item-0".into(),
-            Default::default(),
-            ItemBody::AssistantText {
-                text: "fresh answer".into(),
-                phase: crate::models::AssistantPhase::Final,
-            },
-        ))]);
-        let retained = retained_history(&[cached], from_ref(&update)).unwrap();
-        assert_eq!(retained[0].items, update.items);
-        assert!(!retained[0].items_summary);
-    }
-
-    #[test]
-    fn full_and_not_loaded_views_keep_their_distinct_cache_semantics() {
-        let cached = turn(0, 0..8, false);
-        let full = turn(0, 0..2, false);
-        assert_eq!(
-            retained_history(from_ref(&cached), from_ref(&full)).unwrap(),
-            vec![full]
-        );
-        let mut omitted = turn(0, 0..0, false);
-        Arc::make_mut(&mut omitted).items = None;
-        let retained = retained_history(from_ref(&cached), &[omitted]).unwrap();
-        assert_eq!(retained[0].items, cached.items);
-        assert!(!retained[0].items_summary);
-        let mut absent = cached.clone();
-        Arc::make_mut(&mut absent).items = None;
-        let summary = turn(0, 0..1, true);
-        assert_eq!(
-            retained_history(&[absent], from_ref(&summary)).unwrap(),
-            vec![summary]
-        );
-        for changed in ["status", "duration"] {
-            let mut summary = turn(0, 0..1, true);
-            if changed == "status" {
-                Arc::make_mut(&mut summary).status = TurnStatus::Failed;
-            } else {
-                Arc::make_mut(&mut summary).duration_ms = Some(500);
-            }
-            let retained = retained_history(from_ref(&cached), from_ref(&summary)).unwrap();
-            assert!(retained[0].items_summary);
-            assert_eq!(retained[0].status, summary.status);
-            assert_eq!(retained[0].duration_ms, summary.duration_ms);
-        }
-    }
-
-    #[test]
-    fn hydration_replaces_only_items_and_later_deltas_continue_in_order() {
-        let mut source = Thread {
-            status: SessionStatus::Running,
-            turns: Some(vec![turn(0, 0..1, true)]),
-            ..Default::default()
-        };
-        let item = Arc::new(Item::new(
-            "answer".into(),
-            Default::default(),
-            ItemBody::AssistantText {
-                text: "prefix".into(),
-                phase: crate::models::AssistantPhase::Final,
-            },
-        ));
-        source = SessionChange::TurnItems {
-            turn_id: "turn-0".into(),
-            items: vec![item],
-        }
-        .apply(&source)
-        .unwrap();
-        source = SessionChange::Text {
-            turn_id: "turn-0".into(),
-            item_id: "answer".into(),
-            field: TextField::AssistantText,
-            delta: " + delta".into(),
-        }
-        .apply(&source)
-        .unwrap();
-        assert_eq!(source.status, SessionStatus::Running);
-        source = SessionChange::Status {
-            status: SessionStatus::Idle,
-        }
-        .apply(&source)
-        .unwrap();
-        assert_eq!(source.status, SessionStatus::Idle);
-        let turn = &source.turns.as_ref().unwrap()[0];
-        assert_eq!(turn.status, TurnStatus::Completed);
-        assert!(!turn.items_summary);
-        assert!(
-            matches!(turn.items.as_ref().unwrap()[0].body(), ItemBody::AssistantText {text, ..} if text == "prefix + delta")
-        );
-        assert_eq!(
-            SessionChange::TurnItems {
-                turn_id: "no-longer-visible".into(),
-                items: vec![]
-            }
-            .apply(&source)
-            .unwrap(),
-            source
-        );
     }
 }

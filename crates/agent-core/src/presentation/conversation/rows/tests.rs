@@ -433,11 +433,9 @@ fn timestamps_last_row_and_progress_are_part_of_render_identity() {
 }
 
 #[test]
-fn toggling_returns_choices_and_loads_without_mutating_the_frame_or_accepting_stale_ids() {
+fn toggling_returns_choices_without_mutating_the_frame_or_accepting_stale_ids() {
     let mut thread = source(true);
     let completed = turn(&mut thread);
-    completed.items.as_mut().unwrap().remove(0);
-    completed.items_summary = true;
     completed.status = TurnStatus::Completed;
     let raw = render(thread, None);
     let collapsed = project(raw.clone(), TIMELINE, None);
@@ -445,18 +443,14 @@ fn toggling_returns_choices_and_loads_without_mutating_the_frame_or_accepting_st
     let change = collapsed
         .toggle_activity(id.clone(), HashMap::new())
         .unwrap();
-    let load = change.load_items.unwrap();
-    assert_eq!(load.thread_id.id, "thread");
-    assert_eq!(load.turn_id.as_str(), "turn");
     assert!(collapsed.expansion.is_empty());
     assert!(!header(&collapsed).expanded);
-    let opened = expanded(raw.clone(), change.expansion, Some(collapsed.clone()));
+    let opened = expanded(raw.clone(), change, Some(collapsed.clone()));
     assert!(header(&opened).expanded);
     let close = opened
         .toggle_activity(id.clone(), opened.expansion.clone())
         .unwrap();
-    assert!(!close.expansion.contains_key(&id));
-    assert!(close.load_items.is_none(), "closing never loads details");
+    assert!(!close.contains_key(&id));
     assert!(
         opened
             .toggle_activity(
@@ -498,6 +492,7 @@ fn queued_inputs_keep_their_footer_between_turns_and_session_rows_without_inflat
     let mut pending: std::collections::BTreeMap<_, _> = [(
         "pending".into(),
         Arc::new(PendingSubmission {
+            cursor: None,
             sequence: 0,
             submitted_at_ms: Some(12_000),
             draft_key: thread.id.as_ref().unwrap().into(),
@@ -584,7 +579,6 @@ fn scope_components_are_unambiguous_even_when_they_contain_key_delimiters() {
 fn rapid_activity_clicks_use_the_owners_pending_choices() {
     let mut thread = source(true);
     let completed = turn(&mut thread);
-    completed.items_summary = true;
     completed.status = TurnStatus::Completed;
     let raw = render(thread, None);
     let collapsed = project(raw, DOCKED, None);
@@ -592,23 +586,16 @@ fn rapid_activity_clicks_use_the_owners_pending_choices() {
     let first = collapsed
         .toggle_activity(id.clone(), HashMap::new())
         .unwrap();
-    assert!(first.load_items.is_some());
-    let second = collapsed
-        .toggle_activity(id.clone(), first.expansion)
-        .unwrap();
+    let second = collapsed.toggle_activity(id.clone(), first).unwrap();
     assert!(
-        second.expansion.is_empty(),
+        second.is_empty(),
         "a second click closes before the frame is published"
-    );
-    assert!(
-        second.load_items.is_none(),
-        "closing must not start another history read"
     );
     let third = collapsed
         .toggle_activity(id.clone(), [(id, "running".into())].into())
         .unwrap();
     assert!(
-        third.load_items.is_some(),
+        !third.is_empty(),
         "a stale running choice does not expand completed work"
     );
 }

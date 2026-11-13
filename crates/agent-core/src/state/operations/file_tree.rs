@@ -167,10 +167,7 @@ impl Operation for SearchTree {
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
-    mod host_fixture {
-        include!("../../../tests/support/host.rs");
-    }
+    use crate::test_host as host_fixture;
 
     use super::*;
     use crate::presentation::files::FileTreeSurface;
@@ -369,14 +366,13 @@ mod tests {
             let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
             let store = crate::store::Store::new(peer, initial, None);
             let mut methods = Vec::new();
-            for _ in 0..6 {
+            for _ in 0..5 {
                 let request = reader.read_request().await.unwrap().unwrap();
                 let method = request["method"].as_str().unwrap();
                 let reply = match method {
                     "host/file/openCapabilities" => json!({"editors":["zed"],"reveal":null}),
                     "host/file/tree" => json!({"entries":[{"path":"new.rs","kind":"file","ignored":false}],"truncated":false}),
-                    "host/taskActivity/read" => json!({"revision":0,"statuses":[],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()}),
-                    "host/session/list" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
+                    "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
                     other => panic!("unexpected reconnect request: {other}"),

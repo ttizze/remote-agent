@@ -209,7 +209,7 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot, pane_id: &str)
         .thread_id
         .as_ref()
         .and_then(|id| snapshot.sessions.conversations.get(id))
-        .is_some_and(|thread| thread.preparation.is_some());
+        .is_some_and(|thread| !thread.preparations.is_empty());
     if preparing || snapshot.selected_directory(&pane).is_empty() {
         if pane.workspace.review.is_some() || pane.workspace.review_cwd.is_some() {
             let pane = Arc::make_mut(snapshot.panes.get_mut(pane_id)?);

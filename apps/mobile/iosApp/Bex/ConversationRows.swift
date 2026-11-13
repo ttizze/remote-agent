@@ -216,6 +216,7 @@
         let isExpanded: Bool
         let toggleExpanded: () -> Void
         let loadDetails: () async -> String?
+        let watchOutput: (Bool) -> Void
         @State private var detailError: String?
         @State private var retry = 0
 
@@ -292,6 +293,9 @@
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .contain)
+            .onAppear { watchOutput(isExpanded) }
+            .onChange(of: isExpanded) { _, expanded in watchOutput(expanded) }
+            .onDisappear { watchOutput(false) }
         }
     }
 

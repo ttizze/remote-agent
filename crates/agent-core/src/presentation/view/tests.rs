@@ -477,15 +477,27 @@ fn language_changes_replace_localized_content_and_reject_old_projection_context(
     Arc::make_mut(thread).turns = Some(vec![Arc::new(crate::models::Turn {
         id: "work".into(),
         status: crate::models::TurnStatus::Completed,
-        items: Some(vec![Arc::new(crate::models::Item::new(
-            "answer".into(),
-            crate::models::ItemStatus::Completed,
-            crate::models::ItemBody::AssistantText {
-                text: "answer".into(),
-                phase: crate::models::AssistantPhase::Final,
-            },
-        ))]),
-        items_summary: true,
+        items: Some(vec![
+            Arc::new(crate::models::Item::new(
+                "work".into(),
+                crate::models::ItemStatus::Completed,
+                crate::models::ItemBody::CommandExecution {
+                    command: "inspect".into(),
+                    cwd: None,
+                    output: String::new(),
+                    output_omitted: false,
+                    exit_code: Some(0),
+                },
+            )),
+            Arc::new(crate::models::Item::new(
+                "answer".into(),
+                crate::models::ItemStatus::Completed,
+                crate::models::ItemBody::AssistantText {
+                    text: "answer".into(),
+                    phase: crate::models::AssistantPhase::Final,
+                },
+            )),
+        ]),
         duration_ms: Some(1000),
         ..Default::default()
     })]);

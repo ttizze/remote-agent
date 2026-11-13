@@ -259,6 +259,62 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
     });
     let documents = stored(Documents::default());
     let opened = signal(HashSet::<String>::new());
+    let watching = std::rc::Rc::new(std::cell::RefCell::new(std::collections::BTreeSet::<(
+        agent_core::session::SessionRef,
+        agent_protocol::ids::ItemId,
+    )>::new()));
+    let output_rows = computed(move || {
+        let Some(session) = connection
+            .context
+            .with(|context| context.navigation().thread_id)
+        else {
+            return std::collections::BTreeSet::new();
+        };
+        timeline.rows.with(|rows| {
+            opened.with(|opened| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let item = row.detail.as_ref()?;
+                        (item.source.data.kind == "command"
+                            && opened.contains(&item.source.data.id))
+                        .then(|| item.source.data.native_id.clone())
+                        .flatten()
+                        .map(|item| (session.clone(), item))
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+        })
+    });
+    effect({
+        let watching = watching.clone();
+        move || {
+            let next = output_rows.get();
+            let previous = std::mem::replace(&mut *watching.borrow_mut(), next.clone());
+            for (thread_id, item_id) in previous.difference(&next) {
+                connection.dispatch(Intent::WatchCommandOutput {
+                    thread_id: thread_id.clone(),
+                    item_id: item_id.clone(),
+                    watching: false,
+                });
+            }
+            for (thread_id, item_id) in next.difference(&previous) {
+                connection.dispatch(Intent::WatchCommandOutput {
+                    thread_id: thread_id.clone(),
+                    item_id: item_id.clone(),
+                    watching: true,
+                });
+            }
+        }
+    });
+    cleanup(move || {
+        for (thread_id, item_id) in watching.take() {
+            connection.dispatch(Intent::WatchCommandOutput {
+                thread_id,
+                item_id,
+                watching: false,
+            });
+        }
+    });
     effect(move || {
         scope.get();
         timeline.following.set(true);
@@ -342,9 +398,7 @@ fn handle(
         "fold" => {
             if let Some(activity) = row.activity {
                 let opening = !matches!(row.shape, Shape::Fold { open: true });
-                if let Some(load) = timeline.set_activity(activity, opening) {
-                    connection.dispatch(Intent::LoadTurnItems(load));
-                }
+                timeline.set_activity(activity, opening);
             }
         }
         "group" => timeline.toggle_group(row.id),

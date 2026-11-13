@@ -165,25 +165,14 @@ impl State {
                         .panel_scope(host.clone(), p.context.navigation().draft_key)
                 });
                 if let Some(before) = before {
-                    let before = if let Some(session) =
-                        value.snapshot.submitted_session(before.draft.clone())
-                    {
-                        let submitted = value
-                            .snapshot
-                            .panel_scope(host.clone(), DraftKey::Session { session });
-                        self.panels = self.panels.clone().rekey(before, submitted.clone());
-                        submitted
-                    } else {
-                        before
-                    };
                     self.panels = self.panels.clone().inherit_visibility(
                         before,
                         value
                             .snapshot
                             .panel_scope(host.clone(), value.context.navigation().draft_key),
+                        value.context.navigation().thread_id.is_none(),
                     );
                 }
-                // Rekey and publication are one update, so every native view sees the same scope.
                 self.publications.insert(host, Shared(value));
             }
             Update::Error(reason) => self.failure = Some(reason),
@@ -849,20 +838,18 @@ mod tests {
     }
 
     #[test]
-    fn submitting_a_draft_publishes_its_conversation_and_rekeyed_tabs_together() {
+    fn submitting_a_draft_keeps_its_panel_scope_and_tabs() {
         for navigate_to_new_chat in [false, true] {
             let mut snapshot = Snapshot::default();
             snapshot.connection.storage_scope = "storage".into();
+            let session =
+                SessionRef::new(None, "00000000-0000-0000-0000-000000000001".into()).unwrap();
+            Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
+                DraftKey::from(&session);
             let initial = Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap();
             let draft = initial.context.navigation().draft_key;
-            let before = snapshot.panel_scope("host".into(), draft.clone());
-            let session = SessionRef::new(ProviderKind::Codex, "submitted".into()).unwrap();
-            let after = snapshot.panel_scope(
-                "host".into(),
-                DraftKey::Session {
-                    session: session.clone(),
-                },
-            );
+            let before = snapshot.panel_scope("host".into(), draft);
+            let after = before.clone();
             let mut state = State::default();
             state.receive(Update::Presentation {
                 host: "host".into(),
@@ -875,7 +862,16 @@ mod tests {
             );
             state.panels = opened.panels;
             let retained = state.clone();
-            Arc::make_mut(&mut snapshot.sessions.draft_sessions).insert(draft, session.clone());
+            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+                session.clone(),
+                Arc::new(agent_protocol::models::Thread {
+                    id: Some(session.clone()),
+                    active_provider: Some(ProviderKind::Codex),
+                    ..Default::default()
+                }),
+            );
+            Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).thread_id =
+                (!navigate_to_new_chat).then(|| session.clone());
             let selected = if navigate_to_new_chat {
                 DraftKey::from("next-draft")
             } else {
@@ -888,7 +884,6 @@ mod tests {
                 value: Presentation::project(Arc::new(snapshot), "", None).unwrap(),
             });
             assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
-            assert!(state.panels.get(before.clone()).surfaces.is_empty());
             assert_eq!(
                 state.publications["host"].pane().navigation.draft_key,
                 selected
