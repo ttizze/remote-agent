@@ -8,6 +8,13 @@ use super::{
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Presence,
+    Appearance,
+}
+
 /// `t3.json` from `scripts/nsh-parity-t3.ts`.
 #[derive(Debug, Deserialize)]
 pub struct T3Capture {
@@ -302,12 +309,14 @@ fn matches(view: &NshView, matcher: &NshMatch) -> bool {
             .is_none_or(|class| view.class == class)
 }
 
-/// Every difference of `state` beyond tolerance, in the state's element order.
+/// Presence mismatches, plus visual differences in appearance mode, in the
+/// state's element order. Missing matches remain failures in both modes.
 pub fn differences(
     map: &Map,
     state: &State,
     reference: &BTreeMap<String, Measure>,
     nsh: &BTreeMap<String, Measure>,
+    mode: Mode,
 ) -> Vec<Difference> {
     let mut out = Vec::new();
     for element in elements(map, state) {
@@ -335,6 +344,9 @@ pub fn differences(
         let (Some(theirs), Some(ours)) = pair else {
             continue;
         };
+        if mode == Mode::Presence {
+            continue;
+        }
         let frames = Frames {
             map,
             state,
@@ -828,6 +840,87 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
     }
 
     #[test]
+    fn presence_checks_only_visibility_and_still_detects_missing_or_additional_elements() {
+        let mut map = Map::parse(MAP).unwrap();
+        map.states[0].elements = vec!["column".into()];
+        map.states[0].column = None;
+        let reference = BTreeMap::from([(
+            "column".into(),
+            Measure {
+                radius: Some(16.0),
+                animations: Some(vec!["shimmer".into()]),
+                ..measure([10.0, 20.0, 30.0, 40.0])
+            },
+        )]);
+        let candidate = BTreeMap::from([("column".into(), measure([100.0, 200.0, 300.0, 400.0]))]);
+        for mode in [Mode::Presence, Mode::Appearance] {
+            let differences = differences(&map, &map.states[0], &reference, &candidate, mode);
+            assert_eq!(differences.is_empty(), mode == Mode::Presence);
+            let missing =
+                super::differences(&map, &map.states[0], &reference, &BTreeMap::new(), mode);
+            assert_eq!(missing.len(), 1);
+            assert_eq!(
+                (&*missing[0].reference, &*missing[0].nsh),
+                ("shown", "missing")
+            );
+            let additional =
+                super::differences(&map, &map.states[0], &BTreeMap::new(), &candidate, mode);
+            assert_eq!(additional.len(), 1);
+            assert_eq!(
+                (&*additional[0].reference, &*additional[0].nsh),
+                ("not shown", "shown")
+            );
+        }
+    }
+
+    #[test]
+    fn image_error_presence_is_independent_of_the_os_error_wording() {
+        let map = Map::parse(include_str!("../../../../apps/nsh/parity/map.toml")).unwrap();
+        let mut picture = view(None, [0.0, 0.0, 100.0, 45.0], "", None);
+        picture.class = "BexNshNative.NativePicture".into();
+        let mut views = vec![
+            picture,
+            view(Some(0), [0.0, 15.0, 100.0, 30.0], "Retry", None),
+            view(
+                Some(0),
+                [0.0, 0.0, 100.0, 15.0],
+                "ファイルまたはフォルダが見つかりません。",
+                None,
+            ),
+        ];
+        let matcher = &map.element("markdown-image-error").unwrap().nsh;
+        assert_eq!(find(&views, matcher), Some(2));
+        // A loaded image with the error label hidden must not satisfy an error state.
+        views[2].hidden = true;
+        assert_eq!(find(&views, matcher), None);
+    }
+
+    #[test]
+    fn reference_capture_preserves_the_element_and_its_measurement_provenance() {
+        let map = Map::parse(MAP).unwrap();
+        let capture = serde_json::from_value(serde_json::json!({"elements":{"row":[{
+            "frame":[2,3,12,10],"css":{"fontSize":"16px","fontWeight":"400",
+                "lineHeight":"24px","borderRadius":"9999px"},"animations":["shine"]
+        }]}}))
+        .unwrap();
+        let image = Image {
+            width: 20,
+            height: 20,
+            pixels: vec![[13; 3]; 400],
+            scale: 1.0,
+        };
+        let measured = reference_measures(&map, &map.states[0], Some((&capture, &image)));
+        let row = &measured["row"];
+        assert_eq!(row.frame, [2.0, 3.0, 12.0, 10.0]);
+        assert_eq!(row.radius, Some(5.0));
+        assert_eq!(row.animations, Some(vec!["shine".into()]));
+        assert_eq!(row.ink.as_ref().unwrap().background, [13; 3]);
+        assert_eq!(row.note, "CSS 16px / 24px weight 400");
+        let source = reference_measures(&map, &map.states[1], None);
+        assert_eq!(source["field"].note, "sidebar.rs");
+    }
+
+    #[test]
     fn swiftui_without_layer_metadata_is_unmeasured_rather_than_static_or_square() {
         let map = Map::parse(MAP).unwrap();
         let element = map.element("column").unwrap();
@@ -1006,9 +1099,28 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
             scale: 1.0,
         };
         let row = nsh_measure(&views, 3, &image);
+        assert_eq!(row.frame, [10.0, 5.0, 40.0, 10.0]);
+        assert_eq!(row.ink.as_ref().unwrap().background, [0; 3]);
         assert_eq!(row.animations, Some(vec!["spin".into()]));
         // A radius beyond half the height draws a pill.
         assert_eq!(nsh_measure(&views, 1, &image).radius, Some(9.0));
+        // An ancestor/ordinal/child modifier cannot identify an element alone.
+        for matcher in [
+            NshMatch {
+                up: Some(Up::Levels(0)),
+                ..NshMatch::default()
+            },
+            NshMatch {
+                nth: 1,
+                ..NshMatch::default()
+            },
+            NshMatch {
+                down: vec![0],
+                ..NshMatch::default()
+            },
+        ] {
+            assert_eq!(super::find(&views, &matcher), None);
+        }
     }
 
     #[test]
@@ -1016,14 +1128,15 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
         let mut map = Map::parse(MAP).unwrap();
         map.states[0].elements = vec!["row".into()];
         let empty = BTreeMap::new();
-        let missing = differences(&map, &map.states[0], &empty, &empty);
+        let missing = differences(&map, &map.states[0], &empty, &empty, Mode::Presence);
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].metric, "not measured");
         map.states[0].absent = vec!["row".into()];
-        assert!(differences(&map, &map.states[0], &empty, &empty).is_empty());
+        assert!(differences(&map, &map.states[0], &empty, &empty, Mode::Presence).is_empty());
         let shown = BTreeMap::from([("row".into(), measure([0.0, 0.0, 10.0, 10.0]))]);
         for (reference, candidate) in [(&shown, &empty), (&empty, &shown), (&shown, &shown)] {
-            let unexpected = differences(&map, &map.states[0], reference, candidate);
+            let unexpected =
+                differences(&map, &map.states[0], reference, candidate, Mode::Presence);
             assert_eq!(unexpected.len(), 1);
             assert_eq!(unexpected[0].metric, "expected hidden");
         }
@@ -1052,7 +1165,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
             ("spinner".to_owned(), measure([10.0, 15.0, 60.0, 10.0])),
             ("icon".to_owned(), measure([10.0, 5.0, 10.0, 10.0])),
         ]);
-        let found: Vec<_> = differences(&map, state, &reference, &nsh)
+        let found: Vec<_> = differences(&map, state, &reference, &nsh, Mode::Appearance)
             .into_iter()
             .map(|difference| {
                 (
@@ -1119,7 +1232,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
                 ("column".to_owned(), measure([20.0, 30.0, 50.0, 18.0])),
                 ("row".to_owned(), measure(nsh_row)),
             ]);
-            differences(&map, state, &reference, &nsh)
+            differences(&map, state, &reference, &nsh, Mode::Appearance)
                 .into_iter()
                 .filter(|difference| difference.element == "row")
                 .map(|difference| (difference.metric, difference.reference, difference.nsh))
@@ -1149,7 +1262,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
                 ("column".to_owned(), measure([20.0, -10.0, 60.0, 18.0])),
                 ("row".to_owned(), measure(nsh_row)),
             ]);
-            differences(&map, state, &reference, &nsh)
+            differences(&map, state, &reference, &nsh, Mode::Appearance)
                 .into_iter()
                 .filter(|difference| difference.element == "row")
                 .map(|difference| (difference.metric, difference.follows))
@@ -1225,7 +1338,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
                 ),
             ),
         ]);
-        let found: Vec<_> = differences(&map, state, &reference, &nsh)
+        let found: Vec<_> = differences(&map, state, &reference, &nsh, Mode::Appearance)
             .into_iter()
             .filter(|difference| difference.metric != "present")
             .map(|difference| (difference.element, difference.metric))
@@ -1285,7 +1398,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
                 },
             ),
         ]);
-        let found = differences(&map, state, &reference, &nsh);
+        let found = differences(&map, state, &reference, &nsh, Mode::Appearance);
         assert_eq!(
             found
                 .iter()
@@ -1339,7 +1452,13 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
                 },
             ),
         ]);
-        let found = differences(&map, state, &reference_measures(&map, state, None), &nsh);
+        let found = differences(
+            &map,
+            state,
+            &reference_measures(&map, state, None),
+            &nsh,
+            Mode::Appearance,
+        );
         let offset = found
             .iter()
             .find(|difference| difference.metric == "glyph centre from its container's centre")

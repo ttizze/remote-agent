@@ -1,4 +1,4 @@
-//! `cargo xtask nsh-parity [--compare RUN | --t3 RUN] [STATE-FILTER...]`: brings the Mac NSH
+//! `cargo xtask nsh-parity [--appearance] [--compare RUN | --t3 RUN] [STATE-FILTER...]`: brings the Mac NSH
 //! app and T3 Code to the same states (`apps/nsh/parity/map.toml`), captures
 //! both, pairs their elements and writes `target/nsh-parity/run-<time>/report.md`
 //! with a side-by-side image and the differences of each state.
@@ -17,6 +17,8 @@
 //! `--compare RUN` measures an earlier run's captures again (after editing the
 //! map) without running either client; `--t3 RUN` renders T3's side of it again
 //! first (after editing T3 steps or selectors).
+//! The default compares element presence only. `--appearance` also measures
+//! position, size, colours, typography, corner radii and animation metadata.
 mod compare;
 mod inventory;
 mod manifest;
@@ -29,7 +31,7 @@ use crate::{
     nsh_acceptance::{self, Tools},
     supervision,
 };
-use compare::{Difference, Measure, NshCapture, T3Capture};
+use compare::{Difference, Measure, Mode, NshCapture, T3Capture};
 use map::{Map, Reference, State};
 use pixels::{Image, Rgb};
 use std::{
@@ -46,6 +48,10 @@ const DIFFERS: Rgb = [255, 64, 64];
 const MATCHES: Rgb = [64, 200, 120];
 
 pub async fn run(arguments: &[String]) -> Result<()> {
+    let (mode, arguments) = match arguments {
+        [flag, rest @ ..] if flag == "--appearance" => (Mode::Appearance, rest),
+        _ => (Mode::Presence, arguments),
+    };
     let (flag, existing, filters) = match arguments {
         [flag, run, filters @ ..] if flag == "--compare" || flag == "--t3" => {
             (flag.as_str(), Some(run), filters)
@@ -73,7 +79,7 @@ pub async fn run(arguments: &[String]) -> Result<()> {
         .iter()
         .map(|state| report::Outcome {
             state,
-            result: compare_state(&map, state, &records.join(&state.name)),
+            result: compare_state(&map, state, &records.join(&state.name), mode),
         })
         .collect();
     let name = records
@@ -81,9 +87,14 @@ pub async fn run(arguments: &[String]) -> Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let path = records.join("report.md");
-    let report = report::render(&name, &map, &outcomes) + &inventory::render(&records, &states);
+    let inventory = if mode == Mode::Appearance {
+        inventory::render(&records, &states)
+    } else {
+        String::new()
+    };
+    let report = report::render(&name, &map, &outcomes, mode) + &inventory;
     fs::write(&path, report)?;
-    let summary = report::summary(&map, &outcomes);
+    let summary = report::summary(&map, &outcomes, mode);
     fs::write(
         records.join("summary.json"),
         serde_json::to_vec_pretty(&summary)?,
@@ -231,6 +242,7 @@ fn compare_state(
     map: &Map,
     state: &State,
     directory: &Path,
+    mode: Mode,
 ) -> std::result::Result<Vec<Difference>, String> {
     let read =
         |name: &str| fs::read(directory.join(name)).map_err(|error| format!("{name}: {error}"));
@@ -272,7 +284,7 @@ fn compare_state(
             nsh_image.clone(),
         ),
     };
-    let differences = compare::differences(map, state, &reference, &nsh);
+    let differences = compare::differences(map, state, &reference, &nsh, mode);
     let composite = composite(
         [reference_image, nsh_image],
         [&reference, &nsh],

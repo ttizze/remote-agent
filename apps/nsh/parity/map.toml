@@ -811,7 +811,9 @@ id = "markdown-image-error"
 what = "Markdown image that cannot load"
 kind = "text"
 t3 = "[data-message-role=assistant] .chat-markdown span.inline-flex.items-center:not(.chat-markdown-codeblock *)"
-nsh = { contains = "Image unavailable" }
+# The native error offers Retry and an OS-localized reason. Pair the error
+# element by its native control, independently of its wording.
+nsh = { class = "BexNshNative.NativePicture", down = [1] }
 
 [[element]]
 id = "markdown-table"

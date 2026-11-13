@@ -2,7 +2,7 @@
 //! differences and the approved deviations among them, and every state that
 //! could not be compared, with why.
 use super::{
-    compare::Difference,
+    compare::{Difference, Mode},
     map::{Approval, Map, Reference, State},
 };
 
@@ -16,6 +16,7 @@ pub struct Outcome<'a> {
 /// context, rather than silently turning a comparison into a successful check.
 #[derive(Debug, serde::Serialize)]
 pub struct Summary<'a> {
+    pub mode: Mode,
     pub passed: bool,
     pub states_compared: usize,
     pub states_not_compared: usize,
@@ -34,7 +35,7 @@ pub struct StateResult<'a> {
     pub error: Option<&'a str>,
 }
 
-pub fn summary<'a>(map: &Map, outcomes: &'a [Outcome]) -> Summary<'a> {
+pub fn summary<'a>(map: &Map, outcomes: &'a [Outcome], mode: Mode) -> Summary<'a> {
     let differences: Vec<_> = outcomes
         .iter()
         .filter_map(|outcome| outcome.result.as_ref().ok())
@@ -45,6 +46,7 @@ pub fn summary<'a>(map: &Map, outcomes: &'a [Outcome]) -> Summary<'a> {
         .filter(|outcome| outcome.result.is_err())
         .count();
     Summary {
+        mode,
         passed: !outcomes.is_empty() && states_not_compared == 0 && differences.is_empty(),
         states_compared: outcomes.len() - states_not_compared,
         states_not_compared,
@@ -73,28 +75,24 @@ pub fn summary<'a>(map: &Map, outcomes: &'a [Outcome]) -> Summary<'a> {
     }
 }
 
-pub fn render(run: &str, map: &Map, outcomes: &[Outcome]) -> String {
-    let totals = summary(map, outcomes);
+pub fn render(run: &str, map: &Map, outcomes: &[Outcome], mode: Mode) -> String {
+    let totals = summary(map, outcomes, mode);
     let verdict = if totals.passed { "MATCH" } else { "FAIL" };
+    let comparison = match mode {
+        Mode::Presence => "Element presence only. Position, size, colour, typography, corner radius and animation are excluded.".into(),
+        Mode::Appearance => format!("Element presence and appearance. Tolerances: position {}, size {}, drawn text and glyphs {}, colour distance {}, corner radius {}. Animation metadata checks presence, not speed or trajectory; unavailable metadata is reported as unmeasured.", map.tolerance.position, map.tolerance.size, map.tolerance.text, map.tolerance.color, map.tolerance.radius),
+    };
     let mut report = format!(
         "# NSH parity {run}\n\nNSH (right of each table and image) against the installed T3 Code rendered by \
          `scripts/nsh-parity-t3.ts`, or, for the sidebar, the GPUI client's layout from its source. Both clients ran \
-         against Bex's Codex fixture, at {}×{} points. Positions are in points from the state's column (or the element's \
-         anchor) and the window's top; colours are sRGB. Tolerances: position {}, size {}, drawn text and glyphs {}, \
-         colour distance {}, corner radius {}.\n\n**{verdict}: {} differences including measurement gaps, {} states not compared, {} measurements unavailable.** \
+         against Bex's Codex fixture, at {}×{} points. {comparison}\n\n**{verdict}: {} differences including measurement gaps, {} states not compared, {} measurements unavailable.** \
          Recorded exceptions are included in these totals and in the check's exit status.\n\n\
          Scope: macOS only; {} of {} mapped states selected. Unselected states, unpaired UI, iPhone and Windows \
          are not verified by this result. [Candidate provenance](manifest.json), [reference provenance](reference-manifest.json), \
          [captured map](captured-map.toml), [comparison map](comparison-map.toml), \
-         [machine-readable results](summary.json). Animation metadata checks presence, not speed or trajectory; \
-         SwiftUI redraws without published metadata and unavailable corner radii are reported as unmeasured.\n\n## Summary\n\n| Screen | States compared | Not compared | Unrecorded differences | Missing in NSH | Recorded exceptions |\n|---|---|---|---|---|---|\n",
+         [machine-readable results](summary.json).\n\n## Summary\n\n| Screen | States compared | Not compared | Unrecorded differences | Missing in NSH | Recorded exceptions |\n|---|---|---|---|---|---|\n",
         map.viewport.width,
         map.viewport.height,
-        map.tolerance.position,
-        map.tolerance.size,
-        map.tolerance.text,
-        map.tolerance.color,
-        map.tolerance.radius,
         totals.differences,
         totals.states_not_compared,
         totals.not_measured,
@@ -135,7 +133,7 @@ pub fn render(run: &str, map: &Map, outcomes: &[Outcome]) -> String {
             .iter()
             .filter(|outcome| outcome.state.screen == screen)
         {
-            report.push_str(&section(map, outcome));
+            report.push_str(&section(map, outcome, mode));
         }
     }
     report
@@ -151,7 +149,7 @@ fn screens<'a>(outcomes: &'a [Outcome]) -> Vec<&'a str> {
     screens
 }
 
-fn section(map: &Map, outcome: &Outcome) -> String {
+fn section(map: &Map, outcome: &Outcome, mode: Mode) -> String {
     let state = outcome.state;
     let name = &state.name;
     let reference = match state.reference {
@@ -173,7 +171,11 @@ fn section(map: &Map, outcome: &Outcome) -> String {
     ));
     if differences.is_empty() {
         text.push_str(if approved.is_empty() {
-            "No differences beyond tolerance.\n"
+            if mode == Mode::Presence {
+                "All named elements have their expected visibility.\n"
+            } else {
+                "No differences beyond tolerance.\n"
+            }
         } else {
             "Differences remain in the recorded exceptions below.\n"
         });
@@ -286,19 +288,41 @@ gpui = { height = 1, source = "sidebar.rs" }
 "##;
 
     #[test]
+    fn presence_report_names_its_scope_without_visual_measurement_noise() {
+        let map = Map::parse(MAP).unwrap();
+        let outcomes = [Outcome {
+            state: &map.states[0],
+            result: Ok(vec![]),
+        }];
+        let text = render("presence", &map, &outcomes, Mode::Presence);
+        assert!(text.contains("Element presence only."));
+        assert!(text.contains("All named elements have their expected visibility."));
+        assert!(!text.contains("Tolerances:"));
+        let result = serde_json::to_value(summary(&map, &outcomes, Mode::Presence)).unwrap();
+        assert_eq!(result["mode"], "presence");
+        assert_eq!(result["passed"], true);
+    }
+
+    #[test]
     fn only_fully_measured_equal_states_pass_and_exceptions_do_not_hide_differences() {
         let map = Map::parse(&format!("{MAP}\n[[approved]]\nelement = \"row\"\nreason = \"kept layout\"\napproved = \"2026-11-09\"\nby = \"the user\"\n")).unwrap();
         let mut outcomes = [Outcome {
             state: &map.states[0],
             result: Ok(vec![]),
         }];
-        assert!(summary(&map, &outcomes).passed);
+        assert!(summary(&map, &outcomes, Mode::Appearance).passed);
         outcomes[0].result = Err("reference did not render".into());
-        assert!(!summary(&map, &outcomes).passed);
-        assert_eq!(summary(&map, &outcomes).states_not_compared, 1);
-        assert_eq!(summary(&map, &outcomes).states_compared, 0);
+        assert!(!summary(&map, &outcomes, Mode::Appearance).passed);
         assert_eq!(
-            summary(&map, &outcomes).states[0].error,
+            summary(&map, &outcomes, Mode::Appearance).states_not_compared,
+            1
+        );
+        assert_eq!(
+            summary(&map, &outcomes, Mode::Appearance).states_compared,
+            0
+        );
+        assert_eq!(
+            summary(&map, &outcomes, Mode::Appearance).states[0].error,
             Some("reference did not render")
         );
         outcomes[0].result = Ok(vec![Difference {
@@ -308,7 +332,7 @@ gpui = { height = 1, source = "sidebar.rs" }
             nsh: "24".into(),
             follows: None,
         }]);
-        let result = summary(&map, &outcomes);
+        let result = summary(&map, &outcomes, Mode::Appearance);
         assert!(!result.passed);
         assert_eq!(result.differences, 1);
         assert_eq!(result.recorded_exceptions, 1);
@@ -316,7 +340,7 @@ gpui = { height = 1, source = "sidebar.rs" }
         assert_eq!(result.states_not_selected, 2);
         assert_eq!(result.missing_in_candidate, 0);
         assert_eq!(result.not_measured, 0);
-        assert!(render("run", &map, &outcomes).contains("**FAIL:"));
+        assert!(render("run", &map, &outcomes, Mode::Appearance).contains("**FAIL:"));
         outcomes[0].result = Ok(vec![
             Difference {
                 element: "row".into(),
@@ -333,12 +357,12 @@ gpui = { height = 1, source = "sidebar.rs" }
                 follows: None,
             },
         ]);
-        let result = summary(&map, &outcomes);
+        let result = summary(&map, &outcomes, Mode::Appearance);
         assert!(!result.passed);
         assert_eq!(result.not_measured, 1);
         assert_eq!(result.missing_in_candidate, 1);
         assert_eq!(result.differences, 2);
-        assert!(!summary(&map, &[]).passed);
+        assert!(!summary(&map, &[], Mode::Appearance).passed);
     }
 
     #[test]
@@ -372,7 +396,7 @@ gpui = { height = 1, source = "sidebar.rs" }
                 result: Ok(vec![moved]),
             },
         ];
-        let text = render("run-1", &map, &outcomes);
+        let text = render("run-1", &map, &outcomes, Mode::Appearance);
         for line in [
             "| Conversation | 1 | 1 | 1 | 1 | 0 |",
             "| Sidebar | 1 | 0 | 1 | 0 | 0 |",
@@ -416,7 +440,7 @@ gpui = { height = 1, source = "sidebar.rs" }
                 result: Ok(vec![glyph]),
             },
         ];
-        let text = render("run-1", &map, &outcomes);
+        let text = render("run-1", &map, &outcomes, Mode::Appearance);
         for line in [
             "| Conversation | 1 | 0 | 1 | 0 | 1 |",
             "| Sidebar | 1 | 0 | 0 | 0 | 1 |",
@@ -447,7 +471,7 @@ gpui = { height = 1, source = "sidebar.rs" }
             state: &map.states[0],
             result: Ok(vec![moved(Some("search")), moved(None)]),
         }];
-        let text = render("run-1", &map, &outcomes);
+        let text = render("run-1", &map, &outcomes, Mode::Appearance);
         assert!(
             text.contains("| Conversation | 1 | 0 | 1 | 0 | 1 |"),
             "{text}"

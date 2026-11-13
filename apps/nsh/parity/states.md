@@ -6,8 +6,10 @@ and each component it renders, transitively (`components/chat/*`, the panels
 and dialogs ChatView opens). Paths are relative to T3's `apps/web/src`. The
 sidebar is compared with the GPUI client instead (last section).
 
-Mac captures use the installed T3 app and the same Codex fixture. Each run records
-the exact binaries and T3 version in `manifest.json`. A mapped state can fail to
+Mac captures use the installed T3 app and the same Codex fixture. The default
+comparison checks element presence; `--appearance` also checks visual metrics.
+Each run records the exact binaries and T3 version in `manifest.json` and
+`reference-manifest.json`. A mapped state can fail to
 reach its target or fail to measure an element; consult `report.md` and
 `summary.json`, never this inventory, for verification. iPhone and Windows
 currently have no T3 comparison capture in this loop.
