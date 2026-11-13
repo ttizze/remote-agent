@@ -294,6 +294,7 @@ pub(super) fn write_history(
         &state,
         None,
         None,
+        None,
     )?;
     Ok(())
 }
@@ -482,7 +483,7 @@ impl Storage {
             }
             state.counters.turn = turn.ordinal;
             state.counters.item = transaction.query_row("SELECT coalesce(max(position),0) FROM items WHERE thread=?1", [target_key], |row| row.get::<_,i64>(0)).map_err(failure)?.try_into().map_err(failure)?;
-            rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None)?;
+            rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None, None)?;
             transaction.execute("INSERT INTO receipts(operation_id,provider,thread_id,seq,outcome) VALUES (?1,?2,?3,?4,?5)", params![target.id, target.provider.map(ProviderKind::key), target.id, integer(sequence.sequence)?, protocol::encode(Outcome::Accepted).map_err(failure)?]).map_err(failure)?;
             transaction.commit().map_err(failure)
         })

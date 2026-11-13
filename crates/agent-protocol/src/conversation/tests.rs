@@ -875,23 +875,20 @@ fn continuation_bypasses_the_held_queue_without_releasing_other_inputs() {
     );
     let state = state.apply(&recovered.changes);
     let continuation = &recovered.continuations[0];
-    for enabled in [false, true] {
-        let resumed = step(
-            &state,
-            Event::Command {
-                id: OperationId::Job(continuation.id),
-                receipt: None,
-                command: Command::ContinueAfterRestart {
-                    source: attempt.turn.clone(),
-                    enabled,
-                    content: content(FollowUp::Queue),
-                },
+    let resumed = step(
+        &state,
+        Event::Command {
+            id: OperationId::Job(continuation.id),
+            receipt: None,
+            command: Command::ContinueAfterRestart {
+                source: attempt.turn.clone(),
+                content: content(FollowUp::Queue),
             },
-            context(5),
-        );
-        assert_eq!(resumed.actions.len(), usize::from(enabled));
-        assert!(state.apply(&resumed.changes).thread.queue_held);
-    }
+        },
+        context(5),
+    );
+    assert_eq!(resumed.actions.len(), 1);
+    assert!(state.apply(&resumed.changes).thread.queue_held);
 }
 
 #[test]
@@ -2350,7 +2347,6 @@ fn update_continues_a_turn_with_an_unknown_steer_but_not_a_later_unknown_start()
                 receipt: None,
                 command: Command::ContinueAfterRestart {
                     source: attempt.turn.clone(),
-                    enabled: true,
                     content: content(FollowUp::Queue),
                 },
             },
@@ -3350,7 +3346,6 @@ fn a_restart_continuation_cannot_be_admitted_after_a_later_message_finishes() {
                 receipt: None,
                 command: Command::ContinueAfterRestart {
                     source: source.turn.clone(),
-                    enabled: true,
                     content: content(FollowUp::Queue),
                 },
             },
@@ -3409,7 +3404,6 @@ fn a_restart_continuation_yields_to_a_surviving_retry_and_unheld_queued_input() 
                 receipt: None,
                 command: Command::ContinueAfterRestart {
                     source: source.turn.clone(),
-                    enabled: true,
                     content: content(FollowUp::Queue),
                 },
             },
@@ -3497,7 +3491,6 @@ fn an_older_unknown_steer_does_not_prevent_continuing_the_newest_interrupted_tur
             receipt: None,
             command: Command::ContinueAfterRestart {
                 source: source.turn,
-                enabled: true,
                 content: content(FollowUp::Queue),
             },
         },
@@ -4069,7 +4062,6 @@ fn failed_compaction_never_resumes_the_preceding_task() {
                         receipt: None,
                         command: Command::ContinueAfterRestart {
                             source: attempt.turn.clone(),
-                            enabled: true,
                             content: content(FollowUp::Queue),
                         },
                     },

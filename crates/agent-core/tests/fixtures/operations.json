@@ -526,7 +526,7 @@
     }
   },
   {
-    "name": "failed-resume-stops-send",
+    "name": "submit-rpc-error",
     "command": {
       "type": "sendTurn",
       "threadId": {

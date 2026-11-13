@@ -92,11 +92,9 @@ fn execute_command(
         },
         Command::ResolveUnknown { id, retry } => resolve_unknown(state, &id, retry),
         Command::RetryInput { id, work_locally } => retry_input(state, &id, work_locally, context),
-        Command::ContinueAfterRestart {
-            source,
-            enabled,
-            content,
-        } => continue_after_restart(state, operation, &source, enabled, content, context),
+        Command::ContinueAfterRestart { source, content } => {
+            continue_after_restart(state, operation, &source, content, context)
+        }
         Command::Interrupt { turn } => interrupt(state, turn.as_ref(), context),
         Command::Answer { id, answer } => answer_request(state, id, answer, context),
         Command::EditInput { id, parts } => edit_input(state, &id, parts),
@@ -329,15 +327,13 @@ fn continue_after_restart(
     state: &State,
     operation: OperationId,
     source: &TurnId,
-    enabled: bool,
     content: InputContent,
     context: Context,
 ) -> Step {
     let OperationId::Job(id) = operation else {
         return reject("restart continuation is internal");
     };
-    if !enabled
-        || state.active_turn().is_some()
+    if state.active_turn().is_some()
         || (!state.thread.queue_held && state.has_queued_inputs())
         || state
             .turns

@@ -22,18 +22,7 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
                 ..Default::default()
             })
             .collect();
-        let keys: Vec<_> = [OperationKey::SessionList, OperationKey::ListSearch]
-            .into_iter()
-            .chain(
-                projects
-                    .iter()
-                    .map(|project| OperationKey::ListDecorations {
-                        scope: agent_protocol::operations::ListDecorationScope::Project {
-                            project_id: project.id.clone(),
-                        },
-                    }),
-            )
-            .collect();
+        let keys = [OperationKey::SessionList, OperationKey::ListSearch];
         let previous = Arc::new(Snapshot {
             lists: crate::state::Lists {
                 threads: Some(Arc::new(ThreadList {
@@ -63,7 +52,7 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
             ..Default::default()
         });
         assert!(!changes(&previous, previous.clone()).list);
-        for key in keys.iter().take(3).chain(keys.last().filter(|_| count > 0)) {
+        for key in &keys {
             let mut next = previous.as_ref().clone();
             let state = Arc::make_mut(&mut next.operations).get_mut(key).unwrap();
             state.generation += 1;
@@ -94,7 +83,7 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
             },
             OperationKey::ListDecorations {
                 scope: agent_protocol::operations::ListDecorationScope::Project {
-                    project_id: "not-visible".into(),
+                    project_id: "project0".into(),
                 },
             },
         ] {

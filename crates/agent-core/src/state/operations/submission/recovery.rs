@@ -347,9 +347,7 @@ fn recover_draft(
                 name: name.clone(),
                 path: path.clone(),
             }),
-            Input::Mention { name, path }
-                if path.starts_with("plugin://") || path.starts_with("app://") =>
-            {
+            Input::Mention { name, path } if agent_protocol::composer::is_plugin_path(path) => {
                 draft.invocations.push(Invocation {
                     provider,
                     kind: InvocationKind::Plugin,
@@ -363,7 +361,7 @@ fn recover_draft(
                 is_image: false,
             }),
             Input::LocalImage { path } => draft.attachments.push(Attachment {
-                name: path.rsplit(['/', '\\']).next().unwrap_or(path).into(),
+                name: super::super::sessions::file_name(path),
                 path: path.clone(),
                 is_image: true,
             }),

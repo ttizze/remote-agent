@@ -118,22 +118,10 @@ pub(super) fn received(
         return (previous.clone(), Vec::new());
     };
     let mut next = previous.clone();
-    match tail.apply(update) {
-        Ok(output) => {
-            Arc::make_mut(&mut next.sessions.live_outputs)
-                .insert(key.clone(), (subscription, output));
-            refresh(&mut next, &key.session);
-            (next, Vec::new())
-        }
-        Err(_) => {
-            Arc::make_mut(&mut next.sessions.live_outputs).remove(key);
-            let effects = desired(&next, key)
-                .then(|| Effect::execute(Subscribe { key: key.clone() }))
-                .into_iter()
-                .collect();
-            (next, effects)
-        }
-    }
+    let output = tail.apply(update);
+    Arc::make_mut(&mut next.sessions.live_outputs).insert(key.clone(), (subscription, output));
+    refresh(&mut next, &key.session);
+    (next, Vec::new())
 }
 
 pub(super) fn overlay(
@@ -329,7 +317,6 @@ mod tests {
             &state,
             subscription,
             OutputUpdate::Append {
-                from: 0,
                 through: 1,
                 text: "live command bytes".into(),
             },
@@ -356,7 +343,6 @@ mod tests {
         assert!(
             matches!(live.sessions.conversations[&session].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), ItemBody::CommandExecution { output, .. } if output == "live command bytes")
         );
-        let replica = live.sessions.replicas[&session].clone();
         let (unchanged, _) = received(
             &live,
             uuid::Uuid::new_v4(),
@@ -372,22 +358,6 @@ mod tests {
         assert!(watch(&mut live, "side", key.clone(), true).is_empty());
         assert!(watch(&mut live, "", key.clone(), false).is_empty());
         assert!(live.sessions.live_outputs.contains_key(&key));
-        let (gap, effects) = received(
-            &live,
-            subscription,
-            OutputUpdate::Append {
-                from: 1000,
-                through: 1001,
-                text: "missing".into(),
-            },
-        );
-        assert_eq!(
-            effects.len(),
-            1,
-            "a gap requests its own tail, independently of history"
-        );
-        assert!(gap.sessions.live_outputs.is_empty());
-        assert!(Arc::ptr_eq(&gap.sessions.replicas[&session], &replica));
         live.close_pane("side");
         assert!(
             live.sessions.live_outputs.is_empty(),

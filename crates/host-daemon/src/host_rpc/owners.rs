@@ -32,10 +32,12 @@ pub(super) struct Effect {
     pub action: Action,
 }
 
+type WriteResult = Result<(Outcome, Cursor), String>;
+
 enum Input {
     Write {
         write: Box<Write>,
-        reply: oneshot::Sender<Result<(Outcome, Cursor), String>>,
+        reply: oneshot::Sender<WriteResult>,
     },
     Subscribe {
         session: u64,
@@ -79,7 +81,6 @@ pub(super) enum Write {
         body: agent_protocol::items::ItemBody,
     },
     ImportStatus {
-        error: Option<String>,
         now: i64,
     },
     ImportFailure {
@@ -158,11 +159,7 @@ impl Drop for Subscription {
 }
 
 impl Owners {
-    pub(super) async fn write(
-        self: &Arc<Self>,
-        target: &SessionRef,
-        write: Write,
-    ) -> Result<(Outcome, Cursor), String> {
+    pub(super) async fn write(self: &Arc<Self>, target: &SessionRef, write: Write) -> WriteResult {
         self.enqueue(target, write)?
             .await
             .map_err(|_| "conversation owner stopped before replying".to_owned())?
@@ -173,7 +170,7 @@ impl Owners {
         self: &Arc<Self>,
         target: &SessionRef,
         write: Write,
-    ) -> Result<oneshot::Receiver<Result<(Outcome, Cursor), String>>, String> {
+    ) -> Result<oneshot::Receiver<WriteResult>, String> {
         let (reply, result) = oneshot::channel();
         self.send(
             target,
@@ -344,7 +341,7 @@ async fn run(
                     Write::Event(event, context, create) => {
                         records.decide(&scope, event, context, create.as_ref())
                     }
-                    Write::ImportStatus { error, now } => records.import_status(&scope, error, now),
+                    Write::ImportStatus { now } => records.import_status(&scope, now),
                     Write::ImportFailure {
                         operation,
                         claim,

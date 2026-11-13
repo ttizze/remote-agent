@@ -575,6 +575,12 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
             crate::persistence::decode(&crate::persistence::encode(&elsewhere).unwrap()).unwrap();
         let returned = reduce(&restored, "", Event::Intent(Intent::ShowThreadList)).0;
         assert_eq!(returned.panes.primary().navigation.draft_key, key);
+        let mut returned = returned;
+        let pane = Arc::make_mut(returned.panes.get_mut("").unwrap());
+        Arc::make_mut(&mut pane.workspace).review_cwd = Some("/temporary-review".into());
+        let returned = reduce(&returned, "", Event::Intent(Intent::ShowThreadList)).0;
+        assert!(returned.panes.primary().workspace.review_cwd.is_none());
+        assert_eq!(returned.panes.primary().navigation.draft_key, key);
         let recovered = &returned.input.drafts[&key];
         assert_eq!(
             recovered.text,

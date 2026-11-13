@@ -267,13 +267,6 @@ fn project_children(
     more_title: &str,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
-    if project.loading && !project.has_more {
-        rows.push(Row::new(
-            tr("読み込み中…").into(),
-            Action::Loading(project.id.clone()),
-            Some(scope.clone()),
-        ));
-    }
     if let Some(error) = &project.error {
         rows.push(Row::new(
             error.to_string(),
@@ -294,8 +287,6 @@ fn project_children(
     );
     if project.has_more {
         rows.push(Row {
-            loading: project.loading,
-            enabled: !project.loading,
             ..Row::new(
                 more_title.into(),
                 Action::More(Some(project.id.clone())),
@@ -1159,7 +1150,6 @@ mod tests {
                 section: None,
                 chats_archived: false,
                 expanded: false,
-                loading: false,
                 error: None,
                 threads: vec![thread.clone()],
                 has_more: false,
@@ -1492,23 +1482,15 @@ mod tests {
     }
 
     #[test]
-    fn project_loading_errors_and_paging_recover_without_losing_the_owner() {
+    fn project_errors_and_local_paging_preserve_the_owner() {
         let mut list = fixture_list();
         list.projects[0].expanded = true;
-        list.projects[0].loading = true;
         list.projects[0].error = Some(agent_core::presentation::error::ErrorText {
             message: "一覧を取得できませんでした".into(),
             details: Some("fixture failure".into()),
         });
         for desktop in [false, true] {
             let rendered = fixture_rows(Some(&list), false, "host", "scope", desktop, true);
-            let loading = rendered
-                .iter()
-                .find(|row| matches!(row.action, Action::Loading(_)))
-                .unwrap();
-            assert!(loading.loading);
-            assert!(!loading.enabled);
-            assert_eq!(loading.level, 1);
             let retry = rendered
                 .iter()
                 .find(|row| matches!(row.action, Action::Retry(_)))
@@ -1535,10 +1517,9 @@ mod tests {
             .find(|row| row.action == Action::More(Some("project".into())))
             .unwrap();
         assert_eq!(more.title, "もっと見る");
-        assert!(more.loading);
-        assert!(!more.enabled);
+        assert!(!more.loading);
+        assert!(more.enabled);
         let identity = row_id(more.scope.as_ref(), &more.action);
-        list.projects[0].loading = false;
         list.projects[0].error = None;
         let recovered = fixture_rows(Some(&list), false, "host", "scope", false, true);
         let more = recovered

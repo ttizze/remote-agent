@@ -71,11 +71,7 @@ impl Subscription {
                 through = append.through;
             }
             let update = if through == next.tail.sequence {
-                OutputUpdate::Append {
-                    from: self.sequence,
-                    through,
-                    text,
-                }
+                OutputUpdate::Append { through, text }
             } else {
                 OutputUpdate::Tail(next.tail.clone())
             };
@@ -299,11 +295,11 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(100)).await;
             let update: OutputUpdate = protocol::decode(&watching.recv().await.unwrap()).unwrap();
-            fast = fast.apply(update).unwrap();
+            fast = fast.apply(update);
         }
         let update: OutputUpdate = protocol::decode(&lagging.recv().await.unwrap()).unwrap();
         assert!(matches!(update, OutputUpdate::Append { .. }));
-        slow = slow.apply(update).unwrap();
+        slow = slow.apply(update);
         assert_eq!(fast, slow);
         assert_eq!(fast.text, "progress 99%");
         assert_eq!(outputs.finish(&key, "").text, fast.text);
@@ -343,7 +339,7 @@ mod tests {
                 matches!(update, OutputUpdate::Append { .. }),
                 "late and once-lagging viewers retain every small append"
             );
-            folded = folded.apply(update).unwrap();
+            folded = folded.apply(update);
         }
         assert_eq!(folded.text, outputs.finish(&key, "").text);
         assert!(subscription.recv().await.is_none());
@@ -425,7 +421,7 @@ mod tests {
                 matches!(update, OutputUpdate::Append { .. }),
                 units == 16 * 1024
             );
-            let folded = initial.apply(update).unwrap();
+            let folded = initial.apply(update);
             outputs
                 .write(execution, key.clone(), Change::Append("!"))
                 .unwrap();
@@ -438,10 +434,7 @@ mod tests {
                 Duration::from_millis(if units > 16 * 1024 { 400 } else { 0 })
             );
             assert!(matches!(update, OutputUpdate::Append { .. }));
-            assert_eq!(
-                folded.apply(update).unwrap().text,
-                outputs.finish(&key, "").text
-            );
+            assert_eq!(folded.apply(update).text, outputs.finish(&key, "").text);
         }
     }
 }

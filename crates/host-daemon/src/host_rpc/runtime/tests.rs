@@ -136,7 +136,14 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
 #[tokio::test]
 async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        for compacted in [false, true] {
+        for mode in [
+            "reuse",
+            "compacted",
+            "busy",
+            "state_error",
+            "injection_unknown",
+        ] {
+            let compacted = mode == "compacted";
             let directory = tempfile::tempdir().unwrap();
             let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
             Arc::get_mut(&mut codex).unwrap().metadata_only_state = compacted;
@@ -185,6 +192,29 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
                 (ProviderKind::Claude, "second-provider-marker", 2),
                 (ProviderKind::Codex, "third-provider-marker", 3),
             ] {
+                let before = codex.next.load(std::sync::atomic::Ordering::SeqCst);
+                if provider == ProviderKind::Codex {
+                    match mode {
+                        "busy" => {
+                            codex
+                                .records
+                                .lock()
+                                .unwrap()
+                                .get_mut(&original.id)
+                                .unwrap()
+                                .thread
+                                .status = agent_protocol::models::SessionStatus::Running
+                        }
+                        "state_error" => {
+                            *codex.state_error.lock().unwrap() =
+                                Some(Failure::unknown("resume_unavailable", "lost native state"))
+                        }
+                        "injection_unknown" => codex
+                            .fail_inject
+                            .store(1, std::sync::atomic::Ordering::SeqCst),
+                        _ => {}
+                    }
+                }
                 let operation = Uuid::new_v4();
                 let acknowledged: records::Acknowledged = call(
                     &service,
@@ -201,31 +231,96 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
                 .await
                 .unwrap();
                 assert_eq!(acknowledged.outcome, Outcome::Accepted);
+                if provider == ProviderKind::Codex && matches!(mode, "busy" | "injection_unknown") {
+                    let storage = &service.inner.conversation.storage;
+                    let mut changes = storage.changes();
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        loop {
+                            if let Some(input) = storage
+                                .input(&target, &operation.to_string().into())
+                                .unwrap()
+                                && let decision::InputState::Failed(error) = input.state
+                            {
+                                assert_eq!(
+                                    error.message,
+                                    if mode == "busy" {
+                                        "切り替え先のAIがまだ実行中です。完了を待ってください。"
+                                    } else {
+                                        "connection lost after writing history"
+                                    }
+                                );
+                                break;
+                            }
+                            changes.changed().await.unwrap();
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(codex.next.load(std::sync::atomic::Ordering::SeqCst), before);
+                    assert_eq!(
+                        codex.inputs.lock().unwrap().len(),
+                        1,
+                        "failed preparation must not send the input"
+                    );
+                    codex
+                        .records
+                        .lock()
+                        .unwrap()
+                        .get_mut(&original.id)
+                        .unwrap()
+                        .thread
+                        .status = agent_protocol::models::SessionStatus::Idle;
+                    let retried: records::Acknowledged = call(
+                        &service,
+                        connection.id(),
+                        Call::ChangeConversation(records::Change {
+                            session: target.clone(),
+                            operation: Uuid::new_v4(),
+                            command: Command::RetryInput {
+                                id: operation.to_string().into(),
+                                work_locally: false,
+                            },
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(retried.outcome, Outcome::Accepted);
+                }
                 completed(&service, &target, count).await;
             }
-            assert_eq!(
-                service
-                    .inner
-                    .conversation
-                    .storage
-                    .active_source(&target)
-                    .unwrap(),
-                Some(original.clone())
-            );
+            let active = service
+                .inner
+                .conversation
+                .storage
+                .active_source(&target)
+                .unwrap()
+                .unwrap();
+            let rebuilt = matches!(mode, "state_error" | "injection_unknown");
+            assert_eq!(active == original, !rebuilt, "{mode}");
             assert_eq!(
                 codex.records.lock().unwrap().len(),
-                1,
-                "returning and native compaction do not create another source"
+                if rebuilt { 2 } else { 1 }
+            );
+            assert_eq!(
+                codex.inputs.lock().unwrap().len(),
+                2,
+                "each user input is delivered exactly once: {mode}"
             );
             let injected = codex.injected.lock().unwrap();
-            assert_eq!(injected.len(), 1);
-            assert_eq!(injected[0].0, original.id);
-            let context = injected[0].1.render();
+            assert_eq!(
+                injected.len(),
+                if mode == "injection_unknown" { 2 } else { 1 }
+            );
+            if mode == "injection_unknown" {
+                assert_ne!(injected[0].0, injected[1].0);
+            }
+            assert_eq!(injected.last().unwrap().0, active.id);
+            let context = injected.last().unwrap().1.render();
             assert!(context.contains("second-provider-marker"));
-            assert!(!context.contains("first-provider-marker"));
+            assert_eq!(context.contains("first-provider-marker"), rebuilt);
             assert!(!context.contains("third-provider-marker"));
             assert!(codex.released.lock().unwrap().contains(&original.id));
-            assert_eq!(claude.released.lock().unwrap().len(), 1);
+            assert!(!claude.released.lock().unwrap().is_empty());
         }
     })
     .await
@@ -483,7 +578,7 @@ async fn command_output_case(case: &str) {
         !short,
         "only an overflowing pending append requires a full tail"
     );
-    let tail = opened.initial.apply(update).unwrap();
+    let tail = opened.initial.apply(update);
     assert_eq!(tail.truncated, case != "short");
     assert!(tail.text.encode_utf16().count() <= 64 * 1024);
     assert_eq!(
@@ -2358,7 +2453,7 @@ async fn delivery_proof_before_a_waiting_fence_keeps_command_output_running() {
                 .expect("delivery proof keeps the output stream alive"),
         )
         .unwrap();
-        let final_tail: Output = initial.apply(update).unwrap();
+        let final_tail: Output = initial.apply(update);
         assert_eq!(final_tail.text, "running more");
     })
     .await

@@ -109,10 +109,6 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
                 result
                     .actions
                     .push(Action::WaitUntil((*at).max(context.now)));
-                result.changes.push(Change::Attempt {
-                    turn: turn.id.clone(),
-                    value: None,
-                });
             }
             TurnState::Completed
             | TurnState::Interrupted

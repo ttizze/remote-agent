@@ -1222,7 +1222,6 @@ fn receive(storage: &Storage, claim: &jobs::Claim) {
                 receipt: None,
                 command: Command::ContinueAfterRestart {
                     source: source.clone(),
-                    enabled: true,
                     content,
                 },
             },
@@ -1685,7 +1684,7 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
         ..Default::default()
     };
     let storage = Storage::open(&path);
-    storage.import_status(&id, None, 100).unwrap();
+    storage.import_status(&id, 100).unwrap();
     let first = storage.claim(100, 1).unwrap().pop().unwrap();
     let before = storage.history(&id, 0).unwrap();
     storage.with(|connection| connection.execute_batch("CREATE TRIGGER fail_import BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT,'import commit failed'); END;").map_err(failure)).unwrap();
@@ -2586,7 +2585,7 @@ fn compact_capacity_failure_is_not_resumed_after_loading_the_durable_decision_st
 }
 
 #[test]
-fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
+fn a_claimed_legacy_import_failure_is_unavailable_and_can_be_retried() {
     use agent_protocol::session::{HistoryReadKind, HistoryReadState};
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));
@@ -2596,8 +2595,22 @@ fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
         Some(HistoryReadState::new(HistoryReadKind::Loading, vec![]));
     storage.create(&target, &header).unwrap();
     assert!(storage.loaded(&target).unwrap());
+    ready(&storage, &target);
+    let source = storage.active_source(&target).unwrap().unwrap();
+    storage.queue_import(&target, &source, 100).unwrap();
+    let claim = storage
+        .claim(100, 16)
+        .unwrap()
+        .into_iter()
+        .find(|claim| matches!(&claim.work, jobs::Work::Import { target: id, .. } if id == &target))
+        .unwrap();
     storage
-        .import_status(&target, Some("native unavailable".into()), 100)
+        .import_failed(
+            &target,
+            claim.id,
+            claim.attempt,
+            "native unavailable".into(),
+        )
         .unwrap();
     let failed = storage
         .header(&target)
@@ -2608,36 +2621,32 @@ fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
     assert_eq!(failed.kind, HistoryReadKind::Unavailable);
     let before = storage.snapshot(&target, None, None).unwrap();
     let repeated = storage
-        .import_status(&target, Some("native unavailable".into()), 101)
+        .import_failed(
+            &target,
+            claim.id,
+            claim.attempt,
+            "native unavailable".into(),
+        )
         .unwrap();
     assert!(repeated.rows.is_empty());
     assert_eq!(storage.snapshot(&target, None, None).unwrap(), before);
-    storage.import_status(&target, None, 101).unwrap();
-    assert_eq!(
-        storage
-            .header(&target)
-            .unwrap()
-            .details
-            .history_read_state
-            .unwrap()
-            .kind,
-        HistoryReadKind::Loading
-    );
+    storage.queue_import(&target, &source, 101).unwrap();
     let claim = storage
         .claim(101, 16)
         .unwrap()
         .into_iter()
         .find(|claim| matches!(&claim.work, jobs::Work::Import { target: id, .. } if id == &target))
         .unwrap();
-    let rejected = storage
+    let retried = storage
         .reimport(
             &target,
-            &target,
+            &source,
             claim.id,
             claim.attempt,
             &agent_protocol::models::ThreadResponse {
                 thread: agent_protocol::models::Thread {
-                    id: Some(target.clone()),
+                    id: Some(source.clone()),
+                    turns: Some(vec![]),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2645,16 +2654,14 @@ fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
             102,
         )
         .unwrap();
-    assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
-    assert_eq!(
+    assert_eq!(retried.step.outcome, Outcome::Accepted);
+    assert!(
         storage
             .header(&target)
             .unwrap()
             .details
             .history_read_state
-            .unwrap()
-            .kind,
-        HistoryReadKind::Unavailable
+            .is_none_or(|read| read.kind == HistoryReadKind::Complete)
     );
 }
 
@@ -2667,7 +2674,7 @@ fn a_private_native_source_cannot_create_a_second_conversation_row() {
     ready(&storage, &public);
     let native = storage.active_source(&public).unwrap().unwrap();
     let before = storage.list(None).unwrap();
-    assert!(storage.import_status(&native, None, 100).is_err());
+    assert!(storage.import_status(&native, 100).is_err());
     assert_eq!(storage.list(None).unwrap(), before);
     assert!(storage.lookup(&native).unwrap().is_none());
 }
@@ -3315,6 +3322,122 @@ fn projects_keep_registration_order_in_storage_and_synced_positions() {
 }
 
 #[test]
+fn provider_switches_publish_the_live_steering_admission_in_both_directions() {
+    for (from, to, steers) in [
+        (ProviderKind::Codex, ProviderKind::DeepSeek, false),
+        (ProviderKind::DeepSeek, ProviderKind::Codex, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("state.sqlite"));
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let mut initial = header();
+        initial.state.provider = from;
+        initial.details.capabilities.steer = !steers;
+        storage.create(&target, &initial).unwrap();
+        ready(&storage, &target);
+        let mut command = submit(701);
+        let Event::Command {
+            command: Command::Submit { content, .. },
+            ..
+        } = &mut command
+        else {
+            panic!("submit");
+        };
+        content.model = Some(agent_protocol::models::ModelRef {
+            provider: to,
+            id: "model".into(),
+        });
+        let switching = storage
+            .decide(
+                &target,
+                command,
+                Context {
+                    steers: !steers,
+                    ..context(701)
+                },
+                None,
+            )
+            .unwrap();
+        let [decision::Action::Prepare { id, action, .. }] = &switching.step.actions[..] else {
+            panic!("switch must prepare the target provider");
+        };
+        let prepared = storage
+            .decide(
+                &target,
+                Event::Prepared {
+                    id: id.clone(),
+                    action: *action,
+                    cwd: Some("/project".into()),
+                    source: Some("target-native".into()),
+                },
+                Context {
+                    steers,
+                    ..context(702)
+                },
+                None,
+            )
+            .unwrap();
+        let [decision::Action::Deliver { id, action, .. }] = &prepared.step.actions[..] else {
+            panic!("prepared switch must deliver");
+        };
+        storage
+            .decide(
+                &target,
+                Event::Delivered {
+                    id: id.clone(),
+                    action: *action,
+                    native_turn: Some("target-turn".into()),
+                },
+                Context {
+                    steers,
+                    ..context(703)
+                },
+                None,
+            )
+            .unwrap();
+        let thread = storage.history(&target, 0).unwrap().thread;
+        assert_eq!(thread.active_provider, Some(to));
+        assert_eq!(thread.capabilities.unwrap().steer, steers);
+        assert_eq!(thread.steerable, steers);
+        assert!(!thread.skips_compaction);
+        let mut follow_up = submit(704);
+        let Event::Command {
+            command: Command::Submit { content, .. },
+            ..
+        } = &mut follow_up
+        else {
+            panic!("submit");
+        };
+        content.follow_up = FollowUp::Steer;
+        let sent = storage
+            .decide(
+                &target,
+                follow_up,
+                Context {
+                    steers,
+                    ..context(704)
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            sent.step
+                .actions
+                .iter()
+                .any(|action| matches!(action, decision::Action::Deliver { steer: true, .. })),
+            steers
+        );
+        if !steers {
+            assert!(matches!(
+                storage.state(&target).unwrap().inputs[Uuid::from_u128(704).to_string().as_str()]
+                    .state,
+                InputState::Queued { steer: None }
+            ));
+        }
+    }
+}
+
+#[test]
 fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
     use agent_protocol::{conversation::Observation, execution::ExecutionError};
     for (text, ending) in [("hello", "stop"), ("hello", "retry"), ("/compact", "stop")] {
@@ -3347,11 +3470,9 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
         else {
             panic!("delivery")
         };
-        assert_eq!(
-            storage.history(&target, 0).unwrap().thread.steerable,
-            text == "/compact",
-            "unacknowledged {text}"
-        );
+        let thread = storage.history(&target, 0).unwrap().thread;
+        assert!(!thread.steerable, "unacknowledged {text}");
+        assert_eq!(thread.skips_compaction, text == "/compact");
         storage
             .decide(
                 &target,
@@ -3364,10 +3485,28 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
                 None,
             )
             .unwrap();
-        assert!(
-            storage.history(&target, 0).unwrap().thread.steerable,
-            "acknowledged {text}"
-        );
+        let thread = storage.history(&target, 0).unwrap().thread;
+        assert_eq!(thread.steerable, text != "/compact", "acknowledged {text}");
+        assert_eq!(thread.skips_compaction, text == "/compact");
+        if text == "/compact" {
+            let mut queued = submit(604);
+            let Event::Command {
+                command: Command::Submit { content, .. },
+                ..
+            } = &mut queued
+            else {
+                panic!("submit");
+            };
+            content.follow_up = FollowUp::Steer;
+            let queued = storage.decide(&target, queued, context(604), None).unwrap();
+            assert_eq!(queued.step.outcome, Outcome::Accepted);
+            assert!(queued.step.actions.is_empty());
+            assert!(matches!(
+                storage.state(&target).unwrap().inputs[Uuid::from_u128(604).to_string().as_str()]
+                    .state,
+                InputState::Queued { steer: None }
+            ));
+        }
         let terminal = if ending == "stop" {
             Event::Command {
                 id: OperationId::Client(Uuid::from_u128(603)),
@@ -3389,10 +3528,8 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
         storage
             .decide(&target, terminal, context(603), None)
             .unwrap();
-        assert_eq!(
-            storage.history(&target, 0).unwrap().thread.steerable,
-            text == "/compact",
-            "{text} / {ending}"
-        );
+        let thread = storage.history(&target, 0).unwrap().thread;
+        assert!(!thread.steerable, "{text} / {ending}");
+        assert_eq!(thread.skips_compaction, text == "/compact");
     }
 }

@@ -36,7 +36,6 @@ pub struct ProjectSummary {
     pub section: Option<String>,
     pub chats_archived: bool,
     pub expanded: bool,
-    pub loading: bool,
     pub error: Option<super::error::ErrorText>,
     pub threads: Vec<ThreadSummary>,
     pub has_more: bool,
@@ -159,7 +158,6 @@ fn project_summary(project: &Project, display_name: &str) -> ProjectSummary {
         section: None,
         chats_archived: false,
         expanded: false,
-        loading: false,
         error: None,
         threads: Vec::new(),
         has_more: false,
@@ -331,23 +329,10 @@ impl<'a> ListSource<'a> {
         if crate::state::Same::same(self.operations, other.operations) {
             return true;
         }
-        [K::SessionList, K::ListSearch]
-            .into_iter()
-            .chain(
-                self.lists
-                    .threads
-                    .iter()
-                    .flat_map(|page| &page.projects)
-                    .map(|project| K::ListDecorations {
-                        scope: agent_protocol::operations::ListDecorationScope::Project {
-                            project_id: project.id.clone(),
-                        },
-                    }),
-            )
-            .all(|key| {
-                self.operations.get(&key).map(|state| &state.phase)
-                    == other.operations.get(&key).map(|state| &state.phase)
-            })
+        [K::SessionList, K::ListSearch].into_iter().all(|key| {
+            self.operations.get(&key).map(|state| &state.phase)
+                == other.operations.get(&key).map(|state| &state.phase)
+        })
     }
     fn same_shortcuts(&self, other: &Self) -> bool {
         if std::sync::Arc::ptr_eq(self.conversations, other.conversations) {

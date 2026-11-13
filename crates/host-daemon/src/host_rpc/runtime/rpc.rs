@@ -402,13 +402,7 @@ impl Runtime {
         runtime.recovery(target).get_or_init(|| async {}).await;
         runtime
             .owners
-            .write(
-                target,
-                Write::ImportStatus {
-                    error: None,
-                    now: now(),
-                },
-            )
+            .write(target, Write::ImportStatus { now: now() })
             .await
             .map_err(storage_failure)?;
         Ok(())

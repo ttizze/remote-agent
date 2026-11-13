@@ -353,13 +353,7 @@ impl Runtime {
         let covered = reusable.as_ref().map_or(0, |(_, covered)| *covered);
         // Hydrate the exact rows that will cross the provider boundary. A
         // summary is enough for display, but cannot replace message history.
-        let history = Self::handoff_history(service, target, covered).await?;
-        let missing_message = history.thread.turns.iter().flatten().any(|turn| {
-            turn.items.iter().flatten().any(|item| {
-                item.is_deferred()
-                    && agent_protocol::handoff::Message::from_item(turn, item).is_some()
-            })
-        });
+        let (history, missing_message) = Self::handoff_history(service, target, covered).await?;
         if missing_message
             || history
                 .thread

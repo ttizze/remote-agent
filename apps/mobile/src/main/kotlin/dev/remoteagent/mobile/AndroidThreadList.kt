@@ -350,8 +350,6 @@ private fun LazyListScope.projectSection(
                 )
             }
         }
-        if (project.loading && !project.hasMore)
-            item(key = "loading:${project.listKey}") { CircularProgressIndicator(Modifier.size(18.dp)) }
         project.error?.let { error ->
             item(key = "error:${project.listKey}") {
                 ErrorTextView(error, color = androidx.compose.ui.graphics.Color.Unspecified)
@@ -363,9 +361,8 @@ private fun LazyListScope.projectSection(
             item(key = "more:${project.listKey}") {
                 TextButton(
                     onClick = { dispatch(Intent.ExpandThreadList(project.id)) },
-                    enabled = !project.loading,
                 ) {
-                    LoadingLabel("もっと見る", project.loading)
+                    Text(language.text("もっと見る"))
                 }
             }
     }

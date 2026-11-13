@@ -242,6 +242,7 @@ impl Storage {
                 &state,
                 None,
                 None,
+                None,
             )?);
             transaction.commit().map_err(failure)?;
             Ok(Committed {
@@ -260,7 +261,6 @@ impl Storage {
     pub(in crate::host_rpc) fn import_status(
         &self,
         target: &SessionRef,
-        error: Option<String>,
         now: i64,
     ) -> Result<Committed, String> {
         use agent_protocol::session::{HistoryReadKind, HistoryReadState};
@@ -312,13 +312,8 @@ impl Storage {
                     Counters::default(),
                 )
             };
-            let read = match error {
-                Some(error) => HistoryReadState::new(HistoryReadKind::Unavailable, vec![error]),
-                None => {
-                    queue(&transaction, target, target, now)?;
-                    HistoryReadState::new(HistoryReadKind::Loading, vec![])
-                }
-            };
+            queue(&transaction, target, target, now)?;
+            let read = HistoryReadState::new(HistoryReadKind::Loading, vec![]);
             if header.details.history_read_state.as_ref() == Some(&read) {
                 let current = cursor(&transaction)?;
                 transaction.commit().map_err(failure)?;
@@ -451,7 +446,7 @@ impl Storage {
             }
             let previous=rows::header(&transaction,key)?.0.details.selection;
             let selection=decision::records::Selection {model:previous.model.or(response.model.clone()),effort:previous.effort.or(response.effort.clone()),service_tier:previous.service_tier.or(response.service_tier.clone())};
-            rows::write_header(&transaction, &rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, Some((selection,None)), None)?;
+            rows::write_header(&transaction, &rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, Some((selection,None)), None, None)?;
             // Reimport publishes a reset, including the native reader's final completeness.
             let (mut header, _) = rows::header(&transaction, key)?;
             header.details.history_read_state = response.thread.history_read_state.clone();

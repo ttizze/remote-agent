@@ -373,7 +373,6 @@ impl Runtime {
                             receipt: None,
                             command: Command::ContinueAfterRestart {
                                 source: source.clone(),
-                                enabled: true,
                                 content: decision::InputContent {
                                     parts: vec![op::Input::Text {
                                         text: CONTINUE.into(),

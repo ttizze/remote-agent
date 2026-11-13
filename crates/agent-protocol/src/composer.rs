@@ -59,6 +59,11 @@ impl Invocation {
     }
 }
 
+/// Native mentions use invocation rendering only for plugin and app routes.
+pub fn is_plugin_path(path: &str) -> bool {
+    path.starts_with("plugin://") || path.starts_with("app://")
+}
+
 fn token_boundary(text: &str, start: usize, end: usize) -> bool {
     (start == 0 || text[..start].ends_with(char::is_whitespace))
         && text[end..]

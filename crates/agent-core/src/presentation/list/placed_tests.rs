@@ -744,7 +744,6 @@ fn project_decorations_preserve_the_loaded_rows_and_connection_notice() {
                     project.error.as_ref().map(|error| error.message.as_str()),
                     expected
                 );
-                assert!(!project.loading);
                 let key = OperationKey::ListDecorations {
                     scope: agent_protocol::operations::ListDecorationScope::Project {
                         project_id: "destination".into(),
@@ -764,7 +763,6 @@ fn project_decorations_preserve_the_loaded_rows_and_connection_notice() {
                     .into_iter()
                     .find(|project| project.id == "destination")
                     .unwrap();
-                assert!(!project.loading);
                 assert_eq!(
                     project.error.as_ref().map(|error| error.message.as_str()),
                     expected
@@ -782,7 +780,6 @@ fn project_decorations_preserve_the_loaded_rows_and_connection_notice() {
                     .into_iter()
                     .find(|project| project.id == "destination")
                     .unwrap();
-                assert!(!project.loading);
                 assert_eq!(
                     project.error.as_ref().map(|error| error.message.as_str()),
                     expected

@@ -308,8 +308,107 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         .unwrap()
         .thread;
     assert!(row.preparations.is_empty());
-    assert_eq!(row.workspace_setup, Some(done));
+    assert_eq!(row.workspace_setup, Some(done.clone()));
     assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
+    // Rebinding after a rewind uses ordinary input progress, not the finished
+    // startup card or its original worktree-generation ownership.
+    let finished = until(&mut updates, |thread| {
+        thread.turns.as_ref().is_some_and(|turns| {
+            turns
+                .last()
+                .is_some_and(|turn| turn.status == agent_protocol::execution::TurnStatus::Completed)
+        })
+    })
+    .await;
+    let turn = finished.turns.as_ref().unwrap().last().unwrap().id.clone();
+    let generation = fixture
+        .host
+        .inner
+        .conversation
+        .storage
+        .header(&opened)
+        .unwrap()
+        .details
+        .workspace
+        .unwrap()
+        .generation;
+    fixture
+        .host
+        .setup_update(
+            &opened,
+            generation,
+            crate::host_rpc::storage::workspace::SetupChange::Expire {
+                ended_at: done.ended_at_ms.unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    let rewound: records::Acknowledged = call(
+        &fixture.host,
+        client.id(),
+        Call::ChangeConversation(records::Change {
+            session: opened.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Rewind(turn.clone()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rewound.outcome,
+        agent_protocol::conversation::Outcome::Accepted
+    );
+    let operation = Uuid::new_v4();
+    let next: records::Acknowledged = call(
+        &fixture.host,
+        client.id(),
+        Call::ChangeConversation(records::Change {
+            session: opened.clone(),
+            operation,
+            command: Command::Submit {
+                id: operation.to_string().into(),
+                content: InputContent {
+                    parts: vec![op::Input::Text {
+                        text: "continue after rewind".into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        next.outcome,
+        agent_protocol::conversation::Outcome::Accepted
+    );
+    let rebound = until(&mut updates, |thread| {
+        thread.turns.as_ref().is_some_and(|turns| {
+            turns.last().is_some_and(|latest| {
+                latest.id != turn
+                    && latest.status == agent_protocol::execution::TurnStatus::Completed
+            })
+        })
+    })
+    .await;
+    assert!(rebound.workspace_setup.is_none());
+    assert_eq!(
+        fixture
+            .host
+            .inner
+            .conversation
+            .storage
+            .header(&opened)
+            .unwrap()
+            .details
+            .workspace
+            .unwrap()
+            .generation,
+        generation
+    );
 }
 
 #[tokio::test]

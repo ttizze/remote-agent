@@ -812,6 +812,7 @@ pub(super) fn write_header(
     state: &State,
     admitted: Option<(decision::records::Selection, Option<String>)>,
     previous: Option<&Header>,
+    steers: Option<bool>,
 ) -> Result<Option<Row>, String> {
     let &WriteScope {
         key,
@@ -830,9 +831,15 @@ pub(super) fn write_header(
             )))
     .then_some(header.details.activity.status);
     header.state = state.thread.clone();
-    header.details.steerable = state
-        .steer_target(header.details.capabilities.steer)
-        .is_some();
+    if let Some(steers) = steers {
+        header.details.capabilities.steer = steers;
+    }
+    let target = state.steer_target(header.details.capabilities.steer);
+    header.details.steerable = matches!(target, Some(decision::SteerTarget::Running(_)));
+    header.details.skips_compaction = matches!(
+        target,
+        Some(decision::SteerTarget::CompactionTurn(_) | decision::SteerTarget::CompactionInput(_))
+    );
     if let Some((selection, preview)) = admitted {
         header.details.selection = selection;
         if header.details.preview.is_none() {

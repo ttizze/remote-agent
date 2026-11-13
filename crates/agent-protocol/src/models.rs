@@ -96,6 +96,9 @@ pub struct Thread {
     /// Effective Host admission, distinct from the provider's static capability.
     #[serde(default)]
     pub steerable: bool,
+    /// Promoting a queued input skips the current compaction instead of steering it.
+    #[serde(default)]
+    pub skips_compaction: bool,
     #[serde(default)]
     pub requests: BTreeMap<crate::ids::RequestId, Arc<crate::requests::Request>>,
     #[serde(default)]

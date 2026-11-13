@@ -54,12 +54,9 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) created_in: Mutex<Vec<bool>>,
     pub(in crate::host_rpc) create_response_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) created: tokio::sync::Notify,
-    fail_inject: AtomicUsize,
+    pub(in crate::host_rpc) fail_inject: AtomicUsize,
     pub(in crate::host_rpc) open_gate: tokio::sync::Semaphore,
-    open_error: Mutex<Option<Failure>>,
-    state_error: Mutex<Option<Failure>>,
-    /// Every open fails with this, including the open an import makes.
-    open_failure: Mutex<Option<Failure>>,
+    pub(in crate::host_rpc) state_error: Mutex<Option<Failure>>,
     pub(in crate::host_rpc) fail_list: AtomicUsize,
     pub(in crate::host_rpc) fail_accounts: AtomicUsize,
     pub(in crate::host_rpc) accounts_gate: tokio::sync::Semaphore,
@@ -96,9 +93,7 @@ impl NativeAgent {
             created: tokio::sync::Notify::new(),
             fail_inject: AtomicUsize::new(0),
             open_gate: tokio::sync::Semaphore::new(1),
-            open_error: Mutex::new(None),
             state_error: Mutex::new(None),
-            open_failure: Mutex::new(None),
             fail_list: AtomicUsize::new(0),
             fail_accounts: AtomicUsize::new(0),
             accounts_gate: tokio::sync::Semaphore::new(1),
@@ -130,9 +125,7 @@ impl NativeAgent {
             created: tokio::sync::Notify::new(),
             fail_inject: AtomicUsize::new(0),
             open_gate: tokio::sync::Semaphore::new(1),
-            open_error: Mutex::new(None),
             state_error: Mutex::new(None),
-            open_failure: Mutex::new(None),
             fail_list: AtomicUsize::new(0),
             fail_accounts: AtomicUsize::new(0),
             accounts_gate: tokio::sync::Semaphore::new(1),
@@ -256,12 +249,6 @@ impl crate::providers::Discovery for NativeAgent {
     }
     async fn open(&self, id: &str, limit: usize, _: bool) -> Result<ThreadResponse, Failure> {
         let _permit = self.open_gate.acquire().await.unwrap();
-        if let Some(error) = self.open_error.lock().unwrap().take() {
-            return Err(error);
-        }
-        if let Some(error) = self.open_failure.lock().unwrap().clone() {
-            return Err(error);
-        }
         let mut response = self
             .records
             .lock()

@@ -224,9 +224,9 @@ fn message_parts(value: Value) -> Vec<MessagePart> {
                     path: take_string(&mut part, "path"),
                 },
                 Some("mention")
-                    if part["path"].as_str().is_some_and(|path| {
-                        path.starts_with("plugin://") || path.starts_with("app://")
-                    }) =>
+                    if part["path"]
+                        .as_str()
+                        .is_some_and(agent_protocol::composer::is_plugin_path) =>
                 {
                     MessagePart::Invocation {
                         name: take_string(&mut part, "name"),

@@ -1349,6 +1349,7 @@ pub(crate) fn set_draft_text(snapshot: &mut Snapshot, thread_id: DraftKey, text:
 }
 
 fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
+    let welcome = snapshot.is_welcome_draft(&navigation.draft_key);
     let Some(target) = snapshot.panes.get_mut(pane_id) else {
         return;
     };
@@ -1370,7 +1371,7 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
         workspace.review_cwd = location.review_cwd;
         workspace.comparison = location.comparison;
         workspace.review = location.review;
-    } else if pane.navigation.cwd != navigation.cwd || navigation.draft_key.is_empty() {
+    } else if pane.navigation.cwd != navigation.cwd || welcome {
         clear_workspace_location(Arc::make_mut(&mut pane.workspace));
     }
     if previous_id != navigation.thread_id {
@@ -1728,6 +1729,7 @@ fn has_session_status(thread: &Thread) -> bool {
 }
 fn clear_session_status(thread: &mut Thread) {
     thread.steerable = false;
+    thread.skips_compaction = false;
     if crate::models::task_active(None, thread.status) {
         thread.status = crate::models::SessionStatus::Unknown;
     }

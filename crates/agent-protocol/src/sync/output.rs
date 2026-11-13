@@ -1,5 +1,5 @@
 //! Command output has an ephemeral sequence, independent of saved row cursors.
-//! A gap requests a terminal checkpoint, retaining T3's cursor/style semantics.
+//! The Host sends ordered appends or a terminal checkpoint for a slow viewer.
 use serde::{Deserialize, Serialize};
 mod terminal;
 
@@ -87,17 +87,7 @@ impl OutputStream {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputUpdate {
     Tail(Output),
-    Append {
-        from: u64,
-        through: u64,
-        text: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum OutputError {
-    #[error("command output has a gap; request its current tail")]
-    Gap,
+    Append { through: u64, text: String },
 }
 
 impl Output {
@@ -135,24 +125,17 @@ impl Output {
         output.truncated |= truncated;
         output
     }
-    pub fn apply(&self, update: OutputUpdate) -> Result<Self, OutputError> {
+    pub fn apply(&self, update: OutputUpdate) -> Self {
         match update {
             OutputUpdate::Tail(tail) => {
                 if tail.sequence < self.sequence {
-                    return Ok(self.clone());
+                    return self.clone();
                 }
-                Ok(tail)
+                tail
             }
-            OutputUpdate::Append {
-                from,
-                through,
-                text,
-            } => {
+            OutputUpdate::Append { through, text } => {
                 if through <= self.sequence {
-                    return Ok(self.clone());
-                }
-                if from != self.sequence || through <= from {
-                    return Err(OutputError::Gap);
+                    return self.clone();
                 }
                 let mut next = self.clone();
                 std::sync::Arc::make_mut(&mut next.buffer).append(&text);
@@ -160,7 +143,7 @@ impl Output {
                 next.sequence = through;
                 next.text = text;
                 next.truncated |= truncated;
-                Ok(next)
+                next
             }
         }
     }
@@ -189,39 +172,20 @@ mod tests {
     }
 
     #[test]
-    fn sequence_gaps_duplicates_and_checkpoint_recovery_do_not_change_history() {
+    fn duplicate_updates_and_older_checkpoints_do_not_change_history() {
         let output = Output::new(3, "before");
-        assert_eq!(
-            output.apply(OutputUpdate::Append {
-                from: 4,
-                through: 5,
-                text: "gap".into()
-            }),
-            Err(OutputError::Gap)
-        );
-        let next = output
-            .apply(OutputUpdate::Tail(Output::new(6, "current")))
-            .unwrap();
-        let appended = next
-            .apply(OutputUpdate::Append {
-                from: 6,
-                through: 8,
-                text: "!".into(),
-            })
-            .unwrap();
+        let next = output.apply(OutputUpdate::Tail(Output::new(6, "current")));
+        let appended = next.apply(OutputUpdate::Append {
+            through: 8,
+            text: "!".into(),
+        });
         assert_eq!(appended.text, "current!");
+        assert_eq!(appended.apply(OutputUpdate::Tail(output)), appended);
         assert_eq!(
-            appended.apply(OutputUpdate::Tail(output)).unwrap(),
-            appended
-        );
-        assert_eq!(
-            appended
-                .apply(OutputUpdate::Append {
-                    from: 6,
-                    through: 8,
-                    text: "!".into()
-                })
-                .unwrap(),
+            appended.apply(OutputUpdate::Append {
+                through: 8,
+                text: "!".into()
+            }),
             appended
         );
     }
@@ -251,18 +215,12 @@ mod tests {
         ] {
             let tail = Output::new(1, source);
             assert_eq!(tail.text, expected, "{source:?}");
-            let restored = Output::default()
-                .apply(OutputUpdate::Tail(tail.clone()))
-                .unwrap();
+            let restored = Output::default().apply(OutputUpdate::Tail(tail.clone()));
             let update = OutputUpdate::Append {
-                from: 1,
                 through: 2,
                 text: "!".into(),
             };
-            assert_eq!(
-                restored.apply(update.clone()).unwrap(),
-                tail.apply(update).unwrap()
-            );
+            assert_eq!(restored.apply(update.clone()), tail.apply(update));
         }
     }
     #[test]
@@ -289,13 +247,10 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .repeat(step["repeat"].as_u64().unwrap() as usize);
-                output = output
-                    .apply(OutputUpdate::Append {
-                        from: output.sequence,
-                        through: output.sequence + 1,
-                        text: text.clone(),
-                    })
-                    .unwrap();
+                output = output.apply(OutputUpdate::Append {
+                    through: output.sequence + 1,
+                    text: text.clone(),
+                });
                 stream.append(output.sequence, &text);
                 assert_eq!(
                     stream.checkpoint(),
@@ -311,16 +266,11 @@ mod tests {
                     case["name"]
                 );
             }
-            let restored = Output::default()
-                .apply(OutputUpdate::Tail(checkpoint(output.clone())))
-                .unwrap();
-            let after = restored
-                .apply(OutputUpdate::Append {
-                    from: restored.sequence,
-                    through: restored.sequence + 1,
-                    text: "!".into(),
-                })
-                .unwrap();
+            let restored = Output::default().apply(OutputUpdate::Tail(checkpoint(output.clone())));
+            let after = restored.apply(OutputUpdate::Append {
+                through: restored.sequence + 1,
+                text: "!".into(),
+            });
             assert_eq!(
                 after.text,
                 unpack(&case["after"]),
@@ -349,12 +299,12 @@ mod tests {
             let mut client = Output::default();
             for (index, part) in parts.into_iter().enumerate() {
                 source.push_str(&part);
-                let update = OutputUpdate::Append { from: host.sequence, through: host.sequence + 1, text: part };
-                host = host.apply(update.clone()).unwrap();
+                let update = OutputUpdate::Append { through: host.sequence + 1, text: part };
+                host = host.apply(update.clone());
                 let update = if checkpoints[index % checkpoints.len()] { OutputUpdate::Tail(checkpoint(host.clone())) } else { update };
-                client = client.apply(update.clone()).unwrap();
+                client = client.apply(update.clone());
                 prop_assert_eq!(&client, &host);
-                prop_assert_eq!(client.apply(update).unwrap(), client.clone());
+                prop_assert_eq!(client.apply(update), client.clone());
                 prop_assert_eq!(host.text.clone(), Output::new(host.sequence, &source).text);
             }
         }

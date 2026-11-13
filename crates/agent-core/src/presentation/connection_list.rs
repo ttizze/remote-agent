@@ -102,7 +102,6 @@ mod tests {
                 section: None,
                 chats_archived: false,
                 expanded: true,
-                loading: false,
                 error: None,
                 threads: vec![thread()],
                 has_more: false,

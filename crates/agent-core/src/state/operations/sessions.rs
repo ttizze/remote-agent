@@ -507,7 +507,7 @@ fn sent_input(
     ))
 }
 
-fn file_name(path: &str) -> String {
+pub(super) fn file_name(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
 }
 

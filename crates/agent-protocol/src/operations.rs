@@ -152,9 +152,7 @@ impl Input {
                     name: name.clone(),
                     path: path.clone(),
                 },
-                Self::Mention { name, path }
-                    if path.starts_with("plugin://") || path.starts_with("app://") =>
-                {
+                Self::Mention { name, path } if crate::composer::is_plugin_path(path) => {
                     MessagePart::Invocation {
                         name: name.clone(),
                         path: path.clone(),

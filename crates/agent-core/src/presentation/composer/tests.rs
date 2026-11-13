@@ -482,15 +482,17 @@ fn an_interrupted_turn_or_a_usage_limit_can_be_resumed() {
 fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
     let mut snapshot = snapshot();
     snapshot.input.composer_preferences.follow_up = FollowUp::Steer;
-    for (name, capability, allowed) in [
-        ("stopping or retrying", true, false),
-        ("compaction", false, true),
+    for (name, capability, allowed, skips_compaction) in [
+        ("stopping or retrying", true, false, false),
+        ("compaction", false, false, true),
+        ("ordinary turn", true, true, false),
     ] {
         Arc::make_mut(&mut snapshot.sessions.conversations).insert(
             session(),
             Arc::new(Thread {
                 id: Some(session()),
                 steerable: allowed,
+                skips_compaction,
                 capabilities: Some(agent_protocol::session::Capabilities {
                     steer: capability,
                     ..Default::default()
@@ -504,7 +506,7 @@ fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
             }),
         );
         let controls = &presentation(&snapshot).controls.follow_up;
-        assert_eq!(controls.can_steer, allowed, "{name}");
+        assert_eq!(controls.can_steer, allowed || skips_compaction, "{name}");
         assert_eq!(
             controls.default_action,
             if allowed {

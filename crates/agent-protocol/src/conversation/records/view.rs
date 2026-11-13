@@ -161,6 +161,7 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
             submissions,
             queue,
             steerable: header.details.steerable,
+            skips_compaction: header.details.skips_compaction,
             preparations,
             workspace_setup: header
                 .details

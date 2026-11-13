@@ -48,7 +48,11 @@ impl Runtime {
         if stage == PreparationStage::Provider
             && let Some(mut workspace) = workspace
             && let Some(setup) = &mut workspace.setup
-            && setup.phase != agent_protocol::workspace::SetupPhase::Running
+            && matches!(
+                setup.phase,
+                agent_protocol::workspace::SetupPhase::Failed
+                    | agent_protocol::workspace::SetupPhase::Cancelled
+            )
         {
             workspace.generation = action;
             workspace.visible = true;

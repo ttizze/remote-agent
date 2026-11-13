@@ -578,7 +578,6 @@ pub enum Command {
     },
     ContinueAfterRestart {
         source: TurnId,
-        enabled: bool,
         content: InputContent,
     },
     Interrupt {

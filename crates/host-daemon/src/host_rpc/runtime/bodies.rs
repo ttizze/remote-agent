@@ -4,11 +4,12 @@ use super::*;
 mod tests;
 
 impl Runtime {
+    /// Return hydrated history and whether any required message body is still missing.
     pub(in crate::host_rpc) async fn handoff_history(
         service: &HostRpcService,
         target: &SessionRef,
         covered: u64,
-    ) -> Result<agent_protocol::models::ThreadResponse, Failure> {
+    ) -> Result<(agent_protocol::models::ThreadResponse, bool), Failure> {
         let storage = &service.inner.conversation.storage;
         let history = storage.history(target, covered).map_err(storage_failure)?;
         for turn in history.thread.turns.iter().flatten() {
@@ -22,12 +23,13 @@ impl Runtime {
             }
         }
         let mut history = storage.history(target, covered).map_err(storage_failure)?;
-        if history.thread.turns.iter().flatten().any(|turn| {
+        let missing_message = history.thread.turns.iter().flatten().any(|turn| {
             turn.items.iter().flatten().any(|item| {
                 item.is_deferred()
                     && agent_protocol::handoff::Message::from_item(turn, item).is_some()
             })
-        }) {
+        });
+        if missing_message {
             use agent_protocol::session::{HistoryReadKind, HistoryReadState};
             let state = history
                 .thread
@@ -41,7 +43,7 @@ impl Runtime {
                 state.issues.push(issue);
             }
         }
-        Ok(history)
+        Ok((history, missing_message))
     }
 
     pub(super) async fn read_native_body(

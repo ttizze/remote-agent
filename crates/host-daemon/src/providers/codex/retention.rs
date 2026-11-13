@@ -45,6 +45,12 @@ impl Subscriptions {
     pub(super) fn observe(&self, change: &AgentChange) {
         lock(&self.activity).observe(change, Instant::now());
     }
+    pub(super) fn busy(&self, id: &str) -> bool {
+        lock(&self.activity)
+            .tree(id)
+            .iter()
+            .any(|thread| thread.active || !thread.running.is_empty())
+    }
     pub(super) fn touch(&self, id: &str) {
         lock(&self.activity).touch(id, Instant::now());
     }

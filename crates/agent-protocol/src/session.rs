@@ -433,7 +433,7 @@ impl SessionChange {
                     if item.is_deferred() {
                         return Ok(());
                     }
-                    text_delta(item.body_mut(), *field, delta)?;
+                    text_part(item.body_mut(), *field)?.push_str(delta);
                 }
                 Self::ReasoningPart {
                     item_id,
@@ -1166,13 +1166,6 @@ impl HistoryReadState {
     pub fn new(kind: HistoryReadKind, issues: Vec<String>) -> Self {
         Self { kind, issues }
     }
-}
-
-/// Append one native text fragment in place. Owners choose the body and persist
-/// the result; this function has no state or I/O dependencies.
-pub fn text_delta(body: &mut ItemBody, field: TextField, delta: &str) -> Result<(), UpdateError> {
-    text_part(body, field)?.push_str(delta);
-    Ok(())
 }
 
 /// Select one text stream without replacing the other parts of its item.

@@ -277,9 +277,14 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     )]));
     let restored: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let mut expected = snapshot.clone();
+    expected.sessions.replicas = Default::default();
+    expected.lists.replica = None;
+    expected.lists.subscription = None;
+    expected.lists.task_activity = None;
+    Arc::make_mut(&mut expected.lists.activity).active.clear();
     assert_eq!(
-        serde_json::to_value(&restored).unwrap(),
-        serde_json::to_value(&snapshot).unwrap(),
+        restored, expected,
         "persisted snapshots must retain loaded history after reopening"
     );
 }
@@ -631,10 +636,13 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     );
     let restored: Snapshot = serde_json::from_slice(&serde_json::to_vec(&next).unwrap()).unwrap();
     assert!(restored.sessions.replicas.is_empty());
-    assert_eq!(
-        serde_json::to_value(&restored).unwrap(),
-        serde_json::to_value(&next).unwrap()
-    );
+    let mut expected = next.clone();
+    expected.sessions.replicas = Default::default();
+    expected.lists.replica = None;
+    expected.lists.subscription = None;
+    expected.lists.task_activity = None;
+    Arc::make_mut(&mut expected.lists.activity).active.clear();
+    assert_eq!(restored, expected);
 }
 
 #[test]

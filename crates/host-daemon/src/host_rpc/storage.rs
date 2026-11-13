@@ -519,7 +519,7 @@ change,
                 rows::bind_items(&transaction, key, attempt, self.process, &items)?;
             }
             if created || status_changed || !step.changes.is_empty() {
-                updated.extend(rows::write_header(&transaction, &rows::WriteScope { key, id, sequence: through.sequence, at: if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now}, process: self.process }, &state, admitted, Some(&previous_header))?);
+                updated.extend(rows::write_header(&transaction, &rows::WriteScope { key, id, sequence: through.sequence, at: if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now}, process: self.process }, &state, admitted, Some(&previous_header), Some(context.steers))?);
             }
             if let Some((operation, outcome)) = &step.receipt {
                 transaction

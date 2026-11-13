@@ -1012,6 +1012,40 @@ async fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recov
                 [protocol::encode(turn).unwrap()],
             )
             .unwrap();
+        let external = SessionRef::new(ProviderKind::Codex, "external-running-cli".into()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations VALUES ('codex',?1,?2,?3)",
+                params![
+                    external.id,
+                    cwd,
+                    protocol::encode(ThreadResponse {
+                        thread: Thread {
+                            id: Some(external.clone()),
+                            cwd: Some(cwd.clone()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO turns VALUES ('codex',?1,0,?2)",
+                params![
+                    external.id,
+                    protocol::encode(Turn {
+                        id: "external-turn".into(),
+                        status: TurnStatus::Running,
+                        items: Some(vec![]),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                ],
+            )
+            .unwrap();
         let journal = Recovery {
             tasks: vec![InterruptedTask {
                 native_session: native.clone(),
@@ -1031,6 +1065,10 @@ async fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recov
         let storage = Storage::open(&path);
         storage.check_ready().unwrap();
         assert_eq!(storage.updating().unwrap(), !sending);
+        assert!(matches!(
+            storage.state(&external).unwrap().turns["external-turn"].state,
+            decision::TurnState::Interrupted
+        ));
         // The old updater requires these exact fields while reading only delivery.
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
@@ -1050,6 +1088,18 @@ async fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recov
             external_busy: false,
             steer_ready: true,
         };
+        let external_restart = storage
+            .decide(
+                &external,
+                Event::Restart {
+                    updating: !sending,
+                    continue_after_restart: true,
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        assert!(external_restart.step.continuations.is_empty());
         if !sending {
             let restarted = storage
                 .decide(

@@ -1061,6 +1061,12 @@ impl Agent for Codex {
         }
     }
     async fn unload(&self, id: &str) -> Result<(), Failure> {
+        if self.subscriptions.busy(id) {
+            return Err(Failure::new(
+                "provider_switch_busy",
+                "サブエージェントの応答・確認が終わってからAIを切り替えてください。",
+            ));
+        }
         self.subscriptions
             .release(self.server()?, id, false)
             .await
@@ -1664,6 +1670,11 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
                         }
                         AgentChange::Request {session,origin,request} if session.id == child => {
                             assert_eq!(event.execution,execution);assert!(execution.is_some());
+                            // A completed parent must retain a child still awaiting approval.
+                            for (id, status) in [(root, agent_protocol::models::SessionStatus::Idle), (child, agent_protocol::models::SessionStatus::Running)] {
+                                agent.subscriptions.observe(&AgentChange::Session {session: SessionRef::new(ProviderKind::Codex, id.into()).unwrap(), change: SessionChange::Status {status}});
+                            }
+                            assert_eq!(agent.unload(root).await.unwrap_err().code, "provider_switch_busy");
                             let agent_protocol::requests::RequestBody::Approval {choices,..} = &request.body else {panic!("child approval was lost")};
                             let choice_id=choices.iter().find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Allow).unwrap().id.clone();
                             write=Some(origin.source.prepare(&origin.native_id,&request.body,&agent_protocol::requests::Answer::Approval {choice_id}).await.unwrap());

@@ -84,7 +84,7 @@ pub(super) struct Previous {
     projects: Vec<agent_protocol::models::Project>,
     workspace_scripts: BTreeMap<String, Vec<agent_protocol::models::ProjectScript>>,
     backup: tempfile::TempDir,
-    recovery_pending: bool,
+    continuations: BTreeSet<SessionRef>,
 }
 
 fn file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
@@ -284,14 +284,14 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
         projects,
         workspace_scripts,
         backup,
-        recovery_pending: file::<agent_local_host::update::Recovery>(
+        continuations: file::<agent_local_host::update::Recovery>(
             &path.with_file_name(agent_local_host::update::RECOVERY_FILE),
         )?
-        .is_some_and(|report| {
-            report.tasks.iter().any(|task| {
-                task.delivery == agent_local_host::update::ContinuationDelivery::Pending
-            })
-        }),
+        .into_iter()
+        .flat_map(|report| report.tasks)
+        .filter(|task| task.delivery == agent_local_host::update::ContinuationDelivery::Pending)
+        .map(|task| task.submission.thread_id)
+        .collect(),
     }))
 }
 
@@ -347,7 +347,7 @@ impl Previous {
 
     pub(super) fn write(&self, transaction: &Transaction<'_>, process: Uuid) -> Result<(), String> {
         let now = super::super::runtime::now();
-        if self.recovery_pending {
+        if !self.continuations.is_empty() {
             transaction
                 .execute("UPDATE store SET updating=1", [])
                 .map_err(failure)?;
@@ -499,8 +499,24 @@ impl Previous {
         for row in &self.conversations {
             row.restore(transaction, sequence, process, now)?;
         }
-        // Main interrupted every saved Running turn on startup, even without
-        // an updater journal. Preserve that boundary for the first upgrade.
+        // Main interrupted every saved Running turn, but only the updater's
+        // journal grants permission to send an automatic continuation.
+        for id in history
+            .keys()
+            .filter(|id| !self.continuations.contains(*id))
+        {
+            interrupt_previous(
+                transaction,
+                &rows::WriteScope {
+                    key: thread_key(transaction, id)?,
+                    id,
+                    sequence,
+                    at: now,
+                    process,
+                },
+            )?;
+        }
+        // Only journal-authorized turns remain Running at this point.
         transaction.execute("UPDATE executions SET process=?1 WHERE EXISTS (SELECT 1 FROM turns t WHERE t.thread=executions.thread AND t.id=executions.turn_id AND t.state='running')", [process.to_string()]).map_err(failure)?;
         for id in &self.unimported {
             let source = self
@@ -597,6 +613,7 @@ impl Previous {
             &state,
             None,
             None,
+            None,
         )?;
         if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
             transaction
@@ -614,6 +631,52 @@ impl Previous {
         }
         Ok(())
     }
+}
+
+/// Interrupt old work before the updater flag is visible. Only the journal
+/// grants permission to send a continuation after conversion.
+fn interrupt_previous(
+    transaction: &Transaction<'_>,
+    scope: &rows::WriteScope<'_>,
+) -> Result<(), String> {
+    let state = rows::load(transaction, scope.key, scope.process)?;
+    if !state
+        .turns
+        .values()
+        .any(|turn| matches!(turn.state, decision::TurnState::Running { .. }))
+    {
+        return Ok(());
+    }
+    let step = decision::step(
+        &state,
+        Event::Restart {
+            updating: false,
+            continue_after_restart: false,
+        },
+        Context {
+            now: scope.at,
+            seed: Uuid::new_v4(),
+            steers: false,
+            steer_ready: false,
+            preparation: None,
+            rewind_binding: None,
+            imported_turns: &[],
+            external_busy: false,
+        },
+    );
+    let state = state.apply(&step.changes);
+    for change in &step.changes {
+        rows::write(
+            transaction,
+            scope,
+            change,
+            &state.turns,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )?;
+    }
+    rows::write_header(transaction, scope, &state, None, None, None)?;
+    Ok(())
 }
 
 impl Conversation {
@@ -759,6 +822,7 @@ impl Conversation {
                     process,
                 },
                 &state,
+                None,
                 None,
                 None,
             )?;
