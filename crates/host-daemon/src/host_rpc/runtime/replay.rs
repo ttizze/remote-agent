@@ -399,6 +399,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
         let mut executions = HashMap::<SessionRef, Uuid>::new();
         let mut requests = HashMap::new();
         let mut requested = Vec::new();
+        let mut live_output = None;
         let mut observed = 0;
         for (index, row) in frames(&recording)
             .into_iter()
@@ -421,35 +422,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     native_fixture::own(&service, native, &response);
                 }
             }
-            let line = frame.to_string();
-            let message = RpcMessage::parse(&line).unwrap();
-            let changes = match message.kind() {
-                RpcMessageKind::Notification => codex::event_changes(Uuid::nil(), &message)
-                    .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file)),
-                RpcMessageKind::Request => {
-                    let adapted = crate::providers::requests::codex(
-                        format!("recorded-{index}").into(),
-                        frame["method"].as_str().unwrap(),
-                        &frame["params"],
-                    )
-                    .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file));
-                    vec![AgentChange::Request {
-                        session: SessionRef::new(
-                            ProviderKind::Codex,
-                            frame["params"]["threadId"].as_str().unwrap().into(),
-                        )
-                        .unwrap(),
-                        origin: RequestOrigin {
-                            instance: Uuid::nil(),
-                            native_id: frame["id"].clone(),
-                            provider: ProviderKind::Codex,
-                            source: Arc::new(native_fixture::AnswerResource),
-                        },
-                        request: adapted.request,
-                    }]
-                }
-                _ => Vec::new(),
-            };
+            let changes = decode_codex_frame(index, frame);
             for change in changes {
                 let resolved = match &change {
                     AgentChange::Request {
@@ -523,6 +496,39 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                 }
                 observed += 1;
             }
+            if recording.scenario == "command_output_streaming"
+                && frame["method"] == "item/commandExecution/outputDelta"
+            {
+                let session = SessionRef::new(
+                    ProviderKind::Codex,
+                    frame["params"]["threadId"].as_str().unwrap().into(),
+                )
+                .unwrap();
+                let key = records::OutputKey {
+                    item: decision::provider_item_id(
+                        executions[&session],
+                        frame["params"]["itemId"].as_str().unwrap(),
+                    ),
+                    session,
+                };
+                let (tail, _) = service
+                    .inner
+                    .conversation
+                    .outputs
+                    .subscribe(&key, None)
+                    .unwrap();
+                live_output = Some(tail);
+                let item = service
+                    .inner
+                    .conversation
+                    .storage
+                    .item(&key.session, &key.item)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(item.body, agent_protocol::items::ItemBody::CommandExecution {output,..} if output.is_empty())
+                );
+            }
         }
         assert!(observed > 0, "{}", recording.file);
         let sessions: Vec<_> = executions.into_keys().collect();
@@ -531,6 +537,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
             &service.inner.conversation.storage,
             &sessions,
             &requested,
+            live_output.as_ref(),
         );
         if matches!(
             recording.scenario.as_str(),
@@ -551,6 +558,7 @@ fn assert_codex_projection(
     storage: &Storage,
     sessions: &[SessionRef],
     requested: &[agent_protocol::requests::RequestBody],
+    live_output: Option<&agent_protocol::sync::Output>,
 ) {
     if matches!(
         scenario,
@@ -642,11 +650,16 @@ fn assert_codex_projection(
             else {
                 unreachable!()
             };
-            assert!(output.contains("progress 100%"));
-            assert!(!output.contains("progress 50%"));
-            for line in ["stream line 2", "stream line 3", "stream line 4"] {
-                assert!(output.contains(line));
+            let live = live_output.expect("the native recording must stream live command output");
+            assert!(live.sequence > 0);
+            for text in [output.as_str(), live.text.as_str()] {
+                assert!(text.contains("progress 100%"));
+                assert!(!text.contains("progress 50%"));
+                for line in ["stream line 2", "stream line 3", "stream line 4"] {
+                    assert!(text.contains(line));
+                }
             }
+            assert!(output.trim_end().ends_with(live.text.trim_end()));
         }
     }
     if scenario == "proposed_plan" {
@@ -708,5 +721,37 @@ async fn assert_fork_prefix(storage: &Storage, owners: &Arc<Owners>, recording: 
         for marker in absent {
             assert!(!texts.contains(marker));
         }
+    }
+}
+
+fn decode_codex_frame(index: usize, frame: &Value) -> Vec<AgentChange> {
+    let line = frame.to_string();
+    let message = RpcMessage::parse(&line).unwrap();
+    match message.kind() {
+        RpcMessageKind::Notification => codex::event_changes(Uuid::nil(), &message)
+            .unwrap_or_else(|error| panic!("Codex recording frame {index}: {error}")),
+        RpcMessageKind::Request => {
+            let adapted = crate::providers::requests::codex(
+                format!("recorded-{index}").into(),
+                frame["method"].as_str().unwrap(),
+                &frame["params"],
+            )
+            .unwrap_or_else(|error| panic!("Codex recording frame {index}: {error}"));
+            vec![AgentChange::Request {
+                session: SessionRef::new(
+                    ProviderKind::Codex,
+                    frame["params"]["threadId"].as_str().unwrap().into(),
+                )
+                .unwrap(),
+                origin: RequestOrigin {
+                    instance: Uuid::nil(),
+                    native_id: frame["id"].clone(),
+                    provider: ProviderKind::Codex,
+                    source: Arc::new(native_fixture::AnswerResource),
+                },
+                request: adapted.request,
+            }]
+        }
+        _ => Vec::new(),
     }
 }
