@@ -144,7 +144,7 @@ fn panel(list: List, selected: Memo<Vec<ProjectKey>>, open: Signal<bool>) -> imp
                 .unwrap_or_default()
         })
     });
-    let confirm = move |additive| {
+    let confirm = move |additive: bool| {
         let index = highlighted.get_untracked();
         if index == 0 {
             if !additive {
