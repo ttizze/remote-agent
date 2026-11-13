@@ -3,6 +3,24 @@ import AppKit
 import XCTest
 
 final class ConversationTests: XCTestCase {
+    @MainActor func testNativeCodeAndTableKeepAccessibleIconActionsAndWrappingState() throws {
+        var document = MessageDocument.empty
+        document.labels = ["copyCode":"Copy code", "copyTable":"Copy table", "wrap":"Wrap", "unwrap":"Unwrap"]
+        let body = TranscriptBody()
+        body.update([.code(.init(label:"swift", source:"let x = 1", blocks:[paragraph("let x = 1")], diagram:nil)),
+                     .table(.init(source:"| a |", csv:"a", rows:[[[.text([paragraph("a")])]]]))], document:document, media:[:])
+        let buttons = controls(body)
+        for title in ["Copy code","Copy table","Unwrap"] {
+            let button = try XCTUnwrap(buttons.first{$0.accessibilityLabel() == title},title)
+            XCTAssertEqual(button.imagePosition,.imageOnly)
+            XCTAssertNotNil(button.image)
+        }
+        let wrap = try XCTUnwrap(buttons.first{$0.title == "Unwrap"})
+        wrap.performClick(nil)
+        XCTAssertEqual(wrap.accessibilityLabel(),"Wrap")
+        XCTAssertEqual(wrap.image?.accessibilityDescription,"Wrap")
+    }
+
     @MainActor func testStreamingReusesTheNativeTextAndPreservesOnlyUnchangedSelection() throws {
         let document = MessageDocument.empty
         let body = TranscriptBody()
@@ -80,6 +98,10 @@ final class ConversationTests: XCTestCase {
 
     @MainActor private func texts(_ view: NSView) -> [NSTextView] {
         (view as? NSTextView).map { [$0] } ?? view.subviews.flatMap(texts)
+    }
+
+    @MainActor private func controls(_ view: NSView) -> [NSButton] {
+        (view as? NSButton).map{[$0]} ?? view.subviews.flatMap(controls)
     }
 
     @MainActor private func settle() async {

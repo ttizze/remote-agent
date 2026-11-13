@@ -238,7 +238,9 @@ private extension Optional {
     private var code: TranscriptPart.Code
     private let drawing = NSImageView()
     private let mode = NSButton()
+    private let zoom = NSButton()
     private var showSource = false
+    private var large = false
     private let text: NativeParagraph
     private let header = NSTextField(labelWithString: "")
     private let copy = NSButton()
@@ -260,8 +262,9 @@ private extension Optional {
         }
         scroll.drawsBackground = false; scroll.hasHorizontalScroller = true; scroll.documentView = text
         mode.bezelStyle = .inline; mode.target = self; mode.action = #selector(toggleSource)
+        zoom.bezelStyle = .inline; zoom.target = self; zoom.action = #selector(toggleSize)
         drawing.imageScaling = .scaleProportionallyUpOrDown
-        for view in [header, copy, wrap, scroll, drawing, mode] {
+        for view in [header, copy, wrap, scroll, drawing, mode, zoom] {
             addSubview(view)
         }
     }
@@ -277,10 +280,11 @@ private extension Optional {
 
     override func update(document: MessageDocument, media: [String: String]) {
         super.update(document: document, media: media)
-        copy.title = label("copyCode"); wrap.title = label(wrapping ? "unwrap" : "wrap")
+        copy.title = label(code.diagram == nil ? "copyCode" : "copyDiagram"); wrap.title = label(wrapping ? "unwrap" : "wrap")
         for (button, key) in [(copy, "copy"), (wrap, "wrap")] {
-            button.isBordered = false; button.setAccessibilityLabel(button.title); button.toolTip = button.title
-            button.image = MessageAttributes.icon(key, size: 12); button.imagePosition = .imageOnly
+            button.isBordered = false
+            button.image = MessageAttributes.icon(key, size: 12, label: button.title); button.imagePosition = .imageOnly
+            button.setAccessibilityLabel(button.title); button.toolTip = button.title
         }
         if document.findKey != nil,
            code.blocks
@@ -294,6 +298,7 @@ private extension Optional {
         drawing.isHidden = code.diagram == nil || showSource
         scroll.isHidden = code.diagram != nil && !showSource
         wrap.isHidden = scroll.isHidden
+        zoom.title = label(large ? "shrink" : "enlarge"); zoom.isHidden = drawing.isHidden
         text.send = { [weak self] in self?.send?($0) }
         text.update(document: document, media: media)
     }
@@ -304,10 +309,12 @@ private extension Optional {
         copy.frame.origin = NSPoint(x: max(0, width - copy.frame.width - 7), y: 5)
         wrap.frame.origin = NSPoint(x: max(0, copy.frame.minX - wrap.frame.width - 6), y: 5)
         header.frame = NSRect(x: 14, y: 8, width: max(0, wrap.frame.minX - 20), height: 16)
-        mode.sizeToFit(); mode.frame.origin = NSPoint(x: max(14, wrap.frame.minX - mode.frame.width - 6), y: 5)
-        if !drawing.isHidden, let size = drawing.image?.size, size.width > 0 {
-            let height = min(size.height, available * size.height / size.width)
-            drawing.frame = NSRect(x: 15, y: 35, width: available, height: height)
+        zoom.sizeToFit(); zoom.frame.origin = NSPoint(x: max(14, copy.frame.minX - zoom.frame.width - 6), y: 5)
+        mode.sizeToFit(); mode.frame.origin = NSPoint(x: max(14, (zoom.isHidden ? wrap.frame.minX : zoom.frame.minX) - mode.frame.width - 6), y: 5)
+        header.frame.size.width = max(0, (mode.isHidden ? wrap.frame.minX : mode.frame.minX) - 20)
+        if !drawing.isHidden, let diagram = code.diagram, diagram.width > 0 {
+            let height = min(large ? 640 : min(300, diagram.height), available * diagram.height / diagram.width)
+            drawing.frame = NSRect(x: 15, y: 35, width: min(available, height * diagram.width / diagram.height), height: height)
             return drawing.frame.maxY + 15
         }
         let contentWidth = wrapping ? available : max(available, ceil(text.text.attributedString().size().width))
@@ -326,8 +333,12 @@ private extension Optional {
         showSource.toggle(); update(document: document, media: [:]); resized?()
     }
 
+    @objc private func toggleSize() {
+        large.toggle(); update(document: document, media: [:]); resized?()
+    }
+
     @objc private func toggleWrap() {
-        wrapping.toggle(); wrap.title = label(wrapping ? "unwrap" : "wrap"); resized?()
+        wrapping.toggle(); update(document: document, media: [:]); resized?()
     }
 }
 
@@ -354,8 +365,9 @@ private extension Optional {
 
     override func update(document: MessageDocument, media: [String: String]) {
         super.update(document: document, media: media)
-        copy.title = label("copyTable"); copy.setAccessibilityLabel(copy.title); copy.toolTip = copy.title
-        copy.image = MessageAttributes.icon("copy", size: 12); copy.imagePosition = .imageOnly
+        copy.title = label("copyTable")
+        copy.image = MessageAttributes.icon("copy", size: 12, label: copy.title); copy.imagePosition = .imageOnly
+        copy.setAccessibilityLabel(copy.title); copy.toolTip = copy.title
         for (r, row) in cells.enumerated() {
             for (c, cell) in row.enumerated() {
                 cell.send = { [weak self] in self?.send?($0) }
@@ -423,8 +435,9 @@ private extension Optional {
         button
             .title = label(reason != nil ? "retry" : image && button
                 .image == nil ? "loadingImage" : image ? "openImage" : "openFile")
-        button.setAccessibilityLabel(button.title)
         button.imagePosition = button.image != nil ? .imageOnly : .noImage
+        button.image?.accessibilityDescription = button.title
+        button.setAccessibilityLabel(button.title)
     }
 
     override func measure(_ width: CGFloat) -> CGFloat {

@@ -198,7 +198,6 @@ private struct TaskListButton: View {
             }
         }
         .accessibilityIdentifier(row.id)
-        .accessibilityLabel(row.title)
         .accessibilityValue(row.statusLabel ?? "")
     }
 

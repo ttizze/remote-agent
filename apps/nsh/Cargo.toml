@@ -75,9 +75,9 @@ alacritty_terminal = "=0.26.0"
 # shows its Host's invitation as a QR code for phones.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 agent-core = { path = "../../crates/agent-core", features = ["app-updates"] }
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # The desktop's diagnostic log.
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 agent-transport = { path = "../../crates/agent-transport" }
 tracing.workspace = true

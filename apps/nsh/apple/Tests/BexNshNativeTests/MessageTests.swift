@@ -7,6 +7,7 @@ final class MessageTests: XCTestCase {
     @MainActor func testConversationActionsUseAvailableSystemSymbols() {
         for name in [
             "copy",
+            "agent",
             "edit",
             "fork",
             "more",

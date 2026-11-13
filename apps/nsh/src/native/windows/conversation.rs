@@ -5,7 +5,7 @@ use nsh_platform_windows::{ComponentContext, Components, NativeComponent};
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 use windows::{
@@ -36,6 +36,7 @@ pub(super) fn register(components: &Components) {
 struct Context {
     owner: ComponentContext,
     pending: Cell<bool>,
+    active: Cell<bool>,
     state: RefCell<Viewport>,
 }
 
@@ -55,18 +56,21 @@ struct Viewport {
     padding: f32,
     latest: Option<Item>,
     hovered: Option<String>,
-    wrap: HashMap<(String, usize), bool>,
+    expanded: HashSet<String>,
+    blocks: HashMap<(String, usize), control::BlockState>,
 }
 
 struct Row {
     items: Vec<Item>,
     value: Value,
     width: i32,
+    body: std::ops::Range<usize>,
+    collapsed: bool,
 }
 
 struct Conversation {
     window: HWND,
-    context: Box<Context>,
+    context: Rc<Context>,
 }
 
 impl Conversation {
@@ -89,9 +93,10 @@ impl Conversation {
             )
         }
         .expect("create native transcript viewport");
-        let context = Box::new(Context {
+        let context = Rc::new(Context {
             owner,
             pending: Cell::new(false),
+            active: Cell::new(true),
             state: RefCell::new(Viewport {
                 window,
                 scope: String::new(),
@@ -103,7 +108,8 @@ impl Conversation {
                 height: 480,
                 total: 0,
                 following: true,
-                wrap: HashMap::new(),
+                blocks: HashMap::new(),
+                expanded: HashSet::new(),
                 inset: 0,
                 lane: 736.0,
                 padding: 24.0,
@@ -116,7 +122,7 @@ impl Conversation {
                 window,
                 Some(procedure),
                 SUBCLASS,
-                (&*context as *const Context) as usize,
+                Rc::as_ptr(&context) as usize,
             );
         }
         Self { window, context }
@@ -125,8 +131,9 @@ impl Conversation {
 
 impl Drop for Conversation {
     fn drop(&mut self) {
-        self.context.state.get_mut().controls.clear();
-        self.context.state.get_mut().latest = None;
+        self.context.active.set(false);
+        self.context.state.borrow_mut().controls.clear();
+        self.context.state.borrow_mut().latest = None;
         unsafe {
             let _ = RemoveWindowSubclass(self.window, Some(procedure), SUBCLASS);
             let _ = DestroyWindow(self.window);
@@ -148,7 +155,8 @@ impl NativeComponent for Conversation {
         if state.scope != scope {
             state.controls.clear();
             state.heights.clear();
-            state.wrap.clear();
+            state.blocks.clear();
+            state.expanded.clear();
             state.offset = 0;
             state.scope = scope.into();
         }
@@ -276,9 +284,20 @@ impl Viewport {
                     items: Vec::new(),
                     value: Value::Null,
                     width: 0,
+                    body: 0..0,
+                    collapsed: false,
                 });
                 if row.value != *value || row.width != available {
-                    let descriptors = items(value, &self.wrap, (available as f32 / scale) as i32);
+                    let expanded =
+                        self.expanded.contains(&id) || !value["document"]["findKey"].is_null();
+                    let (descriptors, body) = items(
+                        value,
+                        &self.blocks,
+                        (available as f32 / scale) as i32,
+                        expanded,
+                    );
+                    row.body = body;
+                    row.collapsed = value["collapsible"] == true && !expanded;
                     row.update(descriptors, self.window, owner, &self.scope, value);
                     row.value = value.clone();
                     row.width = available;
@@ -286,7 +305,7 @@ impl Viewport {
                 for item in &row.items {
                     item.visibility(
                         self.hovered.as_ref() == Some(&id),
-                        value["trailing"] == true,
+                        value["trailing"] == true || !value["agentStatus"].is_null(),
                     );
                 }
                 let height = row.layout((width - available) / 2, y - self.offset, available, scale);
@@ -346,6 +365,7 @@ impl Viewport {
                 self.height - (40.0 * scale) as i32,
                 available,
                 scale,
+                None,
             );
         }
         let mut info = SCROLLINFO {
@@ -367,20 +387,37 @@ impl Viewport {
             for item in &row.items {
                 item.visibility(
                     self.hovered.as_ref() == Some(id),
-                    row.value["trailing"] == true,
+                    row.value["trailing"] == true || !row.value["agentStatus"].is_null(),
                 );
             }
         }
     }
     fn button(&mut self, mut action: Value, owner: &ComponentContext) {
-        if action["action"] == "wrapCode" {
+        if action["action"] == "expandMessage" {
+            let id = action["row"].as_str().unwrap_or_default().to_owned();
+            if !self.expanded.remove(&id) {
+                self.expanded.insert(id.clone());
+            }
+            if let Some(row) = self.controls.get_mut(&id) {
+                row.value = Value::Null;
+            }
+            self.heights.remove(&id);
+            self.layout(owner);
+        } else if matches!(
+            action["action"].as_str(),
+            Some("wrapCode" | "diagramSource" | "diagramSize")
+        ) {
             let id = action["row"].as_str().unwrap_or_default();
             let key = (
                 id.to_owned(),
                 action["part"].as_u64().unwrap_or_default() as usize,
             );
-            let wrap = self.wrap.entry(key).or_insert(true);
-            *wrap = !*wrap;
+            let state = self.blocks.entry(key).or_default();
+            match action["action"].as_str() {
+                Some("wrapCode") => state.wrap = !state.wrap,
+                Some("diagramSource") => state.source = !state.source,
+                _ => state.large = !state.large,
+            }
             if let Some(row) = self.controls.get_mut(id) {
                 row.value = Value::Null;
             }
@@ -433,7 +470,13 @@ impl Row {
     fn layout(&mut self, x: i32, y: i32, width: i32, scale: f32) -> i32 {
         let mut index = 0;
         let mut offset = 0;
+        let mut body_start = 0;
         while index < self.items.len() {
+            if index == self.body.start {
+                body_start = offset;
+            }
+            let maximum = (self.collapsed && self.body.contains(&index))
+                .then_some(((176.0 * scale) as i32 - (offset - body_start)).max(0));
             if self.items[index].inline_width(scale).is_some() {
                 let end = (index..self.items.len())
                     .find(|at| self.items[*at].inline_width(scale).is_none())
@@ -449,13 +492,24 @@ impl Row {
                 };
                 for item in &mut self.items[index..end] {
                     let size = item.inline_width(scale).unwrap();
-                    item.place(x + left, y + offset, size, scale);
+                    item.place(x + left, y + offset, size, scale, maximum);
                     left += size + (4.0 * scale) as i32;
                 }
-                offset += (30.0 * scale) as i32;
+                offset += maximum.map_or((30.0 * scale) as i32, |maximum| {
+                    ((30.0 * scale) as i32).min(maximum)
+                });
                 index = end;
             } else {
-                offset += self.items[index].place(x, y + offset, width, scale) + 6;
+                let user = self.value["user"] == true && self.body.contains(&index);
+                let drawn_width = if user { width * 4 / 5 } else { width };
+                let height = self.items[index].place(
+                    x + width - drawn_width,
+                    y + offset,
+                    drawn_width,
+                    scale,
+                    maximum,
+                );
+                offset += height + if height > 0 { 6 } else { 0 };
                 index += 1;
             }
         }
@@ -471,7 +525,13 @@ unsafe extern "system" fn procedure(
     _: usize,
     data: usize,
 ) -> LRESULT {
-    let context = unsafe { &*(data as *const Context) };
+    let context = unsafe {
+        Rc::increment_strong_count(data as *const Context);
+        Rc::from_raw(data as *const Context)
+    };
+    if !context.active.get() {
+        return unsafe { DefSubclassProc(hwnd, msg, w, l) };
+    }
     if msg == WM_NOTIFY && l.0 != 0 {
         let notification = unsafe { &*(l.0 as *const NMHDR) };
         if notification.code == EN_REQUESTRESIZE {
@@ -496,6 +556,19 @@ unsafe extern "system" fn procedure(
     }
     if msg == WM_DRAWITEM && l.0 != 0 && unsafe { Edit::draw(&*(l.0 as *const DRAWITEMSTRUCT)) } {
         return LRESULT(1);
+    }
+    if msg == WM_COMMAND
+        && l.0 != 0
+        && let Some(action) = unsafe { Edit::button(HWND(l.0 as *mut _)) }
+        && action["menuItems"].is_array()
+    {
+        let chosen = control::menu_action(HWND(l.0 as *mut _), action);
+        if let Some(action) = chosen
+            && context.active.get()
+        {
+            context.owner.emit("action", action);
+        }
+        return LRESULT(0);
     }
     if msg == WM_ERASEBKGND {
         let mut rect = RECT::default();

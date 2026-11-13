@@ -8,6 +8,7 @@ pub(crate) struct Document {
     pub rtf: Vec<u8>,
     pub text: String,
     pub links: Vec<Link>,
+    pub active: Option<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -25,6 +26,7 @@ struct Writer {
     links: Vec<Link>,
     colors: Vec<u32>,
     units: usize,
+    active: Option<(usize, usize)>,
 }
 
 pub(crate) fn paragraphs(blocks: &[Value]) -> Document {
@@ -33,7 +35,7 @@ pub(crate) fn paragraphs(blocks: &[Value]) -> Document {
         if index != 0 {
             writer.separator("\\par\n", '\r');
         }
-        writer.paragraph(block, false);
+        writer.paragraph(block, None);
     }
     writer.finish()
 }
@@ -75,7 +77,14 @@ pub(crate) fn picture(data: &str, width: u32) -> Option<Document> {
 
 pub(crate) fn table(rows: &[Value], width: u32) -> Document {
     let mut writer = Writer::new();
-    for row in rows {
+    let columns = rows
+        .iter()
+        .filter_map(Value::as_array)
+        .map(Vec::len)
+        .max()
+        .unwrap_or_default() as u32;
+    let width = width.max(columns.saturating_mul(160));
+    for (index, row) in rows.iter().enumerate() {
         let cells = row.as_array().map(Vec::as_slice).unwrap_or_default();
         writer.body.push_str("\\trowd\\trgaph120");
         for column in 1..=cells.len() {
@@ -90,13 +99,13 @@ pub(crate) fn table(rows: &[Value], width: u32) -> Document {
             for part in parts {
                 if let Some(blocks) = part["Text"].as_array() {
                     for block in blocks {
-                        writer.paragraph(block, true);
+                        writer.paragraph(block, Some(index == 0));
                     }
-                } else if let Some(code) = part.get("Code") {
-                    if let Some(blocks) = code["blocks"].as_array() {
-                        for block in blocks {
-                            writer.paragraph(block, true);
-                        }
+                } else if let Some(code) = part.get("Code")
+                    && let Some(blocks) = code["blocks"].as_array()
+                {
+                    for block in blocks {
+                        writer.paragraph(block, Some(index == 0));
                     }
                 }
             }
@@ -114,6 +123,7 @@ impl Writer {
             text: String::new(),
             links: Vec::new(),
             units: 0,
+            active: None,
             colors: vec![0xd4d4d4, 0x60a5fa, 0x313131, 0x6b5300, 0x9a6700],
         }
     }
@@ -137,6 +147,7 @@ impl Writer {
             rtf: rtf.into_bytes(),
             text: self.text,
             links: self.links,
+            active: self.active,
         }
     }
     fn color(&mut self, rgb: u32) -> usize {
@@ -152,7 +163,8 @@ impl Writer {
         self.text.push(text);
         self.units += text.len_utf16();
     }
-    fn paragraph(&mut self, block: &Value, in_table: bool) {
+    fn paragraph(&mut self, block: &Value, table_header: Option<bool>) {
+        let in_table = table_header.is_some();
         self.body
             .push_str(if in_table { "\\pard\\intbl" } else { "\\pard" });
         let indent = block["depth"]
@@ -169,7 +181,15 @@ impl Writer {
         let size = block["size"]
             .as_u64()
             .map(|size| (size * 2) as u32)
-            .unwrap_or_else(|| heading.unwrap_or(if block["code"] == true { 26 } else { 28 }));
+            .unwrap_or_else(|| {
+                heading.unwrap_or(if in_table {
+                    24
+                } else if block["code"] == true {
+                    26
+                } else {
+                    28
+                })
+            });
         let font = u8::from(block["code"] == true);
         let alignment = match block["alignment"].as_str() {
             Some("center") => "\\qc",
@@ -185,7 +205,12 @@ impl Writer {
             self.literal(&format!("{marker} "));
         }
         for run in block["runs"].as_array().into_iter().flatten() {
-            self.run(run, font, size, heading.is_some());
+            self.run(
+                run,
+                font,
+                size,
+                heading.is_some() || table_header == Some(true),
+            );
         }
     }
     fn run(&mut self, run: &Value, font: u8, size: u32, heading: bool) {
@@ -242,12 +267,16 @@ impl Writer {
                 continue;
             };
             self.literal(before);
+            let begin = self.units;
             self.body.push_str(if found["active"] == true {
                 "{\\highlight5 "
             } else {
                 "{\\highlight4 "
             });
             self.literal(selected);
+            if found["active"] == true {
+                self.active = Some((self.active.map_or(begin, |range| range.0), self.units));
+            }
             self.body.push('}');
             offset = end;
         }
@@ -308,10 +337,23 @@ mod tests {
     #[test]
     fn links_keep_visible_labels_and_utf16_ranges_without_copying_destinations() {
         let doc = paragraphs(&[
-            json!({"runs":[{"text":"👋 "},{"text":"説明","link":"https://example.test/a?q=1"}]}),
+            json!({"runs":[{"text":"👋 "},{"text":"説明","link":"https://example.test/a?q=1","webMenu":[{"id":"copyLink","title":"Copy link"}]}]}),
         ]);
         assert_eq!(doc.text, "👋 説明");
         assert_eq!((doc.links[0].start, doc.links[0].end), (3, 5));
         assert_eq!(doc.links[0].destination, "https://example.test/a?q=1");
+        assert_eq!(doc.links[0].menu[0]["id"], "copyLink");
+        assert_eq!(doc.links[0].action, "webLink");
+    }
+    #[test]
+    fn active_search_ranges_use_utf16_across_unicode_and_formatted_runs() {
+        let doc = paragraphs(&[
+            json!({"runs":[{"text":"👋 before "},{"text":"é","highlights":[{"start":0,"end":2,"active":true}]},{"text":"日本","strong":true,"highlights":[{"start":0,"end":6,"active":true}]}]}),
+        ]);
+        assert_eq!(doc.active, Some((10, 13)));
+        let doc = paragraphs(&[
+            json!({"runs":[{"text":"other","highlights":[{"start":0,"end":5,"active":false}]}]}),
+        ]);
+        assert_eq!(doc.active, None);
     }
 }

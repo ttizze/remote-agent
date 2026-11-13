@@ -1333,8 +1333,9 @@ fn flags(held: &Modifiers) -> NSEventModifierFlags {
     flags
 }
 
-/// A mouse wheel over the element's center, handed to its window without moving
-/// the pointer: NSH routes a wheel by where the event says it is.
+/// A mouse wheel over the element's center, dispatched through the window's
+/// hit test. A CGEvent-derived wheel has no window, so NSWindow cannot route it
+/// to hosted AppKit controls itself.
 fn scroll(
     tree: &Tree,
     index: usize,
@@ -1369,7 +1370,15 @@ fn scroll(
         ),
     );
     let event = NSEvent::eventWithCGEvent(&event).ok_or("AppKit took no wheel event")?;
-    window.sendEvent(&event);
+    let point = NSPoint::new(
+        frame.origin.x + frame.size.width / 2.0,
+        frame.origin.y + frame.size.height / 2.0,
+    );
+    let content = window.contentView().ok_or("the window has no content")?;
+    let hit = content
+        .hitTest(content.convertPoint_fromView(point, None))
+        .ok_or("the wheel hit no view")?;
+    hit.scrollWheel(&event);
     Ok(())
 }
 

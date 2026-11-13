@@ -706,6 +706,7 @@ fn desktop_row(
             let active = move || selected.with(|ids| ids.contains(&selected_id));
             let menu = row.menu.clone();
             let item = menu_row()
+                .accessibility_label(Some(SharedString::from(row.title.clone())))
                 .style_when(active, |s| {
                     s.bg(colors::SELECTED)
                         .text_color(colors::foreground())
@@ -719,6 +720,13 @@ fn desktop_row(
                 .enabled(move || enabled);
             // A secondary press opens the row's menu: a conversation's Copy.
             view()
+                .role(AccessibilityRole::Group)
+                .accessibility_value(row.indicators.as_ref().map(|status| {
+                    nsh_core::AccessibilityValue {
+                        text: Some(status.label().into()),
+                        ..Default::default()
+                    }
+                }))
                 .on_context_menu(move |_: &ContextMenuEvent| {
                     if !menu.is_null() {
                         ui::popup(&menu, move |command| activate("menu", command, None));

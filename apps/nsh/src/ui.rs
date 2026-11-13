@@ -139,6 +139,7 @@ impl Icon {
     pub(crate) const PUSH: Self = icon!(CloudUpload);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);
+    #[cfg(desktop)]
     pub(crate) const MINIMIZE: Self = icon!(Minimize2);
     pub(crate) const WARNING: Self = icon!(TriangleExclamationPoint);
     pub(crate) const CHECK: Self = icon!(Check);

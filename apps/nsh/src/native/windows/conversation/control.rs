@@ -33,7 +33,8 @@ pub(super) fn message(hwnd: HWND, id: u32, w: usize, l: isize) -> LRESULT {
 pub(super) enum Descriptor {
     Text(Document, bool),
     Button(String, Value),
-    Caption(String),
+    Caption(String, bool),
+    Rule,
 }
 pub(super) struct Item {
     edit: Edit,
@@ -54,53 +55,108 @@ pub(super) struct EditContext {
     button: bool,
     compact: Cell<bool>,
     caption: bool,
+    rule: bool,
+    metadata: Cell<bool>,
     symbol: Cell<Option<u16>>,
     icon_only: Cell<bool>,
+    revealed: RefCell<Option<(String, (usize, usize))>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct BlockState {
+    pub wrap: bool,
+    pub source: bool,
+    pub large: bool,
+}
+impl Default for BlockState {
+    fn default() -> Self {
+        Self {
+            wrap: true,
+            source: false,
+            large: false,
+        }
+    }
 }
 
 pub(super) fn items(
     row: &Value,
-    wrapping: &std::collections::HashMap<(String, usize), bool>,
+    states: &std::collections::HashMap<(String, usize), BlockState>,
     width: i32,
-) -> Vec<Descriptor> {
+    expanded: bool,
+) -> (Vec<Descriptor>, std::ops::Range<usize>) {
     let mut result = Vec::new();
     let id = row["id"].as_str().unwrap_or_default();
     let labels = &row["document"]["labels"];
+    for key in ["queued", "steer"] {
+        if row[key] == true {
+            result.push(Descriptor::Caption(
+                labels[key].as_str().unwrap_or_default().into(),
+                false,
+            ));
+        }
+    }
+    if !row["agentStatus"].is_null() {
+        for button in row["buttons"].as_array().into_iter().flatten() {
+            result.push(Descriptor::Button(
+                button["title"].as_str().unwrap_or_default().into(),
+                button.clone(),
+            ));
+        }
+    }
+    if row["user"] == true {
+        for image in row["images"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            picture_parts(&mut result, image, &row["media"], &row["document"], width);
+        }
+    }
+    let body_start = result.len();
     for (index, part) in row["parts"].as_array().into_iter().flatten().enumerate() {
         append_part(
             &mut result,
             part,
             (id, index),
-            wrapping.get(&(id.into(), index)).copied().unwrap_or(true),
+            states.get(&(id.into(), index)).copied().unwrap_or_default(),
             width,
             &row["media"],
-            &row["document"]["labels"],
+            &row["document"],
         );
     }
-    for image in row["images"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        if let Some(data) = row["media"][image]
-            .as_str()
-            .and_then(|data| rich_document::picture(data, width.max(1) as u32))
+    let body_end = result.len();
+    if row["user"] != true {
+        for image in row["images"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
         {
-            result.push(Descriptor::Text(data, true));
+            picture_parts(&mut result, image, &row["media"], &row["document"], width);
         }
+    }
+    if row["collapsible"] == true {
         result.push(Descriptor::Button(
-            labels["openImage"].as_str().unwrap_or_default().into(),
-            json!({"action":"image","text":image}),
+            labels[if expanded { "collapse" } else { "expand" }]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            json!({"action":"expandMessage"}),
         ));
     }
     let time = row["time"].as_str().filter(|time| !time.is_empty());
     if row["user"] == true
         && let Some(time) = time
     {
-        result.push(Descriptor::Caption(time.into()));
+        result.push(Descriptor::Caption(time.into(), true));
     }
-    for button in row["buttons"].as_array().into_iter().flatten() {
+    for button in row["buttons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|_| row["agentStatus"].is_null())
+    {
         result.push(Descriptor::Button(
             button["title"].as_str().unwrap_or_default().into(),
             button.clone(),
@@ -109,61 +165,26 @@ pub(super) fn items(
     if row["user"] != true
         && let Some(time) = time
     {
-        result.push(Descriptor::Caption(time.into()));
+        result.push(Descriptor::Caption(time.into(), true));
     }
 
-    result
+    (result, body_start..body_end)
 }
 
 fn append_part(
     output: &mut Vec<Descriptor>,
     part: &Value,
     key: (&str, usize),
-    wrapping: bool,
+    state: BlockState,
     width: i32,
     media: &Value,
-    labels: &Value,
+    document: &Value,
 ) {
-    let (row, index) = key;
+    let labels = &document["labels"];
     if let Some(blocks) = part["Text"].as_array() {
         output.push(Descriptor::Text(rich_document::paragraphs(blocks), true));
     } else if let Some(code) = part.get("Code") {
-        let label = code["label"].as_str().unwrap_or_default();
-        if !label.is_empty() {
-            output.push(Descriptor::Text(
-                rich_document::paragraphs(&[
-                    json!({"size":11,"runs":[{"text":label,"code":true}]}),
-                ]),
-                true,
-            ));
-        }
-        output.push(Descriptor::Button(
-            labels["copyCode"].as_str().unwrap_or_default().to_owned(),
-            json!({"action":"copyText","text":code["source"],"iconOnly":true,"icon":"copy"}),
-        ));
-        output.push(Descriptor::Button(
-            if wrapping {
-                labels["unwrap"].as_str().unwrap_or_default()
-            } else {
-                labels["wrap"].as_str().unwrap_or_default()
-            }
-            .into(),
-            json!({"action":"wrapCode","row":row,"part":index,"iconOnly":true,"icon":"wrap"}),
-        ));
-        let blocks = code["blocks"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        if let Some(data) = code["diagram"]["png"]
-            .as_str()
-            .and_then(|data| rich_document::picture(data, width.max(1) as u32))
-        {
-            output.push(Descriptor::Text(data, true));
-        }
-        output.push(Descriptor::Text(
-            rich_document::paragraphs(blocks),
-            wrapping,
-        ));
+        code_parts(output, code, key, state, width, labels);
     } else if let Some(table) = part.get("Table") {
         let rows = table["rows"]
             .as_array()
@@ -171,37 +192,117 @@ fn append_part(
             .unwrap_or_default();
         output.push(Descriptor::Text(
             rich_document::table(rows, width.max(160) as u32),
-            true,
+            false,
         ));
-        for (title, key) in [
-            (
-                labels["copyMarkdown"].as_str().unwrap_or_default(),
-                "source",
-            ),
-            (labels["copyCsv"].as_str().unwrap_or_default(), "csv"),
-        ] {
-            output.push(Descriptor::Button(
-                title.into(),
-                json!({"action":"copyText","text":table[key]}),
-            ));
-        }
-    } else if let Some(image) = part.get("Image") {
-        if let Some(data) = image["source"]
-            .as_str()
-            .and_then(|source| media[source].as_str())
-            .and_then(|data| rich_document::picture(data, width.max(1) as u32))
-        {
-            output.push(Descriptor::Text(data, true));
-        }
         output.push(Descriptor::Button(
-            labels["openImage"].as_str().unwrap_or_default().into(),
-            json!({"action":"image","text":image["source"]}),
+            labels["copyTable"].as_str().unwrap_or_default().into(),
+            json!({"action":"tableMenu","iconOnly":true,"icon":"copy","menuItems":[
+                {"id":"copyText","title":labels["copyMarkdown"],"text":table["source"]},
+                {"id":"copyText","title":labels["copyCsv"],"text":table["csv"]}
+            ]}),
         ));
+    } else if let Some(source) = part["Image"]["source"].as_str() {
+        picture_parts(output, source, media, document, width);
+    } else if part.get("Rule").is_some() {
+        output.push(Descriptor::Rule);
     } else if let Some(link) = part.get("Link") {
         output.push(Descriptor::Button(
             labels["openFile"].as_str().unwrap_or_default().into(),
             json!({"action":"link","text":link["url"]}),
         ));
+    }
+}
+
+fn picture_parts(
+    output: &mut Vec<Descriptor>,
+    source: &str,
+    media: &Value,
+    document: &Value,
+    width: i32,
+) {
+    let labels = &document["labels"];
+    let reason = document["mediaErrors"][source].as_str();
+    let loaded = media[source]
+        .as_str()
+        .and_then(|data| rich_document::picture(data, width.max(1) as u32));
+    let ready = loaded.is_some();
+    if let Some(image) = loaded {
+        output.push(Descriptor::Text(image, true));
+    }
+    if let Some(reason) = reason {
+        output.push(Descriptor::Text(
+            rich_document::paragraphs(&[json!({"runs":[{"text":reason}]})]),
+            true,
+        ));
+    }
+    output.push(Descriptor::Button(labels[if reason.is_some() {"retry"} else if ready {"openImage"} else {"loadingImage"}].as_str().unwrap_or_default().into(),json!({"action":if reason.is_some(){"retryImage"}else{"image"},"text":source,"enabled":ready || reason.is_some()})));
+}
+
+fn code_parts(
+    output: &mut Vec<Descriptor>,
+    code: &Value,
+    key: (&str, usize),
+    state: BlockState,
+    width: i32,
+    labels: &Value,
+) {
+    let (row, index) = key;
+    let blocks = code["blocks"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let source = rich_document::paragraphs(blocks);
+    let diagram = code["diagram"].is_object();
+    let showing_source = !diagram || state.source || source.active.is_some();
+    output.push(Descriptor::Caption(
+        code["label"].as_str().unwrap_or_default().into(),
+        false,
+    ));
+    if diagram {
+        output.push(Descriptor::Button(
+            labels[if showing_source { "diagram" } else { "source" }]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            json!({"action":"diagramSource","row":row,"part":index}),
+        ));
+        if !showing_source {
+            output.push(Descriptor::Button(
+                labels[if state.large { "shrink" } else { "enlarge" }]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                json!({"action":"diagramSize","row":row,"part":index}),
+            ));
+        }
+    }
+    output.push(Descriptor::Button(
+        labels[if diagram { "copyDiagram" } else { "copyCode" }]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        json!({"action":"copyText","text":code["source"],"iconOnly":true,"icon":"copy"}),
+    ));
+    if showing_source {
+        output.push(Descriptor::Button(
+            labels[if state.wrap { "unwrap" } else { "wrap" }]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            json!({"action":"wrapCode","row":row,"part":index,"iconOnly":true,"icon":"wrap"}),
+        ));
+        output.push(Descriptor::Text(source, state.wrap));
+    } else {
+        let ratio = code["diagram"]["width"].as_f64().unwrap_or(1.0)
+            / code["diagram"]["height"].as_f64().unwrap_or(1.0).max(1.0);
+        let maximum = if state.large { 640.0 } else { 300.0 };
+        let width = width.min((ratio * maximum) as i32).max(1) as u32;
+        if let Some(image) = code["diagram"]["png"]
+            .as_str()
+            .and_then(|data| rich_document::picture(data, width))
+        {
+            output.push(Descriptor::Text(image, true));
+        }
     }
 }
 
@@ -223,13 +324,18 @@ impl Item {
             document: RefCell::new(Document::default()),
             wrap: Cell::new(true),
             button,
-            caption: matches!(descriptor, Descriptor::Caption(_)),
+            caption: matches!(descriptor, Descriptor::Caption(..)),
+            rule: matches!(descriptor, Descriptor::Rule),
+            metadata: Cell::new(false),
             compact: Cell::new(false),
             symbol: Cell::new(None),
             icon_only: Cell::new(false),
+            revealed: RefCell::new(None),
         });
         let class = if button {
             w!("BUTTON")
+        } else if matches!(descriptor, Descriptor::Rule) {
+            w!("STATIC")
         } else {
             LIBRARY
                 .get_or_init(|| {
@@ -248,6 +354,8 @@ impl Item {
             | WS_CLIPSIBLINGS
             | if button {
                 WINDOW_STYLE(0)
+            } else if matches!(descriptor, Descriptor::Rule) {
+                WINDOW_STYLE(0x10)
             } else {
                 WINDOW_STYLE(0x4 | 0x800 | 0x100) | WS_HSCROLL
             };
@@ -278,7 +386,16 @@ impl Item {
         }
         if !button {
             message(window, EM_EXLIMITTEXT, 0, i32::MAX as isize);
-            message(window, EM_SETBKGNDCOLOR, 0, 0x080808);
+            message(
+                window,
+                EM_SETBKGNDCOLOR,
+                0,
+                if row["user"] == true {
+                    0x141414
+                } else {
+                    0x080808
+                },
+            );
             message(
                 window,
                 EM_SETEVENTMASK,
@@ -298,14 +415,21 @@ impl Item {
     }
     pub fn update(&mut self, descriptor: &Descriptor, scope: &str, row: &Value) -> bool {
         if self.button != matches!(descriptor, Descriptor::Button(..))
-            || self.edit.context.caption != matches!(descriptor, Descriptor::Caption(_))
+            || self.edit.context.caption != matches!(descriptor, Descriptor::Caption(..))
+            || self.edit.context.rule != matches!(descriptor, Descriptor::Rule)
         {
             return false;
         }
-        let base = json!({"scope":scope,"row":row["id"],"target":row["document"]["target"],"menu":row["document"]["menu"],"sideChat":row["document"]["sideChat"]});
+        let base = json!({"scope":scope,"row":row["id"],"target":row["document"]["target"],"menu":row["document"]["menu"],"sideChat":row["document"]["sideChat"],"findKey":row["document"]["findKey"],"agentStatus":row["agentStatus"]});
         match descriptor {
             Descriptor::Button(title, action) => {
-                let title: Vec<_> = title.encode_utf16().chain([0]).collect();
+                let visible_title = title.clone();
+                let title: Vec<_> = action["accessibilityLabel"]
+                    .as_str()
+                    .unwrap_or(title)
+                    .encode_utf16()
+                    .chain([0])
+                    .collect();
                 unsafe {
                     let _ = SetWindowTextW(self.edit.window, PCWSTR(title.as_ptr()));
                 }
@@ -316,6 +440,7 @@ impl Item {
                 self.edit
                     .icon(action["icon"].as_str(), action["iconOnly"] == true);
                 let mut base = base;
+                base["title"] = json!(visible_title);
                 for key in ["action", "text", "part", "menuItems"] {
                     if let Some(value) = action.get(key) {
                         base[key] = value.clone();
@@ -327,13 +452,15 @@ impl Item {
                 *self.edit.context.payload.borrow_mut() = base;
                 self.text(document, *wrap);
             }
-            Descriptor::Caption(text) => {
+            Descriptor::Caption(text, hover) => {
+                self.edit.context.metadata.set(*hover);
                 *self.edit.context.payload.borrow_mut() = base;
                 self.text(
                     &rich_document::paragraphs(&[json!({"size":12,"runs":[{"text":text}]})]),
                     true,
                 );
             }
+            Descriptor::Rule => {}
         }
         true
     }
@@ -359,7 +486,7 @@ impl Item {
     }
     pub fn visibility(&self, hovered: bool, trailing: bool) {
         let payload = self.edit.context.payload.borrow();
-        let meta = self.edit.context.caption
+        let meta = self.edit.context.metadata.get()
             || matches!(payload["action"].as_str(), Some("copy" | "fork" | "edit"));
         unsafe {
             let _ = ShowWindow(
@@ -372,10 +499,12 @@ impl Item {
             );
         }
     }
-    pub fn place(&mut self, x: i32, y: i32, width: i32, scale: f32) -> i32 {
+    pub fn place(&mut self, x: i32, y: i32, width: i32, scale: f32, maximum: Option<i32>) -> i32 {
         let context = &self.edit.context;
         let changed = context.width.replace(width) != width;
-        let height = if self.button || context.caption {
+        let height = if context.rule {
+            (1.0 * scale) as i32
+        } else if self.button || context.caption {
             (26.0 * scale) as i32
         } else {
             context.height.get()
@@ -385,6 +514,19 @@ impl Item {
                     (17.0 * scale) as i32
                 }
         };
+        let height = maximum.map_or(height, |maximum| height.min(maximum.max(0)));
+        if maximum.is_some() {
+            unsafe {
+                let _ = ShowWindow(
+                    self.edit.window,
+                    if height > 0 {
+                        SW_SHOWNOACTIVATE
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
+        }
         unsafe {
             let _ = SetWindowPos(
                 self.edit.window,
@@ -396,7 +538,7 @@ impl Item {
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
-        if !self.button && changed {
+        if !self.button && !context.rule && changed {
             message(
                 self.edit.window,
                 EM_SETTARGETDEVICE,
@@ -405,14 +547,46 @@ impl Item {
             );
             message(self.edit.window, EM_REQUESTRESIZE, 0, 0);
         }
+        self.edit.reveal();
         height
     }
 }
 
 impl Edit {
+    fn reveal(&self) {
+        let found = self.context.payload.borrow()["findKey"]
+            .as_str()
+            .zip(self.context.document.borrow().active)
+            .map(|(key, range)| (key.to_owned(), range));
+        if *self.context.revealed.borrow() == found {
+            return;
+        }
+        *self.context.revealed.borrow_mut() = found.clone();
+        if let Some((_, (start, end))) = found {
+            let mut selected = self.range();
+            let mut active = CHARRANGE {
+                cpMin: start as i32,
+                cpMax: end as i32,
+            };
+            message(
+                self.window,
+                EM_EXSETSEL,
+                0,
+                (&mut active as *mut CHARRANGE) as isize,
+            );
+            message(self.window, EM_SCROLLCARET, 0, 0);
+            message(
+                self.window,
+                EM_EXSETSEL,
+                0,
+                (&mut selected as *mut CHARRANGE) as isize,
+            );
+        }
+    }
     fn icon(&self, name: Option<&str>, only: bool) {
         // OS glyphs are independent of the semantic WindowText accessibility name.
         self.context.symbol.set(match name {
+            Some("agent") => Some(0xe716),
             Some("copy") => Some(0xe8c8),
             Some("edit") => Some(0xe70f),
             Some("fork") => Some(0xef90),
@@ -483,8 +657,13 @@ impl Edit {
             );
             SelectObject(item.hDC, font.into());
             let mut rect = item.rcItem;
+            let agent = context.payload.borrow()["action"] == "agent";
             if !context.icon_only.get() {
-                rect.left = (rect.right - (20.0 * scale) as i32).max(rect.left);
+                if agent {
+                    rect.right = rect.left + (24.0 * scale) as i32;
+                } else {
+                    rect.left = (rect.right - (20.0 * scale) as i32).max(rect.left);
+                }
             }
             DrawTextW(
                 item.hDC,
@@ -492,6 +671,31 @@ impl Edit {
                 &mut rect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
+            if agent {
+                let status = context.payload.borrow()["agentStatus"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let color = match status.as_str() {
+                    "completed" => 0x71ad27,
+                    "running" => 0xffa560,
+                    "failed" => 0x4545ef,
+                    _ => 0x888888,
+                };
+                let brush = CreateSolidBrush(COLORREF(color));
+                let old = SelectObject(item.hDC, brush.into());
+                let x = (15.0 * scale) as i32;
+                let y = (17.0 * scale) as i32;
+                Ellipse(
+                    item.hDC,
+                    x,
+                    y,
+                    x + (8.0 * scale) as i32,
+                    y + (8.0 * scale) as i32,
+                );
+                SelectObject(item.hDC, old);
+                let _ = DeleteObject(brush.into());
+            }
             if !context.icon_only.get() {
                 let text_font = CreateFontW(
                     -(14.0 * scale) as i32,
@@ -510,12 +714,17 @@ impl Edit {
                     w!("Segoe UI"),
                 );
                 SelectObject(item.hDC, text_font.into());
-                let mut title =
-                    vec![0_u16; GetWindowTextLengthW(item.hwndItem).max(0) as usize + 1];
-                let length = GetWindowTextW(item.hwndItem, &mut title).max(0) as usize;
+                let mut title: Vec<_> = context.payload.borrow()["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .encode_utf16()
+                    .collect();
+                let length = title.len();
                 let mut rect = item.rcItem;
-                rect.left += (4.0 * scale) as i32;
-                rect.right -= (20.0 * scale) as i32;
+                rect.left += (if agent { 28.0 } else { 4.0 } * scale) as i32;
+                if !agent {
+                    rect.right -= (20.0 * scale) as i32;
+                }
                 DrawTextW(
                     item.hDC,
                     &mut title[..length],
@@ -826,8 +1035,29 @@ fn file_menu(window: HWND, context: &EditContext) -> bool {
         return false;
     };
     let payload = context.payload.borrow().clone();
+    if let Some(chosen) = choose_menu(window, link.menu.as_array().unwrap()) {
+        let mut value = payload;
+        value["action"] = json!(link.action);
+        value["id"] = chosen["id"].clone();
+        value["text"] = json!(link.destination);
+        context.owner.emit("action", value);
+    }
+    true
+}
+
+pub(super) fn menu_action(window: HWND, mut action: Value) -> Option<Value> {
+    let chosen = choose_menu(window, action["menuItems"].as_array()?)?;
+    action.as_object_mut()?.remove("menuItems");
+    action["action"] = chosen["id"].clone();
+    if let Some(text) = chosen.get("text") {
+        action["text"] = text.clone();
+    }
+    Some(action)
+}
+
+fn choose_menu(window: HWND, items: &[Value]) -> Option<Value> {
     let mut actions = Vec::new();
-    unsafe fn append(menu: HMENU, items: &[Value], actions: &mut Vec<String>) {
+    unsafe fn append(menu: HMENU, items: &[Value], actions: &mut Vec<Value>) {
         for item in items {
             let title: Vec<_> = item["title"]
                 .as_str()
@@ -843,19 +1073,27 @@ fn file_menu(window: HWND, context: &EditContext) -> bool {
                             AppendMenuW(menu, MF_POPUP, child.0 as usize, PCWSTR(title.as_ptr()));
                     }
                 }
-            } else if let Some(id) = item["id"].as_str() {
-                actions.push(id.to_owned());
+            } else if item["id"].is_string() {
+                actions.push(item.clone());
                 unsafe {
-                    let _ = AppendMenuW(menu, MF_STRING, actions.len(), PCWSTR(title.as_ptr()));
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING
+                            | if item["enabled"] == false {
+                                MF_GRAYED
+                            } else {
+                                MF_ENABLED
+                            },
+                        actions.len(),
+                        PCWSTR(title.as_ptr()),
+                    );
                 }
             }
         }
     }
     unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            return false;
-        };
-        append(menu, link.menu.as_array().unwrap(), &mut actions);
+        let menu = CreatePopupMenu().ok()?;
+        append(menu, items, &mut actions);
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
         let chosen = TrackPopupMenu(
@@ -869,16 +1107,9 @@ fn file_menu(window: HWND, context: &EditContext) -> bool {
         )
         .0;
         let _ = DestroyMenu(menu);
-        if let Some(id) = chosen
+        chosen
             .checked_sub(1)
             .and_then(|index| actions.get(index as usize))
-        {
-            let mut value = payload;
-            value["action"] = json!(link.action);
-            value["id"] = json!(id);
-            value["text"] = json!(link.destination);
-            context.owner.emit("action", value);
-        }
+            .cloned()
     }
-    true
 }

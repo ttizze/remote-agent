@@ -127,11 +127,12 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
 }
 
 @MainActor enum MessageAttributes {
-    static func icon(_ name: String?, size: CGFloat) -> NSImage? {
+    static func icon(_ name: String?, size: CGFloat, label: String? = nil) -> NSImage? {
         guard let name else { return nil }
         let symbol: String
         switch name {
         case "copy": symbol = "doc.on.doc"
+        case "agent": symbol = "person.crop.circle"
         case "fork": symbol = "arrow.triangle.branch"
         case "edit": symbol = "pencil"
         case "more": symbol = "ellipsis"
@@ -144,7 +145,7 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
         case "check": symbol = "checkmark"
         default: return nil
         }
-        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(
             pointSize: size,
             weight: .regular
         ))

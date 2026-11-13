@@ -748,6 +748,7 @@ impl Application {
         });
     }
 
+    #[cfg(desktop)]
     pub fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
         self.state.send_modify(|state| {
             let next = state.panels.clone().open_script(scope, cwd, command);

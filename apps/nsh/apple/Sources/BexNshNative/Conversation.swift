@@ -8,6 +8,7 @@ struct ConversationButton: Decodable, Equatable {
     var disclosure: Bool? = nil
     var menuItems: [MessageMenuItem]? = nil
     var enabled: Bool? = nil
+    var accessibilityLabel: String? = nil
 }
 
 struct NativeConversationRow: Decodable, Equatable {
@@ -27,6 +28,7 @@ struct NativeConversationRow: Decodable, Equatable {
     var fold: Bool? = nil
     var collapsible: Bool? = nil
     var top: Double? = nil
+    var agentStatus: String? = nil
 }
 
 struct NativeConversationUpdate: Decodable {
@@ -176,7 +178,11 @@ struct NativeConversationUpdate: Decodable {
         observers.append(NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.updateLatest() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if !self.applying && !self.restoring { self.hideSelection() }
+                self.updateLatest()
+            }
         })
         for (notification, interacting) in [
             (NSScrollView.willStartLiveScrollNotification, true),
@@ -462,7 +468,7 @@ struct NativeConversationUpdate: Decodable {
             guard let title = titles[id], !title.isEmpty else { continue }
             let button = NSButton(title: title, target: self, action: #selector(selectionPressed(_:)))
             button.identifier = .init(id); button.isBordered = false; button.font = .systemFont(ofSize: 12)
-            button.image = MessageAttributes.icon(id, size: 14); button.imagePosition = .imageLeading
+            button.image = MessageAttributes.icon(id, size: 14, label: title); button.imagePosition = .imageLeading
             button.setAccessibilityLabel(title); selection.addArrangedSubview(button)
         }
         let width = selection.fittingSize.width + 16
@@ -529,6 +535,7 @@ struct NativeConversationUpdate: Decodable {
     private let marker = NSTextField(labelWithString: "")
     private let progress = NSProgressIndicator()
     private let rule = NSView()
+    private let agentBadge = NSView()
     private let expand = NSButton()
     private var buttons: [NSButton] = []
     private var row: NativeConversationRow?
@@ -550,12 +557,13 @@ struct NativeConversationUpdate: Decodable {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        for child in [bubble, body, metadata, marker, progress, rule, expand] {
+        for child in [bubble, body, metadata, marker, progress, rule, expand, agentBadge] {
             addSubview(child)
         }
         bubble.wantsLayer = true; bubble.layer?.cornerRadius = 18
         bubble.layer?.backgroundColor = NSColor(white: 20.0 / 255, alpha: 1).cgColor
         rule.wantsLayer = true; rule.layer?.backgroundColor = NSColor(white: 22.0 / 255, alpha: 1).cgColor
+        agentBadge.wantsLayer = true; agentBadge.layer?.cornerRadius = 4
         progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
         metadata.font = .systemFont(ofSize: 12); marker.font = .systemFont(ofSize: 12)
         metadata.textColor = NSColor(white: 170.0 / 255, alpha: 1); marker.textColor = metadata.textColor
@@ -599,7 +607,7 @@ struct NativeConversationUpdate: Decodable {
     private func updateHover() {
         guard let row else { return }
         let alpha: CGFloat = hovered || row.trailing == true ? 1 : 0
-        metadata.alphaValue = alpha
+        metadata.alphaValue = row.agentStatus == nil ? alpha : 1
         for (index, button) in buttons
             .enumerated() {
             button.alphaValue = row.buttons[index].iconOnly == true ? alpha : 1
@@ -637,9 +645,9 @@ struct NativeConversationUpdate: Decodable {
                     .enabled ?? true
                 button.font = .systemFont(ofSize: action.disclosure == true ? 14 : 12)
                 button.contentTintColor = NSColor(white: 170.0 / 255, alpha: 1)
-                button.setAccessibilityLabel(action.title); button.toolTip = action.title
-                button.image = MessageAttributes.icon(action.icon, size: action.disclosure == true ? 14 : 12)
-                button.imagePosition = action.iconOnly == true ? .imageOnly : .imageTrailing
+                button.image = MessageAttributes.icon(action.icon, size: action.disclosure == true ? 14 : 12, label: action.accessibilityLabel ?? action.title)
+                button.imagePosition = action.iconOnly == true ? .imageOnly : action.action == "agent" ? .imageLeading : .imageTrailing
+                button.setAccessibilityLabel(action.accessibilityLabel ?? action.title); button.toolTip = action.title
                 addSubview(button); return button
             }
         }
@@ -649,6 +657,14 @@ struct NativeConversationUpdate: Decodable {
             progress.stopAnimation(nil)
         }
         self.row = row; lane = width
+        agentBadge.isHidden = row.agentStatus == nil
+        let color: NSColor = switch row.agentStatus {
+        case "completed": .systemGreen
+        case "running": .controlAccentColor
+        case "failed": .systemRed
+        default: .secondaryLabelColor
+        }
+        agentBadge.layer?.backgroundColor = color.cgColor
         updateHover(); measure(); return changed
     }
 
@@ -665,6 +681,21 @@ struct NativeConversationUpdate: Decodable {
         var y = CGFloat(row.top ?? 0)
         if !marker.isHidden {
             marker.sizeToFit(); marker.frame.origin = NSPoint(x: x, y: y); y += 20
+        }
+        if row.agentStatus != nil {
+            metadata.sizeToFit()
+            for button in buttons {
+                button.frame = NSRect(x: x, y: y, width: max(0, width - metadata.frame.width - 12), height: 28)
+                button.alignment = .left
+            }
+            metadata.frame.origin = NSPoint(x: x + width - metadata.frame.width, y: y + 6)
+            agentBadge.frame = NSRect(x: x + 13, y: y + 18, width: 8, height: 8)
+            y += 30
+            let height = body.measure(max(1, width - 34))
+            body.frame = NSRect(x: x + 34, y: y, width: width - 34, height: height)
+            bubble.isHidden = true; rule.isHidden = true; expand.isHidden = true
+            measured = NSSize(width: lane, height: ceil(max(1, y + height + row.gap)))
+            return
         }
         let height = body.measure(max(1, width - inset * 2))
         let collapsed = row.collapsible == true && !unfolded && row.document.findKey == nil
@@ -717,7 +748,7 @@ struct NativeConversationUpdate: Decodable {
     @objc private func pressed(_ sender: NSButton) {
         guard let row, let id = sender.identifier?.rawValue else { return }
         if let items = row.buttons.first(where: { $0.action == id })?.menuItems {
-            let menu = NSMenu()
+            let menu = NSMenu(); menu.autoenablesItems = false
             for item in items {
                 let entry = NSMenuItem(title: item.title, action: #selector(menuPressed(_:)), keyEquivalent: "")
                 entry.target = self; entry.representedObject = item.id; entry.isEnabled = item.enabled ?? true; menu

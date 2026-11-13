@@ -1,6 +1,7 @@
 //! Native transcript contract: native viewports own scrolling, reuse and text selection.
 use super::*;
 use serde_json::{Value, json};
+#[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -98,6 +99,8 @@ pub(super) fn project_row(
     let mut buttons = row_buttons(row, open);
     let mut body = if matches!(row.shape, Shape::Plan) {
         format!("{}\n\n{}", row.body, row.note)
+    } else if let Some(agent) = &row.agent {
+        agent.message.clone()
     } else {
         row.body.to_string()
     };
@@ -109,6 +112,9 @@ pub(super) fn project_row(
     }
     if row.status == Some(crate::activity::Status::Thinking) {
         body = tr("思考中").into();
+    }
+    if matches!(row.shape, Shape::Interrupted) {
+        body.push_str(&format!(" · {}", tr("ユーザーが実行を中断しました")));
     }
     if let Some(error) = &row.error {
         body = format!(
@@ -165,13 +171,14 @@ pub(super) fn project_row(
         &crate::rich_text::diagrams(&body),
         &|file| chips.map(|chips| chips.chip(file)),
     ));
-    let labels = json!({"copyCode":tr("コードをコピー"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
+    let labels = json!({"copyCode":tr("コードをコピー"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
     let document = json!({"blocks":[],"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"maxWidth":LANE_WIDTH,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
     json!({
         "id":row.id,"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
         "collapsible":row.kind == Kind::User && agent_core::presentation::conversation::should_collapse_user_message(&row.body),
         "trailing":matches!(row.shape,Shape::Actions),"fold":matches!(row.shape,Shape::Fold{..} | Shape::Working),"time":row.time,"queued":row.queued,"steer":row.steer,
-        "busy":row.streaming || row.status.is_some() || row.detail.as_ref().is_some_and(|item|item.live),"document":document
+        "busy":row.streaming || row.status.is_some() || row.detail.as_ref().is_some_and(|item|item.live),"document":document,
+        "agentStatus":row.agent.as_ref().map(|agent| agent.status)
     })
 }
 
@@ -188,11 +195,22 @@ fn row_buttons(row: &Row, open: bool) -> Vec<Value> {
         )),
         _ => {}
     }
-    if row.detail.is_some() {
-        buttons.push(button(
+    if let Some(item) = &row.detail {
+        let reasoning = item.source.data.kind == "reasoning";
+        let heading = item.source.work_row_label(item.live).heading;
+        let summary: &str = if reasoning && open {
+            &heading
+        } else {
+            &row.body
+        };
+        let mut action = button(
             "item",
-            &format!("{} {}", if open { "▾" } else { "▸" }, row.body),
-        ));
+            &format!("{} {}", if open { "▾" } else { "▸" }, summary),
+        );
+        if reasoning && !open {
+            action["accessibilityLabel"] = json!(format!("{heading}: {summary}"));
+        }
+        buttons.push(action);
     }
     if matches!(
         row.shape,
@@ -227,12 +245,11 @@ fn row_buttons(row: &Row, open: bool) -> Vec<Value> {
         ]);
         buttons.push(menu);
     }
-    if row
-        .agent
-        .as_ref()
-        .is_some_and(|agent| agent.target.is_some())
-    {
-        buttons.push(button("agent", &row.body));
+    if let Some(agent) = &row.agent {
+        let mut action = button("agent", &row.body);
+        action["icon"] = json!("agent");
+        action["enabled"] = json!(agent.target.is_some());
+        buttons.push(action);
     }
     if let Some(setup) = &row.preparation {
         buttons.push(button(
@@ -267,6 +284,7 @@ fn row_buttons(row: &Row, open: bool) -> Vec<Value> {
 
 /// Diff against the native host's last delivered state, not a reactive
 /// computation: computations may run more than once before the mount is sent.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn changes(
     scope: &str,
     order: &[String],
@@ -386,8 +404,8 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                     if let Some(progress) = &row.progress {
                         row.body = progress.label(crate::l10n::language(), now).into();
                     }
-                    if let Some(agent) = &row.agent {
-                        let (name, elapsed) = connection.publication.with(|p| {
+                    if let Some(agent) = &mut row.agent {
+                        let (name, status, elapsed) = connection.publication.with(|p| {
                             let child = agent
                                 .target
                                 .as_ref()
@@ -395,6 +413,7 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                                 .map(|child| &**child);
                             (
                                 agent.name(child),
+                                agent.status(child),
                                 agent_core::presentation::agents::subagent_elapsed(
                                     crate::l10n::language(),
                                     child,
@@ -402,7 +421,9 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                                 ),
                             )
                         });
-                        row.body = format!("{} {}", name, elapsed.unwrap_or_default()).into();
+                        row.body = name.into();
+                        agent.status = status;
+                        row.time = elapsed;
                     }
                     row
                 })
@@ -452,7 +473,7 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
             .prop("data", move || {
                 let (history, notice, opening) = connection.publication.with(|p| {
                     use agent_core::presentation::context::ConversationOpening;
-                    (p.context.history(),p.context.thread_error(),match p.context.opening() {
+                    (p.context.opening().is_none().then(||p.context.history()).flatten(),[p.context.thread_error(),p.conversation.as_ref().and_then(|conversation|conversation.history_notice())].into_iter().flatten().collect::<Vec<_>>().join("\n"),match p.context.opening() {
                         Some(ConversationOpening::Loading) => json!({"loading":true,"text":tr("会話を読み込み中…")}),
                         Some(ConversationOpening::Failed{error}) => json!({"loading":false,"text":error.to_string(),"retry":tr("再試行")}),
                         None => Value::Null,
@@ -467,8 +488,9 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                         row["parts"] = json!(parts);
                     }
                     row["document"]["findKey"] = json!(surroundings.find.key());
-                    row["media"] = media.with(|files| json!(files.iter().filter_map(|(source, file)| match file { Image::Ready(_,data) => Some((source.clone(),data.clone())), _=>None }).collect::<HashMap<_,_>>()));
-                    row["document"]["mediaErrors"] = media.with(|files| json!(files.iter().filter_map(|(source, file)| match file { Image::Failed(error) => Some((source.clone(),error.clone())), _=>None }).collect::<HashMap<_,_>>()));
+                    let sources = image_sources(row);
+                    row["media"] = media.with(|files| json!(sources.iter().filter_map(|source| match files.get(source) { Some(Image::Ready(_,data)) => Some((source.clone(),data.clone())), _=>None }).collect::<HashMap<_,_>>()));
+                    row["document"]["mediaErrors"] = media.with(|files| json!(sources.iter().filter_map(|source| match files.get(source) { Some(Image::Failed(error)) => Some((source.clone(),error.clone())), _=>None }).collect::<HashMap<_,_>>()));
                 }
                 json!({"scope": scope.get(), "rows": rows, "lane":LANE_WIDTH,"padding":lane_padding(window().width.0), "following": timeline.following.get(),
                     "inset": (timeline.inset.get() - timeline.covered.get()).max(0.0), "notice": notice,"opening":opening,
@@ -683,6 +705,38 @@ enum Image {
     Failed(String),
 }
 type Images = HashMap<String, Image>;
+
+fn image_sources(row: &Value) -> HashSet<String> {
+    fn visit(parts: &[Value], output: &mut HashSet<String>) {
+        for part in parts {
+            if let Some(source) = part["Image"]["source"].as_str() {
+                output.insert(source.into());
+            }
+            for cell in part["Table"]["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|row| row.as_array().into_iter().flatten())
+            {
+                if let Some(parts) = cell.as_array() {
+                    visit(parts, output);
+                }
+            }
+        }
+    }
+    let mut sources: HashSet<_> = row["images"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if let Some(parts) = row["parts"].as_array() {
+        visit(parts, &mut sources);
+    }
+    sources
+}
+
 fn image_resources(
     connection: Connection,
     scope: Memo<String>,
@@ -691,43 +745,14 @@ fn image_resources(
 ) -> Signal<Images> {
     let files = signal(Images::new());
     let current_scope = stored(None::<String>);
+    let owner = Owner::current();
     effect(move || {
         let scope_now = scope.get();
         if current_scope.replace(Some(scope_now.clone())).as_ref() != Some(&scope_now) {
             files.set(HashMap::new());
         }
         retry.get();
-        fn sources(parts: &[crate::rich_text::Part], output: &mut Vec<String>) {
-            for part in parts {
-                match part {
-                    crate::rich_text::Part::Image { source, .. } => output.push(source.clone()),
-                    crate::rich_text::Part::Table { rows, .. } => {
-                        for cell in rows.iter().flatten() {
-                            sources(cell, output);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut images = Vec::new();
-        rows.with(|rows| {
-            for row in rows {
-                images.extend(
-                    row["images"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned),
-                );
-                if let Ok(parts) =
-                    serde_json::from_value::<Vec<crate::rich_text::Part>>(row["parts"].clone())
-                {
-                    sources(&parts, &mut images);
-                }
-            }
-        });
+        let images: HashSet<_> = rows.with(|rows| rows.iter().flat_map(image_sources).collect());
         for source in images {
             if files.with_untracked(|files| files.contains_key(&source)) {
                 continue;
@@ -741,24 +766,28 @@ fn image_resources(
             let cwd = connection
                 .composer
                 .with_untracked(|p| p.controls.navigation.cwd.clone());
-            spawn(async move {
-                let result = match crate::media::load_image(client, host, cwd, source.clone()).await
-                {
-                    Ok(file) => {
-                        let path = file.path.clone();
-                        match blocking(move || image_png(&path)).await {
-                            Ok(Ok(data)) => Image::Ready(file, data),
-                            Ok(Err(error)) => Image::Failed(error),
-                            Err(error) => Image::Failed(error.to_string()),
-                        }
+            // Streaming reprojects rows; transfers belong to the viewport,
+            // rather than the effect's next computation.
+            owner.run(move || {
+                spawn(async move {
+                    let result =
+                        match crate::media::load_image(client, host, cwd, source.clone()).await {
+                            Ok(file) => {
+                                let path = file.path.clone();
+                                match blocking(move || image_png(&path)).await {
+                                    Ok(Ok(data)) => Image::Ready(file, data),
+                                    Ok(Err(error)) => Image::Failed(error),
+                                    Err(error) => Image::Failed(error.to_string()),
+                                }
+                            }
+                            Err(error) => Image::Failed(error),
+                        };
+                    if scope.try_get().as_ref() == Some(&expected) {
+                        files.update(|files| {
+                            files.insert(source, result);
+                        });
                     }
-                    Err(error) => Image::Failed(error),
-                };
-                if scope.try_get().as_ref() == Some(&expected) {
-                    files.update(|files| {
-                        files.insert(source, result);
-                    });
-                }
+                })
             });
         }
     });
@@ -823,9 +852,147 @@ fn setup_action(
     }
 }
 
+fn image_png(path: &std::path::Path) -> Result<String, String> {
+    use base64::Engine;
+    let data = std::fs::read(path).map_err(|error| error.to_string())?;
+    let image = image::load_from_memory(&data).map_err(|error| error.to_string())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png.into_inner()))
+}
+
+fn operation_display(
+    connection: Connection,
+    row: &Row,
+    opened: Signal<HashSet<String>>,
+    value: &mut Value,
+) {
+    let mut notices = Vec::new();
+    let mut retry = None;
+    connection.publication.with(|p| {
+        if let Some(turn) = &row.fork {
+            let busy = p.context.fork_phase(turn.clone()) == Some(op::OperationPhase::Running);
+            for button in value["buttons"].as_array_mut().into_iter().flatten() {
+                if button["action"] == "fork" {
+                    button["enabled"] = json!(!busy);
+                }
+            }
+            if busy {
+                notices.push(crate::rich_text::plain(tr("分岐を作成中…").into(), None));
+            }
+            if let Some(error) = p.context.fork_error(turn.clone()) {
+                notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
+            }
+        }
+        for button in value["buttons"].as_array_mut().into_iter().flatten() {
+            if button["action"] == "edit" {
+                button["enabled"] =
+                    json!(p.composer.controls.running_turn.is_none() && !p.context.rewinding());
+            }
+            if button["action"] == "planMenu" {
+                for item in button["menuItems"].as_array_mut().into_iter().flatten() {
+                    if item["id"] == "savePlan" {
+                        item["enabled"] = json!(
+                            p.composer.controls.connected
+                                && !p.composer.controls.navigation.cwd.is_empty()
+                        );
+                    }
+                }
+            }
+        }
+        if matches!(row.shape, Shape::Fold { open: true })
+            && let Some(load) = row
+                .activity
+                .as_ref()
+                .and_then(|activity| activity.load_items.as_ref())
+            && let Some(error) = p.context.turn_items_error(load.turn_id.clone())
+        {
+            notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
+            retry = Some("retryWork");
+        }
+        if let Some(item) = &row.detail
+            && opened.with(|all| all.contains(&item.source.data.id))
+            && let (Some(thread_id), Some(item_id)) = (
+                p.context.navigation().thread_id,
+                item.source.data.native_id.clone(),
+            )
+        {
+            let key = op::OperationKey::Item {
+                item: op::ReadItem {
+                    thread_id,
+                    turn_id: item.turn.clone(),
+                    item_id,
+                },
+            };
+            if p.snapshot.operation_running(key.clone()) {
+                value["busy"] = json!(true);
+            }
+            if let Some(error) = p.snapshot.operation_error(key) {
+                notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
+                retry = Some("retryItem");
+            }
+        }
+    });
+    if let Some(parts) = value["parts"].as_array_mut() {
+        parts.extend(notices.into_iter().map(|part| json!(part)));
+    }
+    if let Some(action) = retry
+        && let Some(buttons) = value["buttons"].as_array_mut()
+    {
+        buttons.push(button(action, tr("再試行")));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagents_keep_their_message_status_name_and_navigation_availability() {
+        use agent_core::presentation::agents::SubagentPresentation;
+        use agent_protocol::models::TurnStatus;
+        let mut row = Row::new(
+            "child".into(),
+            Kind::Activity,
+            Shape::Subagent,
+            "Review the change",
+        );
+        row.agent = Some(SubagentPresentation {
+            target: None,
+            name: row.body.to_string(),
+            message: "Checking the tests".into(),
+            status: TurnStatus::Running,
+        });
+        let shown = project_row(&row, false, "parent", "", None, true, None);
+        assert!(shown["parts"].to_string().contains("Checking the tests"));
+        assert_eq!(shown["buttons"][0]["title"], "Review the change");
+        assert_eq!(shown["buttons"][0]["enabled"], false);
+        assert_eq!(shown["agentStatus"], "running");
+        let agent = row.agent.as_mut().unwrap();
+        agent.target = Some(
+            agent_protocol::session::SessionRef::new(
+                agent_protocol::session::ProviderKind::Codex,
+                "child".into(),
+            )
+            .unwrap(),
+        );
+        agent.status = TurnStatus::Completed;
+        let shown = project_row(&row, false, "parent", "", None, true, None);
+        assert_eq!(shown["buttons"][0]["enabled"], true);
+        assert_eq!(shown["agentStatus"], "completed");
+    }
+
+    #[test]
+    fn image_sources_are_deduplicated_within_their_own_message_including_table_cells() {
+        let row = json!({"images":["sent.png", "sent.png"],"parts":[{"Image":{"source":"inline.png"}},{"Table":{"rows":[[[{"Image":{"source":"table.png"}}]]]}}]});
+        assert_eq!(
+            image_sources(&row),
+            HashSet::from(["sent.png".into(), "inline.png".into(), "table.png".into()])
+        );
+        assert!(image_sources(&json!({"images":[],"parts":[]})).is_empty());
+    }
 
     #[test]
     fn workspace_preparation_keeps_steps_details_terminal_cancel_and_retry_actions() {
@@ -975,98 +1142,5 @@ mod tests {
                 .as_str()
                 .is_some_and(|source| source.ends_with("output.png"))
         }));
-    }
-}
-
-fn image_png(path: &std::path::Path) -> Result<String, String> {
-    use base64::Engine;
-    let data = std::fs::read(path).map_err(|error| error.to_string())?;
-    let image = image::load_from_memory(&data).map_err(|error| error.to_string())?;
-    let mut png = std::io::Cursor::new(Vec::new());
-    image
-        .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|error| error.to_string())?;
-    Ok(base64::engine::general_purpose::STANDARD.encode(png.into_inner()))
-}
-
-fn operation_display(
-    connection: Connection,
-    row: &Row,
-    opened: Signal<HashSet<String>>,
-    value: &mut Value,
-) {
-    let mut notices = Vec::new();
-    let mut retry = None;
-    connection.publication.with(|p| {
-        if let Some(turn) = &row.fork {
-            let busy = p.context.fork_phase(turn.clone()) == Some(op::OperationPhase::Running);
-            for button in value["buttons"].as_array_mut().into_iter().flatten() {
-                if button["action"] == "fork" {
-                    button["enabled"] = json!(!busy);
-                }
-            }
-            if busy {
-                notices.push(crate::rich_text::plain(tr("分岐を作成中…").into(), None));
-            }
-            if let Some(error) = p.context.fork_error(turn.clone()) {
-                notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
-            }
-        }
-        for button in value["buttons"].as_array_mut().into_iter().flatten() {
-            if button["action"] == "edit" {
-                button["enabled"] =
-                    json!(p.composer.controls.running_turn.is_none() && !p.context.rewinding());
-            }
-            if button["action"] == "planMenu" {
-                for item in button["menuItems"].as_array_mut().into_iter().flatten() {
-                    if item["id"] == "savePlan" {
-                        item["enabled"] = json!(
-                            p.composer.controls.connected
-                                && !p.composer.controls.navigation.cwd.is_empty()
-                        );
-                    }
-                }
-            }
-        }
-        if matches!(row.shape, Shape::Fold { open: true })
-            && let Some(load) = row
-                .activity
-                .as_ref()
-                .and_then(|activity| activity.load_items.as_ref())
-            && let Some(error) = p.context.turn_items_error(load.turn_id.clone())
-        {
-            notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
-            retry = Some("retryWork");
-        }
-        if let Some(item) = &row.detail
-            && opened.with(|all| all.contains(&item.source.data.id))
-            && let (Some(thread_id), Some(item_id)) = (
-                p.context.navigation().thread_id,
-                item.source.data.native_id.clone(),
-            )
-        {
-            let key = op::OperationKey::Item {
-                item: op::ReadItem {
-                    thread_id,
-                    turn_id: item.turn.clone(),
-                    item_id,
-                },
-            };
-            if p.snapshot.operation_running(key.clone()) {
-                value["busy"] = json!(true);
-            }
-            if let Some(error) = p.snapshot.operation_error(key) {
-                notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
-                retry = Some("retryItem");
-            }
-        }
-    });
-    if let Some(parts) = value["parts"].as_array_mut() {
-        parts.extend(notices.into_iter().map(|part| json!(part)));
-    }
-    if let Some(action) = retry
-        && let Some(buttons) = value["buttons"].as_array_mut()
-    {
-        buttons.push(button(action, tr("再試行")));
     }
 }
