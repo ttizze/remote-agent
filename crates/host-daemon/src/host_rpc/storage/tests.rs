@@ -3996,3 +3996,190 @@ fn list_replay_obeys_its_byte_budget(#[case] bytes: usize, #[case] reset: bool) 
         reset
     );
 }
+
+#[rstest::rstest]
+#[case("read")]
+#[case("setup")]
+#[case("membership")]
+#[case("discover")]
+#[case("import-status")]
+#[case("import-failure")]
+#[case("catalog-failure")]
+#[case("fork")]
+#[case("reimport")]
+fn each_header_producer_replays_to_the_next_snapshot(#[case] producer: &str) {
+    use agent_protocol::models::{ProjectMembership, ThreadResponse};
+    use decision::records::WorkspacePreparation;
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let original = address("projection-producer");
+    let id = if producer == "fork" {
+        SessionRef::new(None, Uuid::new_v4().to_string()).unwrap()
+    } else {
+        original.clone()
+    };
+    let generation = Uuid::new_v4();
+    let mut seed = header();
+    if producer == "read" {
+        seed.details.activity.completion = Some("done".into());
+    }
+    if producer == "setup" {
+        seed.details.workspace = Some(Box::new(WorkspacePreparation {
+            project_cwd: "/project".into(),
+            strategy: None,
+            generation,
+            created_worktree: false,
+            setup: Some(agent_protocol::workspace::WorkspaceSetup::new(None, 100)),
+            visible: true,
+        }));
+    }
+    let response = |count| ThreadResponse {
+        thread: agent_protocol::models::Thread {
+            id: Some(original.clone()),
+            cwd: Some("/project".into()),
+            turns: Some(
+                (1..=count)
+                    .map(|index| {
+                        Arc::new(agent_protocol::models::Turn {
+                            id: format!("turn-{index}").into(),
+                            status: agent_protocol::models::TurnStatus::Completed,
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    if matches!(producer, "fork" | "reimport") {
+        storage
+            .import(&original, &response(1), Some(&original), 100)
+            .unwrap();
+    } else if matches!(
+        producer,
+        "import-status" | "import-failure" | "catalog-failure"
+    ) {
+        storage.queue_catalog(ProviderKind::Claude, 0).unwrap();
+        let claim = storage.claim(0, 1).unwrap().pop().unwrap();
+        storage
+            .catalog_page(&claim, &[(original.clone(), seed)], None, 0)
+            .unwrap();
+    } else {
+        storage.create(&original, &seed).unwrap();
+    }
+    let claim = match producer {
+        "import-failure" | "reimport" => {
+            if producer == "import-failure" {
+                storage.import_status(&original, 100).unwrap();
+            } else {
+                storage.queue_import(&original, &original, 100).unwrap();
+            }
+            Some(storage.claim(100, 1).unwrap().pop().unwrap())
+        }
+        "catalog-failure" => {
+            storage.queue_catalog(ProviderKind::Claude, 100).unwrap();
+            Some(storage.claim(100, 1).unwrap().pop().unwrap())
+        }
+        _ => None,
+    };
+    let initial = if producer == "fork" {
+        Message::Snapshot {
+            cursor: storage.with(|connection| cursor(connection)).unwrap(),
+            window: Some(Window { turn: 0, item: 0 }),
+            rows: vec![],
+        }
+    } else {
+        storage.snapshot(&id, None, None).unwrap()
+    };
+    let Message::Snapshot {
+        cursor: before,
+        window,
+        ..
+    } = &initial
+    else {
+        panic!("initial")
+    };
+    let list_before = storage.list(None).unwrap();
+    match producer {
+        "read" => {
+            storage.mark_read(&id, &"done".into()).unwrap();
+        }
+        "setup" => {
+            storage
+                .setup(
+                    &id,
+                    generation,
+                    workspace::SetupChange::Finish {
+                        phase: agent_protocol::workspace::SetupPhase::Done,
+                        error: None,
+                    },
+                    200,
+                )
+                .unwrap();
+        }
+        "membership" => {
+            storage
+                .workspace_membership(
+                    &id,
+                    "/project",
+                    ProjectMembership::Assigned("project".into()),
+                )
+                .unwrap();
+        }
+        "discover" => {
+            storage.discover(&id, &id, &header(), 200).unwrap();
+        }
+        "import-status" => {
+            storage.import_status(&id, 200).unwrap();
+        }
+        "import-failure" => {
+            let claim = claim.unwrap();
+            storage
+                .import_failed(&id, claim.id, claim.attempt, "native unavailable".into())
+                .unwrap();
+        }
+        "catalog-failure" => {
+            storage
+                .catalog_failed(&claim.unwrap(), ProviderKind::Claude)
+                .unwrap();
+        }
+        "fork" => {
+            storage.fork(&original, &id, &"turn-1".into(), 200).unwrap();
+        }
+        "reimport" => {
+            let claim = claim.unwrap();
+            storage
+                .reimport(&id, &id, claim.id, claim.attempt, &response(2), 200)
+                .unwrap();
+        }
+        _ => unreachable!(),
+    }
+    let replay = storage.snapshot(&id, Some(*before), *window).unwrap();
+    if matches!(producer, "fork" | "reimport") {
+        assert!(matches!(replay, Message::Snapshot { .. }));
+    } else {
+        assert!(matches!(&replay,Message::Events {events,..} if !events.is_empty()));
+    }
+    let replica =
+        decision::records::Replica::new(agent_protocol::sync::Scope::Conversation(id.clone()), 1);
+    assert_eq!(
+        replica.apply(1, initial).unwrap().apply(1, replay).unwrap(),
+        replica
+            .apply(1, storage.snapshot(&id, None, None).unwrap())
+            .unwrap()
+    );
+    let replica = decision::records::Replica::new(agent_protocol::sync::Scope::List, 1);
+    let cached = match &list_before {
+        Message::Snapshot { cursor, .. } => *cursor,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        replica
+            .apply(1, list_before)
+            .unwrap()
+            .apply(1, storage.list(Some(cached)).unwrap())
+            .unwrap(),
+        replica.apply(1, storage.list(None).unwrap()).unwrap()
+    );
+}

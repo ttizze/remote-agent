@@ -77,7 +77,6 @@ impl HostRpcService {
             .headers(true)
             .map_err(super::super::runtime::storage_failure)?
             .into_iter()
-            .map(|(id, header)| (id, header))
             .collect();
         let mut observed = std::collections::HashSet::new();
         let mut inspected = std::collections::HashSet::new();

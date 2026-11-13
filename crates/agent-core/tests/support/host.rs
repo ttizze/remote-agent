@@ -847,7 +847,7 @@ impl State {
             Message::Events {
                 through: cursor,
                 events: vec![agent_protocol::sync::Event {
-                    sequence: (cursor).sequence,
+                    sequence: cursor.sequence,
                     rows: incoming,
                     removed: vec![],
                 }],

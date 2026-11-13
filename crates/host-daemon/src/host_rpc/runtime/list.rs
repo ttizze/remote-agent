@@ -66,10 +66,10 @@ impl Subscription {
                 .await
                 .ok()?
                 .ok()?;
+            self.cursor = through(&message);
             if unchanged(&message) {
                 continue;
             }
-            self.cursor = through(&message);
             return protocol::encode(message).ok();
         }
     }
@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn item_only_commits_do_not_advance_the_list_stream() {
+    async fn item_only_commits_advance_the_reader_without_sending_list_frames() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Arc::new(Storage::open(&directory.path().join("state.sqlite")));
         let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
@@ -128,34 +128,40 @@ mod tests {
             storage: storage.clone(),
             cursor,
         };
-        let committed = storage
-            .decide(
-                &id,
-                Event::Provider {
-                    attempt,
-                    native_turn: None,
-                    native_items: vec![],
-                    observation: Observation::Item {
-                        id: "reply".into(),
-                        status: agent_protocol::execution::ItemStatus::Running,
-                        deferred: false,
-                        body: agent_protocol::items::ItemBody::AssistantText {
-                            text: "partial".into(),
-                            phase: Default::default(),
+        for round in 0..2 {
+            let mut through = cursor;
+            for index in 0..501 {
+                let committed = storage
+                    .decide(
+                        &id,
+                        Event::Provider {
+                            attempt,
+                            native_turn: None,
+                            native_items: vec![],
+                            observation: Observation::Item {
+                                id: "reply".into(),
+                                status: agent_protocol::execution::ItemStatus::Running,
+                                deferred: false,
+                                body: agent_protocol::items::ItemBody::AssistantText {
+                                    text: format!("partial {round}-{index}"),
+                                    phase: Default::default(),
+                                },
+                            },
                         },
-                    },
-                },
-                context,
-                None,
-            )
-            .unwrap();
-        assert!(committed.cursor.sequence > cursor.sequence);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), subscription.recv())
-                .await
-                .is_err()
-        );
-        assert_eq!(subscription.cursor, cursor);
+                        context,
+                        None,
+                    )
+                    .unwrap();
+                assert!(committed.cursor.sequence > cursor.sequence);
+                through = committed.cursor;
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), subscription.recv())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(subscription.cursor, through);
+        }
         storage
             .decide(&id, Event::Title("renamed".into()), context, None)
             .unwrap();

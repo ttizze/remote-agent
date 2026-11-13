@@ -163,21 +163,17 @@ impl Runtime {
                     .map_err(|error| error.to_string())
                     .and_then(|result| result)
                     .and_then(|message| {
-                        if list::unchanged(&message) {
-                            Ok(None)
-                        } else {
-                            replica
-                                .apply(0, message)
-                                .map(Some)
-                                .map_err(|error| error.to_string())
-                        }
+                        let published = !list::unchanged(&message);
+                        replica
+                            .apply(0, message)
+                            .map(|next| (next, published))
+                            .map_err(|error| error.to_string())
                     });
                 let published = match next {
-                    Ok(Some(next)) => {
+                    Ok((next, published)) => {
                         replica = next;
-                        true
+                        published
                     }
-                    Ok(None) => false,
                     Err(error) => {
                         tracing::error!(target:"agent",operation="list.activity",%error);
                         replica = records::Replica::new(agent_protocol::sync::Scope::List, 0);

@@ -76,7 +76,7 @@ fn change(
     Message::Events {
         through: cursor(through),
         events: vec![Event {
-            sequence: (cursor(through)).sequence,
+            sequence: through,
             rows,
             removed,
         }],

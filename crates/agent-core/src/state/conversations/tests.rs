@@ -202,9 +202,9 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
                 &mut snapshot,
                 &id,
                 vec![Message::Events {
-                    through: through,
+                    through,
                     events: vec![agent_protocol::sync::Event {
-                        sequence: (through).sequence,
+                        sequence: through.sequence,
                         rows: vec![],
                         removed: vec![],
                     }],
@@ -369,7 +369,7 @@ fn hydration_finishes_after_unrelated_live_updates_without_restarting_the_read()
         vec![Message::Events {
             through: latest,
             events: vec![agent_protocol::sync::Event {
-                sequence: (latest).sequence,
+                sequence: latest.sequence,
                 rows: vec![],
                 removed: vec![],
             }],

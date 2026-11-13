@@ -1642,20 +1642,16 @@ async fn explicit_native_imports_append_missing_text_and_keep_settled_messages()
         .turns
         .as_mut()
         .unwrap()[1] = Arc::new(external("updated answer"));
-    let version = |message: records::Message| {
-        let agent_protocol::sync::Message::Snapshot { cursor, .. } = message else {
-            panic!("snapshot")
-        };
-        cursor.sequence
-    };
-    let before = version(storage.snapshot(&target, None, None).unwrap());
+    let database =
+        rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
     storage.queue_import(&target, &native, now()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let history = storage.history(&target, 0).unwrap();
-            let turns = history.thread.turns.unwrap();
-            // Observe the committed import event before asserting immutability.
-            if version(storage.snapshot(&target, None, None).unwrap()) > before {
+            // Unrelated stream commits cannot prove this import has settled.
+            let pending:bool=database.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE lane=?1)",[format!("import:{target}")],|row|row.get(0)).unwrap();
+            if !pending {
+                let history=storage.history(&target,0).unwrap();
+                let turns=history.thread.turns.unwrap();
                 assert!(matches!(turns.last().unwrap().items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "external answer"));
                 assert_eq!(turns.len(), 2);
                 assert_eq!(turns[1].id, id);

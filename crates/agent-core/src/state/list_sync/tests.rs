@@ -472,10 +472,10 @@ fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures(
         &state,
         state.lists.subscription.unwrap(),
         Message::Events {
-            through: through,
+            through,
             events: vec![agent_protocol::sync::Event {
-                sequence: (through).sequence,
-                rows: rows,
+                sequence: through.sequence,
+                rows,
                 removed: Vec::new(),
             }],
         },
@@ -551,9 +551,9 @@ fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion()
         &state,
         state.lists.subscription.unwrap(),
         Message::Events {
-            through: through,
+            through,
             events: vec![agent_protocol::sync::Event {
-                sequence: (through).sequence,
+                sequence: through.sequence,
                 rows: vec![row(0, false, through.sequence)],
                 removed: Vec::new(),
             }],

@@ -6113,9 +6113,9 @@ async fn gallery_finishes_with_an_error_when_the_hydrated_image_was_removed() {
             .send_rows(
                 subscription,
                 Message::Events {
-                    through: through,
+                    through,
                     events: vec![agent_protocol::sync::Event {
-                        sequence: (through).sequence,
+                        sequence: through.sequence,
                         rows: vec![],
                         removed: vec![Key::Item {
                             thread: target,

@@ -698,8 +698,8 @@ pub(crate) fn set_activity(
     let message = records::Message::Events {
         through: agent_protocol::sync::Cursor { sequence, ..from },
         events: vec![agent_protocol::sync::Event {
-            sequence: (agent_protocol::sync::Cursor { sequence, ..from }).sequence,
-            rows: rows,
+            sequence,
+            rows,
             removed: Vec::new(),
         }],
     };
