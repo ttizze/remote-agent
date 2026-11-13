@@ -3563,3 +3563,50 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
         assert_eq!(thread.skips_compaction, text == "/compact");
     }
 }
+
+#[test]
+fn unsupported_destinations_are_rejected_without_rewriting_their_bytes() {
+    for version in [0, 2, 4] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE future(data TEXT); INSERT INTO future VALUES ('preserve');",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let storage = Storage::open(&path);
+        assert!(storage.check_ready().is_err());
+        drop(storage);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    storage
+        .with(|connection| {
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            let synchronous: i64 = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            assert_eq!(synchronous, 2);
+            Ok(())
+        })
+        .unwrap();
+    let invalid = Storage::open(directory.path());
+    assert!(invalid.check_ready().is_err());
+    assert!(invalid.headers(true).is_err());
+    assert!(invalid.list(None).is_err());
+    assert!(invalid.state(&address("invalid")).is_err());
+}

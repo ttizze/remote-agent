@@ -25,7 +25,7 @@ mod codex_fixture;
 #[allow(dead_code)]
 #[path = "support/conversations.rs"]
 mod conversations;
-use host_fixture::test_support::{HostFixture, Memory, assert_project_directory};
+use host_fixture::test_support::{HostFixture, Memory, assert_project_directory, seed_projects};
 
 // These transport Hosts run without account management and use an explicit
 // Codex new-chat preference.
@@ -73,158 +73,6 @@ async fn start_host(directory: &Path) -> HostFixture {
     )
     .await
     .unwrap()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pre_cutover_unknown_first_send_resolves_against_the_original_host_address() {
-    use agent_core::{
-        persistence,
-        state::{Draft, DraftKey, Intent, PendingSubmission, Snapshot},
-        store::Store,
-    };
-    tokio::time::timeout(Duration::from_secs(30), async {
-        for admitted in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let cwd = directory.path().to_str().unwrap();
-            let input = input_id("pre-cutover-unknown");
-            let session =
-                SessionRef::new(ProviderKind::Codex, format!("bex-task:{input}")).unwrap();
-            let model = models::ModelRef {
-                provider: ProviderKind::Codex,
-                id: "fixture-model".into(),
-            };
-            if admitted {
-                std::fs::write(
-                    directory.path().join("bex-conversations.json"),
-                    serde_json::to_vec(&json!([{
-                        "id":session,"active":{"provider":"codex","id":"prior-native"},"cwd":cwd,
-                        "bindings":[],"handoffs":[],"startup":{"project_cwd":cwd,"preparation":{
-                            "submission":{"threadId":session,"clientUserMessageId":input,
-                                "input":[rpc::Input::Text { text: "uncertain".into() }],"model":model},
-                            "stage":"setupScript","status":"interrupted"
-                        }}
-                    }]))
-                    .unwrap(),
-                )
-                .unwrap();
-            }
-            let mut initial = Snapshot::default();
-            Arc::make_mut(&mut initial.sessions.pending_submissions).insert(
-                input.clone(),
-                Arc::new(PendingSubmission {
-                    new_draft_slot: None,
-                    cursor: None,
-                    sequence: 1,
-                    submitted_at_ms: None,
-                    draft_key: DraftKey::from(format!("new:{cwd}")),
-                    draft: Arc::new(Draft {
-                        text: "uncertain".into(),
-                        model: Some(model),
-                        ..Default::default()
-                    }),
-                    turn_id: None,
-                    after_item_id: None,
-                    accepted: false,
-                    delivery_unknown: true,
-                    queued: false,
-                }),
-            );
-            let initial = persistence::decode(&persistence::encode(&initial).unwrap()).unwrap();
-            assert_eq!(
-                initial.sessions.pending_submissions[&input].draft_key,
-                DraftKey::from(&session)
-            );
-            let program = host_fixture::fixture::Config {
-                trace: true,
-                stream_delay_ms: 5,
-                ..Default::default()
-            }
-            .install(
-                Path::new(env!("CARGO_BIN_EXE_agent-codex-fixture")),
-                directory.path(),
-            )
-            .unwrap();
-            std::fs::write(directory.path().join("rpc-trace.jsonl"), "").unwrap();
-            let fixture = HostFixture::start(
-                directory.path(),
-                AppServerConfig {
-                    program,
-                    ..Default::default()
-                },
-                Arc::new(Memory::default()),
-                "isolated Host",
-                false,
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-            let endpoint =
-                Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
-                    .await
-                    .unwrap();
-            let store = Store::connect(
-                &endpoint,
-                &fixture.ticket,
-                initial,
-                None,
-                "Fixture device",
-                None,
-            )
-            .await
-            .unwrap();
-            // Reconnection can already settle an admitted input from its saved rows.
-            if store
-                .snapshot()
-                .sessions
-                .pending_submissions
-                .contains_key(&input)
-            {
-                store
-                    .dispatch(Intent::RestoreUnknownSubmission {
-                        client_user_message_id: input.clone(),
-                    })
-                    .await
-                    .unwrap();
-            }
-            store
-                .subscribe()
-                .wait_for(|snapshot| !snapshot.sessions.pending_submissions.contains_key(&input))
-                .await
-                .unwrap();
-            let snapshot = store.snapshot();
-            if admitted {
-                assert!(snapshot.sessions.conversations.contains_key(&session));
-                assert!(
-                    snapshot
-                        .input
-                        .drafts
-                        .values()
-                        .all(|draft| draft.text != "uncertain")
-                );
-            } else {
-                assert!(
-                    snapshot
-                        .input
-                        .drafts
-                        .values()
-                        .any(|draft| draft.text == "uncertain")
-                );
-            }
-            let trace = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
-            assert!(
-                trace.lines().all(
-                    |line| serde_json::from_str::<Value>(line).unwrap()["method"] != "turn/start"
-                ),
-                "recovery must not resend the input"
-            );
-            store.close().await.unwrap();
-            endpoint.close().await;
-            fixture.close().await.unwrap();
-        }
-    })
-    .await
-    .expect("pre-cutover recovery exceeded its deadline");
 }
 
 async fn completed_chat(client: &Client, cwd: Option<String>) -> models::Thread {
@@ -1219,7 +1067,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
         std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({
             "settings":{"createOnNewSession":automatic,"worktreeDirectory":destination}
         })).unwrap()).unwrap();
-        std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
+        seed_projects(&root, serde_json::from_value(json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
         let source = root.join("photo.png");
         let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
         std::fs::write(&source, bytes).unwrap();
@@ -1931,11 +1779,7 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("bex-projects.json"),
-            json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])
-                .to_string(),
-        )
+        seed_projects(directory.path(), serde_json::from_value(json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap())
         .unwrap();
         std::fs::write(directory.path().join("list-fixture.json"), json!([
             {"id":"large","cwd":directory.path().join("large-history"),"historyMode":"paginated"},
@@ -2107,7 +1951,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         external["status"] = json!({"type":"notLoaded"});
         external["path"] = json!(rollout);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
+        seed_projects(directory.path(), serde_json::from_value(json!(projects)).unwrap()).unwrap();
         let checkout = directory.path().join("worktree");
         std::fs::write(directory.path().join("bex-worktrees.json"), json!({"workspaceRoots":{checkout.to_str().unwrap():directory.path().join("project-5")}}).to_string()).unwrap();
         let program = host_fixture::fixture::Config { trace: true, stream_delay_ms: 5, ..Default::default() }
@@ -2235,11 +2079,10 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
             "fixture",
         ]);
         std::fs::write(workspace.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
-        let project_state = root.join("bex-projects.json");
-        std::fs::write(
-            &project_state,
-            serde_json::to_vec(
-                &json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}]),
+        seed_projects(
+            &root,
+            serde_json::from_value(
+                json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}]),
             )
             .unwrap(),
         )
@@ -2432,7 +2275,7 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
 async fn daemon_exposes_project_roots_and_structured_tool_results() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
+        seed_projects(directory.path(), serde_json::from_value(json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
         let started = conversations::created(&local.peer,conversations::create_request(ProviderKind::Codex,Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),None)).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
@@ -3061,7 +2904,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 std::os::unix::fs::symlink(&project, &configured_project).unwrap();
                 #[cfg(not(unix))]
                 let configured_project = project.clone();
-                std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
+                seed_projects(&root, serde_json::from_value(json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
                 let program = host_fixture::fixture::Config { trace: true, deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_agent-codex-fixture")), &root).unwrap();

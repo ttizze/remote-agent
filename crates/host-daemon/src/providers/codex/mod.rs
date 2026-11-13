@@ -1468,7 +1468,14 @@ rl.on('line', line => {
   if (message.method === 'initialize') {
     process.stdout.write(JSON.stringify({id:message.id,result:{userAgent:'reject-fixture',codexHome:process.env.CODEX_HOME}})+'\n');
   } else if (message.method === 'turn/start') {
-    process.stdout.write(JSON.stringify({id:message.id,error:{code:-32000,message:'explicit rejection'}})+'\n');
+    if (message.params.input === undefined) {
+      process.stdout.write(JSON.stringify({id:message.id,error:{code:-32000,message:'explicit rejection'}})+'\n');
+    } else {
+      const p = message.params;
+      if (Object.keys(p).length !== 6 || p.threadId !== 'thread' || JSON.stringify(p.input) !== '[]' ||
+          p.model !== 'model' || p.effort !== 'high' || p.serviceTierForTurn !== 'priority' || p.summary !== 'detailed') process.exit(3);
+      process.stdout.write(JSON.stringify({id:message.id,result:{turn:{id:'continued-native'}}})+'\n');
+    }
   } else if (message.method === 'fixture/wake') {
     process.stdout.write(JSON.stringify({method:'turn/started',params:{threadId:'thread',turn:{id:'background',status:'inProgress',items:[]}}})+'\n');
     process.stdout.write(JSON.stringify({id:message.id,result:{}})+'\n');
@@ -1532,6 +1539,17 @@ rl.on('line', line => {
         assert!(
             matches!(background.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "background")
         );
+        let continued = agent
+            .continue_turn(
+                "thread",
+                Some("model"),
+                Some("high"),
+                Some("priority"),
+                uuid::Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(continued.turn_id.unwrap().as_str(), "continued-native");
         agent.shutdown().await;
     }
 

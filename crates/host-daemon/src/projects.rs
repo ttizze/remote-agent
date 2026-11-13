@@ -309,12 +309,11 @@ mod tests {
             {"id":"chats","name":"Chats","roots":[{"path":chats}]},
             {"id":"mixed","name":"Workspace","roots":[{"path":chats},{"path":workspace}]}
         ]);
-        std::fs::write(
-            root.join("bex-projects.json"),
-            serde_json::to_vec(&projects).unwrap(),
-        )
-        .unwrap();
         let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
+        store
+            .storage
+            .replace_projects(&serde_json::from_value::<Vec<_>>(projects).unwrap())
+            .unwrap();
         let snapshot = store.load().await.unwrap();
         assert_eq!(snapshot.projects.len(), 1);
         assert_eq!(snapshot.projects[0].id, "mixed");

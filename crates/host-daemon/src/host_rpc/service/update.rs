@@ -213,6 +213,11 @@ impl HostRpcService {
                 let previous = serde_json::to_vec(&report)?;
                 let mut pending = false;
                 for task in &mut report.tasks {
+                    if task.delivery == ContinuationDelivery::Sending {
+                        task.delivery = ContinuationDelivery::Failed(
+                            "継続の配送結果を確認できません。会話を開いて確認してください。".into(),
+                        );
+                    }
                     if !matches!(task.delivery, ContinuationDelivery::Pending) {
                         continue;
                     }
@@ -296,6 +301,53 @@ mod tests {
             serde_json::from_slice(&std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap())
                 .unwrap();
         assert!(saved.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_uncertain_update_continuation_is_reported_without_resending() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new([], directory.path().join("bex-worktrees.json"));
+        let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+        let path = directory.path().join(RECOVERY_FILE);
+        agent_local_host::save_private_json(
+            &path,
+            &Recovery {
+                tasks: vec![InterruptedTask {
+                    native_session: SessionRef::new(ProviderKind::Codex, "native".into()).unwrap(),
+                    cwd: None,
+                    submission: op::Submission {
+                        thread_id: target.clone(),
+                        client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+                        input: vec![],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                    last_turn: None,
+                    delivery: ContinuationDelivery::Sending,
+                }],
+            },
+        )
+        .unwrap();
+        service.resume_after_update(directory.path()).await.unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let report: Recovery = serde_json::from_slice(&saved).unwrap();
+        assert!(
+            matches!(&report.tasks[0].delivery, ContinuationDelivery::Failed(message)
+            if message == "継続の配送結果を確認できません。会話を開いて確認してください。")
+        );
+        assert!(
+            service
+                .inner
+                .conversation
+                .storage
+                .lookup(&target)
+                .unwrap()
+                .is_none()
+        );
+        service.resume_after_update(directory.path()).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
     }
 
     #[tokio::test]

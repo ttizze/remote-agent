@@ -30,9 +30,6 @@ mod rows;
 #[cfg(test)]
 mod tests;
 mod titles;
-mod upgrade;
-#[cfg(test)]
-mod upgrade_tests;
 pub(in crate::host_rpc) mod workspace;
 
 #[derive(Debug)]
@@ -280,14 +277,13 @@ impl Storage {
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .map_err(failure)?;
             match version {
-                0 => Self::initialize(&mut connection, path, process)?,
-                2 => {}
+                0 => Self::initialize(&mut connection)?,
+                3 => {}
                 _ => return Err(format!("conversation storage needs upgrade from {version}")),
             }
             connection
                 .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
                 .map_err(failure)?;
-            upgrade::recover_update(&connection, path)?;
             cursor(&connection)?;
             // The Host lease is already held. Running work belonged to the
             // previous process; a live process never reclaims its own claims.
@@ -307,7 +303,7 @@ impl Storage {
         }
     }
 
-    fn initialize(connection: &mut Connection, path: &Path, process: Uuid) -> Result<(), String> {
+    fn initialize(connection: &mut Connection) -> Result<(), String> {
         let populated: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table')",
@@ -318,7 +314,6 @@ impl Storage {
         if populated {
             return Err("unversioned conversation database requires upgrade".into());
         }
-        let previous = upgrade::prepare(path)?;
         let transaction = connection.transaction().map_err(failure)?;
         transaction
             .execute_batch(include_str!("storage/schema.sql"))
@@ -330,15 +325,9 @@ impl Storage {
             )
             .map_err(failure)?;
         transaction
-            .pragma_update(None, "user_version", 2)
+            .pragma_update(None, "user_version", 3)
             .map_err(failure)?;
-        if let Some(previous) = &previous {
-            previous.write(&transaction, process)?;
-        }
         transaction.commit().map_err(failure)?;
-        if let Some(previous) = previous {
-            previous.keep();
-        }
         Ok(())
     }
 

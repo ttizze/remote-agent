@@ -25,6 +25,18 @@ pub fn assert_project_directory(cwd: &Path, project: &Path, worktrees: Option<&P
     }
 }
 
+/// Seed the current Host store without depending on an obsolete file format.
+pub fn seed_projects(
+    directory: &Path,
+    projects: Vec<agent_protocol::models::Project>,
+) -> Result<()> {
+    let service = HostRpcService::new([], directory.join("bex-worktrees.json"));
+    service
+        .fixture_projects()
+        .replace_fixture_projects(&projects)
+        .map_err(anyhow::Error::msg)
+}
+
 #[derive(Default)]
 pub struct Memory {
     bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,

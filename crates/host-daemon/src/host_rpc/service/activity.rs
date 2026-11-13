@@ -167,14 +167,9 @@ mod tests {
     #[test]
     fn startup_reports_invalid_storage() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("bex-conversations.json"), b"invalid").unwrap();
+        std::fs::write(root.path().join("bex-conversations.sqlite"), b"invalid").unwrap();
         let service = HostRpcService::new([], root.path().join("projects.json"));
-        assert!(
-            service
-                .start()
-                .unwrap_err()
-                .contains("bex-conversations.json")
-        );
+        assert!(service.start().unwrap_err().contains("not a database"));
     }
     use agent_protocol::{
         conversation::records,
@@ -231,15 +226,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let session = |id: &str| SessionRef::new(ProviderKind::Codex, id.into()).unwrap();
         let root = session("public-root");
-        std::fs::write(
-            directory.path().join("bex-read-state.json"),
-            serde_json::to_vec(&["public-root", "child", "grandchild"].map(
-                |id| serde_json::json!({"session":session(id),"turn_id":"completed","unread":true}),
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(directory.path().join("bex-conversations.json"), serde_json::to_vec(&[serde_json::json!({"id":root,"active":session("native-root"),"cwd":directory.path(),"name":null,"preview":null,"bindings":[{"session":session("native-root"),"covered":null}],"segments":[],"handoffs":[],"startup":null})]).unwrap()).unwrap();
         let program = directory.path().join("codex-fixture");
         std::fs::write(&program, r##"#!/usr/bin/env node
 const rl = require('node:readline').createInterface({input:process.stdin});
@@ -279,6 +265,36 @@ rl.on('line', line => {
             directory.path().join("projects.json"),
         );
         let storage = &service.inner.conversation.storage;
+        for (id, source, parent) in [
+            (root.clone(), session("native-root"), None),
+            (
+                session("child"),
+                session("child"),
+                Some(session("native-root")),
+            ),
+            (
+                session("grandchild"),
+                session("grandchild"),
+                Some(session("child")),
+            ),
+        ] {
+            let response = agent_protocol::models::ThreadResponse {
+                thread: Thread {
+                    id: Some(id.clone()),
+                    parent_id: parent,
+                    cwd: Some(directory.path().to_str().unwrap().into()),
+                    turns: Some(vec![Arc::new(agent_protocol::models::Turn {
+                        id: "completed".into(),
+                        status: agent_protocol::execution::TurnStatus::Completed,
+                        items: Some(vec![]),
+                        ..Default::default()
+                    })]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            storage.import(&id, &response, Some(&source), 0).unwrap();
+        }
         storage.queue_catalog(ProviderKind::Codex, 0).unwrap();
         let claim = storage.claim(0, 1).unwrap().remove(0);
         let mut stale = super::super::super::storage::history::header(

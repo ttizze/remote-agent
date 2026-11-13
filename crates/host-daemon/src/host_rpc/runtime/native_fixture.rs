@@ -45,6 +45,10 @@ pub(in crate::host_rpc) struct NativeAgent {
     /// Item IDs whose native bodies cannot be read.
     pub(in crate::host_rpc) unreadable: Mutex<std::collections::HashSet<String>>,
     pub(in crate::host_rpc) inputs: Arc<Mutex<Vec<op::Submission>>>,
+    pub(in crate::host_rpc) continuations: Mutex<Vec<(String, Uuid)>>,
+    pub(in crate::host_rpc) continue_gate: tokio::sync::Semaphore,
+    pub(in crate::host_rpc) continue_started: tokio::sync::Notify,
+    pub(in crate::host_rpc) interrupts: Mutex<Vec<(String, TurnId)>>,
     pub(in crate::host_rpc) injected: Arc<Mutex<Vec<(String, handoff::Context)>>>,
     pub(in crate::host_rpc) released: Arc<Mutex<Vec<String>>>,
     pub(in crate::host_rpc) unload_gate: tokio::sync::Semaphore,
@@ -83,6 +87,10 @@ impl NativeAgent {
             needs_reload: false,
             unreadable: Default::default(),
             inputs: Default::default(),
+            continuations: Default::default(),
+            continue_gate: tokio::sync::Semaphore::new(1),
+            continue_started: tokio::sync::Notify::new(),
+            interrupts: Default::default(),
             injected: Default::default(),
             released: Default::default(),
             unload_gate: tokio::sync::Semaphore::new(1),
@@ -116,6 +124,10 @@ impl NativeAgent {
             needs_reload: self.needs_reload,
             unreadable: Default::default(),
             inputs: self.inputs.clone(),
+            continuations: Default::default(),
+            continue_gate: tokio::sync::Semaphore::new(1),
+            continue_started: tokio::sync::Notify::new(),
+            interrupts: Default::default(),
             injected: self.injected.clone(),
             released: self.released.clone(),
             unload_gate: tokio::sync::Semaphore::new(1),
@@ -496,7 +508,33 @@ impl Agent for NativeAgent {
             turn_id: Some(turn_id),
         })
     }
-    async fn interrupt(&self, _: &str, _: &TurnId) -> Result<Empty, Failure> {
+    async fn continue_turn(
+        &self,
+        id: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        execution: Uuid,
+    ) -> Result<op::SubmissionReceipt, Failure> {
+        self.continuations
+            .lock()
+            .unwrap()
+            .push((id.into(), execution));
+        self.continue_started.notify_one();
+        let _acknowledgement = self
+            .continue_gate
+            .acquire()
+            .await
+            .map_err(|_| unsupported())?;
+        Ok(op::SubmissionReceipt {
+            turn_id: Some(format!("continued-{execution}").into()),
+        })
+    }
+    async fn interrupt(&self, id: &str, turn: &TurnId) -> Result<Empty, Failure> {
+        self.interrupts
+            .lock()
+            .unwrap()
+            .push((id.into(), turn.clone()));
         Ok(Empty {})
     }
     async fn discard_workspace_processes(&self, _: &Path) -> Result<(), Failure> {

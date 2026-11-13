@@ -57,6 +57,7 @@ cap-std = "=4.0.3"
 agent-protocol = { path = "../agent-protocol", features = ["test-support"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 proptest = "1.12"
+rstest = { version = "0.28", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }
 # Exercise the real client Store and rendering against Host behavior.
 agent-core = { path = "../agent-core" }

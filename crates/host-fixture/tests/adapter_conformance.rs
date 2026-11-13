@@ -1140,11 +1140,9 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
         std::fs::create_dir(&path).unwrap();
         serde_json::json!({"id":format!("project-{index}"),"name":format!("Project {index}"),"roots":[{"path":path}]})
     }).collect::<Vec<_>>();
-    // Only pre-upgrade fixtures write the old registry; normal registration is
-    // already tested through AddProject and the durable project-change job.
-    std::fs::write(
-        root.join("bex-projects.json"),
-        serde_json::to_vec(&projects).unwrap(),
+    host_fixture::test_support::seed_projects(
+        &root,
+        serde_json::from_value(serde_json::json!(projects)).unwrap(),
     )
     .unwrap();
     let threads=(0..2000).map(|index|serde_json::json!({

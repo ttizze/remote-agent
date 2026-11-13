@@ -287,7 +287,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let projects = ProjectStore::fixture(root.path().join("bex-projects.json"));
+            let projects = ProjectStore::fixture(root.path().join("bex-worktrees.json"));
             projects.register(&cwd).await.unwrap();
             let service = HostRpcService::new([agent.into()], projects.path());
             if !restarting {
@@ -404,7 +404,7 @@ mod tests {
         )
         .unwrap();
         let state = root.join("bex-worktrees.json");
-        std::fs::write(state.with_file_name("bex-projects.json"), "{").unwrap();
+        std::fs::write(state.with_file_name("bex-conversations.sqlite"), "{").unwrap();
         let service = HostRpcService::new(
             [crate::providers::codex::Codex::new(Err("provider is offline".into())).into()],
             state,

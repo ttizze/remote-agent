@@ -160,19 +160,12 @@ pub(super) fn link_parent(
     Ok(())
 }
 
-pub(super) struct NativeTurn {
-    pub source: SessionRef,
-    pub id: TurnId,
-    pub items: std::collections::BTreeMap<agent_protocol::ids::ItemId, agent_protocol::ids::ItemId>,
-}
-
-/// Used by both the upgrade and explicit external imports. Existing unique IDs
-/// survive; repeated native IDs get stable occurrence IDs within this root.
+/// Import the provider's native history into the current Host projection.
 pub(super) fn write_history(
     transaction: &Transaction<'_>,
     id: &SessionRef,
     response: &ThreadResponse,
-    sources: &std::collections::BTreeMap<TurnId, NativeTurn>,
+    source: Option<&SessionRef>,
     sequence: u64,
     process: Uuid,
     now: i64,
@@ -197,9 +190,8 @@ pub(super) fn write_history(
         let turn = Turn {
             id: unique(native.id.as_str(), &mut seen_turns, namespace).into(),
             ordinal: state.counters.turn,
-            provider: sources
-                .get(&native.id)
-                .and_then(|address| address.source.provider)
+            provider: source
+                .and_then(|source| source.provider)
                 .or(native.provider)
                 .unwrap_or(state.thread.provider),
             queued: native.queued,
@@ -218,14 +210,13 @@ pub(super) fn write_history(
                 .filter(|_| native.status == TurnStatus::Running),
             state: imported_state(native.status, native.error.as_ref()),
         };
-        let address = sources.get(&native.id);
-        let source_key = address
-            .map(|address| {
+        let source_key = source
+            .map(|source| {
                 rows::source(
                     transaction,
                     key,
-                    address.source.native_provider().map_err(failure)?,
-                    &address.source.id,
+                    source.native_provider().map_err(failure)?,
+                    &source.id,
                 )
             })
             .transpose()?;
@@ -240,7 +231,7 @@ pub(super) fn write_history(
         )?;
         let attempt = Uuid::new_v5(&namespace, format!("import:{}", turn.id).as_bytes());
         if let Some(source_key) = source_key {
-            let native_id = &address.expect("mapped source").id;
+            let native_id = &native.id;
             let occurrence = occurrences
                 .entry((source_key, native_id.clone()))
                 .or_default();
@@ -273,8 +264,8 @@ pub(super) fn write_history(
                 &mut Vec::new(),
                 &mut Vec::new(),
             )?;
-            if let Some(address) = address {
-                let native_id = address.items.get(&native.id).unwrap_or(&native.id);
+            if source.is_some() {
+                let native_id = &native.id;
                 transaction.execute("INSERT INTO item_natives(thread,turn_id,attempt,native_id,item_id) VALUES (?1,?2,?3,?4,?5)", params![key,turn.id.as_str(),attempt.to_string(),native_id.as_str(),item.id.as_str()]).map_err(failure)?;
             }
         }
@@ -377,25 +368,7 @@ pub(super) fn install(
         parent.as_ref(),
         sequence,
     )?;
-    let sources = response
-        .thread
-        .turns
-        .iter()
-        .flatten()
-        .filter_map(|turn| {
-            source.map(|source| {
-                (
-                    turn.id.clone(),
-                    NativeTurn {
-                        source: source.clone(),
-                        id: turn.id.clone(),
-                        items: Default::default(),
-                    },
-                )
-            })
-        })
-        .collect();
-    write_history(transaction, id, response, &sources, sequence, process, now)?;
+    write_history(transaction, id, response, source, sequence, process, now)?;
     if let Some(source) = source {
         let key = thread_key(transaction, id)?;
         let state = rows::load(transaction, key, process)?;

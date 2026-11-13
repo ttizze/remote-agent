@@ -134,7 +134,6 @@ pub struct PersistedState {
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
     drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
-    #[serde(default)]
     new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
     pending_submissions: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
@@ -181,22 +180,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     if bytes.is_empty() {
         return Ok(Snapshot::default());
     }
-    let mut saved: PersistedState = serde_json::from_slice(bytes)?;
-    assign_draft_addresses(
-        &mut saved.drafts,
-        &mut saved.new_drafts,
-        &mut saved.navigation,
-        &mut saved.pending_submissions,
-    );
-    for scope in Arc::make_mut(&mut saved.archived_scopes).values_mut() {
-        let scope = Arc::make_mut(scope);
-        assign_draft_addresses(
-            &mut scope.drafts,
-            &mut scope.new_drafts,
-            &mut scope.navigation,
-            &mut scope.pending_submissions,
-        );
-    }
+    let saved: PersistedState = serde_json::from_slice(bytes)?;
     Ok(Snapshot {
         files: crate::state::Files {
             file_drafts: saved.file_drafts,
@@ -230,81 +214,6 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         )),
         ..Default::default()
     })
-}
-
-// Pre-cutover drafts have no Host address yet. Allocate it once on restore,
-// including archived Host scopes, before any view or pending send sees them.
-fn assign_draft_addresses(
-    drafts: &mut Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
-    new_drafts: &mut Arc<BTreeMap<String, crate::session::SessionRef>>,
-    navigation: &mut Arc<Navigation>,
-    pending: &mut Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
-) {
-    use crate::state::DraftKey;
-    let keys: Vec<_> = drafts
-        .keys()
-        .chain(std::iter::once(&navigation.draft_key))
-        .chain(pending.values().map(|input| &input.draft_key))
-        .filter_map(|key| match key {
-            DraftKey::Local { key: value }
-                if value.is_empty()
-                    && (drafts.contains_key(key)
-                        || pending.values().any(|input| input.draft_key == *key)) =>
-            {
-                Some((key.clone(), crate::state::WELCOME_DRAFT_SLOT.to_owned()))
-            }
-            DraftKey::Local { key: value } => value.strip_prefix("new:").map(|suffix| {
-                let slot = suffix
-                    .split_once(':')
-                    .filter(|(slot, _)| slot.parse::<u64>().is_ok())
-                    .map_or_else(
-                        || format!("0:{suffix}"),
-                        |(slot, cwd)| format!("{slot}:{cwd}"),
-                    );
-                (key.clone(), slot)
-            }),
-            _ => None,
-        })
-        .collect();
-    for (old, project) in keys {
-        let session = Arc::make_mut(new_drafts)
-            .entry(project.clone())
-            .or_insert_with(|| crate::session::SessionRef {
-                provider: None,
-                id: uuid::Uuid::new_v4().to_string(),
-            })
-            .clone();
-        let key = DraftKey::from(session);
-        if let Some(draft) = Arc::make_mut(drafts).remove(&old) {
-            Arc::make_mut(drafts).insert(key.clone(), draft);
-        }
-        if navigation.draft_key == old {
-            Arc::make_mut(navigation).draft_key = key.clone();
-        }
-        for (id, input) in Arc::make_mut(pending)
-            .iter_mut()
-            .filter(|(_, input)| input.draft_key == old)
-        {
-            let input = Arc::make_mut(input);
-            // Main already admitted first sends under this address. Only
-            // unsent drafts receive a new providerless UUID at cutover.
-            input.draft_key = input.draft.model.as_ref().map_or_else(
-                || key.clone(),
-                |model| {
-                    DraftKey::from(crate::session::SessionRef {
-                        provider: Some(model.provider),
-                        id: format!("bex-task:{id}"),
-                    })
-                },
-            );
-            input.new_draft_slot = Some(project.clone());
-        }
-    }
-    Arc::make_mut(new_drafts).retain(|_, id| {
-        !pending
-            .values()
-            .any(|input| input.draft_key == DraftKey::from(id.clone()))
-    });
 }
 
 /// Structured domain keys are stored as entries, without encoding keys into strings.
