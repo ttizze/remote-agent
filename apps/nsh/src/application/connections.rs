@@ -228,7 +228,9 @@ impl Application {
             return false;
         }
         let state = self.snapshot();
-        if !state.list_scope_matches(scope) || (navigate && !self.activate_host(&scope.host, true))
+        // Account work pins its Host, not the conversation within that Host.
+        if !state.list_scope_matches(scope)
+            || (navigate && state.host != scope.host && !self.activate_host(&scope.host, true))
         {
             return false;
         }
@@ -707,13 +709,6 @@ mod tests {
             app.select_host("two".into());
             assert!(!app.snapshot().all_hosts);
             assert_eq!(app.snapshot().host, "one");
-            assert!(!app.list_action(
-                &one,
-                Intent::NewChat {
-                    cwd: "/locked".into()
-                },
-                true
-            ));
             app.state
                 .send_modify(|state| Arc::make_mut(state).account_pending = false);
             app.shutdown().await.unwrap();
@@ -722,6 +717,82 @@ mod tests {
             assert_eq!(app.snapshot().host, "one");
             assert!(!app.snapshot().all_hosts);
             assert!(!app.list_action(&one, edit("closed"), false));
+        });
+    }
+
+    #[test]
+    fn account_work_allows_task_switching_on_its_host_and_preserves_drafts() {
+        use agent_core::state::operations::ReadThread;
+        use agent_protocol::session::{ProviderKind, SessionRef};
+
+        let root = tempfile::tempdir().unwrap();
+        profiles(root.path());
+        let (runtime, app) = Application::new(root.path().into(), None).unwrap();
+        runtime.block_on(async {
+            until(&app, |state| state.publications.len() == 2).await;
+            app.select_all_hosts();
+            let state = app.snapshot();
+            let one = scope(&state, "one");
+            let two = scope(&state, "two");
+            app.state
+                .send_modify(|state| Arc::make_mut(state).account_pending = true);
+
+            for (id, expected_draft) in
+                [("first", ""), ("second", ""), ("first", "draft for first")]
+            {
+                let session = SessionRef::new(ProviderKind::Codex, id.into()).unwrap();
+                assert!(app.list_action(
+                    &one,
+                    Intent::ReadThread(ReadThread::open(session.clone())),
+                    true
+                ));
+                let state = until(&app, |state| {
+                    state.publications["one"]
+                        .context
+                        .navigation()
+                        .thread_id
+                        .as_ref()
+                        == Some(&session)
+                })
+                .await;
+                assert_eq!(state.host, "one");
+                assert!(state.all_hosts);
+                assert!(state.account_pending);
+                assert_eq!(
+                    state.publications["one"].composer.draft.text,
+                    expected_draft
+                );
+                assert!(app.list_action(
+                    &one,
+                    Intent::SetDraftText {
+                        thread_id: session.clone().into(),
+                        text: format!("draft for {id}"),
+                    },
+                    false
+                ));
+                until(&app, |state| {
+                    state.publications["one"].composer.draft.text == format!("draft for {id}")
+                })
+                .await;
+                assert!(!app.list_action(
+                    &two,
+                    Intent::ReadThread(ReadThread::open(session)),
+                    true
+                ));
+            }
+            app.state
+                .send_modify(|state| Arc::make_mut(state).account_pending = false);
+            assert!(app.list_action(&two, Intent::NewChat { cwd: "/two".into() }, true));
+            until(&app, |state| {
+                state.host == "two"
+                    && state.publications["two"].context.selected_directory() == "/two"
+            })
+            .await;
+            assert_eq!(
+                app.snapshot().publications["one"].composer.draft.text,
+                "draft for first"
+            );
+            app.shutdown().await.unwrap();
         });
     }
 
