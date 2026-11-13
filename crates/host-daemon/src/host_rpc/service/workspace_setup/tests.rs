@@ -409,6 +409,137 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
             .generation,
         generation
     );
+    let checkout = Path::new(done.worktree_path.as_ref().unwrap());
+    std::fs::write(checkout.join("uncommitted.txt"), "keep local work").unwrap();
+    let branch = done.branch.as_ref().unwrap();
+    let through = rebound.turns.as_ref().unwrap().last().unwrap().id.clone();
+    for fork in [true, false] {
+        let target = if fork {
+            let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+            fixture
+                .host
+                .inner
+                .conversation
+                .storage
+                .fork(&opened, &target, &through, 100)
+                .unwrap();
+            assert!(
+                fixture
+                    .host
+                    .inner
+                    .conversation
+                    .storage
+                    .header(&target)
+                    .unwrap()
+                    .details
+                    .workspace
+                    .is_none()
+            );
+            target
+        } else {
+            let reply: records::Acknowledged = call(
+                &fixture.host,
+                client.id(),
+                Call::ChangeConversation(records::Change {
+                    session: opened.clone(),
+                    operation: Uuid::new_v4(),
+                    command: Command::Rewind(through.clone()),
+                }),
+            )
+            .await
+            .unwrap();
+            reply.accepted().unwrap();
+            opened.clone()
+        };
+        let (_, mut updates) = admit(
+            &fixture.host,
+            client.id(),
+            &Call::SubscribeConversation(records::Subscribe {
+                session: target.clone(),
+                subscription: Uuid::new_v4(),
+                cached: None,
+                window: None,
+            }),
+        )
+        .await;
+        let blocked = fixture.agent.create_gate.acquire().await.unwrap();
+        let input = Uuid::new_v4();
+        let submitted: records::Acknowledged = call(
+            &fixture.host,
+            client.id(),
+            Call::ChangeConversation(records::Change {
+                session: target.clone(),
+                operation: input,
+                command: Command::Submit {
+                    id: input.to_string().into(),
+                    content: InputContent {
+                        parts: vec![op::Input::Text {
+                            text: "prepare another turn".into(),
+                        }],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        submitted.accepted().unwrap();
+        until(&mut updates, |thread| {
+            thread
+                .preparations
+                .iter()
+                .any(|preparation| preparation.stage == PreparationStage::Provider)
+        })
+        .await;
+        let stopped: records::Acknowledged = call(
+            &fixture.host,
+            client.id(),
+            Call::ChangeConversation(records::Change {
+                session: target,
+                operation: Uuid::new_v4(),
+                command: Command::Interrupt {
+                    turn: Some(input.to_string().into()),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        stopped.accepted().unwrap();
+        until(&mut updates, |thread| {
+            thread.preparations.iter().any(|preparation| {
+                preparation.submission.client_user_message_id.as_str() == input.to_string()
+                    && matches!(preparation.status, PreparationStatus::Failed { .. })
+            })
+        })
+        .await;
+        drop(blocked);
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("uncommitted.txt")).unwrap(),
+            "keep local work"
+        );
+        assert!(
+            crate::git::text(
+                checkout,
+                &["rev-parse", "--verify", &format!("refs/heads/{branch}")]
+            )
+            .is_ok()
+        );
+        let saved = fixture
+            .host
+            .inner
+            .conversation
+            .storage
+            .header(&opened)
+            .unwrap()
+            .details
+            .workspace
+            .unwrap();
+        assert_eq!(saved.generation, generation);
+        assert_eq!(saved.setup.unwrap().phase, SetupPhase::Done);
+    }
 }
 
 #[tokio::test]

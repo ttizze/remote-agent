@@ -27,6 +27,23 @@ pub struct Request {
     fixture: Value,
     send: tokio::sync::Mutex<Option<transport::HostPeer>>,
 }
+impl Request {
+    pub async fn acknowledge(&self) -> std::io::Result<()> {
+        let mut send = self
+            .send
+            .lock()
+            .await
+            .take()
+            .expect("request already answered");
+        agent_transport::framing::write(
+            &mut send,
+            protocol::Response::Success {
+                result: agent_protocol::models::Empty {},
+            },
+        )
+        .await
+    }
+}
 impl std::ops::Deref for Request {
     type Target = Value;
     fn deref(&self) -> &Value {

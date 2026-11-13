@@ -2104,13 +2104,26 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
 
         let resource = Arc::new(AnswerResource);
         let retained = Arc::downgrade(&resource);
+        let first_instance = Uuid::new_v4();
         Runtime::observe(&service,AgentChange::Request {
-            session:native.clone(),origin:RequestOrigin {instance:Uuid::new_v4(),native_id:serde_json::json!(1),provider:ProviderKind::Codex,source:resource},
+            session:native.clone(),origin:RequestOrigin {instance:first_instance,native_id:serde_json::json!(1),provider:ProviderKind::Codex,source:resource},
             request:Request {id:"native-request".into(),target:RequestTarget::Turn {turn_id:"request-turn".into(),item_id:None},delivery:agent_protocol::session::RequestDelivery::Awaiting,
                 body:RequestBody::ToolExecution {tool:"inspect".into(),namespace:None,arguments:serde_json::Value::Null}},
         },Some(execution)).await.unwrap();
         assert!(retained.upgrade().is_some(),"the pending native answer remains addressable");
         assert_eq!(service.inner.conversation.storage.state(&target).unwrap().requests.len(),1);
+        let second_instance = Uuid::new_v4();
+        Runtime::observe(&service,AgentChange::Request {
+            session:native.clone(),origin:RequestOrigin {instance:second_instance,native_id:serde_json::json!(1),provider:ProviderKind::Codex,source:Arc::new(AnswerResource)},
+            request:Request {id:"second-native-request".into(),target:RequestTarget::Turn {turn_id:"request-turn".into(),item_id:None},delivery:agent_protocol::session::RequestDelivery::Awaiting,
+                body:RequestBody::ToolExecution {tool:"second inspect".into(),namespace:None,arguments:serde_json::Value::Null}},
+        },Some(execution)).await.unwrap();
+        assert_eq!(service.inner.conversation.storage.state(&target).unwrap().requests.len(),2);
+        Runtime::observe(&service,AgentChange::Resolved {instance:second_instance,native_id:serde_json::json!(1)},None).await.unwrap();
+        let first_id = decision::provider_request_id(execution, &format!("{first_instance}:1"));
+        assert_eq!(service.inner.conversation.storage.state(&target).unwrap().requests.keys().collect::<Vec<_>>(),vec![&first_id]);
+        assert_eq!(service.inner.conversation.requests.lock().unwrap().keys().collect::<Vec<_>>(),vec![&first_id]);
+        assert!(retained.upgrade().is_some(),"resolving another instance's identical native ID retains the first request");
         Runtime::observe(&service,turn(true),Some(execution)).await.unwrap();
         assert!(service.inner.conversation.storage.state(&target).unwrap().requests.is_empty());
         assert!(retained.upgrade().is_none(),"terminal canonical state releases the private answer handle even without a native Resolved frame");

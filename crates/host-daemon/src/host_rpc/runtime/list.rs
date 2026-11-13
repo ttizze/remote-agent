@@ -16,6 +16,11 @@ fn through(message: &records::Message) -> Cursor {
     }
 }
 
+pub(super) fn unchanged(message: &records::Message) -> bool {
+    matches!(message, records::Message::Changes { rows, removed, .. }
+        if rows.is_empty() && removed.is_empty())
+}
+
 pub(super) async fn subscribe(
     storage: Arc<Storage>,
     request: &records::SubscribeList,
@@ -61,8 +66,119 @@ impl Subscription {
                 .await
                 .ok()?
                 .ok()?;
+            if unchanged(&message) {
+                continue;
+            }
             self.cursor = through(&message);
             return protocol::encode(message).ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn item_only_commits_do_not_advance_the_list_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("state.sqlite")));
+        let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        storage
+            .import(
+                &id,
+                &agent_protocol::models::ThreadResponse {
+                    thread: agent_protocol::models::Thread {
+                        id: Some(id.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Some(&id),
+                100,
+            )
+            .unwrap();
+        let context = Context {
+            preparation: None,
+            rewind_binding: None,
+            imported_turns: &[],
+            external_busy: false,
+            now: 100,
+            seed: Uuid::new_v4(),
+            steers: true,
+            steer_ready: true,
+        };
+        let attempt = Uuid::new_v4();
+        storage
+            .decide(
+                &id,
+                Event::ObservedStart {
+                    execution: attempt,
+                    provider: ProviderKind::Codex,
+                    source: id.id.clone(),
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        let initial = storage.list(None).unwrap();
+        let cursor = through(&initial);
+        let mut subscription = Subscription {
+            changed: storage.changes(),
+            storage: storage.clone(),
+            cursor,
+        };
+        let committed = storage
+            .decide(
+                &id,
+                Event::Provider {
+                    attempt,
+                    native_turn: None,
+                    native_items: vec![],
+                    observation: Observation::Item {
+                        id: "reply".into(),
+                        status: agent_protocol::execution::ItemStatus::Running,
+                        deferred: false,
+                        body: agent_protocol::items::ItemBody::AssistantText {
+                            text: "partial".into(),
+                            phase: Default::default(),
+                        },
+                    },
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        assert!(committed.cursor.sequence > cursor.sequence);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), subscription.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(subscription.cursor, cursor);
+        storage
+            .decide(&id, Event::Title("renamed".into()), context, None)
+            .unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), subscription.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let message = protocol::decode(&frame).unwrap();
+        assert!(
+            matches!(&message, records::Message::Changes { from, rows, .. } if *from == cursor && !rows.is_empty())
+        );
+        let replica = records::Replica::new(agent_protocol::sync::Scope::List, 1)
+            .apply(1, initial)
+            .unwrap()
+            .apply(1, message)
+            .unwrap();
+        let row = &replica.rows()[&agent_protocol::sync::Key::Thread(id)];
+        let agent_protocol::sync::Content::Summary(record) = &row.content else {
+            panic!("thread summary")
+        };
+        let records::Record::Thread(header) = record.as_ref() else {
+            panic!("thread header")
+        };
+        assert_eq!(header.state.name, "renamed");
     }
 }

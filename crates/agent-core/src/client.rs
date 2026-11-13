@@ -43,17 +43,7 @@ pub(crate) async fn resolve_hydration(
     // Consume one-use grants even when the requesting subscription became obsolete.
     let resolved = tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        crate::transfers::resolve_item(
-            agent_protocol::operations::ItemResponse {
-                item: crate::models::Item::new(
-                    expected.clone(),
-                    Default::default(),
-                    crate::models::ItemBody::Sleep {},
-                ),
-                transfer: Some(grant),
-            },
-            session,
-        ),
+        crate::transfers::resolve_item(grant, expected, session),
     )
     .await
     .unwrap_or_else(|_| {
@@ -61,19 +51,19 @@ pub(crate) async fn resolve_hydration(
             method: "item body transfer".into(),
         })
     })?;
-    if resolved.item.id != *expected || resolved.item.is_deferred() {
+    if resolved.is_deferred() {
         return Err(PeerError::InvalidMessage("hydration item changed".into()));
     }
     let version = response
         .version
         .ok_or_else(|| PeerError::InvalidMessage("hydration body version is missing".into()))?;
-    Ok(Some((version, resolved.item)))
+    Ok(Some((version, resolved)))
 }
 
 async fn gallery_frame(
     replica: &mut agent_protocol::conversation::records::Replica,
     stream: &mut agent_transport::framing::Reader,
-) -> Result<(), PeerError> {
+) -> Result<bool, PeerError> {
     let message = stream
         .read::<agent_protocol::conversation::records::Message>()
         .await
@@ -81,10 +71,14 @@ async fn gallery_frame(
         .ok_or_else(|| PeerError::ConnectionClosed("gallery subscription ended".into()))?;
     agent_protocol::conversation::records::validate_message(&message)
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+    let extended = matches!(
+        message,
+        agent_protocol::conversation::records::Message::Extend { .. }
+    );
     *replica = replica
         .apply(1, message)
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    Ok(())
+    Ok(extended)
 }
 
 // Keep consuming the one state stream while an RPC or large transfer is in
@@ -98,7 +92,7 @@ async fn gallery_request<T>(
     loop {
         tokio::select! {
             result = &mut request => return result,
-            result = gallery_frame(replica, stream) => result?,
+            result = gallery_frame(replica, stream) => { result?; },
         }
     }
 }
@@ -391,27 +385,20 @@ impl ClientExt for Client {
             .apply(1, opened.initial)
             .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
         loop {
-            let previous_window = replica.window();
             if replica
                 .window()
                 .is_none_or(|window| window.turn == 0 && window.item == 0)
             {
                 break;
             }
-            gallery_request(
-                &mut replica,
-                &mut stream,
-                self.call(&records::Extend {
-                    session: thread_id.clone(),
-                    subscription,
-                }),
-            )
-            .await?;
-            while replica.window().map(|window| (window.turn, window.item))
-                >= previous_window.map(|window| (window.turn, window.item))
-            {
-                gallery_frame(&mut replica, &mut stream).await?;
-            }
+            let extend = records::Extend {
+                session: thread_id.clone(),
+                subscription,
+            };
+            tokio::try_join!(self.call(&extend), async {
+                while !gallery_frame(&mut replica, &mut stream).await? {}
+                Ok::<_, PeerError>(())
+            },)?;
         }
         let thread = records::project(&replica)
             .ok_or_else(|| PeerError::InvalidMessage("gallery conversation disappeared".into()))?

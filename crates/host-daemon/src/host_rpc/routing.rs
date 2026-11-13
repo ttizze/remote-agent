@@ -51,7 +51,7 @@ struct State {
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
     state: Arc<Mutex<State>>,
-    activity: Arc<Mutex<activity::ActivityState>>,
+    activity: Arc<Mutex<Option<Arc<crate::apns::Apns>>>>,
 }
 fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     state.lock().unwrap_or_else(|error| error.into_inner())

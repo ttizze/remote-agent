@@ -204,8 +204,10 @@ impl HostRpcService {
             .map(clean_line)
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>();
-        self.setup_update(id, generation, SetupChange::Output(lines))
-            .await?;
+        if !lines.is_empty() {
+            self.setup_update(id, generation, SetupChange::Output(lines))
+                .await?;
+        }
         buffer.drain(..end);
         Ok(())
     }

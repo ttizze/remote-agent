@@ -2629,6 +2629,96 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
 }
 
 #[tokio::test]
+async fn gallery_restarts_paging_after_a_history_reset() {
+    use agent_protocol::sync::{Message, Position, Window};
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let id = SessionRef::new(ProviderKind::Codex, "reset-gallery".into()).unwrap();
+    let server_id = id.clone();
+    let server = tokio::spawn(async move {
+        let request = read(&mut reader).await;
+        let subscription =
+            serde_json::from_value(request["params"]["subscription"].clone()).unwrap();
+        writer.reply(&request, json!({"result":{"thread":{"id":server_id,"historyHasMore":true,"turns":[{"id":"image-turn","status":"completed","items":[{"id":"image","status":"completed","body":{"inline":{"body":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}]}]}}})).await.unwrap();
+        let extend = read(&mut reader).await;
+        assert_eq!(extend["method"], "host/conversation/extend");
+        let mut reset = writer.replica(&server_id).snapshot().unwrap();
+        let Message::Snapshot {
+            cursor,
+            window,
+            rows,
+        } = &mut reset
+        else {
+            unreachable!()
+        };
+        cursor.sequence += 1;
+        *window = Some(Window {
+            turn: 2000,
+            item: 0,
+        });
+        for row in rows {
+            match &mut row.position {
+                Position::Turn { ordinal } | Position::Item { ordinal, .. } => *ordinal = 2000,
+                _ => {}
+            }
+            if let agent_protocol::sync::Content::Full(record) = &mut row.content
+                && let agent_protocol::conversation::records::Record::Turn(turn) =
+                    Arc::make_mut(record)
+            {
+                turn.ordinal = 2000;
+            }
+        }
+        let cursor = *cursor;
+        writer.send_rows(subscription, reset).await.unwrap();
+        writer
+            .send_rows(
+                subscription,
+                Message::Extend {
+                    cursor,
+                    window: Window {
+                        turn: 1000,
+                        item: 0,
+                    },
+                    rows: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        extend.acknowledge().await.unwrap();
+        let extend = read(&mut reader).await;
+        assert_eq!(extend["method"], "host/conversation/extend");
+        writer
+            .send_rows(
+                subscription,
+                Message::Extend {
+                    cursor,
+                    window: Window { turn: 0, item: 0 },
+                    rows: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        extend.acknowledge().await.unwrap();
+        (reader, writer)
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.dispatch(Intent::LoadSessionImages(op::LoadSessionImages {
+            thread_id: id,
+        })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Outcome::SessionImages { images } = result else {
+        panic!("expected images")
+    };
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].source, "/image.png");
+    let _host = server.await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn gallery_drains_live_frames_while_image_hydration_waits_for_the_host() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let id = SessionRef::new(ProviderKind::Codex, "gallery".into()).unwrap();

@@ -282,11 +282,6 @@ impl Storage {
                         row.get::<_, bool>(0)
                     })
                     .map_err(failure)?
-                && rows::header(&transaction, key)?
-                    .0
-                    .details
-                    .history_read_state
-                    .is_none()
             {
                 return Ok(Committed {
                     step: Step::default(),

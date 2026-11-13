@@ -452,6 +452,7 @@ impl Storage {
             header.state.provider = turn.provider;
             header.state.queue_held = false;
             header.details.parent = None;
+            header.details.workspace = None;
             header.details.read_through = None;
             header.details.agent = None;
             header.details.can_accept_direct_input = Some(true);

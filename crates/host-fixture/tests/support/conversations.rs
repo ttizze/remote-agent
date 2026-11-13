@@ -132,23 +132,11 @@ impl Conversation {
             .unwrap();
         let wire_bytes = agent_protocol::protocol::encode(&reply).unwrap().len();
         let transfer_size = reply.transfer.as_ref().map(|grant| grant.size);
-        let transferred = reply.transfer.is_some();
-        let resolved = if transferred {
+        let resolved = if let Some(grant) = reply.transfer.take() {
             Some(
-                agent_transport::transfers::resolve_item(
-                    op::ItemResponse {
-                        item: agent_protocol::models::Item::new(
-                            item.clone(),
-                            Default::default(),
-                            agent_protocol::models::ItemBody::Sleep {},
-                        ),
-                        transfer: reply.transfer.take(),
-                    },
-                    Some(transport),
-                )
-                .await
-                .unwrap()
-                .item,
+                agent_transport::transfers::resolve_item(grant, item, Some(transport))
+                    .await
+                    .unwrap(),
             )
         } else {
             None
@@ -165,7 +153,7 @@ impl Conversation {
                 .flatten()
                 .flat_map(|turn| turn.items.iter().flatten())
                 .find(|row| &row.id == item)
-                .is_some_and(|item| transferred || !item.is_deferred());
+                .is_some_and(|item| resolved.is_some() || !item.is_deferred());
             if caught_up && ready {
                 break;
             }

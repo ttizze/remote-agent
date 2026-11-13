@@ -90,40 +90,11 @@ fn file(directory: &Path, id: &SessionRef) -> PathBuf {
 }
 
 fn copy(storage_scope: &str, id: &SessionRef, replica: &records::Replica) -> Option<Copy> {
-    let Message::Snapshot {
-        cursor,
-        window,
-        mut rows,
-    } = replica.snapshot()?
-    else {
-        return None;
-    };
-    // Tool bodies and media are loaded on demand; offline copies retain their
-    // row identity/version and metadata without retaining their large bodies.
-    for row in &mut rows {
-        let record = match &row.content {
-            agent_protocol::sync::Content::Full(value)
-            | agent_protocol::sync::Content::Summary(value) => value,
-        };
-        if let records::Record::Item(item) = record.as_ref()
-            && !matches!(
-                item.content.body(),
-                crate::models::ItemBody::UserMessage { .. }
-                    | crate::models::ItemBody::AssistantText { .. }
-            )
-        {
-            records::defer(row);
-        }
-    }
     Some(Copy {
         format: FORMAT,
         storage_scope: storage_scope.into(),
         session: id.clone(),
-        snapshot: Message::Snapshot {
-            cursor,
-            window,
-            rows,
-        },
+        snapshot: replica.snapshot()?,
     })
 }
 
@@ -675,11 +646,21 @@ mod tests {
         );
         let mut expanded = thread("expanded", 11, TurnStatus::Completed);
         expanded.history_cursor = Some("older".into());
-        let mut incoming = snapshot([
-            thread("settled", 2, TurnStatus::Completed),
-            running,
-            expanded,
-        ]);
+        let mut settled = thread("settled", 2, TurnStatus::Completed);
+        let command = crate::models::Item::new(
+            "command".into(),
+            crate::models::ItemStatus::Completed,
+            crate::models::ItemBody::CommandExecution {
+                command: "git status".into(),
+                cwd: None,
+                output: "working tree clean".into(),
+                exit_code: Some(0),
+                output_omitted: false,
+            },
+        );
+        Arc::make_mut(&mut settled.turns.as_mut().unwrap()[0]).items =
+            Some(vec![Arc::new(command.clone())]);
+        let mut incoming = snapshot([settled, running, expanded]);
         let id = SessionRef::new(ProviderKind::Claude, "expanded".into()).unwrap();
         let old = &incoming.sessions.replicas[&id];
         let expanded = old
@@ -719,6 +700,11 @@ mod tests {
             .find(|thread| thread.name.as_deref() == Some("settled"))
             .unwrap();
         assert_eq!(copy.name.as_deref(), Some("settled"));
+        assert_eq!(
+            copy.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].as_ref(),
+            &command,
+            "already received tool bodies remain available offline"
+        );
         assert_eq!(
             copy.status,
             SessionStatus::Unknown,

@@ -1,4 +1,4 @@
-//! Physical preparation, provider discovery and history excerpts.
+//! Provider discovery and history excerpts.
 use super::*;
 use agent_protocol::session::SessionRef;
 

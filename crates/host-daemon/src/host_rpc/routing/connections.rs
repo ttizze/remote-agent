@@ -90,7 +90,7 @@ impl SessionRouter {
         {
             output.alive.store(false, Relaxed);
         }
-        if let Some(apns) = &activity.apns {
+        if let Some(apns) = activity.as_ref() {
             apns.revoke(principal);
         }
     }

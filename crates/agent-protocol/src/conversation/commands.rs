@@ -606,9 +606,15 @@ fn interrupt_input(
     next_input: Option<ClientInputId>,
     context: Context,
 ) -> Step {
-    let cleanup = matches!(input.state, InputState::Preparing { .. })
-        .then(|| workspace::cancelled(context.preparation))
-        .flatten();
+    let setup = context.preparation.filter(|saved| {
+        matches!(input.state, InputState::Preparing { .. })
+            && state.bindings.is_empty()
+            && saved
+                .setup
+                .as_ref()
+                .is_some_and(|setup| setup.phase == crate::workspace::SetupPhase::Running)
+    });
+    let cleanup = workspace::cancelled(setup);
     let (next, actions) = match &input.state {
         InputState::Preparing { action, .. } => (
             InputState::Failed(ExecutionError {
@@ -660,9 +666,7 @@ fn interrupt_input(
             ..state.thread.clone()
         }),
     ];
-    if matches!(input.state, InputState::Preparing { .. })
-        && let Some(saved) = context.preparation
-    {
+    if let Some(saved) = setup {
         changes.push(Change::CancelSetup(saved.generation));
     }
     Step {

@@ -15,6 +15,16 @@ mod script;
 #[cfg(test)]
 mod tests;
 
+fn workspace_setup(strategy: &WorkspaceStrategy, started_at: u64) -> Option<WorkspaceSetup> {
+    match strategy {
+        WorkspaceStrategy::Root => None,
+        WorkspaceStrategy::Worktree { base_ref, .. } => {
+            Some(WorkspaceSetup::new(Some(base_ref.clone()), started_at))
+        }
+        WorkspaceStrategy::ExistingWorktree { .. } => Some(WorkspaceSetup::new(None, started_at)),
+    }
+}
+
 impl HostRpcService {
     pub(in crate::host_rpc) async fn cleanup_setup_resources(
         &self,
@@ -56,16 +66,7 @@ impl HostRpcService {
                     })
             })
             .unwrap_or(WorkspaceStrategy::Root);
-        let mut setup = match &strategy {
-            WorkspaceStrategy::Root => None,
-            WorkspaceStrategy::Worktree { base_ref, .. } => Some(WorkspaceSetup::new(
-                Some(base_ref.clone()),
-                now().max(0) as u64,
-            )),
-            WorkspaceStrategy::ExistingWorktree { .. } => {
-                Some(WorkspaceSetup::new(None, now().max(0) as u64))
-            }
-        };
+        let mut setup = workspace_setup(&strategy, now().max(0) as u64);
         if let Some(setup) = &mut setup {
             let projects = self.project_snapshot().await?;
             setup.script = projects
@@ -222,16 +223,7 @@ impl HostRpcService {
 
         workspace.created_worktree =
             matches!(strategy, WorkspaceStrategy::Worktree { .. }) && retained.is_none();
-        let mut setup = match &strategy {
-            WorkspaceStrategy::Root => None,
-            WorkspaceStrategy::Worktree { base_ref, .. } => Some(WorkspaceSetup::new(
-                Some(base_ref.clone()),
-                now().max(0) as u64,
-            )),
-            WorkspaceStrategy::ExistingWorktree { .. } => {
-                Some(WorkspaceSetup::new(None, now().max(0) as u64))
-            }
-        };
+        let mut setup = workspace_setup(&strategy, now().max(0) as u64);
         if let Some(setup) = &mut setup {
             setup.script = previous.as_ref().and_then(|setup| setup.script.clone());
         }

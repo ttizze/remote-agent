@@ -1666,6 +1666,10 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
     let response = ThreadResponse {
         thread: NativeThread {
             id: Some(id.clone()),
+            history_read_state: Some(agent_protocol::session::HistoryReadState::new(
+                agent_protocol::session::HistoryReadKind::Complete,
+                vec![],
+            )),
             turns: Some(vec![Arc::new(NativeTurn {
                 id: "saved-turn".into(),
                 status: agent_protocol::execution::TurnStatus::Completed,
@@ -1721,6 +1725,11 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
         .unwrap();
     assert!(storage.loaded(&id).unwrap());
     assert!(storage.claim(104, 1).unwrap().is_empty());
+    let cursor = storage.with(|connection| cursor(connection)).unwrap();
+    let repeated = storage.import_status(&id, 105).unwrap();
+    assert_eq!(repeated.cursor, cursor);
+    assert!(repeated.rows.is_empty());
+    assert!(storage.claim(105, 1).unwrap().is_empty());
     let loaded = storage.history(&id, 0).unwrap();
     assert_eq!(
         loaded.thread.turns.unwrap()[0].items.as_ref().unwrap()[0].body(),

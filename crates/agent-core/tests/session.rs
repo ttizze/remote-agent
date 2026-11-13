@@ -92,22 +92,23 @@ fn canonical_snapshot_and_later_rows_preserve_the_hosts_confirmed_history_and_re
         .as_mut()
         .unwrap()
         .insert(0, cached.turns.as_ref().unwrap()[0].clone());
-    let output = opening::opened(response, &mut snapshot);
-    let mut output = output;
+    let mut changed = response.thread.clone();
+    let mut output = opening::opened(response, &mut snapshot);
     output.subscription = subscription;
     ReadThread::new(SessionRef::new(ProviderKind::Codex, "native".into()).unwrap()).apply(
         &mut snapshot,
         "",
         output,
     );
-    let change = SessionChange::Text {
-        turn_id: "B".into(),
-        item_id: "latest".into(),
-        field: TextField::AssistantText,
-        delta: " updated".into(),
-    };
-    let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
-    let changed = change.apply(&snapshot.sessions.conversations[&id]).unwrap();
+    Arc::make_mut(&mut changed.turns.as_mut().unwrap()[1]).items =
+        Some(vec![Arc::new(agent_protocol::models::Item::new(
+            "latest".into(),
+            Default::default(),
+            agent_protocol::models::ItemBody::AssistantText {
+                text: "live updated".into(),
+                phase: Default::default(),
+            },
+        ))]);
     let replica = rows::replica_at(
         agent_protocol::models::ThreadResponse {
             thread: changed,

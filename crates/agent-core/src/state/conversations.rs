@@ -406,6 +406,8 @@ fn finished_workspace_item(item: &crate::models::Item) -> bool {
         item.body(),
         crate::models::ItemBody::FileChange { .. }
             | crate::models::ItemBody::CommandExecution { .. }
+            | crate::models::ItemBody::ToolCall { .. }
+            | crate::models::ItemBody::Subagent { .. }
     )
 }
 

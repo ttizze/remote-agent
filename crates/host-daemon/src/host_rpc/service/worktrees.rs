@@ -65,10 +65,14 @@ impl HostRpcService {
             .inner
             .conversation
             .storage
-            .summaries("", true)
+            .headers(true)
             .map_err(super::super::runtime::storage_failure)?
             .into_iter()
-            .filter_map(|thread| Some((thread.id.clone()?, thread)))
+            .map(|(id, header, _)| {
+                let waiting = header.details.activity.facts().waiting;
+                let thread = agent_protocol::conversation::records::summary(&id, &header);
+                (id, (thread, waiting))
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         let (threads, warning) = self.worktree_threads(&saved).await?;
         let mut worktrees = worktrees
@@ -84,11 +88,12 @@ impl HostRpcService {
             })
             .collect::<Vec<_>>();
         for (thread, from_provider) in threads {
-            let active = worktree_active(
-                thread.status,
-                thread.turns.as_deref().unwrap_or_default(),
-                !thread.requests.is_empty(),
-            );
+            let active = agent_protocol::models::task_active(None, thread.status)
+                || thread
+                    .id
+                    .as_ref()
+                    .and_then(|id| saved.get(id))
+                    .is_some_and(|(_, waiting)| *waiting);
             let Some(cwd) = thread.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) else {
                 if active {
                     return Err(Failure::new(
@@ -193,7 +198,7 @@ impl HostRpcService {
     }
     async fn worktree_threads(
         &self,
-        saved: &std::collections::BTreeMap<agent_protocol::session::SessionRef, Thread>,
+        saved: &std::collections::BTreeMap<agent_protocol::session::SessionRef, (Thread, bool)>,
     ) -> Result<(Vec<(Thread, bool)>, Option<String>), Failure> {
         let mut warnings = std::collections::BTreeMap::new();
         let mut threads = Vec::new();
@@ -223,14 +228,14 @@ impl HostRpcService {
         }
         // Committed preparation and execution headers also cover work the
         // provider has not listed yet.
-        for thread in saved.values() {
+        for (thread, _) in saved.values() {
             if let Some(provider) = thread.active_provider
                 && let Err(error) = self.inner.providers.get(provider)
             {
                 warnings.insert(provider, error.to_string());
             }
         }
-        threads.extend(saved.values().cloned().map(|thread| (thread, false)));
+        threads.extend(saved.values().map(|(thread, _)| (thread.clone(), false)));
         Ok((threads, self.inner.providers.error_summary(warnings)))
     }
     pub(super) async fn remove_worktree(&self, path: String) -> Result<(), Failure> {
@@ -341,18 +346,6 @@ impl HostRpcService {
         }
         Ok(())
     }
-}
-
-pub(super) fn worktree_active(
-    status: agent_protocol::models::SessionStatus,
-    turns: &[Arc<agent_protocol::models::Turn>],
-    has_requests: bool,
-) -> bool {
-    agent_protocol::models::task_active(None, status)
-        || has_requests
-        || turns
-            .iter()
-            .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
 }
 
 #[cfg(test)]
@@ -694,38 +687,6 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn worktree_activity_includes_running_turns_and_unanswered_requests() {
-        use agent_protocol::{execution::TurnStatus, models::SessionStatus};
-        for status in [
-            TurnStatus::Running,
-            TurnStatus::Unknown,
-            TurnStatus::Completed,
-            TurnStatus::Failed,
-            TurnStatus::Interrupted,
-        ] {
-            let turns = [std::sync::Arc::new(agent_protocol::models::Turn {
-                status,
-                ..Default::default()
-            })];
-            assert_eq!(
-                super::worktree_active(SessionStatus::Idle, &turns, false),
-                status == TurnStatus::Running
-            );
-            assert!(super::worktree_active(
-                SessionStatus::Running,
-                &turns,
-                false
-            ));
-            assert!(super::worktree_active(
-                SessionStatus::Preparing,
-                &turns,
-                false
-            ));
-            assert!(super::worktree_active(SessionStatus::Idle, &turns, true));
-        }
-    }
-
     #[tokio::test]
     async fn worktree_listing_blocks_only_checkouts_with_unverified_claude_activity() {
         use super::*;
@@ -926,9 +887,14 @@ pub(super) mod tests {
     #[tokio::test]
     async fn unchanged_cleanup_follows_each_projects_override() {
         use super::*;
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
+        use agent_protocol::conversation::{Context, Event, Observation};
+        use agent_protocol::session::SessionRef;
+        use uuid::Uuid;
         let directory = tempfile::tempdir().unwrap();
         let repository = repository(directory.path());
-        let host = HostRpcService::new([], directory.path().join("worktrees.json"));
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
         host.inner.projects.register(&repository).await.unwrap();
         let project = host.project_snapshot().await.unwrap().projects[0]
             .id
@@ -967,6 +933,115 @@ pub(super) mod tests {
         )
         .await
         .expect("changed cleanup rules request a sweep");
+        let response = agent
+            .create(kept.to_str().unwrap(), None, None)
+            .await
+            .unwrap();
+        let source = response.thread.id.clone().unwrap();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        own(&host, &target, &response);
+        let storage = &host.inner.conversation.storage;
+        let context = Context {
+            preparation: None,
+            rewind_binding: None,
+            imported_turns: &[],
+            external_busy: false,
+            now: 100,
+            seed: Uuid::new_v4(),
+            steers: true,
+            steer_ready: true,
+        };
+        let attempt = Uuid::new_v4();
+        storage
+            .decide(
+                &target,
+                Event::ObservedStart {
+                    execution: attempt,
+                    provider: ProviderKind::Codex,
+                    source: source.id,
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        for observation in [
+            Observation::Background {
+                tasks: vec![agent_protocol::execution::BackgroundTask {
+                    id: "background-command".into(),
+                    kind: agent_protocol::execution::BackgroundTaskKind::Command,
+                    description: None,
+                }],
+            },
+            Observation::Request {
+                id: "permission".into(),
+                body: agent_protocol::requests::RequestBody::Permission {
+                    description: "background command".into(),
+                    details: String::new(),
+                    choices: vec![],
+                },
+            },
+        ] {
+            storage
+                .decide(
+                    &target,
+                    Event::Provider {
+                        attempt,
+                        native_turn: None,
+                        native_items: vec![],
+                        observation,
+                    },
+                    context,
+                    None,
+                )
+                .unwrap();
+        }
+        let header = storage.header(&target).unwrap();
+        assert_eq!(
+            header.details.activity.status,
+            agent_protocol::models::SessionStatus::Idle
+        );
+        assert!(header.details.activity.waiting);
+        assert!(matches!(
+            storage
+                .state(&target)
+                .unwrap()
+                .turns
+                .values()
+                .last()
+                .unwrap()
+                .state,
+            agent_protocol::conversation::TurnState::Waiting(
+                agent_protocol::conversation::Wait::Background { .. }
+            )
+        ));
+        let listed = host.worktree_list().await.unwrap();
+        assert!(
+            listed[0]
+                .threads
+                .iter()
+                .any(|thread| thread.id == target && thread.active)
+        );
+        assert!(listed[0].blocked_reason.is_some());
+        assert!(
+            host.remove_worktree(kept.to_string_lossy().into_owned())
+                .await
+                .is_err()
+        );
+        host.cleanup_unchanged_worktrees().await.unwrap();
+        assert!(kept.is_dir(), "a background permission keeps its checkout");
+        storage
+            .decide(
+                &target,
+                Event::Provider {
+                    attempt,
+                    native_turn: None,
+                    native_items: vec![],
+                    observation: Observation::Completed,
+                },
+                context,
+                None,
+            )
+            .unwrap();
         host.cleanup_unchanged_worktrees().await.unwrap();
         assert!(!kept.exists(), "the project's override enables cleanup");
     }
