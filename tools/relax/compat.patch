@@ -1,0 +1,1482 @@
+diff --git a/libs/relax/compiler/src/cache.rs b/libs/relax/compiler/src/cache.rs
+index 6d06409..4f239be 100644
+--- a/libs/relax/compiler/src/cache.rs
++++ b/libs/relax/compiler/src/cache.rs
+@@ -1727,10 +1727,12 @@ impl Cache {
+     /// A decoded key or entry says expression `expr` of `file` is the closure with identity
+     /// `fp`: true when this program agrees (or has not parsed it yet and no other key said
+     /// otherwise; the build checks it then). False rejects the entry: it was made from another
+-    /// numbering of the file, and linking it would run or call the wrong code.
+-    fn closure_fp_agrees(&mut self, u: &Unit, file: u32, expr: u32, fp: u64) -> bool {
++    /// numbering of the file, and linking it would run or call the wrong code. When decoding
++    /// coroutine metadata, require parsed text: a deferred check cannot undo shared type-context state.
++    fn closure_fp_agrees(&mut self, u: &Unit, file: u32, expr: u32, fp: u64, allow_unparsed: bool) -> bool {
+         let ok = match closure_text_fp(u, file, expr) {
+             Some(have) => have == fp,
++            None if !allow_unparsed => return false,
+             None => *self.closure_fps.entry((file, expr)).or_insert(fp) == fp,
+         };
+         if !ok {
+@@ -1936,11 +1938,14 @@ impl Cache {
+                 return self.enc_tys(u, u.tcx.tys.list(args), e, crates, depth);
+             }
+             TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state }) => {
++                // A warm parent may never run typeck. Its coroutine classification must
++                // travel with the type so Future::Output can still normalize on a cache miss.
+                 // its owner's closure ordinal (closure_ordinal): the owner's type first, which
+                 // names the item the ordinal counts in
+                 let def = match u.tcx.tys.kind(owner) { TyKind::FnDef(d, ..) => Some(*d), _ => None };
+                 if let Some((ord, fp)) = def.filter(|_| !u.prog.is_edit_version(file)).and_then(|d| self.closure_ordinal(u, d, file, expr)) {
+                     e.u8(28);
++                    e.u8(u.tcx.coroutines.contains(&(file, expr)) as u8);
+                     crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
+                     self.enc_ty(u, owner, e, crates, depth + 1)?;
+                     e.u32(ord);
+@@ -1949,6 +1954,7 @@ impl Cache {
+                     return self.enc_ty(u, state, e, crates, depth + 1);
+                 }
+                 e.u8(17);
++                e.u8(u.tcx.coroutines.contains(&(file, expr)) as u8);
+                 crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
+                 self.enc_file(u, file, e)?;
+                 e.u32(expr);
+@@ -2167,16 +2173,19 @@ impl Cache {
+                 TyKind::FnDef(def, u.tcx.tys.mk_list(&self.dec_tys(u, d, depth)?), regions)
+             }
+             17 => {
++                let coroutine = match d.u8()? { 0 => false, 1 => true, _ => return None };
+                 let file = self.dec_file(u, d)?;
+                 let expr = d.u32()?;
+-                if !self.closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
++                if !self.closure_fp_agrees(u, file, expr, d.u64()?, !coroutine) { return None; }
+                 let kind = self.dec_ty(u, d, depth + 1)?;
+                 let sig = self.dec_ty(u, d, depth + 1)?;
+                 let state = self.dec_ty(u, d, depth + 1)?;
+                 let owner = self.dec_ty(u, d, depth + 1)?;
++                if coroutine { u.tcx.coroutines.insert_first((file, expr), ()); }
+                 TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state })
+             }
+             28 => {
++                let coroutine = match d.u8()? { 0 => false, 1 => true, _ => return None };
+                 let owner = self.dec_ty(u, d, depth + 1)?;
+                 let ord = d.u32()?;
+                 let fp = d.u64()?;
+@@ -2185,6 +2194,7 @@ impl Cache {
+                 let kind = self.dec_ty(u, d, depth + 1)?;
+                 let sig = self.dec_ty(u, d, depth + 1)?;
+                 let state = self.dec_ty(u, d, depth + 1)?;
++                if coroutine { u.tcx.coroutines.insert_first((file, expr), ()); }
+                 TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state })
+             }
+             18 => {
+@@ -5001,6 +5011,10 @@ fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident
+     // not def.sub: module / impl indices are global to the program (they differ per app).
+     // Impls (derived ones share their type's item) by what they implement for what.
+     if def.kind == DefKind::Impl {
++        // Unevaluated const arguments can have the same structural type hash:
++        // each header's first anonymous constant has the same unnamed path.
++        // Keep the header identity too, before a value is available to normalize.
++        crate::stable::def_ident(prog, d, &mut h);
+         if let Some(t) = tcx.impl_self.get(&d) {
+             h.u128(crate::stable::type_hash(&prog, &tcx, *t));
+         }
+@@ -8079,6 +8093,102 @@ mod data_tests {
+         drop(cache); std::fs::remove_dir_all(root).unwrap();
+     }
+
++    #[test]
++    fn cached_closure_types_restore_coroutine_classification() {
++        isolated_test!(cached_closure_types_restore_coroutine_classification);
++        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
++        let session = std::sync::Arc::new(crate::Session::default());
++        let root = std::env::temp_dir().join(format!("relax-coroutine-type-cache-{}", std::process::id()));
++        std::fs::create_dir_all(&root).unwrap();
++        let source = root.join("lib.rs");
++        std::fs::write(&source, "#![no_std] fn owner() { let _ = || 1; let _ = async { 2 }; }").unwrap();
++        let mut prog = crate::program::Program::new(&session);
++        prog.load_crate("coroutine_keys", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
++        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
++        let owner = DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "owner").unwrap() as u32);
++        let file = prog.def(owner).file;
++        let closures = crate::program::closure_exprs(&prog, owner);
++        assert_eq!(closures.len(), 2);
++        let mut u = Unit::new(prog, tcx, 0);
++        let mut cache = open_test_cache(&u, &root.join("cache"));
++        for expr in closures {
++            let coroutine = matches!(u.prog.files[file as usize].ast.expr(crate::ast::ExprId(expr)).kind, crate::ast::ExprKind::Async(..));
++            for ordinal in [false, true] {
++                if coroutine { u.tcx.coroutines.insert_first((file, expr), ()); }
++                let tys = &u.tcx.tys;
++                let parent = if ordinal { tys.intern(TyKind::FnDef(owner, tys.mk_list(&[]), crate::types::RegionArgsId::EMPTY)) } else { tys.unit };
++                let sig = tys.intern(TyKind::FnPtr(tys.mk_list(&[]), tys.u32_, crate::types::FnHeader::RUST, 0));
++                let ty = tys.intern(TyKind::Closure(file, expr, crate::types::ClosureArgs {
++                    parent_args: parent, closure_kind_ty: tys.u8_, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: tys.unit,
++                }));
++                let mut bytes = E::default();
++                assert!(cache.enc_ty(&u, ty, &mut bytes, &mut Vec::new(), 0).is_some());
++                let mut key = E::default();
++                let mut crates = Vec::new();
++                cache.enc_fnkey(&u, &FnKey::Inst(owner, vec![ty]), &mut key, &mut crates, 0).unwrap();
++                crates.sort_unstable();
++                crates.dedup();
++                assert_eq!(cache.key_crates(&u, &key.0), Some(crates));
++                let mut skipped = D { b: &key.0, p: 0 };
++                image::skip_fnkey(&mut skipped, 0, &mut image::no_atoms).unwrap();
++                assert_eq!(skipped.p, key.0.len(), "image reader must consume the entire closure key");
++                u.tcx.coroutines = Default::default();
++                assert!(!u.tcx.is_coroutine(ty));
++                for _ in 0..3 {
++                    let mut reader = D { b: &bytes.0, p: 0 };
++                    let restored = cache.dec_ty(&u, &mut reader, 0).unwrap();
++                    assert_eq!(reader.p, bytes.0.len());
++                    assert_eq!(restored, ty);
++                    assert_eq!(u.tcx.is_coroutine(restored), coroutine);
++                    assert_eq!(u.tcx.coroutines.mem_stats(|_, _| 0).0, usize::from(coroutine), "repeated decoding must not allocate duplicate coroutine entries");
++                }
++            }
++        }
++        // An unparsed id from another parse must miss without classifying that id.
++        let missing = 0x3fff_ffff;
++        assert!(closure_text_fp(&u, file, missing).is_none());
++        cache.closure_fps.insert((file, missing), 123);
++        u.tcx.coroutines.insert_first((file, missing), ());
++        let tys = &u.tcx.tys;
++        let uncertain = tys.intern(TyKind::Closure(file, missing, crate::types::ClosureArgs {
++            parent_args: tys.unit, closure_kind_ty: tys.u8_, closure_sig_as_fn_ptr_ty: tys.unit, tupled_upvars_ty: tys.unit,
++        }));
++        let mut bytes = E::default();
++        cache.enc_ty(&u, uncertain, &mut bytes, &mut Vec::new(), 0).unwrap();
++        u.tcx.coroutines = Default::default();
++        cache.closure_fps.clear();
++        assert!(cache.dec_ty(&u, &mut D { b: &bytes.0, p: 0 }, 0).is_none());
++        assert!(!u.tcx.is_coroutine(uncertain));
++        drop(cache); std::fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn cached_impl_constants_have_distinct_serialized_identities() {
++        isolated_test!(cached_impl_constants_have_distinct_serialized_identities);
++        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
++        let session = std::sync::Arc::new(crate::Session::default());
++        let root = std::env::temp_dir().join(format!("relax-impl-constant-cache-{}", std::process::id()));
++        std::fs::create_dir_all(&root).unwrap();
++        let source = root.join("lib.rs");
++        std::fs::write(&source, "#![no_std] struct Raw<const N: usize>; impl Raw<{1 + 1}> {} impl Raw<{2 + 2}> {}").unwrap();
++        let mut prog = crate::program::Program::new(&session);
++        prog.load_crate("impl_constants", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
++        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
++        let constants: Vec<_> = prog.defs.iter().enumerate()
++            .filter(|(_, d)| d.kind == DefKind::AnonConst && prog.def(d.parent).kind == DefKind::Impl)
++            .map(|(i, _)| DefId(i as u32)).collect();
++        assert_eq!(constants.len(), 2);
++        let u = Unit::new(prog, tcx, 0);
++        let mut cache = open_test_cache(&u, &root.join("cache"));
++        let identities: Vec<_> = constants.into_iter().map(|d| {
++            let mut encoded = E::default();
++            cache.enc_fnkey(&u, &FnKey::Inst(d, vec![]), &mut encoded, &mut Vec::new(), 0).unwrap();
++            encoded.0
++        }).collect();
++        assert_ne!(identities[0], identities[1], "different impl initializers must never share a cached value");
++        drop(cache); std::fs::remove_dir_all(root).unwrap();
++    }
++
+     fn open_test_cache(u: &Unit, root: &std::path::Path) -> Cache {
+         // ReadOnly avoids a pruning thread; tests explicitly enable in-memory recording.
+         let mut c = Cache::open_in(u, Mode::ReadOnly, root.to_path_buf()).unwrap();
+@@ -8875,7 +8985,7 @@ impl Linker {
+             KeyKind::ClosureInFile => {
+                 let file = self.cache().dec_file(u, d)?;
+                 let expr = d.u32()?;
+-                if !self.cache().closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
++                if !self.cache().closure_fp_agrees(u, file, expr, d.u64()?, true) { return None; }
+                 // a parent the startup image names: its slot, decoded or not
+                 let parent = match self.image_slot_at(u, d) {
+                     Some(p) => p,
+diff --git a/libs/relax/compiler/src/cache/image.rs b/libs/relax/compiler/src/cache/image.rs
+index 61d5a3b..1bfd3a8 100644
+--- a/libs/relax/compiler/src/cache/image.rs
++++ b/libs/relax/compiler/src/cache/image.rs
+@@ -917,6 +917,7 @@ fn skip_ty(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
+             d.u32()?;
+         }
+         17 => {
++            match d.u8()? { 0 | 1 => {}, _ => return None }
+             skip_file(d, v)?;
+             d.u32()?;
+             d.u64()?;
+@@ -952,6 +953,7 @@ fn skip_ty(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
+         20 => skip_const(d, depth + 1, v)?,
+         27 => skip_def(d, v)?,
+         28 => {
++            match d.u8()? { 0 | 1 => {}, _ => return None }
+             skip_ty(d, depth + 1, v)?;
+             d.u32()?;
+             d.u64()?;
+diff --git a/libs/relax/compiler/src/lower.rs b/libs/relax/compiler/src/lower.rs
+index 29d5fd6..830cac5 100644
+--- a/libs/relax/compiler/src/lower.rs
++++ b/libs/relax/compiler/src/lower.rs
+@@ -4375,7 +4375,7 @@ impl<'a> Lcx<'a> {
+
+     /// `&` operands in extending position of a `let` initializer (rustc's temporary lifetime
+     /// extension): `&e`, and through tuples, arrays, struct literals, casts, parens,
+-    /// block tails, if branches and match arms.
++    /// tuple/variant constructors, block tails, if branches and match arms.
+     fn collect_extending(&self, e: ExprId, out: &mut Vec<u32>) {
+         let ast = self.ast();
+         match &ast.expr(e).kind {
+@@ -4396,6 +4396,12 @@ impl<'a> Lcx<'a> {
+                     self.collect_extending(f.expr, out);
+                 }
+             }
++            ExprKind::Call(f, args)
++                if matches!(self.b.res.get(&strip_paren(ast, *f).0), Some(Res::Def(d))
++                    if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct)) =>
++            {
++                for x in ast.list(*args) { self.collect_extending(*x, out); }
++            }
+             ExprKind::Block(b, _) | ExprKind::Unsafe(b) => {
+                 if let Some(Stmt::Expr(x, false)) = ast.stmts(*b).last() {
+                     self.collect_extending(*x, out);
+@@ -5840,19 +5846,14 @@ impl<'a> Lcx<'a> {
+                 let b = self.to_leaves(b, t);
+                 self.bytes_eq(a[0], a[1], b[0], b[1])
+             }
+-            _ => {
++            TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Ptr(..) | TyKind::FnPtr(..) => {
+                 let a = self.to_leaves(a, t);
+                 let b = self.to_leaves(b, t);
+                 // all leaves equal
+                 let mut acc: Option<VReg> = None;
+                 for i in 0..a.len().min(b.len()) {
+                     let c = self.f.vreg(Cls::I);
+-                    if self.f.vregs[a[i].0 as usize] == Cls::I {
+-                        self.emit(Inst::ICmp(Cond::Eq, false, c, a[i], b[i]));
+-                    } else {
+-                        let f64_ = self.f.vregs[a[i].0 as usize] == Cls::F64;
+-                        self.emit(Inst::FCmp(Cond::Eq, f64_, c, a[i], b[i]));
+-                    }
++                    self.emit(Inst::ICmp(Cond::Eq, false, c, a[i], b[i]));
+                     acc = Some(match acc {
+                         None => c,
+                         Some(p) => {
+@@ -5867,6 +5868,28 @@ impl<'a> Lcx<'a> {
+                     None => self.iconst(1),
+                 }
+             }
++            _ => {
++                // Aggregate equality is PartialEq, including inactive enum payloads,
++                // references by value and custom impls. Indirect layouts have no scalar
++                // leaves; treating that as an empty comparison made every pair equal.
++                let method = self.u.tcx.lang_items.get(LangItem::PartialEq).and_then(|td| {
++                    self.u.prog.traits[self.u.prog.def(td).sub as usize].iter().copied()
++                        .find(|it| self.u.prog.name(*it) == "eq")
++                });
++                let Some(method) = method else {
++                    self.err(self.pos, "missing PartialEq::eq".to_string());
++                    return self.iconst(0);
++                };
++                let pa = self.val_to_place(a);
++                let pb = self.val_to_place(b);
++                let ra = self.ref_to_place(&pa, t);
++                let rb = self.ref_to_place(&pb, t);
++                let reference = self.u.tcx.tys.intern(TyKind::Ref(false, t, crate::types::RegionId::ERASED));
++                let instance = self.resolve_instance(method, &[t, t]);
++                let boolean = self.u.tcx.tys.bool_;
++                let result = self.emit_instance(instance, vec![(Val::L(ra), reference), (Val::L(rb), reference)], boolean);
++                self.to_leaves(result, boolean)[0]
++            }
+         }
+     }
+
+@@ -8416,17 +8439,13 @@ impl<'a> Lcx<'a> {
+                 let av = self.lower_expr(a);
+                 // (`fn_ptr == fn_item`: the rhs reified to the lhs pointer type)
+                 let bv = self.lower_expr_coerced(b, at);
+-                // `&a < &b` on primitives compares the values
++                // Reference equality compares values. Both operands are now `at`;
++                // keep the dereferenced type with their dereferenced values.
+                 let (av, bv, at) = match self.kind(at) {
+                     TyKind::Ref(_, inner, _) if matches!(self.kind_ref(inner), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Ref(..) | TyKind::FnPtr(..)) => {
+-                        let bt = self.body_ty(b);
+                         let (x, xt) = self.prim_leaves(av, at);
+-                        let (y, _) = self.prim_leaves(bv, bt);
+-                        if matches!(self.kind_ref(xt), TyKind::Ref(..)) {
+-                            (Val::L(x), Val::L(y), at)
+-                        } else {
+-                            (Val::L(x), Val::L(y), xt)
+-                        }
++                        let (y, _) = self.prim_leaves(bv, at);
++                        (Val::L(x), Val::L(y), xt)
+                     }
+                     _ => (av, bv, at),
+                 };
+diff --git a/libs/relax/compiler/src/os/proc.rs b/libs/relax/compiler/src/os/proc.rs
+index 334d673..5bff6d4 100644
+--- a/libs/relax/compiler/src/os/proc.rs
++++ b/libs/relax/compiler/src/os/proc.rs
+@@ -15,6 +15,23 @@
+
+ pub use imp::*;
+
++/// Resolve ordinary exports first. Linux native bundles also expose address
++/// accessors for archive symbols that the shared link keeps hidden.
++#[cfg(target_os = "linux")]
++pub unsafe fn find(name: *const u8) -> *mut u8 {
++    let address = imp::find(name);
++    if address.is_null() {
++        let name = std::ffi::CStr::from_ptr(name.cast()).to_bytes();
++        let accessor = std::ffi::CString::new(relax_front::native::address_name(name)).unwrap();
++        let entry = imp::find(accessor.as_ptr().cast());
++        if !entry.is_null() {
++            let get: unsafe extern "C" fn() -> *mut u8 = std::mem::transmute(entry);
++            return get();
++        }
++    }
++    address
++}
++
+ /// `name` (a C symbol) wherever this platform's loader finds one for the process: the default
+ /// search of every loaded image (`find`), then the system libraries (`find_system`). Null: none.
+ pub unsafe fn find_any(name: *const u8) -> *mut u8 {
+diff --git a/libs/relax/compiler/std/core/arch/x86_64.rs b/libs/relax/compiler/std/core/arch/x86_64.rs
+index 9654167..d776fdc 100644
+--- a/libs/relax/compiler/std/core/arch/x86_64.rs
++++ b/libs/relax/compiler/std/core/arch/x86_64.rs
+@@ -1279,6 +1279,12 @@ pub fn _mm512_set1_epi16(a: i16) -> __m512i {
+     }
+ }
+
++#[inline]
++#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
++pub fn _mm512_set1_epi32(a: i32) -> __m512i {
++    unsafe { from512_i32([a; 16]) }
++}
++
+ #[inline]
+ #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
+ pub fn _mm512_set_epi32(
+@@ -2424,6 +2430,12 @@ pub unsafe fn _mm_storeu_ps(mem_addr: *mut f32, a: __m128) {
+     vx::vx_store(mem_addr as *mut u8, a)
+ }
+
++#[inline]
++#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse"))]
++pub unsafe fn _mm_store_ss(mem_addr: *mut f32, a: __m128) {
++    crate::ptr::write(mem_addr, a.0[0]);
++}
++
+ #[inline]
+ #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse"))]
+ pub fn _mm_sub_ps(a: __m128, b: __m128) -> __m128 {
+@@ -3324,7 +3336,14 @@ pub fn _mm_cvtsi64x_sd(a: __m128d, b: i64) -> __m128d {
+     }
+ }
+
+-// ---- SSE3 / SSE4.1 f64 (stdarch x86/sse3.rs, x86/sse41.rs)
++// ---- SSE3 / SSE4.1 (stdarch x86/sse3.rs, x86/sse41.rs)
++/// [a0 + a1, a2 + a3, b0 + b1, b2 + b3]
++#[inline]
++#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse3"))]
++pub fn _mm_hadd_ps(a: __m128, b: __m128) -> __m128 {
++    unsafe { _mm_add_ps(_mm_shuffle_ps::<0x88>(a, b), _mm_shuffle_ps::<0xdd>(a, b)) }
++}
++
+ /// [a0 - b0, a1 + b1]
+ #[inline]
+ #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse3"))]
+diff --git a/libs/relax/compiler/std/core/lib.rs b/libs/relax/compiler/std/core/lib.rs
+index bd8ea10..712ac8b 100644
+--- a/libs/relax/compiler/std/core/lib.rs
++++ b/libs/relax/compiler/std/core/lib.rs
+@@ -55,6 +55,7 @@ pub mod error;
+ pub mod hint;
+ pub mod marker;
+ pub mod mem;
++pub mod net;
+ pub mod ops;
+ pub mod option;
+ pub mod panic;
+diff --git a/libs/relax/compiler/std/core/net/addr.rs b/libs/relax/compiler/std/core/net/addr.rs
+new file mode 100644
+index 0000000..6bcd3f9
+--- /dev/null
++++ b/libs/relax/compiler/std/core/net/addr.rs
+@@ -0,0 +1,183 @@
++//! Socket addresses, shared by core::net and std::net.
++
++use crate::string::String;
++use core::fmt;
++use core::fmt::Write as _;
++use super::{IpAddr, Ipv4Addr, Ipv6Addr};
++
++#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
++pub enum SocketAddr {
++    V4(SocketAddrV4),
++    V6(SocketAddrV6),
++}
++
++#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
++pub struct SocketAddrV4 {
++    ip: Ipv4Addr,
++    port: u16,
++}
++
++#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
++pub struct SocketAddrV6 {
++    ip: Ipv6Addr,
++    port: u16,
++    flowinfo: u32,
++    scope_id: u32,
++}
++
++impl SocketAddr {
++    pub const fn new(ip: IpAddr, port: u16) -> SocketAddr {
++        match ip {
++            IpAddr::V4(a) => SocketAddr::V4(SocketAddrV4::new(a, port)),
++            IpAddr::V6(a) => SocketAddr::V6(SocketAddrV6::new(a, port, 0, 0)),
++        }
++    }
++    pub const fn ip(&self) -> IpAddr {
++        match self {
++            SocketAddr::V4(a) => IpAddr::V4(a.ip),
++            SocketAddr::V6(a) => IpAddr::V6(a.ip),
++        }
++    }
++    pub const fn set_ip(&mut self, ip: IpAddr) {
++        match (self, ip) {
++            (SocketAddr::V4(a), IpAddr::V4(ip)) => a.set_ip(ip),
++            (SocketAddr::V6(a), IpAddr::V6(ip)) => a.set_ip(ip),
++            (this, ip) => *this = SocketAddr::new(ip, this.port()),
++        }
++    }
++    pub const fn port(&self) -> u16 {
++        match self {
++            SocketAddr::V4(a) => a.port,
++            SocketAddr::V6(a) => a.port,
++        }
++    }
++    pub const fn set_port(&mut self, port: u16) {
++        match self {
++            SocketAddr::V4(a) => a.port = port,
++            SocketAddr::V6(a) => a.port = port,
++        }
++    }
++    pub const fn is_ipv4(&self) -> bool {
++        match self {
++            SocketAddr::V4(_) => true,
++            SocketAddr::V6(_) => false,
++        }
++    }
++    pub const fn is_ipv6(&self) -> bool {
++        !self.is_ipv4()
++    }
++}
++
++impl SocketAddrV4 {
++    pub const fn new(ip: Ipv4Addr, port: u16) -> SocketAddrV4 {
++        SocketAddrV4 { ip, port }
++    }
++    pub const fn ip(&self) -> &Ipv4Addr {
++        &self.ip
++    }
++    pub const fn set_ip(&mut self, ip: Ipv4Addr) {
++        self.ip = ip;
++    }
++    pub const fn port(&self) -> u16 {
++        self.port
++    }
++    pub const fn set_port(&mut self, port: u16) {
++        self.port = port;
++    }
++}
++
++impl SocketAddrV6 {
++    pub const fn new(ip: Ipv6Addr, port: u16, flowinfo: u32, scope_id: u32) -> SocketAddrV6 {
++        SocketAddrV6 { ip, port, flowinfo, scope_id }
++    }
++    pub const fn ip(&self) -> &Ipv6Addr {
++        &self.ip
++    }
++    pub const fn set_ip(&mut self, ip: Ipv6Addr) {
++        self.ip = ip;
++    }
++    pub const fn port(&self) -> u16 {
++        self.port
++    }
++    pub const fn set_port(&mut self, port: u16) {
++        self.port = port;
++    }
++    pub const fn flowinfo(&self) -> u32 {
++        self.flowinfo
++    }
++    pub const fn set_flowinfo(&mut self, flowinfo: u32) {
++        self.flowinfo = flowinfo;
++    }
++    pub const fn scope_id(&self) -> u32 {
++        self.scope_id
++    }
++    pub const fn set_scope_id(&mut self, scope_id: u32) {
++        self.scope_id = scope_id;
++    }
++}
++
++impl From<SocketAddrV4> for SocketAddr {
++    fn from(a: SocketAddrV4) -> SocketAddr {
++        SocketAddr::V4(a)
++    }
++}
++impl From<SocketAddrV6> for SocketAddr {
++    fn from(a: SocketAddrV6) -> SocketAddr {
++        SocketAddr::V6(a)
++    }
++}
++impl<I: Into<IpAddr>> From<(I, u16)> for SocketAddr {
++    fn from(pieces: (I, u16)) -> SocketAddr {
++        SocketAddr::new(pieces.0.into(), pieces.1)
++    }
++}
++
++fn pad_or_write(f: &mut fmt::Formatter, s: &str) -> fmt::Result {
++    if f.precision().is_none() && f.width().is_none() {
++        f.write_str(s)
++    } else {
++        f.pad(s)
++    }
++}
++
++impl fmt::Display for SocketAddrV4 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        let mut s = String::new();
++        let _ = write!(s, "{}:{}", self.ip, self.port);
++        pad_or_write(f, &s)
++    }
++}
++impl fmt::Debug for SocketAddrV4 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        fmt::Display::fmt(self, f)
++    }
++}
++impl fmt::Display for SocketAddrV6 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        let mut s = String::new();
++        if self.scope_id == 0 {
++            let _ = write!(s, "[{}]:{}", self.ip, self.port);
++        } else {
++            let _ = write!(s, "[{}%{}]:{}", self.ip, self.scope_id, self.port);
++        }
++        pad_or_write(f, &s)
++    }
++}
++impl fmt::Debug for SocketAddrV6 {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        fmt::Display::fmt(self, f)
++    }
++}
++impl fmt::Display for SocketAddr {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        match self {
++            SocketAddr::V4(a) => fmt::Display::fmt(a, f),
++            SocketAddr::V6(a) => fmt::Display::fmt(a, f),
++        }
++    }
++}
++impl fmt::Debug for SocketAddr {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        fmt::Display::fmt(self, f)
++    }
++}
+diff --git a/libs/relax/compiler/std/std/net/ip.rs b/libs/relax/compiler/std/core/net/ip.rs
+similarity index 97%
+rename from libs/relax/compiler/std/std/net/ip.rs
+rename to libs/relax/compiler/std/core/net/ip.rs
+index 763906a..81f2324 100644
+--- a/libs/relax/compiler/std/std/net/ip.rs
++++ b/libs/relax/compiler/std/core/net/ip.rs
+@@ -1,6 +1,6 @@
+ //! IpAddr / Ipv4Addr / Ipv6Addr (pure; Display and parsing as real core::net).
+
+-use alloc::string::String;
++use crate::string::String;
+ use core::cmp::Ordering;
+ use core::fmt;
+ use core::fmt::Write as _;
+@@ -264,6 +264,12 @@ impl PartialEq<Ipv6Addr> for IpAddr {
+         }
+     }
+ }
++impl PartialEq<IpAddr> for Ipv4Addr {
++    fn eq(&self, other: &IpAddr) -> bool { other == self }
++}
++impl PartialEq<IpAddr> for Ipv6Addr {
++    fn eq(&self, other: &IpAddr) -> bool { other == self }
++}
+ impl PartialOrd<Ipv4Addr> for IpAddr {
+     fn partial_cmp(&self, other: &Ipv4Addr) -> Option<Ordering> {
+         match self {
+diff --git a/libs/relax/compiler/std/core/net/mod.rs b/libs/relax/compiler/std/core/net/mod.rs
+new file mode 100644
+index 0000000..04f5540
+--- /dev/null
++++ b/libs/relax/compiler/std/core/net/mod.rs
+@@ -0,0 +1,9 @@
++//! IP and socket address values, independent of operating-system sockets.
++
++mod addr;
++mod ip;
++mod parser;
++
++pub use self::addr::{SocketAddr, SocketAddrV4, SocketAddrV6};
++pub use self::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
++pub use self::parser::AddrParseError;
+diff --git a/libs/relax/compiler/std/std/net/parser.rs b/libs/relax/compiler/std/core/net/parser.rs
+similarity index 100%
+rename from libs/relax/compiler/std/std/net/parser.rs
+rename to libs/relax/compiler/std/core/net/parser.rs
+diff --git a/libs/relax/compiler/std/core/option.rs b/libs/relax/compiler/std/core/option.rs
+index 8899719..645cfc1 100644
+--- a/libs/relax/compiler/std/core/option.rs
++++ b/libs/relax/compiler/std/core/option.rs
+@@ -135,6 +135,12 @@ impl<T> Option<T> {
+             None => default,
+         }
+     }
++    pub const fn map_or_default<U: crate::default::Default, F: FnOnce(T) -> U>(self, f: F) -> U {
++        match self {
++            Some(t) => f(t),
++            None => U::default(),
++        }
++    }
+     pub const fn map_or_else<U, D: FnOnce() -> U, F: FnOnce(T) -> U>(self, default: D, f: F) -> U {
+         match self {
+             Some(t) => f(t),
+diff --git a/libs/relax/compiler/std/core/slice/inherent.rs b/libs/relax/compiler/std/core/slice/inherent.rs
+index d2ecbb9..b1af3b9 100644
+--- a/libs/relax/compiler/std/core/slice/inherent.rs
++++ b/libs/relax/compiler/std/core/slice/inherent.rs
+@@ -240,10 +240,23 @@ impl<T> [T] {
+         }
+         (&self[..mid], &self[mid..])
+     }
++    /// # Safety
++    /// `mid` must not exceed the slice length.
++    pub const unsafe fn split_at_unchecked(&self, mid: usize) -> (&[T], &[T]) {
++        let ptr = self.as_ptr();
++        (super::from_raw_parts(ptr, mid), super::from_raw_parts(ptr.add(mid), self.len() - mid))
++    }
+     #[track_caller]
+     pub const fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
+         super::split_at_mut(self, mid)
+     }
++    /// # Safety
++    /// `mid` must not exceed the slice length; the returned slices are disjoint.
++    pub const unsafe fn split_at_mut_unchecked(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
++        let len = self.len();
++        let ptr = self.as_mut_ptr();
++        (super::from_raw_parts_mut(ptr, mid), super::from_raw_parts_mut(ptr.add(mid), len - mid))
++    }
+     pub const fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
+         if mid > self.len() {
+             None
+diff --git a/libs/relax/compiler/std/core/str/inherent.rs b/libs/relax/compiler/std/core/str/inherent.rs
+index 07781d5..53a1638 100644
+--- a/libs/relax/compiler/std/core/str/inherent.rs
++++ b/libs/relax/compiler/std/core/str/inherent.rs
+@@ -6,6 +6,22 @@ use super::*;
+ use crate::string::String;
+
+ impl str {
++    /// `core::str::from_utf8`, reachable as `str::from_utf8` (an associated function since 1.87).
++    pub const fn from_utf8(v: &[u8]) -> Result<&str, crate::str::Utf8Error> {
++        crate::str::from_utf8(v)
++    }
++    /// `core::str::from_utf8_mut` as an associated function.
++    pub const fn from_utf8_mut(v: &mut [u8]) -> Result<&mut str, crate::str::Utf8Error> {
++        crate::str::from_utf8_mut(v)
++    }
++    /// `core::str::from_utf8_unchecked` as an associated function.
++    pub const unsafe fn from_utf8_unchecked(v: &[u8]) -> &str {
++        crate::str::from_utf8_unchecked(v)
++    }
++    /// `core::str::from_utf8_unchecked_mut` as an associated function.
++    pub const unsafe fn from_utf8_unchecked_mut(v: &mut [u8]) -> &mut str {
++        crate::str::from_utf8_unchecked_mut(v)
++    }
+     pub fn into_string(self: crate::boxed::Box<str>) -> crate::string::String {
+         let len = (*self).len();
+         let p = crate::boxed::Box::into_raw(self) as *mut u8;
+diff --git a/libs/relax/compiler/std/std/net/addr.rs b/libs/relax/compiler/std/std/net/addr.rs
+index 898bf2d..6a88fa7 100644
+--- a/libs/relax/compiler/std/std/net/addr.rs
++++ b/libs/relax/compiler/std/std/net/addr.rs
+@@ -1,204 +1,30 @@
+-//! SocketAddr / SocketAddrV4 / SocketAddrV6 and ToSocketAddrs (getaddrinfo for host names).
++//! Socket address OS encoding and host-name resolution.
+
+ use alloc::ffi::CString;
+ use alloc::string::String;
+ use alloc::vec::Vec;
+-use core::fmt;
+-use core::fmt::Write as _;
+-
+-use super::{IpAddr, Ipv4Addr, Ipv6Addr};
++use super::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+ use crate::io;
+ use crate::sys::net as sn;
+
+-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+-pub enum SocketAddr {
+-    V4(SocketAddrV4),
+-    V6(SocketAddrV6),
+-}
+-
+-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+-pub struct SocketAddrV4 {
+-    ip: Ipv4Addr,
+-    port: u16,
+-}
+-
+-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+-pub struct SocketAddrV6 {
+-    ip: Ipv6Addr,
+-    port: u16,
+-    flowinfo: u32,
+-    scope_id: u32,
+-}
+-
+-impl SocketAddr {
+-    pub const fn new(ip: IpAddr, port: u16) -> SocketAddr {
+-        match ip {
+-            IpAddr::V4(a) => SocketAddr::V4(SocketAddrV4::new(a, port)),
+-            IpAddr::V6(a) => SocketAddr::V6(SocketAddrV6::new(a, port, 0, 0)),
+-        }
+-    }
+-    pub const fn ip(&self) -> IpAddr {
+-        match self {
+-            SocketAddr::V4(a) => IpAddr::V4(a.ip),
+-            SocketAddr::V6(a) => IpAddr::V6(a.ip),
+-        }
+-    }
+-    pub const fn set_ip(&mut self, ip: IpAddr) {
+-        match (self, ip) {
+-            (SocketAddr::V4(a), IpAddr::V4(ip)) => a.set_ip(ip),
+-            (SocketAddr::V6(a), IpAddr::V6(ip)) => a.set_ip(ip),
+-            (this, ip) => *this = SocketAddr::new(ip, this.port()),
+-        }
+-    }
+-    pub const fn port(&self) -> u16 {
+-        match self {
+-            SocketAddr::V4(a) => a.port,
+-            SocketAddr::V6(a) => a.port,
+-        }
+-    }
+-    pub const fn set_port(&mut self, port: u16) {
+-        match self {
+-            SocketAddr::V4(a) => a.port = port,
+-            SocketAddr::V6(a) => a.port = port,
+-        }
+-    }
+-    pub const fn is_ipv4(&self) -> bool {
+-        match self {
+-            SocketAddr::V4(_) => true,
+-            SocketAddr::V6(_) => false,
+-        }
+-    }
+-    pub const fn is_ipv6(&self) -> bool {
+-        !self.is_ipv4()
+-    }
+-
+-    /// Encodes into a sockaddr buffer; returns its length.
+-    pub(crate) fn encode(&self, buf: &mut sn::SockaddrStorage) -> sn::socklen_t {
+-        match self {
+-            SocketAddr::V4(a) => sn::encode_v4(buf, a.ip.octets(), a.port),
+-            SocketAddr::V6(a) => sn::encode_v6(buf, a.ip.octets(), a.port, a.flowinfo, a.scope_id),
+-        }
+-    }
+-
+-    pub(crate) fn decode(buf: &sn::SockaddrStorage) -> io::Result<SocketAddr> {
+-        let fam = sn::family(buf);
+-        if fam == sn::AF_INET {
+-            let o = sn::decode_v4(buf);
+-            Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(o[0], o[1], o[2], o[3]), sn::decode_port(buf))))
+-        } else if fam == sn::AF_INET6 {
+-            let (ip, flow, scope) = sn::decode_v6(buf);
+-            Ok(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip), sn::decode_port(buf), flow, scope)))
+-        } else {
+-            Err(io::const_error!(io::ErrorKind::InvalidInput, "invalid argument"))
+-        }
+-    }
+-}
+-
+-impl SocketAddrV4 {
+-    pub const fn new(ip: Ipv4Addr, port: u16) -> SocketAddrV4 {
+-        SocketAddrV4 { ip, port }
+-    }
+-    pub const fn ip(&self) -> &Ipv4Addr {
+-        &self.ip
+-    }
+-    pub const fn set_ip(&mut self, ip: Ipv4Addr) {
+-        self.ip = ip;
+-    }
+-    pub const fn port(&self) -> u16 {
+-        self.port
+-    }
+-    pub const fn set_port(&mut self, port: u16) {
+-        self.port = port;
++/// Encodes into a sockaddr buffer; returns its length.
++pub(super) fn encode(addr: &SocketAddr, buf: &mut sn::SockaddrStorage) -> sn::socklen_t {
++    match addr {
++        SocketAddr::V4(a) => sn::encode_v4(buf, a.ip().octets(), a.port()),
++        SocketAddr::V6(a) => sn::encode_v6(buf, a.ip().octets(), a.port(), a.flowinfo(), a.scope_id()),
+     }
+ }
+
+-impl SocketAddrV6 {
+-    pub const fn new(ip: Ipv6Addr, port: u16, flowinfo: u32, scope_id: u32) -> SocketAddrV6 {
+-        SocketAddrV6 { ip, port, flowinfo, scope_id }
+-    }
+-    pub const fn ip(&self) -> &Ipv6Addr {
+-        &self.ip
+-    }
+-    pub const fn set_ip(&mut self, ip: Ipv6Addr) {
+-        self.ip = ip;
+-    }
+-    pub const fn port(&self) -> u16 {
+-        self.port
+-    }
+-    pub const fn set_port(&mut self, port: u16) {
+-        self.port = port;
+-    }
+-    pub const fn flowinfo(&self) -> u32 {
+-        self.flowinfo
+-    }
+-    pub const fn scope_id(&self) -> u32 {
+-        self.scope_id
+-    }
+-}
+-
+-impl From<SocketAddrV4> for SocketAddr {
+-    fn from(a: SocketAddrV4) -> SocketAddr {
+-        SocketAddr::V4(a)
+-    }
+-}
+-impl From<SocketAddrV6> for SocketAddr {
+-    fn from(a: SocketAddrV6) -> SocketAddr {
+-        SocketAddr::V6(a)
+-    }
+-}
+-impl<I: Into<IpAddr>> From<(I, u16)> for SocketAddr {
+-    fn from(pieces: (I, u16)) -> SocketAddr {
+-        SocketAddr::new(pieces.0.into(), pieces.1)
+-    }
+-}
+-
+-fn pad_or_write(f: &mut fmt::Formatter, s: &str) -> fmt::Result {
+-    if f.precision().is_none() && f.width().is_none() {
+-        f.write_str(s)
++pub(super) fn decode(buf: &sn::SockaddrStorage) -> io::Result<SocketAddr> {
++    let fam = sn::family(buf);
++    if fam == sn::AF_INET {
++        let o = sn::decode_v4(buf);
++        Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(o[0], o[1], o[2], o[3]), sn::decode_port(buf))))
++    } else if fam == sn::AF_INET6 {
++        let (ip, flow, scope) = sn::decode_v6(buf);
++        Ok(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip), sn::decode_port(buf), flow, scope)))
+     } else {
+-        f.pad(s)
+-    }
+-}
+-
+-impl fmt::Display for SocketAddrV4 {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        let mut s = String::new();
+-        let _ = write!(s, "{}:{}", self.ip, self.port);
+-        pad_or_write(f, &s)
+-    }
+-}
+-impl fmt::Debug for SocketAddrV4 {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        fmt::Display::fmt(self, f)
+-    }
+-}
+-impl fmt::Display for SocketAddrV6 {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        let mut s = String::new();
+-        if self.scope_id == 0 {
+-            let _ = write!(s, "[{}]:{}", self.ip, self.port);
+-        } else {
+-            let _ = write!(s, "[{}%{}]:{}", self.ip, self.scope_id, self.port);
+-        }
+-        pad_or_write(f, &s)
+-    }
+-}
+-impl fmt::Debug for SocketAddrV6 {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        fmt::Display::fmt(self, f)
+-    }
+-}
+-impl fmt::Display for SocketAddr {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        match self {
+-            SocketAddr::V4(a) => fmt::Display::fmt(a, f),
+-            SocketAddr::V6(a) => fmt::Display::fmt(a, f),
+-        }
+-    }
+-}
+-impl fmt::Debug for SocketAddr {
+-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        fmt::Display::fmt(self, f)
++        Err(io::const_error!(io::ErrorKind::InvalidInput, "invalid argument"))
+     }
+ }
+
+@@ -333,7 +159,7 @@ fn lookup(host: &str, port: u16) -> io::Result<alloc::vec::IntoIter<SocketAddr>>
+         let mut buf = sn::zeroed();
+         let n = if ai.addrlen() < 128 { ai.addrlen() } else { 128 };
+         unsafe { core::ptr::copy_nonoverlapping(ai.addr(), sn::storage_mut_ptr(&mut buf), n) };
+-        if let Ok(mut a) = SocketAddr::decode(&buf) {
++        if let Ok(mut a) = decode(&buf) {
+             a.set_port(port);
+             out.push(a);
+         }
+diff --git a/libs/relax/compiler/std/std/net/mod.rs b/libs/relax/compiler/std/std/net/mod.rs
+index c5fb35b..03cf645 100644
+--- a/libs/relax/compiler/std/std/net/mod.rs
++++ b/libs/relax/compiler/std/std/net/mod.rs
+@@ -1,8 +1,6 @@
+ //! std::net: IP/socket addresses, TCP and UDP.
+
+ mod addr;
+-mod ip;
+-mod parser;
+ #[cfg(unix)]
+ #[path = "socket_unix.rs"]
+ mod socket;
+@@ -15,9 +13,8 @@ mod socket;
+ pub(crate) mod tcp;
+ mod udp;
+
+-pub use self::addr::{SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
+-pub use self::ip::{IpAddr, Ipv4Addr, Ipv6Addr};
+-pub use self::parser::AddrParseError;
++pub use core::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
++pub use self::addr::ToSocketAddrs;
+ pub use self::tcp::{Incoming, TcpListener, TcpStream};
+ pub use self::udp::UdpSocket;
+
+diff --git a/libs/relax/compiler/std/std/net/tcp.rs b/libs/relax/compiler/std/std/net/tcp.rs
+index 645a336..885b428 100644
+--- a/libs/relax/compiler/std/std/net/tcp.rs
++++ b/libs/relax/compiler/std/std/net/tcp.rs
+@@ -53,7 +53,7 @@ impl TcpStream {
+         each_addr(addr, |a| {
+             let s = Socket::new(family_of(a), sn::SOCK_STREAM)?;
+             let mut buf = sn::zeroed();
+-            let len = a.encode(&mut buf);
++            let len = super::addr::encode(a, &mut buf);
+             s.connect(&buf, len)?;
+             Ok(TcpStream { sock: s })
+         })
+@@ -61,17 +61,17 @@ impl TcpStream {
+     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+         let s = Socket::new(family_of(addr), sn::SOCK_STREAM)?;
+         let mut buf = sn::zeroed();
+-        let len = addr.encode(&mut buf);
++        let len = super::addr::encode(addr, &mut buf);
+         s.connect_timeout(&buf, len, timeout)?;
+         Ok(TcpStream { sock: s })
+     }
+     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+         let (buf, _) = self.sock.name(true)?;
+-        SocketAddr::decode(&buf)
++        super::addr::decode(&buf)
+     }
+     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+         let (buf, _) = self.sock.name(false)?;
+-        SocketAddr::decode(&buf)
++        super::addr::decode(&buf)
+     }
+     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+         self.sock.shutdown(how)
+@@ -164,7 +164,7 @@ impl TcpListener {
+                 s.set_int(sn::SOL_SOCKET, sn::SO_REUSEADDR, 1)?;
+             }
+             let mut buf = sn::zeroed();
+-            let len = a.encode(&mut buf);
++            let len = super::addr::encode(a, &mut buf);
+             s.bind(&buf, len)?;
+             s.listen(BACKLOG)?;
+             Ok(TcpListener { sock: s })
+@@ -172,14 +172,14 @@ impl TcpListener {
+     }
+     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+         let (buf, _) = self.sock.name(false)?;
+-        SocketAddr::decode(&buf)
++        super::addr::decode(&buf)
+     }
+     pub fn try_clone(&self) -> io::Result<TcpListener> {
+         Ok(TcpListener { sock: self.sock.try_clone()? })
+     }
+     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+         let (s, buf, _) = self.sock.accept()?;
+-        Ok((TcpStream { sock: s }, SocketAddr::decode(&buf)?))
++        Ok((TcpStream { sock: s }, super::addr::decode(&buf)?))
+     }
+     pub fn incoming(&self) -> Incoming<'_> {
+         Incoming { listener: self }
+diff --git a/libs/relax/compiler/std/std/net/udp.rs b/libs/relax/compiler/std/std/net/udp.rs
+index bda8e7e..9b933ee 100644
+--- a/libs/relax/compiler/std/std/net/udp.rs
++++ b/libs/relax/compiler/std/std/net/udp.rs
+@@ -19,18 +19,18 @@ impl UdpSocket {
+         each_addr(addr, |a| {
+             let s = Socket::new(family_of(a), sn::SOCK_DGRAM)?;
+             let mut buf = sn::zeroed();
+-            let len = a.encode(&mut buf);
++            let len = super::addr::encode(a, &mut buf);
+             s.bind(&buf, len)?;
+             Ok(UdpSocket { sock: s })
+         })
+     }
+     pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+         let (n, addr) = self.sock.recv_from(buf, false)?;
+-        Ok((n, SocketAddr::decode(&addr)?))
++        Ok((n, super::addr::decode(&addr)?))
+     }
+     pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+         let (n, addr) = self.sock.recv_from(buf, true)?;
+-        Ok((n, SocketAddr::decode(&addr)?))
++        Ok((n, super::addr::decode(&addr)?))
+     }
+     pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> io::Result<usize> {
+         let addr = match addr.to_socket_addrs()?.next() {
+@@ -38,16 +38,16 @@ impl UdpSocket {
+             None => return Err(io::const_error!(io::ErrorKind::InvalidInput, "no addresses to send data to")),
+         };
+         let mut storage = sn::zeroed();
+-        let len = addr.encode(&mut storage);
++        let len = super::addr::encode(&addr, &mut storage);
+         self.sock.send_to(buf, &storage, len)
+     }
+     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+         let (buf, _) = self.sock.name(true)?;
+-        SocketAddr::decode(&buf)
++        super::addr::decode(&buf)
+     }
+     pub fn local_addr(&self) -> io::Result<SocketAddr> {
+         let (buf, _) = self.sock.name(false)?;
+-        SocketAddr::decode(&buf)
++        super::addr::decode(&buf)
+     }
+     pub fn try_clone(&self) -> io::Result<UdpSocket> {
+         Ok(UdpSocket { sock: self.sock.try_clone()? })
+@@ -129,7 +129,7 @@ impl UdpSocket {
+     pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+         each_addr(addr, |a| {
+             let mut buf = sn::zeroed();
+-            let len = a.encode(&mut buf);
++            let len = super::addr::encode(a, &mut buf);
+             self.sock.connect(&buf, len)
+         })
+     }
+diff --git a/libs/relax/compiler/tests/allow_c/cnative/csrc/cnative.c b/libs/relax/compiler/tests/allow_c/cnative/csrc/cnative.c
+index 795c9ff..598e02d 100644
+--- a/libs/relax/compiler/tests/allow_c/cnative/csrc/cnative.c
++++ b/libs/relax/compiler/tests/allow_c/cnative/csrc/cnative.c
+@@ -1,6 +1,12 @@
+ #include <stdint.h>
+ #include <stddef.h>
+-int32_t cn_add(int32_t a, int32_t b) { return a + b; }
++#if defined(__linux__)
++#define CN_HIDDEN __attribute__((visibility("hidden")))
++#else
++#define CN_HIDDEN
++#endif
++CN_HIDDEN int32_t cn_offset = 7;
++CN_HIDDEN int32_t cn_add(int32_t a, int32_t b) { return a + b + cn_offset; }
+ uint64_t cn_hash(const uint8_t *p, size_t n) {
+     uint64_t h = 0xcbf29ce484222325ull;
+     for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001b3ull; }
+diff --git a/libs/relax/compiler/tests/allow_c/cnative/src/lib.rs b/libs/relax/compiler/tests/allow_c/cnative/src/lib.rs
+index 82fe9ac..8946a1c 100644
+--- a/libs/relax/compiler/tests/allow_c/cnative/src/lib.rs
++++ b/libs/relax/compiler/tests/allow_c/cnative/src/lib.rs
+@@ -1,10 +1,11 @@
+ extern "C" {
++    static cn_offset: i32;
+     fn cn_add(a: i32, b: i32) -> i32;
+     fn cn_hash(p: *const u8, n: usize) -> u64;
+     fn cn_apply(f: extern "C" fn(i32) -> i32, x: i32) -> i32;
+     fn cn_square_plus(x: i32) -> i32;
+ }
+-pub fn add(a: i32, b: i32) -> i32 { unsafe { cn_add(a, b) } }
++pub fn add(a: i32, b: i32) -> i32 { unsafe { cn_add(a, b) - cn_offset } }
+ pub fn hash(b: &[u8]) -> u64 { unsafe { cn_hash(b.as_ptr(), b.len()) } }
+ pub fn apply(f: extern "C" fn(i32) -> i32, x: i32) -> i32 { unsafe { cn_apply(f, x) } }
+ pub fn built() -> bool { cfg!(cnative_built) }
+diff --git a/libs/relax/compiler/tests/std/core_arch_audio.rs b/libs/relax/compiler/tests/std/core_arch_audio.rs
+new file mode 100644
+index 0000000..b0ab8d0
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_arch_audio.rs
+@@ -0,0 +1,28 @@
++#[cfg(target_arch = "x86_64")]
++#[test]
++fn a01_horizontal_add_and_scalar_store() {
++    use core::arch::x86_64::*;
++    if !std::is_x86_feature_detected!("sse3") { return; }
++    unsafe {
++        let a = _mm_set_ps(8.0, 4.0, 2.0, 1.0);
++        let b = _mm_set_ps(-8.0, -4.0, -2.0, -1.0);
++        let lanes: [f32; 4] = core::mem::transmute(_mm_hadd_ps(a, b));
++        assert_eq!(lanes, [3.0, 12.0, -3.0, -12.0]);
++        let mut output = [91.0, 92.0, 93.0];
++        _mm_store_ss(output.as_mut_ptr().add(1), a);
++        assert_eq!(output, [91.0, 1.0, 93.0]);
++        println!("| hadd {lanes:?}; scalar store {output:?}");
++    }
++}
++
++#[cfg(target_arch = "x86_64")]
++#[test]
++fn a02_broadcasts_all_sixteen_signed_lanes() {
++    use core::arch::x86_64::*;
++    if !std::is_x86_feature_detected!("avx512f") { return; }
++    for value in [i32::MIN, -1, 0, 17, i32::MAX] {
++        let lanes: [i32; 16] = unsafe { core::mem::transmute(_mm512_set1_epi32(value)) };
++        assert_eq!(lanes, [value; 16]);
++        println!("| broadcast {value}: {lanes:?}");
++    }
++}
+diff --git a/libs/relax/compiler/tests/std/core_constructor_temp_lifetime.rs b/libs/relax/compiler/tests/std/core_constructor_temp_lifetime.rs
+new file mode 100644
+index 0000000..597142e
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_constructor_temp_lifetime.rs
+@@ -0,0 +1,42 @@
++use std::cell::Cell;
++use std::rc::Rc;
++
++struct Probe(Rc<Cell<usize>>, String);
++impl Drop for Probe {
++    fn drop(&mut self) { self.0.set(self.0.get() + 1); }
++}
++struct Borrowed<'a>(&'a Probe);
++
++#[test]
++fn a01_variant_constructor_keeps_the_borrowed_temporary_alive() {
++    let drops = Rc::new(Cell::new(0));
++    {
++        let value = Some(&Probe(drops.clone(), "variant".into()));
++        assert_eq!(drops.get(), 0);
++        assert_eq!(value.unwrap().1, "variant");
++    }
++    assert_eq!(drops.get(), 1);
++    println!("| variant temporary drops at the end of its binding's scope");
++}
++
++#[test]
++fn a02_tuple_struct_keeps_the_borrowed_temporary_alive() {
++    let drops = Rc::new(Cell::new(0));
++    {
++        let value = Borrowed(&Probe(drops.clone(), "tuple".into()));
++        assert_eq!(drops.get(), 0);
++        assert_eq!(value.0.1, "tuple");
++    }
++    assert_eq!(drops.get(), 1);
++    println!("| tuple struct temporary drops at the end of its binding's scope");
++}
++
++#[test]
++fn a03_ordinary_calls_do_not_extend_their_arguments() {
++    fn consume(value: Borrowed<'_>) -> usize { value.0.0.get() }
++    let drops = Rc::new(Cell::new(0));
++    let during_call = consume(Borrowed(&Probe(drops.clone(), "call".into())));
++    assert_eq!(during_call, 0);
++    assert_eq!(drops.get(), 1);
++    println!("| ordinary call's argument drops at the end of the statement");
++}
+diff --git a/libs/relax/compiler/tests/std/core_net_identity.rs b/libs/relax/compiler/tests/std/core_net_identity.rs
+new file mode 100644
+index 0000000..0fc7320
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_net_identity.rs
+@@ -0,0 +1,37 @@
++// core::net and std::net must expose the same types, including FromStr and errors.
++use core::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
++use std::net::ToSocketAddrs;
++
++#[test]
++fn a01_addresses_keep_their_identity_across_core_and_std() {
++    let ip: std::net::IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
++    let v4: std::net::SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8080);
++    let mut v6: std::net::SocketAddrV6 = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 9090, 7, 3);
++    let socket: std::net::SocketAddr = SocketAddr::from(v4);
++    assert_eq!(socket.ip(), ip);
++    assert_eq!(socket.to_socket_addrs().unwrap().collect::<Vec<_>>(), vec![socket]);
++    assert_eq!(v6.flowinfo(), 7);
++    assert_eq!(v6.scope_id(), 3);
++    v6.set_flowinfo(u32::MAX);
++    v6.set_scope_id(u32::MAX);
++    assert_eq!(v6.flowinfo(), u32::MAX);
++    assert_eq!(v6.scope_id(), u32::MAX);
++    v6.set_flowinfo(0);
++    v6.set_scope_id(0);
++    assert_eq!(v6.flowinfo(), 0);
++    assert_eq!(v6.scope_id(), 0);
++    assert_eq!(v6.ip(), &Ipv6Addr::LOCALHOST);
++    assert_eq!(v6.port(), 9090);
++    assert_eq!("[::1%3]:9090".parse::<SocketAddr>().unwrap().to_string(), "[::1%3]:9090");
++    assert_eq!("127.0.0.1:8080".parse::<SocketAddr>().unwrap(), socket);
++    let error: AddrParseError = "256.0.0.1".parse::<Ipv4Addr>().unwrap_err();
++    let _: std::net::AddrParseError = error;
++    assert!(Ipv4Addr::LOCALHOST == ip);
++    assert!(ip == Ipv4Addr::LOCALHOST);
++    assert!(!(Ipv6Addr::LOCALHOST == ip));
++    let ip6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
++    assert!(Ipv6Addr::LOCALHOST == ip6);
++    assert!(ip6 == Ipv6Addr::LOCALHOST);
++    assert!(!(Ipv4Addr::LOCALHOST == ip6));
++    println!("| core and std share address types, parsing, and socket resolution");
++}
+diff --git a/libs/relax/compiler/tests/std/core_option_map_or_default.rs b/libs/relax/compiler/tests/std/core_option_map_or_default.rs
+new file mode 100644
+index 0000000..5a0785c
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_option_map_or_default.rs
+@@ -0,0 +1,16 @@
++// Used by agent-core; compare with rustc through core_diff.sh.
++#[test]
++fn a01_maps_once_and_defaults_without_calling_the_closure() {
++    let calls = std::cell::Cell::new(0);
++    let value = Some(7).map_or_default(|n| {
++        calls.set(calls.get() + 1);
++        n * 3
++    });
++    assert_eq!((value, calls.get()), (21, 1));
++    let empty: Option<u32> = None;
++    let default: String = empty.map_or_default(|_| panic!("None must not map"));
++    assert!(default.is_empty());
++    let owned = String::from("owned");
++    assert_eq!(Some(()).map_or_default(move |_| owned), "owned");
++    println!("| map_or_default maps once, consumes captures, and defaults lazily");
++}
+diff --git a/libs/relax/compiler/tests/std/core_partial_eq_indirect.rs b/libs/relax/compiler/tests/std/core_partial_eq_indirect.rs
+new file mode 100644
+index 0000000..4309168
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_partial_eq_indirect.rs
+@@ -0,0 +1,53 @@
++#[derive(Default)]
++struct Metadata { name: Option<String>, updated_at: Option<f64> }
++fn metadata(value: &Metadata) -> impl PartialEq + '_ { (&value.name, value.updated_at) }
++fn opaque<T: PartialEq>(value: T) -> impl PartialEq { value }
++
++#[test]
++fn a01_indirect_opaque_tuples_compare_their_values() {
++    let first = Metadata { name: Some("Title".into()), ..Default::default() };
++    let renamed = Metadata { name: Some("Renamed".into()), ..Default::default() };
++    let same = Metadata { name: Some("Title".into()), ..Default::default() };
++    assert!(metadata(&first) != metadata(&renamed));
++    assert!(metadata(&first) == metadata(&same));
++    println!("| indirect opaque tuple uses value equality");
++}
++
++#[test]
++fn a02_large_float_arrays_preserve_inequality_and_nan() {
++    let zero = opaque([0.0f64; 128]);
++    let one = opaque([1.0f64; 128]);
++    assert!(zero != one);
++    assert!(zero == opaque([0.0f64; 128]));
++    let nan = opaque([f64::NAN; 128]);
++    assert!(nan != nan);
++    println!("| indirect arrays preserve floating-point equality");
++}
++
++struct Key { value: u8, incidental: u8 }
++impl PartialEq for Key {
++    fn eq(&self, other: &Self) -> bool { self.value == other.value }
++}
++#[test]
++fn a03_opaque_values_respect_custom_equality() {
++    let a = Key { value: 1, incidental: 2 };
++    let b = Key { value: 1, incidental: 3 };
++    assert_ne!(a.incidental, b.incidental);
++    assert!(opaque(a) == opaque(b));
++    println!("| assertions respect the type's PartialEq implementation");
++}
++
++#[test]
++fn a04_nested_references_compare_the_referenced_values() {
++    assert!(opaque(&"a") != opaque(&"b"));
++    assert!(opaque(&"a") == opaque(&"a"));
++    let first = String::from("value");
++    let same = String::from("value");
++    let different = String::from("changed");
++    let first_ref = &first;
++    let same_ref = &same;
++    let different_ref = &different;
++    assert!(opaque(&first_ref) == opaque(&same_ref));
++    assert!(opaque(&first_ref) != opaque(&different_ref));
++    println!("| nested references preserve value equality");
++}
+diff --git a/libs/relax/compiler/tests/std/core_slice_split_at_unchecked.rs b/libs/relax/compiler/tests/std/core_slice_split_at_unchecked.rs
+new file mode 100644
+index 0000000..5f3cfd0
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_slice_split_at_unchecked.rs
+@@ -0,0 +1,29 @@
++#[test]
++fn a01_splits_at_both_ends_and_the_middle() {
++    let bytes = b"en-US";
++    for mid in [0, 2, bytes.len()] {
++        let (left, right) = unsafe { bytes.split_at_unchecked(mid) };
++        assert_eq!(left, &bytes[..mid]);
++        assert_eq!(right, &bytes[mid..]);
++        println!("| split {mid}: {left:?} {right:?}");
++    }
++}
++
++#[test]
++fn a02_mutable_splits_keep_both_parts_disjoint() {
++    for mid in [0, 2, 4] {
++        let mut values = [1, 2, 3, 4];
++        let (left, right) = unsafe { values.split_at_mut_unchecked(mid) };
++        for value in left { *value += 10; }
++        for value in right { *value += 20; }
++        let expected = match mid {
++            0 => [21, 22, 23, 24],
++            2 => [11, 12, 23, 24],
++            4 => [11, 12, 13, 14],
++            _ => unreachable!(),
++        };
++        assert_eq!(values, expected);
++    }
++    let (left, right) = unsafe { <[u8]>::split_at_mut_unchecked(&mut [], 0) };
++    assert!(left.is_empty() && right.is_empty());
++}
+diff --git a/libs/relax/compiler/tests/std/core_str_utf8_associated.rs b/libs/relax/compiler/tests/std/core_str_utf8_associated.rs
+new file mode 100644
+index 0000000..e29edce
+--- /dev/null
++++ b/libs/relax/compiler/tests/std/core_str_utf8_associated.rs
+@@ -0,0 +1,22 @@
++// Associated str UTF-8 constructors: const use, validation, and mutable views.
++const CHECKED: &str = match str::from_utf8(b"\xc3\xa9") { Ok(s) => s, Err(_) => panic!("valid UTF-8") };
++const UNCHECKED: &str = unsafe { str::from_utf8_unchecked(b"hello") };
++
++#[test]
++fn a01_associated_constructors_validate_and_work_in_constants() {
++    assert_eq!(CHECKED, "é");
++    assert_eq!(UNCHECKED, "hello");
++    assert!(str::from_utf8(&std::hint::black_box([0xff])).is_err());
++    println!("| associated UTF-8 constructors preserve validation and constants");
++}
++
++#[test]
++fn a02_mutable_constructors_borrow_the_original_bytes() {
++    let mut bytes = *b"ab";
++    str::from_utf8_mut(&mut bytes).unwrap().make_ascii_uppercase();
++    assert_eq!(bytes, *b"AB");
++    unsafe { str::from_utf8_unchecked_mut(&mut bytes) }.make_ascii_lowercase();
++    assert_eq!(bytes, *b"ab");
++    assert!(str::from_utf8_mut(&mut std::hint::black_box([0xff])).is_err());
++    println!("| associated mutable UTF-8 constructors update their input");
++}
+diff --git a/libs/relax/front/src/native.rs b/libs/relax/front/src/native.rs
+index 507b8a4..1e030c8 100644
+--- a/libs/relax/front/src/native.rs
++++ b/libs/relax/front/src/native.rs
+@@ -81,6 +81,15 @@ pub struct Built {
+
+ const BUILD_DEPS: [&str; 6] = ["cc", "cmake", "pkg_config", "bindgen", "vcpkg", "nasm_rs"];
+
++/// An exported accessor for a native symbol whose own visibility may be hidden.
++/// Hex keeps arbitrary assembler names out of the generated C identifiers.
++pub fn address_name(name: &[u8]) -> String {
++    use std::fmt::Write;
++    let mut out = String::from("__relax_native_address_");
++    for byte in name { write!(out, "{byte:02x}").unwrap(); }
++    out
++}
++
+ /// Why a package's build script is native, if it is.
+ pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<String> {
+     let (dir, name, _) = &g.pkg[bs.krate];
+@@ -196,7 +205,7 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
+     let flags: Vec<&String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").collect();
+
+     // ---- the key
+-    let mut h = fnv(b"native-link-v12", 0xcbf29ce484222325);
++    let mut h = fnv(b"native-link-v13", 0xcbf29ce484222325);
+     h = fnv(req.triple.as_bytes(), h);
+     h = fnv(&selection_key(&script_pkgs, &lib_pkgs).to_le_bytes(), h);
+     for f in &flags {
+@@ -673,23 +682,51 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
+         // Force each exported symbol through normal archive extraction. A merged
+         // archive may contain the same object twice; --whole-archive would load
+         // both copies and fail with duplicate definitions.
+-        let mut symbols = std::collections::BTreeSet::new();
++        let mut symbols = std::collections::BTreeMap::new();
+         for archive in archives {
+-            let out = Command::new("nm").args(["-g", "--defined-only", "-P", archive])
++            let out = Command::new("nm").args(["-g", "--defined-only", "--format=sysv", archive])
+                 .output().map_err(|e| format!("--allow-c: cannot read archive symbols: {e}"))?;
+             if !out.status.success() {
+                 return Err(format!("--allow-c: nm failed for {archive}: {}", String::from_utf8_lossy(&out.stderr)));
+             }
+             for line in String::from_utf8_lossy(&out.stdout).lines() {
+-                let mut words = line.split_whitespace();
+-                if let (Some(name), Some(kind)) = (words.next(), words.next()) {
+-                    if kind.len() == 1 && !name.ends_with(':') {
+-                        symbols.insert(name.to_string());
+-                    }
++                let columns: Vec<_> = line.split('|').map(str::trim).collect();
++                if columns.len() >= 4 && columns[2].len() == 1 && !columns[0].is_empty() {
++                    symbols.insert(columns[0].to_string(), columns[3] == "TLS");
++                }
++            }
++        }
++        if cfg!(target_os = "linux") {
++            // Rust's static link can refer to hidden archive symbols, whereas dlsym cannot.
++            // Export address accessors without changing the symbols' own visibility. The TLS
++            // declaration must match the definition for the accessor object to link. Versioned
++            // and other names that need assembler directives stay on the ordinary dlsym path.
++            let source_path = format!("{tmp}.addresses.c");
++            let object_path = format!("{tmp}.addresses.o");
++            let mut source = String::new();
++            for (i, (name, tls)) in symbols.iter().enumerate() {
++                if !name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b"_.".contains(&b))
++                    || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.$".contains(&b))
++                {
++                    continue;
+                 }
++                use std::fmt::Write;
++                let escaped = name.bytes().map(|b| format!("\\{b:03o}")).collect::<String>();
++                let storage = if *tls { "__thread " } else { "" };
++                writeln!(source, "extern {storage}char s{i}[] __asm__(\"{escaped}\");").unwrap();
++                writeln!(source, "__attribute__((visibility(\"default\"))) void *{}(void) {{ return s{i}; }}", address_name(name.as_bytes())).unwrap();
++            }
++            std::fs::write(&source_path, source).map_err(|e| format!("{source_path}: {e}"))?;
++            let compile = Command::new(cc()).args(["-fPIC", "-c", &source_path, "-o", &object_path]).output();
++            let _ = std::fs::remove_file(&source_path);
++            let compile = compile.map_err(|e| format!("--allow-c: cannot compile native address accessors: {e}"))?;
++            if !compile.status.success() {
++                let _ = std::fs::remove_file(&object_path);
++                return Err(format!("--allow-c: compiling native address accessors failed: {}", String::from_utf8_lossy(&compile.stderr)));
+             }
++            cmd.arg(&object_path);
+         }
+-        let args = symbols.into_iter().map(|name| {
++        let args = symbols.keys().map(|name| {
+             format!("--undefined=\"{}\"\n", name.replace('\\', "\\\\").replace('"', "\\\""))
+         }).collect::<String>();
+         std::fs::write(&symbols_path, args).map_err(|e| format!("{symbols_path}: {e}"))?;
+@@ -748,6 +785,7 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
+         let _ = std::fs::remove_file(&stubs_path);
+     }
+     let _ = std::fs::remove_file(&symbols_path);
++    let _ = std::fs::remove_file(format!("{tmp}.addresses.o"));
+     if linked.is_err() {
+         let _ = std::fs::remove_file(&tmp);
+     }

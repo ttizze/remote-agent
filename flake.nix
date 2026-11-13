@@ -25,6 +25,7 @@
         kani = pkgs.callPackage ./tools/kani/package.nix { };
         cargo = pkgs.callPackage ./tools/cargo/package.nix { };
         maestro = pkgs.callPackage ./tools/maestro/package.nix { };
+        relax = pkgs.callPackage ./tools/relax/package.nix { };
       } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
         node-runtime = pkgs.callPackage ./tools/node-runtime/package.nix { };
       });
