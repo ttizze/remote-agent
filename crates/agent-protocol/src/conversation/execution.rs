@@ -19,6 +19,31 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
         Event::ExecutionLost { attempt, error } => {
             provider(state, attempt, Observation::Failed(Some(error)), context)
         }
+        Event::ResumeDeferred { attempt, at, error } => {
+            let Some(execution) = state
+                .attempts
+                .values()
+                .find(|execution| execution.id == attempt)
+            else {
+                return Step::default();
+            };
+            let Some(turn) = state
+                .turns
+                .get(&execution.turn)
+                .filter(|turn| turn.state == TurnState::Running { interrupt: None })
+            else {
+                return Step::default();
+            };
+            Step {
+                changes: vec![Change::Turn(Turn {
+                    state: TurnState::Waiting(Wait::Retry { at }),
+                    error,
+                    ..turn.clone()
+                })],
+                outcome: Outcome::Accepted,
+                ..Step::default()
+            }
+        }
         Event::Title(name) => {
             if !state.thread.name.trim().is_empty() || name.trim().is_empty() {
                 return Step::default();
@@ -242,6 +267,7 @@ fn wake(state: &State, context: Context) -> Step {
         actions: vec![Action::Resume {
             attempt,
             cwd: cwd.clone(),
+            at,
             error: turn.error.clone(),
         }],
         outcome: Outcome::Accepted,
@@ -703,7 +729,13 @@ fn after_completion(state: &State, turn: &Turn, mut result: Step, context: Conte
         // preserves its previous hold and grants a bypass only to the chosen input.
         result.changes.push(Change::Thread(state.thread.clone()));
         let next = state.apply(&result.changes);
+        if next.queued_head().is_none_or(|first| &first.id != id) {
+            return commands::append_advance(state, result, context);
+        }
         let delivery = commands::dispatch(&next, id, context, DeliveryMode::Direct);
+        if delivery.actions.is_empty() {
+            return commands::append_advance(state, result, context);
+        }
         result.changes.extend(delivery.changes);
         result.actions.extend(delivery.actions);
         return result;

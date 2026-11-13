@@ -4,9 +4,12 @@ use super::TAIL_CHARS;
 use std::{collections::VecDeque, sync::Arc};
 use vte::ansi::{self, Attr, Color, Handler, NamedColor};
 
+#[cfg(test)]
+std::thread_local! { pub(super) static PRINTED_UNITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 const ESC: &str = "\x1b";
 
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Style {
     bold: bool,
     dim: bool,
@@ -91,12 +94,12 @@ impl Handler for Style {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Cell {
     unit: u16,
     style: Arc<Style>,
 }
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct Line {
     cells: VecDeque<Cell>,
     runs: usize,
@@ -111,6 +114,14 @@ impl Line {
             self.runs += 1;
         }
         self.cells.push_back(cell);
+    }
+    fn replace(&mut self, index: usize, cell: Cell) {
+        let edges = |style: &Arc<Style>| {
+            usize::from(index > 0 && self.cells[index - 1].style != *style)
+                + usize::from(index + 1 < self.cells.len() && self.cells[index + 1].style != *style)
+        };
+        self.runs = self.runs + edges(&cell.style) - edges(&self.cells[index].style);
+        self.cells[index] = cell;
     }
     fn recount(&mut self) {
         let mut previous = None;
@@ -184,8 +195,10 @@ fn line_text(line: &Line) -> String {
     text
 }
 
+#[derive(Debug, Clone)]
 struct Screen {
     settled: String,
+    settled_units: usize,
     lines: VecDeque<Line>,
     row: usize,
     col: usize,
@@ -197,6 +210,7 @@ impl Default for Screen {
     fn default() -> Self {
         Self {
             settled: String::new(),
+            settled_units: 0,
             lines: [Line::default()].into(),
             row: 0,
             col: 0,
@@ -213,10 +227,13 @@ impl Screen {
     }
     fn scroll(&mut self) -> usize {
         let line = self.lines.pop_front().expect("live line");
-        self.settled.push_str(&line_text(&line));
+        let text = line_text(&line);
+        self.settled_units += text.encode_utf16().count() + 1;
+        self.settled.push_str(&text);
         self.settled.push('\n');
-        if self.settled.encode_utf16().count() > 2 * TAIL_CHARS {
+        if self.settled_units > 2 * TAIL_CHARS {
             self.settled = tail(&self.settled).0;
+            self.settled_units = self.settled.encode_utf16().count();
             self.dropped = true;
         }
         self.row -= 1;
@@ -288,6 +305,7 @@ impl Screen {
             3 => {
                 self.dropped |= !self.settled.is_empty();
                 self.settled.clear();
+                self.settled_units = 0;
             }
             _ => {}
         }
@@ -295,6 +313,8 @@ impl Screen {
 }
 impl vte::Perform for Screen {
     fn print(&mut self, ch: char) {
+        #[cfg(test)]
+        PRINTED_UNITS.set(PRINTED_UNITS.get() + ch.len_utf16());
         if ('\u{80}'..='\u{9f}').contains(&ch) {
             return;
         }
@@ -314,8 +334,7 @@ impl vte::Perform for Screen {
             if self.col == line.cells.len() {
                 line.push(cell);
             } else {
-                line.cells[self.col] = cell;
-                line.recount();
+                line.replace(self.col, cell);
             }
             self.col += 1;
         }
@@ -447,95 +466,102 @@ fn tail(text: &str) -> (String, bool) {
     (format!("{prefix}{}", &text[start..]), true)
 }
 
-pub(super) struct Fold {
-    pub text: String,
-    pub resume: String,
-    pub truncated: bool,
+#[derive(Debug, Clone, Default)]
+pub(super) struct Buffer {
+    screen: Screen,
+    pending: Vec<u8>,
 }
-pub(super) fn fold(input: &str) -> Fold {
-    let mut screen = Screen::default();
-    let mut parser = vte::Parser::new();
-    // T3 terminates otherwise-hidden string escapes at a newline too.
-    for part in input.split_inclusive('\n') {
-        let text = part.strip_suffix('\n').unwrap_or(part);
-        parser.advance(&mut screen, text.as_bytes());
-        if part.ends_with('\n') {
-            let pending = parser.pending_input();
-            if pending.starts_with(b"\x1b")
-                && pending.get(1).is_some_and(|byte| b"]PX_^".contains(byte))
-            {
-                parser.advance(&mut screen, b"\x1b\\");
+impl Buffer {
+    pub fn append(&mut self, input: &str) {
+        let screen = &mut self.screen;
+        let mut parser = vte::Parser::new();
+        parser.advance(screen, &self.pending);
+        // T3 terminates otherwise-hidden string escapes at a newline too.
+        for part in input.split_inclusive('\n') {
+            let text = part.strip_suffix('\n').unwrap_or(part);
+            parser.advance(screen, text.as_bytes());
+            if part.ends_with('\n') {
+                let pending = parser.pending_input();
+                if pending.starts_with(b"\x1b")
+                    && pending.get(1).is_some_and(|byte| b"]PX_^".contains(byte))
+                {
+                    parser.advance(screen, b"\x1b\\");
+                }
+                parser.advance(screen, b"\n");
             }
-            parser.advance(&mut screen, b"\n");
+        }
+        self.pending = parser.pending_input();
+        if self.pending.len() > 64 {
+            let hidden = self
+                .pending
+                .get(1)
+                .is_some_and(|byte| b"]PX_^".contains(byte));
+            let escaped = self.pending.ends_with(b"\x1b");
+            self.pending.truncate(if hidden { 2 } else { 0 });
+            if hidden && escaped {
+                self.pending.push(27);
+            }
+        }
+        let mut columns: usize = screen.lines.iter().map(|line| line.cells.len()).sum();
+        while columns > TAIL_CHARS && screen.row > 0 {
+            columns -= screen.scroll();
+        }
+        let mut budget = TAIL_CHARS;
+        for row in 0..screen.lines.len() {
+            let keep = screen.lines[row].cells.len().min(budget);
+            screen.trim_line(row, keep);
+            budget -= keep;
         }
     }
-    let mut columns: usize = screen.lines.iter().map(|line| line.cells.len()).sum();
-    while columns > TAIL_CHARS && screen.row > 0 {
-        columns -= screen.scroll();
+    pub fn display(&self) -> (String, bool) {
+        let screen = &self.screen;
+        let (settled, cut) = tail(&screen.settled);
+        let window = screen
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (text, window_cut) = tail(&(settled + &window));
+        (text, screen.dropped || cut || window_cut)
     }
-    let mut budget = TAIL_CHARS;
-    for row in 0..screen.lines.len() {
-        let keep = screen.lines[row].cells.len().min(budget);
-        screen.trim_line(row, keep);
-        budget -= keep;
-    }
-    let (settled, cut) = tail(&screen.settled);
-    let window = screen
-        .lines
-        .iter()
-        .map(line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let (text, window_cut) = tail(&(settled + &window));
-    let reachable = text.bytes().filter(|byte| *byte == b'\n').take(63).count();
-    let last = screen.lines.len() - 1;
-    let go_to = |row: usize, col: usize| {
-        let up = last.saturating_sub(row).min(reachable);
-        format!(
-            "{}{ESC}[{}G",
+    pub fn resume(&self) -> String {
+        let screen = &self.screen;
+        let (text, _) = self.display();
+        let reachable = text.bytes().filter(|byte| *byte == b'\n').take(63).count();
+        let last = screen.lines.len() - 1;
+        let go_to = |row: usize, col: usize| {
+            let up = last.saturating_sub(row).min(reachable);
+            format!(
+                "{}{ESC}[{}G",
+                if up > 0 {
+                    format!("{ESC}[{up}A")
+                } else {
+                    String::new()
+                },
+                col + 1
+            )
+        };
+        let mut resume = text.clone();
+        if let Some((row, col)) = screen.saved {
+            resume.push_str(&go_to(row, col));
+            resume.push_str(&format!("{ESC}7"));
+            let up = last.saturating_sub(row).min(reachable);
             if up > 0 {
-                format!("{ESC}[{up}A")
-            } else {
-                String::new()
-            },
-            col + 1
-        )
-    };
-    let mut resume = text.clone();
-    if let Some((row, col)) = screen.saved {
-        resume.push_str(&go_to(row, col));
-        resume.push_str(&format!("{ESC}7"));
-        let up = last.saturating_sub(row).min(reachable);
-        if up > 0 {
-            resume.push_str(&format!("{ESC}[{up}B"));
+                resume.push_str(&format!("{ESC}[{up}B"));
+            }
         }
-    }
-    if screen.saved.is_some()
-        || screen.row < last
-        || screen.col != screen.lines[screen.row].cells.len()
-    {
-        resume.push_str(&go_to(screen.row, screen.col));
-    }
-    let pen = screen.pen.pen();
-    if !pen.is_empty() {
-        resume.push_str(&sgr(&pen));
-    }
-    let pending = String::from_utf8(parser.pending_input()).unwrap_or_default();
-    if pending.len() <= 64 {
-        resume.push_str(&pending);
-    } else if pending
-        .as_bytes()
-        .get(1)
-        .is_some_and(|byte| b"]PX_^".contains(byte))
-    {
-        resume.push_str(&pending[..2]);
-        if pending.ends_with('\x1b') {
-            resume.push('\x1b');
+        if screen.saved.is_some()
+            || screen.row < last
+            || screen.col != screen.lines[screen.row].cells.len()
+        {
+            resume.push_str(&go_to(screen.row, screen.col));
         }
-    }
-    Fold {
-        text,
-        resume,
-        truncated: screen.dropped || cut || window_cut,
+        let pen = screen.pen.pen();
+        if !pen.is_empty() {
+            resume.push_str(&sgr(&pen));
+        }
+        resume.push_str(std::str::from_utf8(&self.pending).unwrap_or(""));
+        resume
     }
 }

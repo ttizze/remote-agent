@@ -1633,7 +1633,7 @@ mod tests {
                 claude.into(),
                 adapter.clone().into(),
             ],
-            crate::ProjectStore::new(root.path().join("worktrees.json")),
+            root.path().join("worktrees.json"),
         );
         let session = service.open_session();
         tokio::time::pause();

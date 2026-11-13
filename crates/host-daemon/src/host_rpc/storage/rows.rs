@@ -697,6 +697,31 @@ pub(super) fn write(
                 .map_err(failure)?;
             return Ok(());
         }
+        Change::CancelSetup(generation) => {
+            let (mut header, counters) = header(transaction, key)?;
+            if let Some(workspace) = header
+                .details
+                .workspace
+                .as_mut()
+                .filter(|workspace| workspace.generation == *generation)
+            {
+                if let Some(setup) = &mut workspace.setup {
+                    setup.finish(
+                        agent_protocol::workspace::SetupPhase::Cancelled,
+                        None,
+                        scope.at.max(0) as u64,
+                    );
+                }
+                transaction
+                    .execute(
+                        "UPDATE threads SET body=?1 WHERE key=?2",
+                        params![codec::header(&header, &counters)?, key],
+                    )
+                    .map_err(failure)?;
+            }
+            return Ok(());
+        }
+
         Change::Binding { provider, value } => {
             if let Some(value) = value {
                 let (native, tag, covered, body) = match value {
@@ -769,14 +794,19 @@ pub(super) fn write(
 
 pub(super) fn write_header(
     transaction: &Transaction<'_>,
-    key: i64,
-    id: &SessionRef,
+    scope: &WriteScope<'_>,
     state: &State,
-    sequence: u64,
-    at: i64,
     admitted: Option<(decision::records::Selection, Option<String>)>,
-) -> Result<Row, String> {
-    let (mut header, _) = header(transaction, key)?;
+    previous: Option<&Header>,
+) -> Result<Option<Row>, String> {
+    let &WriteScope {
+        key,
+        id,
+        sequence,
+        at,
+        ..
+    } = scope;
+    let (mut header, counters) = header(transaction, key)?;
     let external_status = (state.active_turn().is_none()
         && (header.details.activity.unobserved_running()
             || matches!(
@@ -786,7 +816,6 @@ pub(super) fn write_header(
             )))
     .then_some(header.details.activity.status);
     header.state = state.thread.clone();
-    header.details.updated_at = at;
     if let Some((selection, preview)) = admitted {
         header.details.selection = selection;
         if header.details.preview.is_none() {
@@ -888,6 +917,21 @@ pub(super) fn write_header(
     {
         header.details.activity.completion = None;
     }
+    // T3 ProjectionStore advances thread.updatedAt for committed work events
+    // too. Keep that ordering; skip only an identical projection and timestamp.
+    header.details.updated_at = at;
+    if previous == Some(&header) {
+        // Counters belong to the writer, but aren't part of the public header.
+        if counters != state.counters {
+            transaction
+                .execute(
+                    "UPDATE threads SET body=?1 WHERE key=?2",
+                    params![codec::header(&header, &state.counters)?, key],
+                )
+                .map_err(failure)?;
+        }
+        return Ok(None);
+    }
     transaction
         .execute(
             "UPDATE threads SET seq=?1,cwd=?2,updated_at=?3,body=?4 WHERE key=?5",
@@ -900,12 +944,12 @@ pub(super) fn write_header(
             ],
         )
         .map_err(failure)?;
-    Ok(Row {
+    Ok(Some(Row {
         key: Key::Thread(id.clone()),
         version: sequence,
         position: Position::Unordered,
         content: Content::Full(Arc::new(Record::Thread(header))),
-    })
+    }))
 }
 
 pub(super) fn hydrate(

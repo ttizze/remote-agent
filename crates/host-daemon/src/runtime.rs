@@ -2,7 +2,7 @@ use crate::command_line::StartupConfig;
 use agent_local_host::{HostLease, LocalHostRegistry};
 use agent_transport::transport::{Endpoint, Relays};
 use anyhow::{Context, Result};
-use host_daemon::{FileKeyStore, HostCredentials, HostRpcService, HostRuntime, ProjectStore};
+use host_daemon::{FileKeyStore, HostCredentials, HostRpcService, HostRuntime};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -97,8 +97,10 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         ),
     };
     let project_path = directory.join("bex-worktrees.json");
-    let projects = tokio::task::spawn_blocking(move || ProjectStore::new(project_path)).await?;
-    let service = HostRpcService::new([codex.into(), claude, deepseek], projects);
+    let service = tokio::task::spawn_blocking(move || {
+        HostRpcService::new([codex.into(), claude, deepseek], project_path)
+    })
+    .await?;
     service.set_history_scope(directory.clone(), config.isolated);
     service
         .enable_apns(

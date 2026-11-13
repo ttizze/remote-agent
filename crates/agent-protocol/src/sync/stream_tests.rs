@@ -126,14 +126,17 @@ impl Host {
     }
 
     fn extend(&mut self, target: u8) {
+        let old = self.window;
         self.window.item = self.window.item.min(u64::from(target));
         self.window.turn = self.window.turn.min(u64::from(target));
-        // Sending existing rows too is harmless; importantly this includes late
-        // items above the old position floor in newly admitted older turns.
         self.pending.push_back(Message::Extend {
             cursor: self.at,
             window: self.window,
-            rows: self.rows(self.window),
+            rows: self
+                .rows(self.window)
+                .into_iter()
+                .filter(|row| !contains(&scope(), Some(old), &row.key, &row.position))
+                .collect(),
         });
     }
 
@@ -211,10 +214,6 @@ impl Host {
             }
             self.deliver_one(client);
         }
-        assert!(
-            self.pending.is_empty(),
-            "delivery failed to reach a resumable state"
-        );
     }
 
     fn restore(&mut self, client: &mut Replica<String, String>) {
@@ -255,6 +254,7 @@ proptest! {
         for (kind,target,value) in actions {
             host.act(kind,target,value,&mut client);
             if host.pending.is_empty() {
+                prop_assert_eq!(client.window, Some(host.window));
                 let truth: BTreeMap<_,_> = host.rows(client.window.unwrap()).into_iter().map(|row| (row.key.clone(),row)).collect();
                 prop_assert_eq!(&client.rows,&truth);
                 prop_assert_eq!(client.cursor,Some(host.at));

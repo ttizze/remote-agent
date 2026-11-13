@@ -287,7 +287,19 @@ pub(super) fn write_history(
     state.counters.turn = state.counters.turn.max(counters.turn);
     state.counters.item = state.counters.item.max(counters.item);
     let updated_at = header(response, now).details.updated_at;
-    rows::write_header(transaction, key, id, &state, sequence, updated_at, None)?;
+    rows::write_header(
+        transaction,
+        &rows::WriteScope {
+            key,
+            id,
+            sequence,
+            at: updated_at,
+            process,
+        },
+        &state,
+        None,
+        None,
+    )?;
     Ok(())
 }
 
@@ -462,7 +474,7 @@ impl Storage {
             let mut state = State::new(header.state);
             state.counters.turn = turn.ordinal;
             state.counters.item = transaction.query_row("SELECT coalesce(max(position),0) FROM items WHERE thread=?1", [target_key], |row| row.get::<_,i64>(0)).map_err(failure)?.try_into().map_err(failure)?;
-            rows::write_header(&transaction, target_key, target, &state, sequence.sequence, now, None)?;
+            rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None)?;
             transaction.execute("INSERT INTO receipts(operation_id,provider,thread_id,seq,outcome) VALUES (?1,?2,?3,?4,?5)", params![target.id, target.provider.map(ProviderKind::key), target.id, integer(sequence.sequence)?, protocol::encode(Outcome::Accepted).map_err(failure)?]).map_err(failure)?;
             transaction.commit().map_err(failure)
         })

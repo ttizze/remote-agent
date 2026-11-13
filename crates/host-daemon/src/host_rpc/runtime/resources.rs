@@ -665,6 +665,7 @@ impl Runtime {
         target: &SessionRef,
         attempt: &Attempt,
         cwd: &str,
+        at: i64,
         original_error: Option<agent_protocol::execution::ExecutionError>,
     ) -> Result<(), String> {
         let _workspace = service.inner.worktree_access.read().await;
@@ -674,10 +675,24 @@ impl Runtime {
         let action = Action::Resume {
             attempt: attempt.clone(),
             cwd: cwd.to_owned(),
+            at,
             error: original_error.clone(),
         };
         if !runtime.storage.state(target)?.permits(&action) {
             return Self::cancel_unstarted_resume(service, target, attempt).await;
+        }
+        if service.require_not_updating().is_err() {
+            Self::event(
+                service,
+                target,
+                Event::ResumeDeferred {
+                    attempt: attempt.id,
+                    at,
+                    error: original_error,
+                },
+            )
+            .await?;
+            return Ok(());
         }
         let selection =
             runtime
@@ -862,6 +877,7 @@ mod tests {
             "preparing",
             "stop",
             "stop-before-start",
+            "updating",
         ] {
             use super::super::native_fixture::NativeAgent;
             use agent_protocol::{
@@ -871,10 +887,8 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
             Arc::get_mut(&mut agent).unwrap().needs_reload = case == "reload";
-            let service = HostRpcService::new(
-                [agent.backend()],
-                crate::ProjectStore::new(directory.path().join("projects.json")),
-            );
+            let service =
+                HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
             let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
             let native = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
             let response = ThreadResponse {
@@ -977,6 +991,7 @@ mod tests {
             let Action::Resume {
                 attempt,
                 cwd,
+                at,
                 error,
             } = &due.step.actions[0]
             else {
@@ -1027,11 +1042,16 @@ mod tests {
                     .await
                     .unwrap();
             }
+            if case == "updating" {
+                service.set_history_scope(directory.path().to_owned(), true);
+                service.prepare_update().await.unwrap();
+            }
             let effect = Effect {
                 target: target.clone(),
                 action: Action::Resume {
                     attempt: attempt.clone(),
                     cwd: cwd.clone(),
+                    at: *at,
                     error: error.clone(),
                 },
             };
@@ -1075,6 +1095,15 @@ mod tests {
             let state = storage.state(&target).unwrap();
             if case.starts_with("stop") {
                 assert_eq!(state.turns[&attempt.turn].state, TurnState::Interrupted);
+            } else if case == "updating" {
+                assert_eq!(
+                    state.turns[&attempt.turn].state,
+                    TurnState::Waiting(decision::Wait::Retry { at: *at })
+                );
+                assert_eq!(
+                    state.turns[&attempt.turn].error.as_ref().unwrap().message,
+                    "original overload"
+                );
             } else {
                 let TurnState::Failed(error) = &state.turns[&attempt.turn].state else {
                     panic!("unsafe resume must end without scheduling another retry")

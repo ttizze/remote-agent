@@ -7,7 +7,7 @@ impl Runtime {
         service: &HostRpcService,
         session: SessionId,
         call: &Call,
-    ) -> Result<Option<HostReply>, String> {
+    ) -> Result<Option<HostReply>, Failure> {
         let reply = match call {
             Call::SubscribeList(request) => {
                 let storage = service.inner.conversation.storage.clone();
@@ -42,12 +42,7 @@ impl Runtime {
                     .await
                 }
                 .await;
-                return Ok(Some(match result {
-                    Ok(reply) => reply,
-                    Err(error) => {
-                        Response::from_result::<(), _>(Err(storage_failure(error))).into()
-                    }
-                }));
+                return result.map(Some).map_err(storage_failure);
             }
             Call::SubscribeCommandOutput(request) => {
                 let result = (|| {
@@ -74,11 +69,9 @@ impl Runtime {
                             .inner
                             .conversation
                             .storage
-                            .state(&request.key.session)
+                            .turn_execution(&request.key.session, &item.turn)
                             .map_err(storage_failure)?
-                            .attempts
-                            .get(&item.turn)
-                            .map(|attempt| attempt.id)
+                            .map(|execution| execution.attempt.id)
                     } else {
                         None
                     };
@@ -106,10 +99,7 @@ impl Runtime {
                         updates,
                     })
                 })();
-                return Ok(Some(match result {
-                    Ok(reply) => reply,
-                    Err(error) => Response::from_result::<(), _>(Err(error)).into(),
-                }));
+                return result.map(Some);
             }
             Call::SubscribeConversation(request) => {
                 let result = async {
@@ -134,7 +124,7 @@ impl Runtime {
                         .map_err(storage_failure)
                 }
                 .await;
-                return Ok(Some(Self::opened(&request.session, result)?));
+                return Ok(Some(Self::opened(&request.session, result?)?));
             }
             Call::CreateConversation(request) => {
                 let result = async {
@@ -159,7 +149,7 @@ impl Runtime {
                         .map_err(storage_failure)
                 }
                 .await;
-                return Ok(Some(Self::opened(&request.session, result)?));
+                return Ok(Some(Self::opened(&request.session, result?)?));
             }
             Call::ForkConversation(request) => {
                 let result = async {
@@ -181,30 +171,36 @@ impl Runtime {
                     Ok::<_, Failure>(request.target.clone())
                 }
                 .await;
-                Response::from_result(result).into()
+                Response::Success {
+                    result: result?.into(),
+                }
+                .into()
             }
-            Call::ChangeConversation(request) => {
-                Response::from_result(Self::change(service, request).await).into()
+            Call::ChangeConversation(request) => Response::Success {
+                result: Self::change(service, request).await?.into(),
             }
-            Call::CheckConversationCommands(request) => Response::from_result(
-                service
+            .into(),
+            Call::CheckConversationCommands(request) => Response::Success {
+                result: (service
                     .inner
                     .conversation
                     .storage
                     .receipts(&request.session, &request.operations)
-                    .map_err(storage_failure),
-            )
+                    .map_err(storage_failure)?)
+                .into(),
+            }
             .into(),
-            Call::ExtendConversation(request) => Response::from_result(
-                service
+            Call::ExtendConversation(request) => Response::Success {
+                result: (service
                     .inner
                     .conversation
                     .owners
                     .read(&request.session, session, request.subscription, None)
                     .await
                     .map(|_| agent_protocol::models::Empty {})
-                    .map_err(storage_failure),
-            )
+                    .map_err(storage_failure)?)
+                .into(),
+            }
             .into(),
             Call::HydrateConversation(request) => {
                 let result = async {
@@ -234,7 +230,10 @@ impl Runtime {
                     Ok::<_, Failure>(records::Hydrated { cursor: read.cursor, version, transfer })
                 }
                 .await;
-                Response::from_result(result).into()
+                Response::Success {
+                    result: result?.into(),
+                }
+                .into()
             }
             _ => return Ok(None),
         };
@@ -243,25 +242,22 @@ impl Runtime {
 
     fn opened(
         target: &SessionRef,
-        result: Result<super::super::owners::Opened, Failure>,
-    ) -> Result<HostReply, String> {
-        match result {
-            Ok(opened) => Ok(HostReply {
-                initial: protocol::response_frame(Response::Success {
-                    result: records::Opened {
-                        session: target.clone(),
-                        subscription_id: opened.subscription.id,
-                        initial: opened.initial,
-                    }
-                    .into(),
-                })
-                .map_err(|error| error.to_string())?,
-                updates: Some(super::super::routing::HostSubscription::Conversation(
-                    opened.subscription,
-                )),
-            }),
-            Err(error) => Ok(Response::from_result::<(), _>(Err(error)).into()),
-        }
+        opened: super::super::owners::Opened,
+    ) -> Result<HostReply, Failure> {
+        Ok(HostReply {
+            initial: protocol::response_frame(Response::Success {
+                result: records::Opened {
+                    session: target.clone(),
+                    subscription_id: opened.subscription.id,
+                    initial: opened.initial,
+                }
+                .into(),
+            })
+            .map_err(|error| storage_failure(error.to_string()))?,
+            updates: Some(super::super::routing::HostSubscription::Conversation(
+                opened.subscription,
+            )),
+        })
     }
 
     async fn create(service: &HostRpcService, request: &records::Create) -> Result<(), Failure> {
@@ -373,6 +369,19 @@ impl Runtime {
         service: &HostRpcService,
         target: &SessionRef,
     ) -> Result<(), Failure> {
+        if service
+            .inner
+            .conversation
+            .storage
+            .native_owner(target)
+            .map_err(storage_failure)?
+            .is_some_and(|owner| owner != *target)
+        {
+            return Err(Failure::new(
+                "native_session_bound",
+                "This native session belongs to another conversation",
+            ));
+        }
         if service
             .inner
             .conversation

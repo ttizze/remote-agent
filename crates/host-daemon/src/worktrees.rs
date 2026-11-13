@@ -180,23 +180,58 @@ impl Worktrees {
 
     /// Roll back a checkout, including its branch, made for a session start
     /// that failed before any conversation recorded it.
-    pub(crate) async fn discard(&self, cwd: String) -> Result<()> {
+    pub(crate) async fn discard(&self, cwd: String, expected_branch: Option<String>) -> Result<()> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
-            let (target, root) = state
+            let owned = state
                 .workspace_roots
                 .iter()
                 .filter(|(target, _)| Path::new(&cwd).starts_with(target))
                 .max_by_key(|(target, _)| target.len())
-                .map(|(target, root)| (target.clone(), root.clone()))
-                .context("Bexが作成したワークツリーではありません。")?;
-            let branch = crate::git::text(Path::new(&target), &["branch", "--show-current"])?;
-            remove_checkout(Path::new(&root), Path::new(&target), branch.trim())?;
+                .map(|(target, root)| (target.clone(), root.clone()));
+            let Some((target, root)) = owned else {
+                if !Path::new(&cwd).exists() {
+                    return Ok(());
+                }
+                anyhow::bail!("Bexが作成したワークツリーではありません。");
+            };
+            let root = Path::new(&root);
+            let listing = crate::git::text(root, &["worktree", "list", "--porcelain", "-z"])?;
+            let registered = listing
+                .split("\0\0")
+                .any(|entry| worktree_path(entry) == Some(Path::new(&target)));
+            let branch = if Path::new(&target).exists() {
+                let actual = crate::git::text(Path::new(&target), &["branch", "--show-current"])?;
+                let actual = actual.trim().to_owned();
+                anyhow::ensure!(
+                    expected_branch
+                        .as_ref()
+                        .is_none_or(|expected| expected == &actual),
+                    "prepared worktree branch changed"
+                );
+                actual
+            } else {
+                expected_branch.context("cancelled checkout branch is missing")?
+            };
+            if registered {
+                remove_linked_worktree(root, Path::new(&target), true)?;
+            } else {
+                anyhow::ensure!(
+                    !Path::new(&target).exists(),
+                    "prepared worktree is no longer registered"
+                );
+            }
+            let reference = format!("refs/heads/{branch}");
+            let refs =
+                crate::git::text(root, &["for-each-ref", "--format=%(refname)", &reference])?;
+            if refs.lines().any(|name| name == reference) {
+                crate::git::text(root, &["branch", "-D", &branch])?;
+            }
             state.workspace_roots.remove(&target);
             save(&path, &state)?;
-            remove_session_container(Path::new(&target), Path::new(&root));
+            remove_session_container(Path::new(&target), root);
             Ok(())
         })
         .await?
@@ -1261,7 +1296,10 @@ mod tests {
             .trim()
             .to_owned();
         fs::write(cwd.join("partial.txt"), "written before the start failed").unwrap();
-        store.discard(cwd.to_str().unwrap().into()).await.unwrap();
+        store
+            .discard(cwd.to_str().unwrap().into(), None)
+            .await
+            .unwrap();
         assert!(!cwd.exists());
         assert!(
             !cwd.parent().unwrap().exists(),
@@ -1269,9 +1307,41 @@ mod tests {
         );
         assert!(crate::git::text(&root, &["rev-parse", "--verify", "--quiet", &branch]).is_err());
         assert!(store.list().await.unwrap().is_empty());
+        store
+            .discard(cwd.to_str().unwrap().into(), Some(branch))
+            .await
+            .unwrap();
+        let partial = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let branch = crate::git::text(&partial, &["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        crate::git::text(
+            &root,
+            &["worktree", "remove", "--force", partial.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(crate::git::text(&root, &["rev-parse", "--verify", "--quiet", &branch]).is_ok());
+        store
+            .discard(partial.to_str().unwrap().into(), Some(branch.clone()))
+            .await
+            .unwrap();
+        assert!(crate::git::text(&root, &["rev-parse", "--verify", "--quiet", &branch]).is_err());
+        assert!(store.list().await.unwrap().is_empty());
         assert!(
-            store.discard(cwd.to_str().unwrap().into()).await.is_err(),
-            "only recorded checkouts can be discarded"
+            store
+                .discard(root.to_str().unwrap().into(), None)
+                .await
+                .is_err(),
+            "an existing unowned folder must be preserved"
         );
     }
 

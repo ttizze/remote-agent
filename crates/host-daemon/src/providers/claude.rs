@@ -1512,7 +1512,7 @@ impl Worker {
         if let Some(path) = outcome.output_path
             && let Ok(output) = read_tool_output_tail(path).await
         {
-            let omitted = output.sequence != 0;
+            let omitted = output.truncated;
             let mut body =
                 native::tool_result_body(item.body(), &Value::String(output.text), &Value::Null);
             if let ItemBody::CommandExecution { output_omitted, .. } = &mut body {
@@ -3220,6 +3220,52 @@ mod execution_tests {
         };
         (router, session, worker)
     }
+    #[tokio::test]
+    async fn background_completion_marks_only_actually_truncated_output() {
+        for text in ["short 日".into(), "日".repeat(100_000)] {
+            let (observed, session, mut worker) = routed_worker();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &text).unwrap();
+            worker
+                .change(SessionChange::Item {
+                    turn_id: "turn".into(),
+                    item: Arc::new(Item::new(
+                        "command".into(),
+                        ItemStatus::Running,
+                        ItemBody::CommandExecution {
+                            command: "echo output".into(),
+                            cwd: None,
+                            output: String::new(),
+                            output_omitted: false,
+                            exit_code: None,
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            let outcome = native::task_outcome(
+                Some("command"),
+                Some("completed"),
+                Some("done"),
+                file.path().to_str(),
+            )
+            .unwrap();
+            assert!(worker.complete_background(&outcome).await.unwrap());
+            let turn = observed.current_turn(&session, "turn").unwrap();
+            let item = turn
+                .items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|item| item.id.as_str() == "command")
+                .unwrap();
+            assert!(
+                matches!(item.body(), ItemBody::CommandExecution { output, output_omitted, .. } if text.ends_with(output) && *output_omitted == (text.encode_utf16().count() > agent_protocol::sync::TAIL_CHARS))
+            );
+            assert_eq!(item.status, ItemStatus::Completed);
+        }
+    }
+
     #[tokio::test]
     async fn sdk_completion_and_input_echo_assign_the_actual_turn() {
         let path = std::env::var_os("PATH");

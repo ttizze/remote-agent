@@ -265,7 +265,7 @@ async fn history_extensions_arrive_on_the_stream_before_later_commits() {
 #[tokio::test]
 async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
     fn stream(bytes: Arc<AtomicUsize>) -> (Subscriber, Subscription) {
-        let (messages, receiver) = mpsc::channel(4);
+        let (messages, receiver) = mpsc::channel(QUEUED_MESSAGES);
         let (owner, _input) = mpsc::unbounded_channel();
         let id = Uuid::new_v4();
         let queued_bytes = Arc::new(AtomicUsize::new(0));
@@ -306,4 +306,30 @@ async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
     assert!(second_read.recv().await.is_some());
     assert_eq!(budget.load(Relaxed), 0);
     assert_eq!(other.load(Relaxed), MAX_QUEUED_BYTES / 2);
+    // One stream must close at its own limit, before the shared 16 MiB cap.
+    let (mut over_bytes, mut closed) = stream(budget.clone());
+    over_bytes
+        .send(Vec::with_capacity(
+            STREAM_QUEUED_BYTES - std::mem::size_of::<Vec<u8>>(),
+        ))
+        .unwrap();
+    assert!(over_bytes.send(vec![1]).is_err());
+    drop(over_bytes);
+    assert!(closed.recv().await.is_some());
+    assert!(closed.recv().await.is_none());
+    assert_eq!(budget.load(Relaxed), 0);
+    let (mut over_frames, mut closed) = stream(budget.clone());
+    for _ in 0..QUEUED_MESSAGES {
+        over_frames.send(vec![1]).unwrap();
+    }
+    assert!(over_frames.send(vec![1]).is_err());
+    drop(over_frames);
+    for _ in 0..QUEUED_MESSAGES {
+        assert!(closed.recv().await.is_some());
+    }
+    assert!(closed.recv().await.is_none());
+    assert_eq!(budget.load(Relaxed), 0);
+    second.send(vec![2]).unwrap();
+    assert_eq!(second_read.recv().await.unwrap(), vec![2]);
+    assert_eq!(budget.load(Relaxed), 0);
 }

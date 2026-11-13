@@ -1515,7 +1515,7 @@ rl.on('line', line => {
                     agent: Ok(agent.clone()),
                     dictation: None,
                 }],
-                crate::ProjectStore::new(directory.path().join(name)),
+                directory.path().join(name),
             );
             service.set_history_scope(directory.path().to_owned(), true);
             service

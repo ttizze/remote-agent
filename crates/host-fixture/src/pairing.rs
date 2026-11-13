@@ -660,7 +660,8 @@ mod tests {
     #[test]
     fn list_controls_update_the_live_project_owner_and_restore_original_ids() {
         let root = tempfile::tempdir().unwrap();
-        let store = host_daemon::ProjectStore::new(root.path().join("bex-worktrees.json"));
+        let store = host_daemon::HostRpcService::new([], root.path().join("bex-worktrees.json"))
+            .fixture_projects();
         let original = vec![agent_protocol::models::Project {
             id: "original-project".into(),
             name: "Original".into(),
@@ -714,7 +715,8 @@ mod tests {
             assert_eq!(
                 route(
                     root.path(),
-                    &host_daemon::ProjectStore::new(root.path().join("bex-worktrees.json")),
+                    &host_daemon::HostRpcService::new([], root.path().join("bex-worktrees.json"))
+                        .fixture_projects(),
                     &runtime,
                     &ticket,
                     &identity,
@@ -752,7 +754,11 @@ mod tests {
                 assert_eq!(
                     route(
                         root.path(),
-                        &host_daemon::ProjectStore::new(root.path().join("bex-worktrees.json")),
+                        &host_daemon::HostRpcService::new(
+                            [],
+                            root.path().join("bex-worktrees.json")
+                        )
+                        .fixture_projects(),
                         &runtime,
                         &ticket,
                         &identity,

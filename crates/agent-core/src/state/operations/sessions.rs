@@ -162,8 +162,6 @@ pub struct ReadThread {
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub open: bool,
 }
-/// Turns an opened conversation shows first, and each older page adds.
-pub const HISTORY_WINDOW_TURNS: u32 = 10;
 impl ReadThread {
     pub fn new(thread_id: crate::session::SessionRef) -> Self {
         Self {

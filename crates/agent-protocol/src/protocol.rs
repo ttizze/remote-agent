@@ -112,7 +112,7 @@ results! {
     HandoffHistory(crate::handoff::Page),
     LiveActivity(crate::live_activity::LiveActivityRegistration),
     Browser(crate::browser::BrowserFrame),
-    Conversation(crate::conversation::records::Opened), ConversationAck(crate::conversation::records::Acknowledged), ConversationRows(Vec<crate::conversation::records::Message>),
+    Conversation(crate::conversation::records::Opened), ConversationAck(crate::conversation::records::Acknowledged),
     Threads(crate::models::ThreadList),
     Decorations(crate::operations::ListDecorations),
     ProjectScan(crate::project_import::ProjectScan),

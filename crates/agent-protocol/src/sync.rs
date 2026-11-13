@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod output;
-pub use output::{Output, OutputError, OutputUpdate, TAIL_CHARS};
+pub use output::{Output, OutputError, OutputStream, OutputUpdate, TAIL_CHARS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {

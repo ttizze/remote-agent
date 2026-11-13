@@ -47,7 +47,6 @@ pub struct WorkspacePreparation {
     pub strategy: Option<crate::workspace::WorkspaceStrategy>,
     pub generation: uuid::Uuid,
     /// The current preparation created this checkout; cancellation owns its cleanup.
-    #[serde(default)]
     pub created_worktree: bool,
     pub setup: Option<crate::workspace::WorkspaceSetup>,
     pub visible: bool,
@@ -542,19 +541,40 @@ pub fn defer(row: &mut Row) {
 }
 
 pub fn summarize(rows: &mut [Row], mut remaining: usize) -> Result<(), String> {
-    for row in rows {
+    // Keep messages inline within the page budget. Work details spend their
+    // separate budget newest-first, independent of a database's return order.
+    let mut order: Vec<_> = (0..rows.len()).collect();
+    order.sort_by_key(|index| match &rows[*index].position {
+        crate::sync::Position::Item {
+            ordinal, position, ..
+        } => std::cmp::Reverse((*ordinal, *position)),
+        _ => std::cmp::Reverse((0, 0)),
+    });
+    for index in order {
+        let row = &mut rows[index];
         let value = match &row.content {
             crate::sync::Content::Full(value) | crate::sync::Content::Summary(value) => value,
         };
-        if let Record::Item(item) = value.as_ref() {
-            let bytes = crate::protocol::encode(item.content.as_ref())
-                .map_err(|error| error.to_string())?
-                .len();
-            if bytes > remaining {
+        let Record::Item(item) = value.as_ref() else {
+            continue;
+        };
+        let bytes = crate::protocol::encode(item.content.as_ref())
+            .map_err(|error| error.to_string())?
+            .len();
+        if matches!(
+            item.content.body(),
+            crate::items::ItemBody::UserMessage { .. }
+                | crate::items::ItemBody::AssistantText { .. }
+        ) {
+            // The independent large-body transfer still bounds one exceptional
+            // message; the work-detail budget never truncates normal text.
+            if bytes > crate::models::MAX_INLINE_ITEM_BYTES {
                 defer(row);
-            } else {
-                remaining -= bytes;
             }
+        } else if bytes > remaining {
+            defer(row);
+        } else {
+            remaining -= bytes;
         }
     }
     Ok(())

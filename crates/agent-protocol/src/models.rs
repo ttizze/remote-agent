@@ -175,6 +175,33 @@ impl Turn {
 pub use crate::{execution::*, items::*};
 
 impl Thread {
+    pub fn can_steer(&self) -> bool {
+        self.preparations.iter().any(|input| {
+            input.status == crate::session::PreparationStatus::Sending
+                && crate::operations::Input::is_compaction(&input.submission.input)
+        }) || self
+            .turns
+            .iter()
+            .flatten()
+            .rev()
+            .find(|turn| turn.status == TurnStatus::Running)
+            .is_some_and(|turn| {
+                self.capabilities.unwrap_or_default().steer
+                    || turn.items.iter().flatten().any(|item| match item.body() {
+                        ItemBody::Compaction {} => true,
+                        ItemBody::UserMessage { text, content } => {
+                            match (text.as_ref(), content.as_slice()) {
+                                (Some(text), []) | (None, [MessagePart::Text { text }]) => {
+                                    crate::operations::Input::is_compaction_text(text)
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    })
+            })
+    }
+
     /// The turn a stop request targets. The Host routes a preparing task's
     /// submission ID to its preparation, so the same stop control covers both.
     pub fn active_turn_id(&self) -> Option<crate::ids::TurnId> {

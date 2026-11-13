@@ -19888,6 +19888,22 @@
           }
         }
       }
+    },
+    "以前の出力は表示されていません": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以前の出力は表示されていません"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Earlier output not shown"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

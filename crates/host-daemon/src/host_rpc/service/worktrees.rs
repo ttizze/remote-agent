@@ -392,10 +392,8 @@ pub(super) mod tests {
             let repository = repository(directory.path());
             let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
             Arc::get_mut(&mut agent).unwrap().idle_warning = warning;
-            let host = HostRpcService::new(
-                [agent.backend()],
-                ProjectStore::new(directory.path().join("worktrees.json")),
-            );
+            let host =
+                HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
             host.inner
                 .worktrees
                 .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -468,10 +466,8 @@ pub(super) mod tests {
                 let directory = tempfile::tempdir().unwrap();
                 let repository = repository(directory.path());
                 let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-                let host = HostRpcService::new(
-                    [agent.backend()],
-                    ProjectStore::new(directory.path().join("worktrees.json")),
-                );
+                let host =
+                    HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
                 host.inner
                     .worktrees
                     .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -542,7 +538,7 @@ pub(super) mod tests {
                 agent.backend(),
                 Backend::unavailable(ProviderKind::Claude, "claude startup failed"),
             ],
-            ProjectStore::new(directory.path().join("worktrees.json")),
+            directory.path().join("worktrees.json"),
         );
         host.inner
             .worktrees
@@ -639,7 +635,7 @@ pub(super) mod tests {
                             )
                         }
                     }),
-                    ProjectStore::new(directory.path().join("worktrees.json")),
+                    directory.path().join("worktrees.json"),
                 );
                 host.inner
                     .worktrees
@@ -764,10 +760,7 @@ pub(super) mod tests {
         )
         .await
         .unwrap();
-        let service = HostRpcService::new(
-            [claude.into()],
-            ProjectStore::new(root.path().join("projects.json")),
-        );
+        let service = HostRpcService::new([claude.into()], root.path().join("projects.json"));
         service
             .inner
             .worktrees
@@ -860,10 +853,7 @@ pub(super) mod tests {
         let repository = repository(directory.path());
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
         agent.create_gate.close();
-        let host = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         host.inner
             .worktrees
             .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -938,10 +928,7 @@ pub(super) mod tests {
         use super::*;
         let directory = tempfile::tempdir().unwrap();
         let repository = repository(directory.path());
-        let host = HostRpcService::new(
-            [],
-            ProjectStore::new(directory.path().join("worktrees.json")),
-        );
+        let host = HostRpcService::new([], directory.path().join("worktrees.json"));
         host.inner.projects.register(&repository).await.unwrap();
         let project = host.project_snapshot().await.unwrap().projects[0]
             .id

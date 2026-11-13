@@ -129,7 +129,7 @@ async fn gallery_item(
         let caught_up = replica.cursor().is_some_and(|current| {
             current.store == cursor.store && current.sequence >= cursor.sequence
         });
-        let ready = replica.rows().get(&key).is_some_and(|row| {
+        let ready = replica.rows().get(&key).is_none_or(|row| {
                                 let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
                                 transferred || Some(row.version) != version || matches!(value.as_ref(), records::Record::Item(item) if !item.content.is_deferred())
                             });
@@ -232,12 +232,19 @@ pub fn terminal_handle(cwd: String) -> String {
     )
 }
 
+#[derive(Clone, Copy)]
+pub enum SubscriptionKind {
+    List,
+    Conversation,
+    Output,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait ClientExt {
     async fn open_subscription<O: RpcMethod>(
         &self,
         operation: &O,
-    ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError>;
+    ) -> Result<Option<(O::Output, Updates, uuid::Uuid, SubscriptionKind)>, PeerError>;
     async fn models(&self, provider: crate::session::ProviderKind) -> Result<ModelPage, PeerError>;
     async fn respond(
         &self,
@@ -255,20 +262,29 @@ impl ClientExt for Client {
     async fn open_subscription<O: RpcMethod>(
         &self,
         operation: &O,
-    ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError> {
+    ) -> Result<Option<(O::Output, Updates, uuid::Uuid, SubscriptionKind)>, PeerError> {
         let id = uuid::Uuid::new_v4();
         let mut request = operation.request()?;
-        match &mut request {
-            crate::protocol::Call::SubscribeList(params) => params.subscription = id,
-            crate::protocol::Call::SubscribeConversation(params) => params.subscription = id,
-            crate::protocol::Call::SubscribeCommandOutput(params) => params.subscription = id,
-            crate::protocol::Call::CreateConversation(params) => params.subscription = id,
+        let (subscription, kind) = match &mut request {
+            crate::protocol::Call::SubscribeList(params) => {
+                (&mut params.subscription, SubscriptionKind::List)
+            }
+            crate::protocol::Call::SubscribeConversation(params) => {
+                (&mut params.subscription, SubscriptionKind::Conversation)
+            }
+            crate::protocol::Call::SubscribeCommandOutput(params) => {
+                (&mut params.subscription, SubscriptionKind::Output)
+            }
+            crate::protocol::Call::CreateConversation(params) => {
+                (&mut params.subscription, SubscriptionKind::Conversation)
+            }
             _ => return Ok(None),
-        }
+        };
+        *subscription = id;
         let (mut output, updates) = self.request_stream::<O::Output>(&request).await?;
         validate_output(operation, &output)?;
         O::subscription(&mut output, id);
-        Ok(Some((output, updates, id)))
+        Ok(Some((output, updates, id, kind)))
     }
 
     async fn models(&self, provider: crate::session::ProviderKind) -> Result<ModelPage, PeerError> {

@@ -89,29 +89,36 @@ pub(crate) fn details(
             });
         }
     });
-    let running = move || {
+    let detail = computed(move || {
         request.with(|read| {
-            read.as_ref().is_some_and(|read| {
-                connection.publication.with(|p| {
-                    p.snapshot
-                        .operation_running(op::OperationKey::Item { item: read.clone() })
+            read.as_ref()
+                .map(|read| {
+                    connection
+                        .context
+                        .with(|context| context.item_detail(read.clone()))
                 })
-            })
+                .unwrap_or_default()
         })
-    };
-    let error = move || {
-        request.with(|read| {
-            read.as_ref().and_then(|read| {
-                connection.publication.with(|p| {
-                    p.snapshot
-                        .operation_error(op::OperationKey::Item { item: read.clone() })
-                })
-            })
-        })
-    };
+    });
+    let running = move || detail.with(|detail| detail.loading);
+    let error = move || detail.with(|detail| detail.error.clone());
     let load = move || {
         if let Some(read) = request.get_untracked() {
-            connection.dispatch(Intent::ReadItem(read));
+            if item.with(|item| {
+                item.as_ref()
+                    .is_some_and(|item| item.source.data.kind == "command")
+            }) && error().is_some()
+            {
+                for watching in [false, true] {
+                    connection.dispatch(Intent::WatchCommandOutput {
+                        thread_id: read.thread_id.clone(),
+                        item_id: read.item_id.clone(),
+                        watching,
+                    });
+                }
+            } else {
+                connection.dispatch(Intent::ReadItem(read));
+            }
         }
     };
     let toggle = move || {
@@ -265,7 +272,8 @@ pub(crate) fn details(
                     move || {
                         item.with(|item| {
                             item.as_ref().is_some_and(|item| item.source.data.deferred)
-                        })
+                        }) || running()
+                            || error().is_some()
                     },
                     move || {
                         view()

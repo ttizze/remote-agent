@@ -331,7 +331,7 @@ mod tests {
                 agent.into(),
                 Backend::unavailable(ProviderKind::Codex, "offline"),
             ],
-            ProjectStore::new(&store_path),
+            &store_path,
         );
         let scan = service.scan_projects().await.unwrap();
         assert_eq!(scan.projects.len(), 2);
@@ -342,7 +342,9 @@ mod tests {
         assert_eq!(candidate.conversation_count, 3);
         assert_eq!(candidate.providers, [ProviderKind::Claude]);
         assert!(
-            ProjectStore::new(&store_path)
+            &service
+                .inner
+                .projects
                 .load()
                 .await
                 .unwrap()
@@ -361,7 +363,7 @@ mod tests {
             .import_projects(&[path.clone(), path.clone()])
             .await
             .unwrap();
-        let registered = ProjectStore::new(&store_path).load().await.unwrap();
+        let registered = ProjectStore::fixture(&store_path).load().await.unwrap();
         assert_eq!(registered.projects.len(), 1);
         assert_eq!(registered.projects[0].roots[0].path, path);
         let scan = service.scan_projects().await.unwrap();

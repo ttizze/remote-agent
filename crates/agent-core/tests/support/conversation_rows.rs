@@ -8,6 +8,10 @@ use agent_protocol::{
 };
 use std::sync::Arc;
 
+pub fn history_has_more(has_more: Option<bool>, cursor: Option<&str>) -> bool {
+    has_more == Some(true) || cursor.is_some()
+}
+
 pub fn catalog(list: agent_protocol::models::ThreadList, cursor: Cursor) -> records::Message {
     let mut rows = std::collections::BTreeMap::new();
     for thread in list.data {
@@ -179,7 +183,10 @@ pub fn replica_at(response: ThreadResponse, generation: u64, sequence: u64) -> r
             content: Content::Full(Arc::new(records::Record::Request(record))),
         });
     }
-    let floor = thread.history_cursor.as_ref().map(|_| 1).unwrap_or(0);
+    let floor = u64::from(history_has_more(
+        thread.history_has_more,
+        thread.history_cursor.as_deref(),
+    ));
     let mut position = 0;
     let mut item_ids = std::collections::BTreeSet::new();
     for (index, turn) in thread.turns.into_iter().flatten().enumerate() {

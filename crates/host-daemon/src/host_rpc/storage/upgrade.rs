@@ -16,12 +16,13 @@ use std::{
     io::ErrorKind,
 };
 
-const FILES: [&str; 5] = [
+const FILES: [&str; 6] = [
     "bex-conversations.json",
     "bex-read-state.json",
     "bex-model-selections.json",
     "bex-conversations.rewind",
     "bex-projects.json",
+    agent_local_host::update::RECOVERY_FILE,
 ];
 
 #[derive(Deserialize)]
@@ -83,6 +84,7 @@ pub(super) struct Previous {
     projects: Vec<agent_protocol::models::Project>,
     workspace_scripts: BTreeMap<String, Vec<agent_protocol::models::ProjectScript>>,
     backup: tempfile::TempDir,
+    recovery_pending: bool,
 }
 
 fn file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
@@ -282,6 +284,14 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
         projects,
         workspace_scripts,
         backup,
+        recovery_pending: file::<agent_local_host::update::Recovery>(
+            &path.with_file_name(agent_local_host::update::RECOVERY_FILE),
+        )?
+        .is_some_and(|report| {
+            report.tasks.iter().any(|task| {
+                task.delivery == agent_local_host::update::ContinuationDelivery::Pending
+            })
+        }),
     }))
 }
 
@@ -329,6 +339,11 @@ impl Previous {
 
     pub(super) fn write(&self, transaction: &Transaction<'_>, process: Uuid) -> Result<(), String> {
         let now = super::super::runtime::now();
+        if self.recovery_pending {
+            transaction
+                .execute("UPDATE store SET updating=1", [])
+                .map_err(failure)?;
+        }
         let mut history = self.history.clone();
         for row in &self.conversations {
             row.active.native_provider().map_err(failure)?;
@@ -433,24 +448,33 @@ impl Previous {
                 .and_then(|row| row.bindings.first())
                 .map_or(id, |binding| &binding.session);
             let key = thread_key(transaction, id)?;
+            let sources = native_history_sources(response, source)?;
+            history::write_history(transaction, id, response, &sources, sequence, process, now)?;
+            restore_user_receipts(transaction, id, response, sequence)?;
             if self.unimported.contains(id) && !self.conversations.iter().any(|row| &row.id == id) {
-                // A recorded native fragment was hidden on main until its first
-                // import. Keep it discoverable and importable rather than certifying it complete.
-                transaction
-                    .execute("UPDATE threads SET loaded=0 WHERE key=?1", [key])
-                    .map_err(failure)?;
-            } else {
-                let sources = native_history_sources(response, source)?;
-                history::write_history(
+                // Recorded-only native turns survive even when the later native
+                // read omits them. Loading remains explicit until reimport settles.
+                let state = rows::load(transaction, key, process)?;
+                rows::write(
                     transaction,
-                    id,
-                    response,
-                    &sources,
-                    sequence,
-                    process,
-                    now,
+                    &rows::WriteScope {
+                        key,
+                        id,
+                        sequence,
+                        at: now,
+                        process,
+                    },
+                    &Change::Binding {
+                        provider: source.native_provider().map_err(failure)?,
+                        value: Some(decision::Binding::Ready {
+                            source: source.id.clone(),
+                            covered: state.history_end(),
+                        }),
+                    },
+                    &state.turns,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
                 )?;
-                restore_user_receipts(transaction, id, response, sequence)?;
             }
             if let Some(queue) = self.queues.get(id) {
                 for input in &queue.inputs {
@@ -551,7 +575,19 @@ impl Previous {
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
-        rows::write_header(transaction, key, id, &state, sequence, now, None)?;
+        rows::write_header(
+            transaction,
+            &rows::WriteScope {
+                key,
+                id,
+                sequence,
+                at: now,
+                process: scope.process,
+            },
+            &state,
+            None,
+            None,
+        )?;
         if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
             transaction
                 .execute(
@@ -703,7 +739,19 @@ impl Conversation {
                     })
                 }
             };
-            rows::write_header(transaction, key, &self.id, &state, sequence, now, None)?;
+            rows::write_header(
+                transaction,
+                &rows::WriteScope {
+                    key,
+                    id: &self.id,
+                    sequence,
+                    at: now,
+                    process,
+                },
+                &state,
+                None,
+                None,
+            )?;
             Previous::input(
                 transaction,
                 &rows::WriteScope {
@@ -799,4 +847,44 @@ fn native_history_sources(
         }
     }
     Ok(sources)
+}
+
+/// The old worker continues reading the same journal while the new store owns
+/// recovery. Rebind its native turn once; no alternate runtime wire decoder.
+pub(super) fn recover_update(connection: &Connection, path: &Path) -> Result<(), String> {
+    use agent_local_host::update::{ContinuationDelivery, RECOVERY_FILE, Recovery};
+    let path = path.with_file_name(RECOVERY_FILE);
+    let Some(mut report) = file::<Recovery>(&path)? else {
+        return Ok(());
+    };
+    let previous = serde_json::to_vec(&report).map_err(failure)?;
+    for task in &mut report.tasks {
+        if task.delivery == ContinuationDelivery::Sending {
+            task.delivery = ContinuationDelivery::Failed(
+                "継続の配送結果を確認できません。会話を開いて確認してください。".into(),
+            );
+        }
+        if let Some(turn) = &task.last_turn {
+            let target = &task.submission.thread_id;
+            let Some(key) = existing_key(connection, target)? else {
+                continue;
+            };
+            // New reports already name the canonical turn. Old reports name the
+            // active native source's last turn, including qualified handoffs.
+            if rows::turn(connection, key, turn)?.is_some() {
+                continue;
+            }
+            let canonical: Option<String> = connection.query_row(
+                "SELECT e.turn_id FROM executions e JOIN sources s ON s.id=e.source_id JOIN turns t ON t.thread=e.thread AND t.id=e.turn_id WHERE e.thread=?1 AND s.provider IS ?2 AND s.native_id=?3 AND e.native_turn_id=?4 AND t.state!='rolled_back' ORDER BY t.ordinal DESC LIMIT 1",
+                params![key, task.native_session.provider.map(ProviderKind::key), task.native_session.id, turn.as_str()], |row| row.get(0)
+            ).optional().map_err(failure)?;
+            if let Some(canonical) = canonical {
+                task.last_turn = Some(canonical.into());
+            }
+        }
+    }
+    if serde_json::to_vec(&report).map_err(failure)? != previous {
+        agent_local_host::save_private_json(&path, &report).map_err(failure)?;
+    }
+    Ok(())
 }

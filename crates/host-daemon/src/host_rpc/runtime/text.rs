@@ -110,6 +110,33 @@ impl resources::Source {
     }
 }
 
+impl Runtime {
+    pub(super) async fn flush_text(
+        service: &HostRpcService,
+        source: &resources::Source,
+    ) -> Result<(), String> {
+        for (attempt, observation) in source.take_text() {
+            Self::event(
+                service,
+                &source.target,
+                Event::Provider {
+                    attempt: attempt.id,
+                    native_turn: service
+                        .inner
+                        .conversation
+                        .storage
+                        .execution(&source.target, attempt.id)?
+                        .and_then(|execution| execution.native_turn),
+                    native_items: Vec::new(),
+                    observation,
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 // T3 Code splitBufferedAssistantText: only complete Markdown blocks are ready.
 fn paragraph_boundary(text: &str) -> usize {
     use std::sync::LazyLock;
@@ -168,7 +195,9 @@ fn paragraph_boundary(text: &str) -> usize {
                         .unwrap_or(trimmed)
                         .strip_prefix("**")
                         .and_then(|value| value.strip_suffix("**"))
-                        .is_some_and(|value| !value.is_empty() && !value.contains("**")));
+                        .is_some_and(|value| {
+                            !value.is_empty() && !value.contains("**") && !value.ends_with('*')
+                        }));
             title = section;
         }
         start = newline + 1;

@@ -1438,7 +1438,7 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
         request["params"]["initial"][1]["parts"][0]["text"]["text"],
         "first message"
     );
-    writer.reply(&request, json!({ "result": {"thread": {"id":{"provider":"codex","id":"created"}, "cwd":"/fixture", "status":"preparing", "turns":[]}}})).await.unwrap();
+    writer.reply(&request, json!({ "result": {"thread": {"activeProvider":"codex", "cwd":"/fixture", "status":"preparing", "turns":[]}}})).await.unwrap();
     assert!(matches!(
         sending.await.unwrap(),
         Outcome::StartedThread { .. }
@@ -1628,7 +1628,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
         if navigate_away {
             new_chat(&store, &mut reader, &mut writer, "/other").await;
         }
-        writer.reply(&create, json!({"result":{"thread":{"id":{"provider":"codex","id":"created"},"cwd":"/fixture","turns":[],"status":"idle"}}})).await.unwrap();
+        writer.reply(&create, json!({"result":{"thread":{"activeProvider":"codex","cwd":"/fixture","turns":[],"status":"idle"}}})).await.unwrap();
         assert_eq!(
             sending.await.unwrap().unwrap(),
             Outcome::StartedThread {
@@ -1918,7 +1918,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         let input =
             json!([{"text":{"text":"typed\nspoken"}},{"localImage":{"path":"/fixture/photo.png"}}]);
         assert_eq!(start["params"]["initial"][1]["parts"], input);
-        writer.reply(&start, json!({"result":{"thread":{"id":{"provider":"codex","id":"created"},"cwd":"/fixture","projectId":null,"status":"idle","turns":[]}}})).await.unwrap();
+        writer.reply(&start, json!({"result":{"thread":{"activeProvider":"codex","cwd":"/fixture","projectId":null,"status":"idle","turns":[]}}})).await.unwrap();
         writer.notify(json!({"method":"fixture/session/change","session":created,"change":{"type":"turn","turn":{"id":"turn","status":"completed","items":[{"id":"native","status":"unknown","clientInputId":"3d1919da-a635-591b-89e3-32f49d9197fb","body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"done","phase":"final"}}}}}]},"completed":true}})).await.unwrap();
         assert!(matches!(
             sending.await.unwrap(),
@@ -2868,7 +2868,7 @@ async fn creating_a_chat_updates_matching_search_results_without_reading_the_lis
         {
             let result = match request["method"].as_str().unwrap() {
                 "host/conversation/create" => {
-                    json!({"thread":{"id":{"provider":"codex","id":"created"},"name":"created chat","cwd":"/fixture","turns":[],"status":"idle"}})
+                    json!({"thread":{"activeProvider":"codex","name":"created chat","cwd":"/fixture","turns":[],"status":"idle"}})
                 }
                 "host/conversation/subscribe" => writer.current(
                     &serde_json::from_value(request["params"]["session"].clone()).unwrap(),
@@ -3311,10 +3311,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             .unwrap();
         writer.send_rows(subscription, replacement).await.unwrap();
     }
-    writer
-        .reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","turns":[kept]}}}))
-        .await
-        .unwrap();
+    writer.reply(&request, json!({"result":{}})).await.unwrap();
     rewind.await.unwrap();
     if navigate {
         assert!(
@@ -4141,8 +4138,13 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 session.close();
             }
             if let Some((session, mut reader, writer)) = replacement {
-                for _ in 0..2 {
-                    let request = reader.read_request().await.unwrap().unwrap();
+                let ready = wait_for(&store, |state| state.lists.task_activity.is_some() && state.lists.threads.as_ref().is_some_and(|list| list.data.iter().any(|thread| thread.id.as_ref().is_some_and(|id| id.id == "replacement"))));
+                tokio::pin!(ready);
+                loop {
+                    let request = tokio::select! {
+                        _ = &mut ready => break,
+                        request = reader.read_request() => request.unwrap().unwrap(),
+                    };
                     let result = match request["method"].as_str().unwrap() {
                         "host/list/subscribe" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
@@ -4151,7 +4153,6 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                     };
                     writer.reply(&request, json!({"result":result})).await.unwrap();
                 }
-                wait_for(&store, |state| state.lists.task_activity.is_some()).await;
                 assert_eq!(store.snapshot().lists.threads.as_ref().unwrap().data[0].id.as_ref().unwrap().id,"replacement");
                 assert!(store.snapshot().connection.connected);
                 assert!(store.snapshot().panes.primary().error.is_none());
@@ -5996,5 +5997,66 @@ async fn local_unknown_input_restore_and_discard_follow_the_user_intent_after_ho
         state.input.drafts[&session.into()].text,
         if restore { "uncertain\nnewer" } else { "newer" }
     );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn gallery_finishes_with_an_error_when_the_hydrated_image_was_removed() {
+    use agent_protocol::{
+        conversation::records,
+        sync::{Key, Message, Removal},
+    };
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let id = SessionRef::new(ProviderKind::Codex, "removed-gallery".into()).unwrap();
+    let target = id.clone();
+    let server = tokio::spawn(async move {
+        let subscribe = read(&mut reader).await;
+        let subscription =
+            serde_json::from_value(subscribe["params"]["subscription"].clone()).unwrap();
+        writer.reply(&subscribe, json!({"result":{"thread":{"id":target,"turns":[{"id":"turn","status":"completed","items":[{"id":"image","status":"completed","body":{"deferred":{"summary":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}]}]}}})).await.unwrap();
+        let hydrate = read(&mut reader).await;
+        assert_eq!(hydrate["method"], "host/conversation/hydrate");
+        let from = writer.replica(&target).cursor().unwrap();
+        let through = agent_protocol::sync::Cursor {
+            sequence: from.sequence + 1,
+            ..from
+        };
+        writer
+            .send_rows(
+                subscription,
+                Message::Changes {
+                    from,
+                    through,
+                    rows: vec![],
+                    removed: vec![Removal {
+                        key: Key::Item {
+                            thread: target,
+                            id: "image".into(),
+                        },
+                        version: through.sequence,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        writer.reply(&hydrate, json!({"result":records::Hydrated { cursor: through, version: None, transfer: None }})).await.unwrap();
+        (reader, writer)
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        store.dispatch(Intent::LoadSessionImages(op::LoadSessionImages {
+            thread_id: id,
+        })),
+    )
+    .await
+    .unwrap();
+    let error = result.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("gallery item is no longer available"),
+        "{error:?}"
+    );
+    let _host = server.await.unwrap();
     store.close().await.unwrap();
 }

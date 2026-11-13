@@ -55,12 +55,20 @@ impl ProjectStore {
         self.storage.replace_projects(projects)
     }
 
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(
+        path: impl Into<PathBuf>,
+        storage: Arc<crate::host_rpc::storage::Storage>,
+    ) -> Self {
+        let path = path.into();
+        Self { path, storage }
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let storage = Arc::new(crate::host_rpc::storage::Storage::open(
             &path.with_file_name("bex-conversations.sqlite"),
         ));
-        Self { path, storage }
+        Self::new(path, storage)
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -175,7 +183,7 @@ mod tests {
         let unavailable = root.join("unavailable");
         std::os::unix::fs::symlink(&unavailable, &unavailable).unwrap();
         assert!(tokio::fs::canonicalize(&unavailable).await.is_err());
-        let store = ProjectStore::new(root.join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
         let projects = serde_json::json!([
             {"id":"offline","name":"Offline","roots":[{"path":unavailable}]},
             {"id":"local","name":"Local","roots":[{"path":root}]}
@@ -215,7 +223,7 @@ mod tests {
     async fn wsl_roots_remain_readable_without_accessing_windows_shares() {
         use agent_protocol::models::ProjectMembership;
         let directory = tempfile::tempdir().unwrap();
-        let store = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(directory.path().join("bex-worktrees.json"));
         let path = r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project";
         let projects = serde_json::json!([
             {"id":"wsl","name":"WSL project","roots":[{"path":path}]}
@@ -236,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn corrupt_project_state_is_still_reported() {
         let directory = tempfile::tempdir().unwrap();
-        let store = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(directory.path().join("bex-worktrees.json"));
         let connection =
             rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
         connection
@@ -261,7 +269,7 @@ mod tests {
         };
         #[cfg(not(unix))]
         let configured = root.clone();
-        let store = ProjectStore::new(configured.join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(configured.join("bex-worktrees.json"));
         store.register(&root).await.unwrap();
         let chats = store.chat_directory();
         assert!(!chats.exists());
@@ -306,7 +314,7 @@ mod tests {
             serde_json::to_vec(&projects).unwrap(),
         )
         .unwrap();
-        let store = ProjectStore::new(root.join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
         let snapshot = store.load().await.unwrap();
         assert_eq!(snapshot.projects.len(), 1);
         assert_eq!(snapshot.projects[0].id, "mixed");
@@ -328,11 +336,11 @@ mod tests {
         let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
-        let store = ProjectStore::new(root.join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
         assert!(store.load().await.unwrap().projects.is_empty());
         store.register(&project).await.unwrap();
         store.register(&project).await.unwrap();
-        let reopened = ProjectStore::new(store.path());
+        let reopened = ProjectStore::fixture(store.path());
         let snapshot = reopened.load().await.unwrap();
         assert_eq!(snapshot.projects.len(), 1);
         assert_eq!(

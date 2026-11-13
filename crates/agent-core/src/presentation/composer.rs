@@ -171,7 +171,7 @@ fn follow_up_controls(
             .collect(),
         held: thread.queue.held,
         resumable: resumable(thread),
-        can_steer: thread.active_turn_id().is_some() && follow_up::steers(thread),
+        can_steer: thread.can_steer(),
         editing: session.and_then(|session| {
             snapshot
                 .input

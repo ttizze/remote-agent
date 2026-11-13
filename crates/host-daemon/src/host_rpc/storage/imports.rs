@@ -117,13 +117,17 @@ impl Storage {
                     &mut Vec::new(),
                 )?;
             }
-            updated.push(rows::write_header(
+            updated.extend(rows::write_header(
                 &transaction,
-                key,
-                target,
+                &rows::WriteScope {
+                    key,
+                    id: target,
+                    sequence: sequence.sequence,
+                    at: header.details.updated_at,
+                    process: self.process,
+                },
                 &state,
-                sequence.sequence,
-                header.details.updated_at,
+                None,
                 None,
             )?);
             transaction.commit().map_err(failure)?;
@@ -152,6 +156,13 @@ impl Storage {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
             let existing = existing_key(&transaction, target)?;
+            if existing.is_none()
+                && super::titles::native_owner(&transaction, target)?
+                    .is_some_and(|owner| owner != *target)
+            {
+                return Err("native source belongs to another conversation".into());
+            }
+
             if let Some(key) = existing
                 && transaction
                     .query_row("SELECT loaded=1 FROM threads WHERE key=?1", [key], |row| {
@@ -172,7 +183,6 @@ impl Storage {
                     reset: false,
                 });
             }
-            let sequence = Self::advance(&transaction)?;
             let (mut header, counters) = if let Some(key) = existing {
                 rows::header(&transaction, key)?
             } else {
@@ -189,13 +199,26 @@ impl Storage {
                     Counters::default(),
                 )
             };
-            header.details.history_read_state = Some(match error {
+            let read = match error {
                 Some(error) => HistoryReadState::new(HistoryReadKind::Unavailable, vec![error]),
                 None => {
                     queue(&transaction, target, target, now)?;
                     HistoryReadState::new(HistoryReadKind::Loading, vec![])
                 }
-            });
+            };
+            if header.details.history_read_state.as_ref() == Some(&read) {
+                let current = cursor(&transaction)?;
+                transaction.commit().map_err(failure)?;
+                return Ok(Committed {
+                    step: Step::default(),
+                    cursor: current,
+                    rows: vec![],
+                    removed: vec![],
+                    reset: false,
+                });
+            }
+            header.details.history_read_state = Some(read);
+            let sequence = Self::advance(&transaction)?;
             let key = match existing {
                 Some(key) => key,
                 None => history::insert_header(
@@ -278,6 +301,7 @@ impl Storage {
                 return Ok(Committed { step: Step { outcome: Outcome::Accepted, ..Default::default() }, cursor: sequence, rows: vec![], removed: vec![], reset: true });
             }
             let mut state = rows::load(&transaction, key, self.process)?;
+            if state.thread.name.is_empty() { state.thread.name = response.thread.name.clone().unwrap_or_default(); }
             let binding: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM bindings b JOIN sources s ON s.id=b.source_id WHERE b.thread=?1 AND b.provider=?2 AND b.state='ready' AND s.native_id=?3)", params![key,source.native_provider().map_err(failure)?.key(),source.id], |row| row.get(0)).map_err(failure)?;
             if !binding || Some(state.thread.provider) != source.provider {
                 let sequence = Self::advance(&transaction)?;
@@ -315,7 +339,7 @@ impl Storage {
             }
             let previous=rows::header(&transaction,key)?.0.details.selection;
             let selection=decision::records::Selection {model:previous.model.or(response.model.clone()),effort:previous.effort.or(response.effort.clone()),service_tier:previous.service_tier.or(response.service_tier.clone())};
-            rows::write_header(&transaction, key, target, &state, sequence.sequence, now, Some((selection,None)))?;
+            rows::write_header(&transaction, &rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, Some((selection,None)), None)?;
             // Reimport publishes a reset, including the native reader's final completeness.
             let (mut header, _) = rows::header(&transaction, key)?;
             header.details.history_read_state = response.thread.history_read_state.clone();
@@ -367,6 +391,29 @@ fn reorder_imported(
     {
         return Ok(());
     }
+    let remapped: std::collections::BTreeMap<_, _> = turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| (turn.ordinal, index as u64 + 1))
+        .collect();
+    let bindings: Vec<_> = state
+        .bindings
+        .iter()
+        .filter_map(|(provider, binding)| {
+            if let decision::Binding::Ready { source, covered } = binding {
+                let next = remapped.get(covered).copied().unwrap_or(*covered);
+                (next != *covered).then(|| Change::Binding {
+                    provider: *provider,
+                    value: Some(decision::Binding::Ready {
+                        source: source.clone(),
+                        covered: next,
+                    }),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
     // Move indexed ordinals out of the destination range before assigning the
     // new order; bodies and public identities stay unchanged in this transaction.
     transaction
@@ -382,6 +429,17 @@ fn reorder_imported(
             transaction,
             scope,
             &Change::Turn(turn),
+            &state.turns,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )?;
+    }
+    for change in bindings {
+        *state = state.apply(std::slice::from_ref(&change));
+        rows::write(
+            transaction,
+            scope,
+            &change,
             &state.turns,
             &mut Vec::new(),
             &mut Vec::new(),
@@ -454,6 +512,12 @@ fn import_turn(
     {
         return Ok(None);
     }
+    let refreshing = existing.as_ref().is_some_and(|turn| {
+        matches!(
+            turn.state,
+            TurnState::Running { .. } | TurnState::Waiting(decision::Wait::Background { .. })
+        )
+    });
     let turn = if let Some(mut turn) = existing {
         turn.state = match native.status {
             TurnStatus::Completed => TurnState::Completed,
@@ -464,12 +528,16 @@ fn import_turn(
     } else {
         state.counters.turn += 1;
         Turn {
-            id: Uuid::new_v5(
-                namespace,
-                format!("turn:{occurrence}:{}", native.id).as_bytes(),
-            )
-            .to_string()
-            .into(),
+            id: if *source == write.id && !state.turns.contains_key(&native.id) {
+                native.id.clone()
+            } else {
+                Uuid::new_v5(
+                    namespace,
+                    format!("turn:{occurrence}:{}", native.id).as_bytes(),
+                )
+                .to_string()
+                .into()
+            },
             ordinal: state.counters.turn,
             provider: source.native_provider().map_err(failure)?,
             queued: false,
@@ -518,12 +586,17 @@ fn import_turn(
         if !native.is_history_message() {
             continue;
         }
-        let canonical = Uuid::new_v5(
-            namespace,
-            format!("item:{}:{}", turn.id, native.id).as_bytes(),
-        )
-        .to_string()
-        .into();
+        let canonical =
+            if *source == write.id && rows::item(transaction, key, &native.id)?.is_none() {
+                native.id.clone()
+            } else {
+                Uuid::new_v5(
+                    namespace,
+                    format!("item:{}:{}", turn.id, native.id).as_bytes(),
+                )
+                .to_string()
+                .into()
+            };
         let mapped: Option<String> = transaction.query_row("SELECT item_id FROM item_natives WHERE thread=?1 AND turn_id=?2 AND attempt=?3 AND native_id=?4", params![key,turn.id.as_str(),attempt.to_string(),native.id.as_str()], |row| row.get(0)).optional().map_err(failure)?;
         let existing = mapped
             .map(|id| rows::item(transaction, key, &id.into()))
@@ -532,29 +605,50 @@ fn import_turn(
             .or(rows::item(transaction, key, &native.id)?)
             .filter(|item| item.turn == turn.id)
             .or(rows::item(transaction, key, &canonical)?.filter(|item| item.turn == turn.id));
-        let (id, position) = if let Some(item) = existing {
-            (item.id, item.position)
+        let item = if let Some(mut item) = existing {
+            // Settled messages and composed user input are authoritative. A
+            // foreign running turn may still supply its final assistant text;
+            // its original canonical input linkage always stays unchanged.
+            if refreshing
+                && matches!(
+                    item.body,
+                    agent_protocol::items::ItemBody::AssistantText { .. }
+                )
+            {
+                item.body = native.body().clone();
+                item.status = native.status;
+                item.deferred = native.is_deferred();
+                rows::write(
+                    transaction,
+                    write,
+                    &Change::Item(item.clone()),
+                    &state.turns,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                )?;
+            }
+            item
         } else {
             state.counters.item += 1;
-            (canonical, state.counters.item)
+            let item = Item {
+                id: canonical,
+                turn: turn.id.clone(),
+                position: state.counters.item,
+                status: native.status,
+                deferred: native.is_deferred(),
+                input: native.client_input_id.clone(),
+                body: native.body().clone(),
+            };
+            rows::write(
+                transaction,
+                write,
+                &Change::Item(item.clone()),
+                &state.turns,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )?;
+            item
         };
-        let item = Item {
-            id,
-            turn: turn.id.clone(),
-            position,
-            status: native.status,
-            deferred: native.is_deferred(),
-            input: native.client_input_id.clone(),
-            body: native.body().clone(),
-        };
-        rows::write(
-            transaction,
-            write,
-            &Change::Item(item.clone()),
-            &state.turns,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )?;
         transaction.execute("INSERT INTO item_natives(thread,turn_id,attempt,native_id,item_id) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(thread,turn_id,attempt,native_id) DO NOTHING", params![key,turn.id.as_str(),attempt.to_string(),native.id.as_str(),item.id.as_str()]).map_err(failure)?;
     }
     Ok(Some(turn.id))

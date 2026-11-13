@@ -68,7 +68,9 @@ extension PanelKind {
 extension ConversationModel {
     func migrateWorkbench(to next: AgentCore.Snapshot, navigation: AgentCore.Navigation) {
         let before = snapshot.panelScope(host: host, draft: coreDraftKey)
-        panels = panels.inheritVisibility(before: before, after: next.panelScope(host: host, draft: navigation.draftKey), newDraft: navigation.threadId == nil)
+        let after = next.panelScope(host: host, draft: navigation.draftKey)
+        let welcome = snapshot.welcomeSubmission(draft: coreDraftKey) || next.welcomeSubmission(draft: navigation.draftKey)
+        panels = panels.inheritVisibility(before: before, after: after, newDraft: navigation.threadId == nil, welcome: welcome)
     }
 
     func openWorkbench(_ kind: PanelKind, scope: PanelScope, directory: String) {

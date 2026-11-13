@@ -4,11 +4,17 @@ use super::*;
 fn headers(connection: &Connection, after: u64) -> Result<Vec<Row>, String> {
     Ok(rows::headers(connection, after, false)?
         .into_iter()
-        .map(|(id, header, version)| Row {
-            key: Key::Thread(id),
-            version,
-            position: Position::Unordered,
-            content: Content::Full(Arc::new(Record::Thread(header))),
+        .map(|(id, mut header, version)| {
+            // List consumers never use setup logs or model selection. Keep the
+            // same row identity/version without forwarding conversation details.
+            header.details.workspace = None;
+            header.details.selection = Default::default();
+            Row {
+                key: Key::Thread(id),
+                version,
+                position: Position::Unordered,
+                content: Content::Summary(Arc::new(Record::Thread(header))),
+            }
         })
         .collect())
 }

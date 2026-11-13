@@ -1,7 +1,7 @@
 use super::*;
 use crate::host_rpc::storage::jobs::{Claim, Work};
 
-pub(super) const CONTINUE: &str = "Bexの更新に伴う再起動で作業が中断されました。この同じ会話の履歴から進捗と未完了の作業を確認し、中断したところから続けてください。元の依頼を最初からやり直したり、代わりの会話を作成したりしないでください。";
+pub(in crate::host_rpc) const CONTINUE: &str = "Bexの更新に伴う再起動で作業が中断されました。この同じ会話の履歴から進捗と未完了の作業を確認し、中断したところから続けてください。元の依頼を最初からやり直したり、代わりの会話を作成したりしないでください。";
 
 impl Runtime {
     pub(super) async fn stopped(
@@ -40,48 +40,13 @@ impl Runtime {
         for (native, source) in sources {
             let result = async {
             let _updates = source.updates.lock().await;
-            for (attempt, observation) in source.take_text() {
-                Self::event(
-                    service,
-                    &source.target,
-                    Event::Provider {
-                        attempt: attempt.id,
-                        native_turn: runtime
-                            .storage
-                            .execution(&source.target, attempt.id)?
-                            .and_then(|execution| execution.native_turn),
-                        native_items: Vec::new(),
-                        observation,
-                    },
-                )
-                .await?;
-            }
+            Self::flush_text(service, &source).await?;
             for execution in runtime.storage.source_executions(&source.target, &native)? {
                 let result = async {
                 let attempt = execution.attempt;
-                let mut final_items = Vec::new();
-                runtime.finish_outputs(
-                    &source.target,
-                    attempt.id,
-                    agent_protocol::execution::TurnStatus::Failed,
-                    &mut final_items,
-                )?;
-                for observation in final_items {
-                    Self::event(
-                        service,
-                        &source.target,
-                        Event::Provider {
-                            attempt: attempt.id,
-                            native_turn: runtime
-                                .storage
-                                .execution(&source.target, attempt.id)?
-                                .and_then(|execution| execution.native_turn),
-                            native_items: Vec::new(),
-                            observation,
-                        },
-                    )
-                    .await?;
-                }
+                Self::settle_command_outputs(service, &source.target, attempt.id,
+                    execution.native_turn,
+                    agent_protocol::execution::TurnStatus::Failed).await?;
                 runtime
                     .storage
                     .fence_execution(&source.target, attempt.id)?;

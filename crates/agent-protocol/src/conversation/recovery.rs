@@ -14,6 +14,18 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
         outcome: Outcome::Accepted,
         ..Step::default()
     };
+    if context.preparation.is_some_and(|saved| {
+        saved
+            .setup
+            .as_ref()
+            .is_some_and(|setup| setup.phase == crate::workspace::SetupPhase::Cancelled)
+    }) && let Some((generation, _, checkout)) = workspace::cancelled(context.preparation)
+    {
+        result.actions.push(Action::CancelPreparation {
+            action: generation,
+            discard: Some((generation, checkout)),
+        });
+    }
     for (provider, binding) in &state.bindings {
         if matches!(binding, Binding::Aligning { .. }) {
             result.changes.push(Change::Binding {

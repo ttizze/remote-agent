@@ -281,13 +281,25 @@ impl Panels {
         before: PanelScope,
         after: PanelScope,
         new_draft: bool,
+        welcome: bool,
     ) -> Arc<Self> {
-        if before == after
-            || before.host != after.host
-            || before.storage != after.storage
-            || !new_draft
-            || self.threads.contains_key(&after)
-        {
+        if before == after || before.host != after.host || before.storage != after.storage {
+            return self;
+        }
+        // The unaddressed welcome composer acquires its conversation UUID at
+        // first send. Move its tools with it, and back if that send is restored.
+        if welcome && (before.draft.is_empty() || after.draft.is_empty()) {
+            let mut next = self.as_ref().clone();
+            if let Some(source) = next.threads.remove(&before) {
+                let target = next.threads.entry(after).or_default();
+                target.surfaces.extend(source.surfaces);
+                target.active = source.active.or(target.active);
+                target.open |= source.open;
+                target.maximized |= source.maximized;
+            }
+            return Arc::new(next);
+        }
+        if !new_draft || self.threads.contains_key(&after) {
             return self;
         }
         let open = self.get(before).open;
@@ -391,7 +403,7 @@ mod tests {
         let terminal = open(&mut panels, original.clone(), PanelKind::Terminal, None);
         panels = panels.clone().set_maximized(original.clone(), true);
         let previous = panels.get(original.clone());
-        panels = panels.inherit_visibility(original.clone(), draft.clone(), true);
+        panels = panels.inherit_visibility(original.clone(), draft.clone(), true, false);
         assert_eq!(
             panels.get(draft.clone()),
             PanelState {
@@ -402,17 +414,17 @@ mod tests {
         assert_eq!(panels.get(original.clone()), previous);
         assert_eq!(panels.scope(terminal), Some(original.clone()));
         panels = panels.set_open(draft.clone(), false);
-        panels = panels.inherit_visibility(original.clone(), draft.clone(), true);
+        panels = panels.inherit_visibility(original.clone(), draft.clone(), true, false);
         assert!(!panels.get(draft.clone()).open);
 
         let another = scope("another");
-        panels = panels.inherit_visibility(draft.clone(), another.clone(), true);
-        panels = panels.inherit_visibility(original.clone(), another.clone(), true);
+        panels = panels.inherit_visibility(draft.clone(), another.clone(), true, false);
+        panels = panels.inherit_visibility(original.clone(), another.clone(), true, false);
         assert!(
             !panels.get(another).open,
             "a visited closed draft stays closed"
         );
-        panels = panels.inherit_visibility(original.clone(), original.clone(), true);
+        panels = panels.inherit_visibility(original.clone(), original.clone(), true, false);
         assert_eq!(panels.get(original.clone()), previous);
 
         for destination in [
@@ -433,6 +445,7 @@ mod tests {
                 original.clone(),
                 destination.clone(),
                 matches!(destination.draft, DraftKey::Local { .. }),
+                false,
             );
             assert_eq!(panels.get(destination), PanelState::default());
         }

@@ -101,9 +101,10 @@ impl Operation for ImportProjects {
             }
         }
         state.result = Some(output);
-        vec![Effect::execute(super::super::list_sync::SubscribeCatalog {
-            refresh: false,
-        })]
+        let query = (*snapshot.lists.list_query).clone();
+        let (next, effects) = super::super::list_sync::query(snapshot.clone(), query, false);
+        *snapshot = next;
+        effects
     }
 }
 
@@ -264,6 +265,7 @@ mod tests {
     #[test]
     fn import_refresh_preserves_choices_and_partial_failures_without_changing_the_draft() {
         let mut snapshot = Snapshot::default();
+        snapshot.connection.connected = true;
         let scan = ProjectScan {
             projects: vec![candidate("/a"), candidate("/b")],
             ..Default::default()
@@ -293,6 +295,12 @@ mod tests {
         assert_eq!(ImportProjects {}.capture(&snapshot, "").unwrap(), ["/b"]);
         assert_eq!(snapshot.panes.primary().navigation, navigation);
         assert_eq!(snapshot.input.drafts, drafts);
-        assert_eq!(effects.len(), 1, "refresh the registered project list");
+        assert_eq!(effects.len(), 1, "recover the missing project subscription");
+        snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
+        let effects = ImportProjects {}.apply(&mut snapshot, "", ProjectImportResult::default());
+        assert!(
+            effects.is_empty(),
+            "the existing stream delivers imported project rows"
+        );
     }
 }

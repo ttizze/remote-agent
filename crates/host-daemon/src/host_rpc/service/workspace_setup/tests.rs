@@ -1,10 +1,7 @@
 use super::*;
-use crate::{
-    ProjectStore,
-    host_rpc::{
-        routing::{HostSubscription, SessionId},
-        runtime::native_fixture::{NativeAgent, call},
-    },
+use crate::host_rpc::{
+    routing::{HostSubscription, SessionId},
+    runtime::native_fixture::{NativeAgent, call},
 };
 use agent_protocol::{
     conversation::{Command, InputContent, records},
@@ -118,10 +115,7 @@ impl Fixture {
         )
         .unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
-        let host = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         host.inner
             .worktrees
             .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -710,7 +704,16 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stopping_a_new_checkout_removes_it_and_retry_creates_a_fresh_checkout() {
+async fn stop_cleanup_allows_retry_to_create_a_fresh_checkout() {
+    stopped_checkout(true).await;
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_cleanup_allows_a_new_input_without_retry() {
+    stopped_checkout(false).await;
+}
+#[cfg(unix)]
+async fn stopped_checkout(retry_existing: bool) {
     let marker = tempfile::tempdir().unwrap();
     let flag = marker.path().join("attempted");
     let fixture = Fixture::new(script(&format!("if [ ! -f '{}' ]; then touch '{}'; printf 'waiting\\n'; sleep 120; fi; printf 'retried\\n'", flag.display(), flag.display()), false)).await;
@@ -744,9 +747,60 @@ async fn stopping_a_new_checkout_removes_it_and_retry_creates_a_fresh_checkout()
             .any(|preparation| matches!(preparation.status, PreparationStatus::Failed { .. }))
     })
     .await;
-    let retried: records::Acknowledged = call(&fixture.host, client.id(), retry(id, false))
+    setup_until(&mut updates, |setup| {
+        setup.phase == SetupPhase::Cancelled
+            && setup.worktree_path.is_none()
+            && setup.branch.is_none()
+    })
+    .await;
+    assert!(!Path::new(running.worktree_path.as_deref().unwrap()).exists());
+    assert!(
+        crate::git::text(
+            &fixture.repository,
+            &["branch", "--list", running.branch.as_deref().unwrap()]
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let header = fixture.host.inner.conversation.storage.header(&id).unwrap();
+    assert_eq!(header.state.workspace.cwd(), fixture.repository.to_str());
+    let setup = header.details.workspace.unwrap().setup.unwrap();
+    assert!(setup.worktree_path.is_none());
+    assert!(setup.branch.is_none());
+    let request = if retry_existing {
+        retry(id.clone(), false)
+    } else {
+        let removed: records::Acknowledged = call(
+            &fixture.host,
+            client.id(),
+            Call::ChangeConversation(records::Change {
+                session: id.clone(),
+                operation: Uuid::new_v4(),
+                command: Command::RemoveInput(Uuid::from_u128(42).to_string().into()),
+            }),
+        )
         .await
         .unwrap();
+        removed.accepted().unwrap();
+        let input = Uuid::new_v4();
+        Call::ChangeConversation(records::Change {
+            session: id.clone(),
+            operation: input,
+            command: Command::Submit {
+                id: input.to_string().into(),
+                content: InputContent {
+                    parts: vec![op::Input::Text {
+                        text: "new input after Stop".into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
+            },
+        })
+    };
+    let retried: records::Acknowledged = call(&fixture.host, client.id(), request).await.unwrap();
     retried.accepted().unwrap();
     let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
     assert!(!Path::new(running.worktree_path.as_deref().unwrap()).exists());
@@ -767,10 +821,7 @@ async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
     let directory = tempfile::tempdir().unwrap();
     let id = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let generation = Uuid::new_v4();
-    let host = HostRpcService::new(
-        [],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let host = HostRpcService::new([], directory.path().join("projects.json"));
     let ended = now().max(20_000) as u64 - 20_000;
     let mut setup = WorkspaceSetup::new(None, ended - 1);
     setup.finish(SetupPhase::Done, None, ended);
@@ -865,10 +916,7 @@ async fn retry_after_restart_restores_a_deleted_checkout_before_the_first_provid
     drop(client);
     drop(fixture.host);
     std::fs::remove_dir_all(&checkout).unwrap();
-    let host = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let client = host.open_session();
     let (reopened, mut updates) = admit(&host, client.id(), &creation).await;
     assert_eq!(reopened, id);

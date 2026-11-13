@@ -1,7 +1,7 @@
 //! The single state owner. Independent RPC work publishes completed results.
 use crate::{
     client::{
-        ClientExt, SessionImage,
+        ClientExt, SessionImage, SubscriptionKind,
         persistence::{DevicePreferences, ModelChoice, Preferences},
     },
     diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
@@ -9,7 +9,6 @@ use crate::{
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
 use agent_protocol::operations::{IdentifyDevice, Pair, RpcMethod};
-use agent_protocol::protocol::contracts::Contract;
 use agent_transport::client::{Client, Updates};
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use std::{
@@ -253,13 +252,6 @@ impl Receipt {
         }
     }
 }
-#[derive(Clone, Copy)]
-enum SubscriptionKind {
-    List,
-    Conversation,
-    Output,
-}
-
 struct Completed {
     subscriptions: Vec<(
         uuid::Uuid,
@@ -1938,18 +1930,7 @@ impl Execution<'_> {
         &mut self,
         operation: &O,
     ) -> Result<O::Output, PeerError> {
-        if let Some((output, stream, id)) = self.client.open_subscription(operation).await? {
-            let kind = if O::Contract::METHOD
-                == agent_protocol::protocol::contracts::SubscribeList::METHOD
-            {
-                SubscriptionKind::List
-            } else if O::Contract::METHOD
-                == agent_protocol::protocol::contracts::SubscribeCommandOutput::METHOD
-            {
-                SubscriptionKind::Output
-            } else {
-                SubscriptionKind::Conversation
-            };
+        if let Some((output, stream, id, kind)) = self.client.open_subscription(operation).await? {
             self.subscriptions.push((id, kind, stream));
             Ok(output)
         } else {

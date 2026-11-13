@@ -96,7 +96,11 @@ impl HostRpcService {
         Ok(())
     }
 
-    fn schedule_setup_expiry(&self, id: SessionRef, workspace: WorkspacePreparation) {
+    pub(in crate::host_rpc) fn schedule_setup_expiry(
+        &self,
+        id: SessionRef,
+        workspace: WorkspacePreparation,
+    ) {
         let Some(ended_at) = workspace
             .setup
             .as_ref()
@@ -208,7 +212,10 @@ impl HostRpcService {
         {
             self.inner
                 .worktrees
-                .discard(path.clone())
+                .discard(
+                    path.clone(),
+                    previous.as_ref().and_then(|setup| setup.branch.clone()),
+                )
                 .await
                 .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
         }
@@ -223,7 +230,10 @@ impl HostRpcService {
         {
             self.inner
                 .worktrees
-                .discard(path)
+                .discard(
+                    path,
+                    previous.as_ref().and_then(|setup| setup.branch.clone()),
+                )
                 .await
                 .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
         }

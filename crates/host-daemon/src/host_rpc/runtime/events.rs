@@ -364,24 +364,7 @@ impl Runtime {
                 ..
             }
         ) {
-            for (owner, observation) in source.take_text() {
-                Self::event(
-                    service,
-                    &source.target,
-                    Event::Provider {
-                        native_items: Vec::new(),
-                        attempt: owner.id,
-                        native_turn: service
-                            .inner
-                            .conversation
-                            .storage
-                            .execution(&source.target, owner.id)?
-                            .and_then(|execution| execution.native_turn),
-                        observation,
-                    },
-                )
-                .await?;
-            }
+            Self::flush_text(service, &source).await?;
         }
         for (_, id) in &mappings {
             source.replace_text(id);
@@ -490,11 +473,12 @@ impl Runtime {
                             .execution(&source.target, owner.id)?
                             .and_then(|execution| execution.native_turn);
                         if tasks.is_empty() {
-                            Self::complete_command_outputs(
+                            Self::settle_command_outputs(
                                 service,
                                 &source.target,
                                 owner.id,
                                 native_turn.clone(),
+                                TurnStatus::Completed,
                             )
                             .await?;
                         }
@@ -557,19 +541,18 @@ impl Runtime {
         Ok(())
     }
 
-    pub(super) async fn complete_command_outputs(
+    pub(super) async fn settle_command_outputs(
         service: &HostRpcService,
         target: &SessionRef,
         execution: Uuid,
         native_turn: Option<agent_protocol::ids::TurnId>,
+        status: TurnStatus,
     ) -> Result<(), String> {
         let mut observations = Vec::new();
-        service.inner.conversation.finish_outputs(
-            target,
-            execution,
-            TurnStatus::Completed,
-            &mut observations,
-        )?;
+        service
+            .inner
+            .conversation
+            .finish_outputs(target, execution, status, &mut observations)?;
         for observation in observations {
             Self::event(
                 service,
@@ -608,7 +591,11 @@ impl Runtime {
                 } = body
                 {
                     *output = tail.text;
-                    *output_omitted = tail.truncated;
+                    // Running rows omit their inline body while the live stream
+                    // owns it. That placeholder isn't evidence of truncation.
+                    *output_omitted = tail.truncated
+                        || (!matches!(*status, ItemStatus::Running | ItemStatus::Unknown)
+                            && *output_omitted);
                     *status = item_status;
                 }
             } else if let Some(mut item) = self.storage.item(target, &key.item)? {
@@ -687,7 +674,7 @@ impl Runtime {
                 *output_omitted = true;
             } else {
                 let tail = outputs.finish(&key, output);
-                *output_omitted = tail.truncated;
+                *output_omitted |= tail.truncated;
                 *output = tail.text;
             }
         }

@@ -164,6 +164,14 @@ fn json_only_rewind_restores_qualified_addresses_without_changing_public_ids() {
     {
         Arc::make_mut(item).id = id.into();
     }
+    let echoed = Arc::make_mut(&mut native_turn.items.as_mut().unwrap()[0]);
+    echoed.client_input_id = None;
+    echoed.body = agent_protocol::items::ItemContent::Inline {
+        body: Box::new(ItemBody::UserMessage {
+            text: Some("Provider context handoff. private context packet".into()),
+            content: vec![],
+        }),
+    };
     imported.thread.turns = Some(vec![Arc::new(native_turn)]);
     storage.queue_import(&root, &second, 300).unwrap();
     let claim = storage
@@ -184,7 +192,15 @@ fn json_only_rewind_restores_qualified_addresses_without_changing_public_ids() {
     );
     assert_eq!(turns[1].id.as_str(), turn);
     assert_eq!(turns[1].items.as_ref().unwrap().len(), 2);
-    assert_eq!(turns[1].items.as_ref().unwrap()[0].id.as_str(), user);
+    let kept = &turns[1].items.as_ref().unwrap()[0];
+    assert_eq!(kept.id.as_str(), user);
+    assert_eq!(
+        kept.client_input_id.as_ref().unwrap().as_str(),
+        input.to_string()
+    );
+    assert!(
+        matches!(kept.body(), ItemBody::UserMessage { text: Some(text), .. } if text == "kept user input")
+    );
 }
 fn input(id: Uuid) -> Submission {
     Submission {
@@ -617,7 +633,7 @@ fn recorded_native_fragments_without_metadata_are_imported_after_upgrade() {
         drop(connection);
         let storage = Storage::open(&directory.path().join("bex-conversations.sqlite"));
         storage.check_ready().unwrap();
-        assert_eq!(storage.loaded(&address()).unwrap(), managed);
+        assert!(storage.loaded(&address()).unwrap());
         let before = storage.state(&address()).unwrap();
         assert!(before.thread.queue_held);
         assert!(before.inputs.contains_key(queued.to_string().as_str()));
@@ -767,4 +783,127 @@ fn repeated_qualified_native_turns_keep_each_deferred_item_address() {
         assert_eq!(address.request.turn_id.as_str(), "repeated");
         assert_eq!(address.request.item_id.as_str(), native);
     }
+}
+
+#[test]
+fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recovery_once() {
+    use agent_local_host::update::{
+        ContinuationDelivery, InterruptedTask, RECOVERY_FILE, Recovery,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    previous(&directory.path().join("bex-transcripts.sqlite"), false);
+    let connection = Connection::open(directory.path().join("bex-transcripts.sqlite")).unwrap();
+    let mut turn: Turn = protocol::decode(
+        &connection
+            .query_row("SELECT body FROM turns", [], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap(),
+    )
+    .unwrap();
+    turn.status = TurnStatus::Running;
+    connection
+        .execute(
+            "UPDATE turns SET body=?1",
+            [protocol::encode(turn).unwrap()],
+        )
+        .unwrap();
+    let journal = Recovery {
+        tasks: vec![InterruptedTask {
+            native_session: address(),
+            submission: input(Uuid::new_v4()),
+            cwd: Some("/kept/workspace".into()),
+            last_turn: Some("original-turn".into()),
+            delivery: ContinuationDelivery::Pending,
+        }],
+    };
+    let report = directory.path().join(RECOVERY_FILE);
+    agent_local_host::save_private_json(&report, &journal).unwrap();
+    let path = directory.path().join("bex-conversations.sqlite");
+    let storage = Storage::open(&path);
+    storage.check_ready().unwrap();
+    assert!(storage.updating().unwrap());
+    // The old updater requires these exact fields while reading only delivery.
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    assert_eq!(
+        saved["tasks"][0]["native_session"],
+        serde_json::json!(address())
+    );
+    assert!(saved["tasks"][0].get("submission").is_some());
+    let context = Context {
+        now: 1000,
+        seed: Uuid::new_v4(),
+        steers: true,
+        preparation: None,
+        rewind_binding: None,
+        external_busy: false,
+        steer_ready: true,
+    };
+    let restarted = storage
+        .decide(
+            &address(),
+            Event::Restart {
+                updating: true,
+                continue_after_restart: true,
+            },
+            context,
+            None,
+        )
+        .unwrap();
+    assert_eq!(restarted.step.continuations.len(), 1);
+    let again = storage
+        .decide(
+            &address(),
+            Event::Restart {
+                updating: true,
+                continue_after_restart: true,
+            },
+            context,
+            None,
+        )
+        .unwrap();
+    assert!(again.step.continuations.is_empty());
+    drop(storage);
+    Storage::open(&path).check_ready().unwrap();
+}
+
+#[test]
+fn native_reimport_retains_recorded_turns_absent_from_the_native_transcript() {
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("bex-transcripts.sqlite");
+    previous(&old, false);
+    let connection = Connection::open(old).unwrap();
+    connection
+        .execute("UPDATE conversations SET metadata=NULL", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM host_state WHERE name='bindings'", [])
+        .unwrap();
+    let storage = Storage::open(&directory.path().join("bex-conversations.sqlite"));
+    storage.check_ready().unwrap();
+    let claim = storage.claim(i64::MAX / 2, 16).unwrap().into_iter().find(|claim| matches!(&claim.work, jobs::Work::Import { target, .. } if target == &address())).unwrap();
+    storage
+        .reimport(
+            &address(),
+            &address(),
+            claim.id,
+            claim.attempt,
+            &ThreadResponse {
+                thread: Thread {
+                    id: Some(address()),
+                    cwd: Some("/kept/workspace".into()),
+                    turns: Some(vec![]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            100,
+        )
+        .unwrap();
+    let history = storage.history(&address(), 0).unwrap();
+    let turns = history.thread.turns.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].id.as_str(), "original-turn");
+    assert!(
+        matches!(turns[0].items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "kept answer")
+    );
 }

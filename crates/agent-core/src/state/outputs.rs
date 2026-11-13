@@ -270,6 +270,24 @@ mod tests {
         );
         let replica = state.sessions.replicas[&session].clone();
         assert_eq!(watch(&mut state, "", key.clone(), true).len(), 1);
+        Arc::make_mut(&mut state.operations).insert(
+            op::OperationKey::CommandOutput {
+                session: session.clone(),
+                item: key.item.clone(),
+            },
+            op::OperationState {
+                generation: 1,
+                phase: op::OperationPhase::Failed {
+                    message: "could not subscribe".into(),
+                },
+            },
+        );
+        assert!(watch(&mut state, "", key.clone(), false).is_empty());
+        assert_eq!(
+            watch(&mut state, "", key.clone(), true).len(),
+            1,
+            "re-expanding retries a failed output subscription"
+        );
         let subscription = uuid::Uuid::new_v4();
         Subscribe { key: key.clone() }.apply(
             &mut state,

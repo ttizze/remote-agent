@@ -7,6 +7,29 @@ pub(super) struct Preparation {
 }
 
 impl Runtime {
+    pub(super) fn preparation(&self, target: &SessionRef) -> Arc<Preparation> {
+        self.preparations
+            .lock()
+            .unwrap()
+            .entry(target.clone())
+            .or_insert_with(|| {
+                Arc::new(Preparation {
+                    io: Default::default(),
+                    active: Default::default(),
+                })
+            })
+            .clone()
+    }
+
+    pub(super) fn retire_preparation(&self, target: &SessionRef) {
+        let mut preparations = self.preparations.lock().unwrap();
+        if preparations.get(target).is_some_and(|preparation| {
+            Arc::strong_count(preparation) == 1 && preparation.active.lock().unwrap().is_none()
+        }) {
+            preparations.remove(target);
+        }
+    }
+
     pub(super) async fn prepare_effect(
         service: &HostRpcService,
         target: &SessionRef,
@@ -71,20 +94,20 @@ impl Runtime {
                         .workspace(target, cwd.clone(), projects.project_membership(Some(&cwd)))
                         .await?;
                 }
-                let saved = runtime.storage.state(target)?;
+                let saved = runtime.storage.header(target)?;
                 if let Some(native) = source {
                     Self::release_unused_source(service, target, provider, &native).await?;
                 }
                 if created
-                    && saved.thread.workspace.cwd() != Some(cwd.as_str())
-                    && let Err(error) = service.inner.worktrees.discard(cwd).await
+                    && saved.state.workspace.cwd() != Some(cwd.as_str())
+                    && let Err(error) = service.inner.worktrees.discard(cwd, None).await
                 {
                     tracing::warn!(target: "agent", operation="conversation.discard_worktree", %error);
                 }
             }
             Err(error) => {
                 if let Some(generation) = setup_generation {
-                    let current = runtime.storage.state(target)?.inputs.get(&id).is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action));
+                    let current = runtime.storage.input(target, &id)?.is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action));
                     let phase = if current {
                         agent_protocol::workspace::SetupPhase::Failed
                     } else {
@@ -129,26 +152,8 @@ impl Runtime {
         let _workspace = service.inner.worktree_access.read().await;
         service.require_not_updating()?;
         let runtime = &service.inner.conversation;
-        let _retire = scopeguard::guard((), |_| {
-            let mut preparations = runtime.preparations.lock().unwrap();
-            if preparations.get(target).is_some_and(|preparation| {
-                Arc::strong_count(preparation) == 1 && preparation.active.lock().unwrap().is_none()
-            }) {
-                preparations.remove(target);
-            }
-        });
-        let preparation = runtime
-            .preparations
-            .lock()
-            .unwrap()
-            .entry(target.clone())
-            .or_insert_with(|| {
-                Arc::new(Preparation {
-                    io: Default::default(),
-                    active: Default::default(),
-                })
-            })
-            .clone();
+        let _retire = scopeguard::guard((), |_| runtime.retire_preparation(target));
+        let preparation = runtime.preparation(target);
         let _io = preparation.io.lock().await;
         let cancel = tokio_util::sync::CancellationToken::new();
         *preparation.active.lock().unwrap() = Some((action, cancel.clone()));
@@ -163,30 +168,16 @@ impl Runtime {
         });
         if !runtime
             .storage
-            .state(target)
+            .input(target, id)
             .map_err(storage_failure)?
-            .permits(&Action::Prepare {
-                id: id.clone(),
-                action,
-                stage,
-                cwd: cwd.clone(),
-                provider,
-            })
+            .is_some_and(|input| input.state.preparing(action, stage))
         {
             return Err(Failure::new(
                 "preparation_interrupted",
                 "Preparation cancelled",
             ));
         }
-        let cancelled = cancel.clone();
-        let generation = runtime
-            .storage
-            .header(target)
-            .map_err(storage_failure)?
-            .details
-            .workspace
-            .map(|workspace| workspace.generation);
-        let result = async {
+        async {
             match stage {
                 PreparationStage::Workspace => {
                     let directory = cwd
@@ -265,26 +256,6 @@ impl Runtime {
                 }
             }
         }
-        .await;
-        if cancelled.is_cancelled()
-            && let Some(workspace) = runtime
-                .storage
-                .header(target)
-                .map_err(storage_failure)?
-                .details
-                .workspace
-                .filter(|workspace| {
-                    Some(workspace.generation) == generation && workspace.created_worktree
-                })
-            && let Some(path) = workspace.setup.and_then(|setup| setup.worktree_path)
-        {
-            service
-                .inner
-                .worktrees
-                .discard(path)
-                .await
-                .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
-        }
-        result
+        .await
     }
 }

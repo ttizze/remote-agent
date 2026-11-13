@@ -181,12 +181,7 @@ fn steer_input(state: &State, id: &ClientInputId, context: Context) -> Step {
         return reject("context compaction must run as a separate turn");
     }
     if let Some(turn) = state.active_turn().filter(|turn| turn.compaction) {
-        let first = state
-            .inputs
-            .values()
-            .filter(|input| matches!(input.state, InputState::Queued { .. }))
-            .min_by_key(|input| input.position)
-            .map(|input| &input.id);
+        let first = state.queued_head().map(|input| &input.id);
         let mut result = interrupt_turn(state, turn, Some(id.clone()), context);
         if result.outcome != Outcome::Accepted {
             return result;
@@ -200,12 +195,7 @@ fn steer_input(state: &State, id: &ClientInputId, context: Context) -> Step {
             .is_some_and(|delivery| !delivery.steer)
             && InputPart::is_compaction(&input.content.parts)
     }) {
-        let first = state
-            .inputs
-            .values()
-            .filter(|input| matches!(input.state, InputState::Queued { .. }))
-            .min_by_key(|input| input.position)
-            .map(|input| &input.id);
+        let first = state.queued_head().map(|input| &input.id);
         let mut result = interrupt_input(state, compact, Some(id.clone()), context);
         result.changes.extend(move_input(state, id, first).changes);
         return result;
@@ -392,9 +382,16 @@ fn retry_input(state: &State, id: &ClientInputId, work_locally: bool, context: C
         state: InputState::Queued { steer: None },
         ..input.clone()
     })]);
-    result
-        .actions
-        .extend(cancel.map(|action| Action::CancelPreparation { action }));
+    if let Some(action) = cancel {
+        let cleanup = workspace::cancelled(context.preparation);
+        if let Some(saved) = context.preparation {
+            result.changes.push(Change::CancelSetup(saved.generation));
+        }
+        result.actions.push(Action::CancelPreparation {
+            action,
+            discard: cleanup.map(|(generation, _, path)| (generation, path)),
+        });
+    }
     let next = state.apply(&result.changes);
     let delivery = dispatch(&next, id, context, DeliveryMode::Direct);
     result.changes.extend(delivery.changes);
@@ -553,7 +550,14 @@ fn interrupt_turn(
             let Some(attempt) = state.attempts.get(&turn.id) else {
                 return reject("active attempt is missing");
             };
-            let action = allocate(context.seed, "interrupt");
+            let pending = next_input.as_ref().and(match &turn.state {
+                TurnState::Running { interrupt } => interrupt.as_ref(),
+                _ => None,
+            });
+            let action = pending.map_or_else(
+                || allocate(context.seed, "interrupt"),
+                |interrupt| interrupt.action,
+            );
             Step {
                 changes: vec![
                     Change::Turn(Turn {
@@ -574,11 +578,18 @@ fn interrupt_turn(
                         ..state.thread.clone()
                     }),
                 ],
-                actions: vec![Action::Interrupt {
-                    attempt: attempt.clone(),
-                    action,
-                    background: matches!(turn.state, TurnState::Waiting(Wait::Background { .. })),
-                }],
+                actions: pending
+                    .is_none()
+                    .then(|| Action::Interrupt {
+                        attempt: attempt.clone(),
+                        action,
+                        background: matches!(
+                            turn.state,
+                            TurnState::Waiting(Wait::Background { .. })
+                        ),
+                    })
+                    .into_iter()
+                    .collect(),
                 outcome: Outcome::Accepted,
                 ..Step::default()
             }
@@ -596,13 +607,21 @@ fn interrupt_input(
     next_input: Option<ClientInputId>,
     context: Context,
 ) -> Step {
+    let cleanup = matches!(input.state, InputState::Preparing { .. })
+        .then(|| workspace::cancelled(context.preparation))
+        .flatten();
     let (next, actions) = match &input.state {
         InputState::Preparing { action, .. } => (
             InputState::Failed(ExecutionError {
                 message: "preparation interrupted".into(),
                 ..ExecutionError::default()
             }),
-            vec![Action::CancelPreparation { action: *action }],
+            vec![Action::CancelPreparation {
+                action: *action,
+                discard: cleanup
+                    .as_ref()
+                    .map(|(generation, _, path)| (*generation, path.clone())),
+            }],
         ),
         _ => {
             let delivery = input.live_delivery().expect("selected live delivery");
@@ -624,21 +643,31 @@ fn interrupt_input(
             (next, Vec::new())
         }
     };
+    let mut changes = vec![
+        Change::Input(PendingInput {
+            state: next,
+            ..input.clone()
+        }),
+        Change::Thread(Thread {
+            queue_held: if next_input.is_some() {
+                state.thread.queue_held
+            } else {
+                InputPart::is_compaction(&input.content.parts) || state.has_queued_inputs()
+            },
+            workspace: cleanup.as_ref().map_or_else(
+                || state.thread.workspace.clone(),
+                |(_, root, _)| Workspace::Folder(root.clone()),
+            ),
+            ..state.thread.clone()
+        }),
+    ];
+    if matches!(input.state, InputState::Preparing { .. })
+        && let Some(saved) = context.preparation
+    {
+        changes.push(Change::CancelSetup(saved.generation));
+    }
     Step {
-        changes: vec![
-            Change::Input(PendingInput {
-                state: next,
-                ..input.clone()
-            }),
-            Change::Thread(Thread {
-                queue_held: if next_input.is_some() {
-                    state.thread.queue_held
-                } else {
-                    InputPart::is_compaction(&input.content.parts) || state.has_queued_inputs()
-                },
-                ..state.thread.clone()
-            }),
-        ],
+        changes,
         actions,
         outcome: Outcome::Accepted,
         ..Step::default()

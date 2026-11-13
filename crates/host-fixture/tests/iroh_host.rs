@@ -11,7 +11,7 @@ use agent_transport::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{HostCredentials, HostRpcService, ProjectStore};
+use host_daemon::{HostCredentials, HostRpcService};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -147,7 +147,10 @@ async fn imported(fixture: &HostFixture, session: &SessionRef) {
     let stream = conversations::Conversation::open(&local.peer, session)
         .await
         .unwrap();
-    assert!(stream.replica.cursor().is_some());
+    assert_eq!(
+        stream.view().thread.history_read_state.unwrap().kind,
+        agent_protocol::session::HistoryReadKind::Complete
+    );
     local.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2603,7 +2606,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         );
         let service = HostRpcService::new(
             [host_daemon::providers::codex::Codex::new(Ok(server.clone())).into()],
-            ProjectStore::new(root.join("bex-worktrees.json")),
+            root.join("bex-worktrees.json"),
         );
         let runtime = Arc::new(
             HostRuntime::new(

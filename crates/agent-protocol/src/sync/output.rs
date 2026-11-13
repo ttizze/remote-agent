@@ -5,12 +5,83 @@ mod terminal;
 
 pub const TAIL_CHARS: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Output {
     pub sequence: u64,
     pub text: String,
     pub truncated: bool,
+    buffer: std::sync::Arc<terminal::Buffer>,
+}
+
+// The wire checkpoint contains the terminal resume string once; text and the
+// incremental screen are local projections of it.
+#[derive(Serialize, Deserialize)]
+struct Checkpoint {
+    sequence: u64,
     resume: String,
+    truncated: bool,
+}
+impl Serialize for Output {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Checkpoint {
+            sequence: self.sequence,
+            resume: self.buffer.resume(),
+            truncated: self.truncated,
+        }
+        .serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for Output {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Checkpoint::deserialize(deserializer)?;
+        let mut output = Self::new(value.sequence, &value.resume);
+        output.truncated |= value.truncated;
+        Ok(output)
+    }
+}
+impl PartialEq for Output {
+    fn eq(&self, other: &Self) -> bool {
+        self.sequence == other.sequence
+            && self.truncated == other.truncated
+            && self.text == other.text
+    }
+}
+impl Eq for Output {}
+
+/// The live owner feeds only new bytes. A display/checkpoint is built when
+/// publishing, subscribing or settling, rather than on each provider chunk.
+#[derive(Debug, Default)]
+pub struct OutputStream {
+    sequence: u64,
+    buffer: terminal::Buffer,
+    truncated: bool,
+}
+impl From<Output> for OutputStream {
+    fn from(output: Output) -> Self {
+        Self {
+            sequence: output.sequence,
+            buffer: std::sync::Arc::unwrap_or_clone(output.buffer),
+            truncated: output.truncated,
+        }
+    }
+}
+impl OutputStream {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    pub fn append(&mut self, through: u64, text: &str) {
+        self.buffer.append(text);
+        self.sequence = through;
+    }
+    pub fn checkpoint(&self) -> Output {
+        let (text, truncated) = self.buffer.display();
+        Output {
+            sequence: self.sequence,
+            text,
+            truncated: self.truncated || truncated,
+            buffer: std::sync::Arc::new(self.buffer.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,12 +102,14 @@ pub enum OutputError {
 
 impl Output {
     pub fn new(sequence: u64, text: &str) -> Self {
-        let folded = terminal::fold(text);
+        let mut buffer = terminal::Buffer::default();
+        buffer.append(text);
+        let (text, truncated) = buffer.display();
         Self {
             sequence,
-            text: folded.text,
-            resume: folded.resume,
-            truncated: folded.truncated,
+            text,
+            truncated,
+            buffer: std::sync::Arc::new(buffer),
         }
     }
     /// T3 bounds the raw final snapshot to four tails before interpreting it.
@@ -68,9 +141,7 @@ impl Output {
                 if tail.sequence < self.sequence {
                     return Ok(self.clone());
                 }
-                let mut next = Self::new(tail.sequence, &tail.resume);
-                next.truncated |= tail.truncated;
-                Ok(next)
+                Ok(tail)
             }
             OutputUpdate::Append {
                 from,
@@ -83,8 +154,12 @@ impl Output {
                 if from != self.sequence || through <= from {
                     return Err(OutputError::Gap);
                 }
-                let mut next = Self::new(through, &(self.resume.clone() + &text));
-                next.truncated |= self.truncated;
+                let mut next = self.clone();
+                std::sync::Arc::make_mut(&mut next.buffer).append(&text);
+                let (text, truncated) = next.buffer.display();
+                next.sequence = through;
+                next.text = text;
+                next.truncated |= truncated;
                 Ok(next)
             }
         }
@@ -95,6 +170,24 @@ impl Output {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    #[test]
+    fn live_appends_interpret_only_new_terminal_text() {
+        let mut stream = OutputStream::default();
+        stream.append(
+            1,
+            &"verbose command line with output and columns................................\n"
+                .repeat(1000),
+        );
+        let before = terminal::PRINTED_UNITS.get();
+        stream.append(2, "next line\n");
+        assert_eq!(terminal::PRINTED_UNITS.get() - before, "next line".len());
+        assert!(stream.checkpoint().text.ends_with("next line\n"));
+    }
+
+    fn checkpoint(output: Output) -> Output {
+        crate::protocol::decode(&crate::protocol::encode(output).unwrap()).unwrap()
+    }
+
     #[test]
     fn sequence_gaps_duplicates_and_checkpoint_recovery_do_not_change_history() {
         let output = Output::new(3, "before");
@@ -204,7 +297,7 @@ mod tests {
                 );
             }
             let restored = Output::default()
-                .apply(OutputUpdate::Tail(output.clone()))
+                .apply(OutputUpdate::Tail(checkpoint(output.clone())))
                 .unwrap();
             let after = restored
                 .apply(OutputUpdate::Append {
@@ -238,7 +331,7 @@ mod tests {
                 source.push_str(&part);
                 let update = OutputUpdate::Append { from: host.sequence, through: host.sequence + 1, text: part };
                 host = host.apply(update.clone()).unwrap();
-                let update = if checkpoints[index % checkpoints.len()] { OutputUpdate::Tail(host.clone()) } else { update };
+                let update = if checkpoints[index % checkpoints.len()] { OutputUpdate::Tail(checkpoint(host.clone())) } else { update };
                 client = client.apply(update.clone()).unwrap();
                 prop_assert_eq!(&client, &host);
                 prop_assert_eq!(client.apply(update).unwrap(), client.clone());

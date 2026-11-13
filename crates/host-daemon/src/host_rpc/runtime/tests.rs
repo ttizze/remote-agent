@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    ProjectStore,
-    host_rpc::runtime::native_fixture::{NativeAgent, call},
-};
+use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
 use agent_protocol::{
     protocol::{self, Call, Response},
     sync::Scope,
@@ -25,10 +22,8 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-        let service = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let connection = service.open_session();
         let parent = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
         let _: records::Opened = call(
@@ -148,7 +143,7 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
             let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
             let service = HostRpcService::new(
                 [codex.backend(), claude.backend()],
-                ProjectStore::new(directory.path().join("projects.json")),
+                directory.path().join("projects.json"),
             );
             let connection = service.open_session();
             let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -243,7 +238,7 @@ async fn compact_keeps_inline_provider_handoff_until_the_next_ordinary_input() {
         let directory = tempfile::tempdir().unwrap();
         let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
         let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
-        let service = HostRpcService::new([codex.backend(), claude.backend()], ProjectStore::new(directory.path().join("projects.json")));
+        let service = HostRpcService::new([codex.backend(), claude.backend()], directory.path().join("projects.json"));
         let connection = service.open_session();
         let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
         let text = |text: &str| decision::InputContent { parts: vec![op::Input::Text { text: text.into() }], ..content() };
@@ -271,10 +266,7 @@ async fn compact_keeps_inline_provider_handoff_until_the_next_ordinary_input() {
 #[tokio::test]
 async fn missing_providerless_conversations_keep_durable_rejections_without_a_provider() {
     let directory = tempfile::tempdir().unwrap();
-    let service = HostRpcService::new(
-        [],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let operation = Uuid::new_v4();
@@ -342,8 +334,23 @@ async fn background_command_completion_and_completion_while_stop_is_pending_save
     }
 }
 
+#[tokio::test]
+async fn resolving_unknown_delivery_saves_live_output_and_ends_its_subscription() {
+    command_output_case("fenced").await;
+}
+#[tokio::test]
+async fn a_short_pretruncated_command_keeps_its_omission_notice_when_settled() {
+    command_output_case("pretruncated").await;
+}
+
+#[tokio::test]
+async fn a_complete_short_command_does_not_claim_earlier_output_was_omitted() {
+    command_output_case("short").await;
+}
+
 async fn command_output_case(case: &str) {
     let stopped = case == "stopped";
+    let short = matches!(case, "short" | "pretruncated");
     use agent_protocol::{
         execution::{ItemStatus, TurnStatus},
         items::{Item, ItemBody},
@@ -351,10 +358,7 @@ async fn command_output_case(case: &str) {
     };
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let _: records::Opened = call(
@@ -410,7 +414,7 @@ async fn command_output_case(case: &str) {
                 command: "echo output".into(),
                 cwd: None,
                 output: "initial".into(),
-                output_omitted: false,
+                output_omitted: case == "pretruncated",
                 exit_code: None,
             },
         )),
@@ -452,7 +456,11 @@ async fn command_output_case(case: &str) {
         turn_id: "tools".into(),
         item_id: "command".into(),
         field: agent_protocol::session::TextField::CommandOutput,
-        delta: "日".repeat(100_000),
+        delta: if short {
+            "short tail".into()
+        } else {
+            "日".repeat(100_000)
+        },
     })
     .await
     .unwrap();
@@ -466,12 +474,13 @@ async fn command_output_case(case: &str) {
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     let frame = updates.recv().await.unwrap();
     let update: OutputUpdate = protocol::decode(&frame).unwrap();
-    assert!(
+    assert_eq!(
         matches!(update, OutputUpdate::Tail(_)),
-        "a subscriber behind the retained range receives the new tail"
+        !short,
+        "only an overflowing pending append requires a full tail"
     );
     let tail = opened.initial.apply(update).unwrap();
-    assert!(tail.truncated);
+    assert_eq!(tail.truncated, case != "short");
     assert!(tail.text.encode_utf16().count() <= 64 * 1024);
     assert_eq!(
         service
@@ -604,6 +613,97 @@ async fn command_output_case(case: &str) {
         if case == "foreground-stop" {
             assert!(state.thread.queue_held);
         }
+    } else if case == "fenced" {
+        let storage = &service.inner.conversation.storage;
+        let context = Runtime::context(&service, Some(ProviderKind::Codex));
+        let input = Uuid::new_v4();
+        let mut content = content();
+        content.follow_up = op::FollowUp::Steer;
+        let pending = storage
+            .decide(
+                &target,
+                Event::Command {
+                    id: decision::OperationId::Client(input),
+                    receipt: None,
+                    command: Command::Submit {
+                        id: input.to_string().into(),
+                        content,
+                    },
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        let Action::Deliver { id, action, .. } = &pending.step.actions[0] else {
+            panic!("steer delivery");
+        };
+        storage
+            .decide(
+                &target,
+                Event::DeliveryFailed {
+                    id: id.clone(),
+                    action: *action,
+                    unknown: true,
+                    error: Default::default(),
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        send(SessionChange::Item {
+            turn_id: "tools".into(),
+            item: Arc::new(Item::new(
+                "last-text".into(),
+                ItemStatus::Running,
+                ItemBody::AssistantText {
+                    text: String::new(),
+                    phase: Default::default(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+        send(SessionChange::Text {
+            turn_id: "tools".into(),
+            item_id: "last-text".into(),
+            field: agent_protocol::session::TextField::AssistantText,
+            delta: "last buffered text".into(),
+        })
+        .await
+        .unwrap();
+        let resolved = storage
+            .decide(
+                &target,
+                Event::Command {
+                    id: decision::OperationId::Client(Uuid::new_v4()),
+                    receipt: None,
+                    command: Command::ResolveUnknown {
+                        id: id.clone(),
+                        retry: false,
+                    },
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        for action in resolved.step.actions {
+            Runtime::execute(
+                &service,
+                Effect {
+                    target: target.clone(),
+                    action,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let text = storage
+            .item(&target, &decision::provider_item_id(execution, "last-text"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(text.body, ItemBody::AssistantText { text, .. } if text == "last buffered text")
+        );
     } else if stopped {
         Runtime::observe(
             &service,
@@ -647,12 +747,12 @@ async fn command_output_case(case: &str) {
         panic!("command missing")
     };
     assert_eq!(output, tail.text);
-    assert!(output_omitted);
+    assert_eq!(output_omitted, case != "short");
     assert_eq!(
         stored.status,
         match case {
             "stopped" | "background-failed" => ItemStatus::Failed,
-            "background-interrupted" | "foreground-stop" => ItemStatus::Interrupted,
+            "background-interrupted" | "foreground-stop" | "fenced" => ItemStatus::Interrupted,
             _ => ItemStatus::Completed,
         }
     );
@@ -664,10 +764,7 @@ async fn command_output_case(case: &str) {
 async fn native_reply_before_submit_ack_commits_one_turn_and_replay_never_sends_again() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let operation = Uuid::new_v4();
@@ -775,10 +872,7 @@ async fn completed(
 async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resources() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let first = Uuid::new_v4();
@@ -864,10 +958,7 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
 async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let operation = Uuid::new_v4();
@@ -1053,7 +1144,7 @@ async fn an_update_restart_continues_each_interrupted_root_once_in_its_original_
     let directory = tempfile::tempdir().unwrap();
     let projects = directory.path().join("projects.json");
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new([agent.backend()], ProjectStore::new(projects.clone()));
+    let service = HostRpcService::new([agent.backend()], projects.clone());
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let operation = Uuid::new_v4();
@@ -1127,7 +1218,7 @@ async fn an_update_restart_continues_each_interrupted_root_once_in_its_original_
     .await
     .unwrap();
     let restarted = agent.restarted();
-    let service = HostRpcService::new([restarted.backend()], ProjectStore::new(projects));
+    let service = HostRpcService::new([restarted.backend()], projects);
     service.start().unwrap();
     let history = completed(&service, &target, 3).await;
     assert_eq!(
@@ -1157,7 +1248,7 @@ async fn an_update_restart_continues_each_interrupted_root_once_in_its_original_
 }
 
 #[tokio::test]
-async fn explicit_native_imports_preserve_host_turns_and_refresh_external_text_once() {
+async fn explicit_native_imports_append_missing_text_and_keep_settled_messages() {
     use agent_protocol::{
         execution::ItemStatus,
         items::{Item, ItemBody},
@@ -1165,10 +1256,7 @@ async fn explicit_native_imports_preserve_host_turns_and_refresh_external_text_o
     };
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let _: records::Opened = call(
@@ -1233,7 +1321,16 @@ async fn explicit_native_imports_preserve_host_turns_and_refresh_external_text_o
         .push(Arc::new(external("external answer")));
     let storage = &service.inner.conversation.storage;
     for _ in 0..2 {
-        storage.queue_import(&target, &native, now()).unwrap();
+        let imported: agent_protocol::project_import::ProjectImportResult = call(
+            &service,
+            connection.id(),
+            Call::ImportProjects(agent_protocol::project_import::ImportProjects {
+                paths: vec![directory.path().to_str().unwrap().into()],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(imported.imported.len(), 1);
     }
     let imported = completed(&service, &target, 2).await;
     let turns = imported.thread.turns.as_ref().unwrap();
@@ -1255,12 +1352,30 @@ async fn explicit_native_imports_preserve_host_turns_and_refresh_external_text_o
         .turns
         .as_mut()
         .unwrap()[1] = Arc::new(external("updated answer"));
+    let version = |message: records::Message| {
+        let agent_protocol::sync::Message::Snapshot { rows, .. } = message else {
+            panic!("snapshot")
+        };
+        rows.into_iter()
+            .find(|row| {
+                row.key
+                    == agent_protocol::sync::Key::Turn {
+                        thread: target.clone(),
+                        id: id.clone(),
+                    }
+            })
+            .unwrap()
+            .version
+    };
+    let before = version(storage.snapshot(&target, None, None).unwrap());
     storage.queue_import(&target, &native, now()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let history = storage.history(&target, 0).unwrap();
             let turns = history.thread.turns.unwrap();
-            if matches!(turns.last().unwrap().items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "updated answer") {
+            // Observe a versioned import result before asserting immutability.
+            if version(storage.snapshot(&target, None, None).unwrap()) > before {
+                assert!(matches!(turns.last().unwrap().items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "external answer"));
                 assert_eq!(turns.len(), 2);
                 assert_eq!(turns[1].id, id);
                 assert_eq!(turns[1].items.as_ref().unwrap()[0].id, item);
@@ -1287,7 +1402,7 @@ async fn registering_a_project_updates_open_conversations_and_the_shared_list_af
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let service = HostRpcService::new([], ProjectStore::new(&state_file));
+    let service = HostRpcService::new([], &state_file);
     let id = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     service
         .inner
@@ -1368,12 +1483,12 @@ async fn registering_a_project_updates_open_conversations_and_the_shared_list_af
         replica.rows()[&Key::Thread(id.clone())].version
     );
     assert!(
-        matches!(&listed.content,Content::Full(record) if matches!(record.as_ref(),records::Record::Thread(header) if header.details.project.as_deref()==Some(project.id.as_str())))
+        matches!(&listed.content,Content::Full(record) | Content::Summary(record) if matches!(record.as_ref(),records::Record::Thread(header) if header.details.project.as_deref()==Some(project.id.as_str())))
     );
     drop(updates);
     drop(connection);
     drop(service);
-    let restarted = HostRpcService::new([], ProjectStore::new(&state_file));
+    let restarted = HostRpcService::new([], &state_file);
     assert_eq!(
         restarted
             .inner
@@ -1431,10 +1546,7 @@ async fn opening_native_history_subscribes_before_import_and_publishes_the_lates
         },
     );
     let held = agent.open_gate.acquire().await.unwrap();
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let reply = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -1509,10 +1621,7 @@ async fn opening_native_history_subscribes_before_import_and_publishes_the_lates
 async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_another_turn() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let _: records::Opened = call(
@@ -1698,10 +1807,8 @@ async fn discovery_cannot_publish_a_private_source_before_its_creation_receipt()
         let directory = tempfile::tempdir().unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
         let held = agent.create_response_gate.acquire().await.unwrap();
-        let service = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         service
             .inner
             .conversation
@@ -1773,7 +1880,7 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         let directory = tempfile::tempdir().unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex,directory.path().into());
-        let service = HostRpcService::new([agent.backend()],ProjectStore::new(directory.path().join("projects.json")));
+        let service = HostRpcService::new([agent.backend()],directory.path().join("projects.json"));
         let connection = service.open_session();
         let target = SessionRef::new(None,Uuid::new_v4().to_string()).unwrap();
         let _: records::Opened = call(&service,connection.id(),Call::CreateConversation(records::Create {
@@ -1828,10 +1935,7 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
 async fn unavailable_project_does_not_block_listing_or_opening_saved_conversations() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new(
-        [agent.backend()],
-        ProjectStore::new(directory.path().join("projects.json")),
-    );
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let _: records::Opened = call(
@@ -1908,4 +2012,94 @@ async fn unavailable_project_does_not_block_listing_or_opening_saved_conversatio
         matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { content, .. }
             if content.iter().any(|part| matches!(part, agent_protocol::items::MessagePart::Text { text } if text == "run once")))
     }));
+}
+
+#[tokio::test]
+async fn cancellation_between_stages_discards_the_owned_checkout_without_an_active_worker() {
+    use agent_protocol::{
+        conversation::{self as decision, Action},
+        workspace::CreatedWorktree,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    for args in [
+        &["init", "-b", "main"][..],
+        &["config", "user.name", "fixture"],
+        &["config", "user.email", "fixture@example.test"],
+        &["commit", "--allow-empty", "-m", "initial"],
+    ] {
+        crate::git::text(&repository, args).unwrap();
+    }
+    let service = HostRpcService::new([], directory.path().join("projects.json"));
+    let checkout = service
+        .inner
+        .worktrees
+        .prepare_selected(
+            repository.to_str().unwrap(),
+            "main".into(),
+            false,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let branch = crate::git::text(&checkout, &["symbolic-ref", "--short", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_owned();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let header = records::Header {
+        state: decision::Thread {
+            name: String::new(),
+            workspace: decision::Workspace::Folder(repository.to_str().unwrap().into()),
+            provider: ProviderKind::Codex,
+            queue_held: false,
+        },
+        details: Default::default(),
+    };
+    service
+        .inner
+        .conversation
+        .storage
+        .create(&target, &header)
+        .unwrap();
+    let action = Action::CancelPreparation {
+        action: Uuid::new_v4(),
+        discard: Some((
+            Uuid::new_v4(),
+            CreatedWorktree {
+                path: checkout.to_str().unwrap().into(),
+                branch: branch.clone(),
+            },
+        )),
+    };
+    for _ in 0..2 {
+        Runtime::execute(
+            &service,
+            crate::host_rpc::owners::Effect {
+                target: target.clone(),
+                action: action.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert!(!checkout.exists());
+    assert!(
+        crate::git::text(&repository, &["branch", "--list", &branch])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .header(&target)
+            .unwrap()
+            .state
+            .workspace
+            .cwd(),
+        repository.to_str()
+    );
 }

@@ -451,3 +451,68 @@ fn an_interrupted_turn_or_a_usage_limit_can_be_resumed() {
     }
     assert!(!super::resumable(&Thread::default()));
 }
+
+#[test]
+fn sending_ordinary_input_cannot_be_steered_but_compaction_can_be_promoted() {
+    let mut snapshot = snapshot();
+    for (text, expected) in [("ordinary", false), ("/compact", true)] {
+        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+            session(),
+            Arc::new(Thread {
+                id: Some(session()),
+                capabilities: Some(agent_protocol::session::Capabilities {
+                    steer: true,
+                    ..Default::default()
+                }),
+                preparations: vec![agent_protocol::session::SessionPreparation {
+                    submission: agent_protocol::operations::Submission {
+                        thread_id: session(),
+                        client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+                        input: vec![agent_protocol::operations::Input::Text { text: text.into() }],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                    status: agent_protocol::session::PreparationStatus::Sending,
+                    stage: agent_protocol::session::PreparationStage::Provider,
+                }],
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            presentation(&snapshot).controls.follow_up.can_steer,
+            expected
+        );
+    }
+    Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+        session(),
+        Arc::new(Thread {
+            id: Some(session()),
+            capabilities: Some(agent_protocol::session::Capabilities {
+                steer: false,
+                ..Default::default()
+            }),
+            turns: Some(vec![Arc::new(Turn {
+                id: "compacting".into(),
+                status: TurnStatus::Running,
+                items: Some(vec![Arc::new(crate::models::Item::new(
+                    "compact-input".into(),
+                    crate::models::ItemStatus::Completed,
+                    crate::models::ItemBody::UserMessage {
+                        text: None,
+                        content: vec![crate::models::MessagePart::Text {
+                            text: "/compact".into(),
+                        }],
+                    },
+                ))]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        }),
+    );
+    assert!(
+        presentation(&snapshot).controls.follow_up.can_steer,
+        "an acknowledged compaction can be skipped before its native compaction item arrives"
+    );
+}

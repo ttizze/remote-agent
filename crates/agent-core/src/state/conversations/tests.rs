@@ -500,3 +500,79 @@ fn a_rejected_first_message_returns_to_its_folder_and_merges_a_newer_draft() {
         );
     }
 }
+
+#[test]
+fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
+    use crate::state::{Event, Intent, reduce};
+    for occupied in [false, true] {
+        let mut first = Snapshot::default();
+        let key = first.panes.primary().navigation.draft_key.clone();
+        let draft = Arc::new(Draft {
+            text: "welcome work".into(),
+            model: Some(crate::models::ModelRef {
+                provider: crate::session::ProviderKind::Codex,
+                id: "model".into(),
+            }),
+            attachments: vec![Attachment {
+                path: "/picture.png".into(),
+                name: "picture.png".into(),
+                is_image: true,
+            }],
+            invocations: vec![agent_protocol::composer::Invocation {
+                provider: crate::session::ProviderKind::Codex,
+                kind: agent_protocol::composer::InvocationKind::Skill,
+                name: "kept".into(),
+                path: "/SKILL.md".into(),
+            }],
+            ..Default::default()
+        });
+        Arc::make_mut(&mut first.input.drafts).insert(key.clone(), draft.clone());
+        let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+        let (mut pending, _) = super::super::submission(
+            &first,
+            super::super::Destination {
+                thread_id: None,
+                cwd: None,
+                draft_key: key.clone(),
+            },
+            draft.clone(),
+            input.clone(),
+            None,
+            Default::default(),
+        );
+        assert!(pending.welcome_submission(pending.panes.primary().navigation.draft_key.clone()));
+        if occupied {
+            Arc::make_mut(&mut pending.input.drafts).insert(
+                key.clone(),
+                Arc::new(Draft {
+                    text: "new typing".into(),
+                    ..Default::default()
+                }),
+            );
+        }
+        let failed = reduce(&pending, "", Event::SubmissionFailed(input)).0;
+        let elsewhere = reduce(
+            &failed,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/else".into(),
+            }),
+        )
+        .0;
+        let restored =
+            crate::persistence::decode(&crate::persistence::encode(&elsewhere).unwrap()).unwrap();
+        let returned = reduce(&restored, "", Event::Intent(Intent::ShowThreadList)).0;
+        assert_eq!(returned.panes.primary().navigation.draft_key, key);
+        let recovered = &returned.input.drafts[&key];
+        assert_eq!(
+            recovered.text,
+            if occupied {
+                "welcome work\nnew typing"
+            } else {
+                "welcome work"
+            }
+        );
+        assert_eq!(recovered.attachments, draft.attachments);
+        assert_eq!(recovered.invocations, draft.invocations);
+    }
+}

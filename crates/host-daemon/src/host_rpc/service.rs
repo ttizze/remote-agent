@@ -66,14 +66,27 @@ impl HostRpcService {
         }
     }
 
-    pub fn new(backends: impl IntoIterator<Item = Backend>, projects: ProjectStore) -> Self {
+    #[cfg(feature = "test-support")]
+    pub fn fixture_projects(&self) -> ProjectStore {
+        self.inner.projects.clone()
+    }
+
+    pub fn new(
+        backends: impl IntoIterator<Item = Backend>,
+        project_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let project_path = project_path.into();
+        let storage = Arc::new(super::storage::Storage::open(
+            &project_path.with_file_name("bex-conversations.sqlite"),
+        ));
+        let projects = ProjectStore::new(project_path, storage.clone());
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
         let router = SessionRouter::new();
         let (providers, dictation) = crate::providers::Registry::new(backends);
         let conversation = super::runtime::Runtime::new(
-            projects.storage.clone(),
+            storage,
             providers.all().into_iter().map(|(provider, _)| provider),
         );
         Self {
@@ -241,22 +254,19 @@ impl HostRpcService {
         } else {
             None
         };
-        let result = if _workspace.is_some()
-            && self
-                .inner
-                .updating
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            Err(Failure::new(
-                "host_updating",
-                "Bexを更新しています。再接続後にもう一度お試しください。",
-            ))
-        } else {
-            if let Some(reply) = super::runtime::Runtime::dispatch(self, session, message).await? {
-                return Ok(reply);
+        let result = async {
+            if _workspace.is_some() {
+                self.require_not_updating()?;
             }
-            self.request(session, message).await
-        };
+            match super::runtime::Runtime::dispatch(self, session, message).await? {
+                Some(reply) => Ok(reply),
+                None => self
+                    .request(session, message)
+                    .await
+                    .map(|body| Response::Success { result: body }.into()),
+            }
+        }
+        .await;
         if let Err(error) = &result {
             agent_transport::diagnostics::rpc_error(
                 message.method(),
@@ -264,7 +274,12 @@ impl HostRpcService {
                 &serde_json::value::to_raw_value(error).map_err(invalid_message)?,
             );
         }
-        Ok(Response::from_result(result).into())
+        Ok(result.unwrap_or_else(|error| {
+            Response::Failure {
+                error: error.into(),
+            }
+            .into()
+        }))
     }
 
     async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
@@ -652,10 +667,7 @@ mod tests {
         };
         let directory = tempfile::tempdir().unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-        let host = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("worktrees.json")),
-        );
+        let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
         let client = host.open_session();
         let mut other = host.open_session();
         let settings: ProviderSettings = call(
@@ -735,7 +747,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             std::iter::empty::<Backend>(),
-            ProjectStore::new(root.path().join("worktrees.json")),
+            root.path().join("worktrees.json"),
         );
         let session = service.open_session();
         let missing = root.path().join("missing.mp4").to_str().unwrap().to_owned();
@@ -782,7 +794,7 @@ mod tests {
         b.accounts_gate.forget_permits(1);
         let host = HostRpcService::new(
             [a.backend(), b.backend()],
-            ProjectStore::new(directory.path().join("worktrees.json")),
+            directory.path().join("worktrees.json"),
         );
         let client = host.open_session();
         let mut accounts = Box::pin(call::<op::Accounts>(
@@ -831,7 +843,7 @@ mod tests {
                 Backend::unavailable(ProviderKind::Claude, "claude startup failed"),
                 a.backend(),
             ],
-            ProjectStore::new(directory.path().join("worktrees.json")),
+            directory.path().join("worktrees.json"),
         );
         let client = host.open_session();
 
@@ -865,7 +877,7 @@ mod tests {
         ];
         let service = HostRpcService::new(
             providers.map(|provider| Backend::unavailable(provider, "offline")),
-            ProjectStore::new(root.path().join("worktrees.json")),
+            root.path().join("worktrees.json"),
         );
         let session = service.open_session();
         for provider in providers {
@@ -904,17 +916,14 @@ mod tests {
                 ProviderKind::Claude,
                 "invalid provider configuration",
             )],
-            ProjectStore::new(root.path().join("worktrees.json")),
+            root.path().join("worktrees.json"),
         );
         assert_eq!(
             service.provider_errors()["claude"]["code"],
             "provider_unavailable"
         );
         let agent = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
-        let service = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(root.path().join("worktrees.json")),
-        );
+        let service = HostRpcService::new([agent.backend()], root.path().join("worktrees.json"));
         assert!(service.provider_errors().get("claude").is_none());
         let session = service.open_session();
         let response = service
@@ -1000,7 +1009,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             [Backend::unavailable(ProviderKind::Codex, "unavailable")],
-            ProjectStore::new(root.path().join("projects.json")),
+            root.path().join("projects.json"),
         );
         let target = agent_protocol::session::SessionRef::new(
             ProviderKind::Codex,
@@ -1088,10 +1097,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let service = super::HostRpcService::new(
-            [claude.into()],
-            crate::ProjectStore::new(root.path().join("projects.json")),
-        );
+        let service =
+            super::HostRpcService::new([claude.into()], root.path().join("projects.json"));
         let before = service.storage_scope().unwrap();
         let claude = crate::providers::claude::Claude::load(
             "claude".into(),
@@ -1110,12 +1117,67 @@ mod tests {
         .unwrap();
         let service = super::HostRpcService::new(
             [claude.into(), harness.into()],
-            crate::ProjectStore::new(root.path().join("projects.json")),
+            root.path().join("projects.json"),
         );
         let after = service.storage_scope().unwrap();
         assert_eq!(
             before, after,
             "Adding Harness must not archive existing drafts or navigation"
         );
+    }
+    #[tokio::test]
+    async fn conversation_rpc_failures_are_logged_once_without_request_payloads() {
+        use crate::HostRpcService;
+        use agent_protocol::protocol::{Call, Response};
+        use tracing::instrument::WithSubscriber;
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
+        service.set_history_scope(directory.path().to_owned(), true);
+        service.prepare_update().await.unwrap();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let file = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || file.try_clone().unwrap())
+            .finish();
+        let client = service.open_session();
+        let input = uuid::Uuid::new_v4();
+        let request = Call::ChangeConversation(agent_protocol::conversation::records::Change {
+            session: agent_protocol::session::SessionRef::new(
+                None,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap(),
+            operation: input,
+            command: agent_protocol::conversation::Command::Submit {
+                id: input.to_string().into(),
+                content: agent_protocol::conversation::InputContent {
+                    parts: vec![agent_protocol::operations::Input::Text {
+                        text: "private request title".into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
+            },
+        });
+        let reply = service
+            .dispatch(client.id(), &request)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        let Response::Failure { error } = agent_protocol::protocol::decode::<
+            Response<agent_protocol::models::Empty>,
+        >(&reply.initial)
+        .unwrap() else {
+            panic!("updating must reject the write");
+        };
+        assert_eq!(error.code, "host_updating");
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        assert_eq!(text.matches("host/conversation/change").count(), 1);
+        assert!(text.contains("host_updating"));
+        assert!(!text.contains("private request title"));
     }
 }

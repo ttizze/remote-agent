@@ -485,6 +485,7 @@ mod tests {
     fn local_recovery_restores_only_after_the_original_submission_is_fenced(
         #[values(true, false)] accepted: bool,
         #[values(true, false)] restore: bool,
+        #[values(true, false)] welcome: bool,
     ) {
         let session = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
         let input: ClientInputId = uuid::Uuid::new_v4().to_string().into();
@@ -500,7 +501,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             input.clone(),
             Arc::new(PendingSubmission {
-                new_draft_slot: None,
+                new_draft_slot: welcome.then(String::new),
                 draft_key: key.clone(),
                 draft: Arc::new(Draft {
                     text: "uncertain input".into(),
@@ -516,6 +517,10 @@ mod tests {
                 queued: false,
             }),
         );
+        Arc::make_mut(snapshot.panes.primary_mut()).navigation = Arc::new(Navigation {
+            draft_key: key.clone(),
+            ..Default::default()
+        });
         let operation = ResolveLocalInput {
             input: input.clone(),
             restore,
@@ -540,7 +545,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            snapshot.input.drafts[&key].text,
+            snapshot.input.drafts[&snapshot.panes.primary().navigation.draft_key].text,
             if !accepted && restore {
                 "uncertain input\nnew typing"
             } else {

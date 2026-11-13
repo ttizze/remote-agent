@@ -204,7 +204,7 @@ fn list_replication_shares_committed_header_versions_and_recovers_after_reopen()
     let row = &replica.rows()[&Key::Thread(id.clone())];
     assert_eq!(row.version, committed.cursor.sequence);
     assert!(
-        matches!(&row.content,Content::Full(record) if matches!(record.as_ref(),Record::Thread(header) if header.state.name=="Renamed"))
+        matches!(&row.content,Content::Full(record) | Content::Summary(record) if matches!(record.as_ref(),Record::Thread(header) if header.state.name=="Renamed"))
     );
     assert_eq!(replica.cursor(), Some(committed.cursor));
     drop(storage);
@@ -1200,7 +1200,7 @@ fn native_reimport_keeps_reused_turn_and_item_occurrences_after_reopen() {
             .unwrap();
         let after = storage.history(&id, 0).unwrap().thread.turns.unwrap();
         assert_eq!(after.len(), 2);
-        for (index, expected) in ["first updated", "second updated"].into_iter().enumerate() {
+        for (index, expected) in ["first", "second"].into_iter().enumerate() {
             assert_eq!(after[index].id, before[index].id);
             let items = after[index].items.as_ref().unwrap();
             assert_eq!(items.len(), 1);
@@ -2430,6 +2430,12 @@ fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
         .history_read_state
         .unwrap();
     assert_eq!(failed.kind, HistoryReadKind::Unavailable);
+    let before = storage.snapshot(&target, None, None).unwrap();
+    let repeated = storage
+        .import_status(&target, Some("native unavailable".into()), 101)
+        .unwrap();
+    assert!(repeated.rows.is_empty());
+    assert_eq!(storage.snapshot(&target, None, None).unwrap(), before);
     storage.import_status(&target, None, 101).unwrap();
     assert_eq!(
         storage
@@ -2473,5 +2479,396 @@ fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
             .unwrap()
             .kind,
         HistoryReadKind::Unavailable
+    );
+}
+
+#[test]
+fn a_private_native_source_cannot_create_a_second_conversation_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let public = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    storage.create(&public, &header()).unwrap();
+    ready(&storage, &public);
+    let native = storage.active_source(&public).unwrap().unwrap();
+    let before = storage.list(None).unwrap();
+    assert!(storage.import_status(&native, None, 100).is_err());
+    assert_eq!(storage.list(None).unwrap(), before);
+    assert!(storage.lookup(&native).unwrap().is_none());
+}
+
+#[test]
+fn item_and_timing_changes_preserve_activity_time_without_republishing_identical_headers() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let id = address("quiet-header");
+    storage.create(&id, &header()).unwrap();
+    ready(&storage, &id);
+    let sent = storage
+        .decide(&id, submit(1100), context(1100), None)
+        .unwrap();
+    let decision::Action::Deliver {
+        id: input,
+        action,
+        attempt,
+        ..
+    } = &sent.step.actions[0]
+    else {
+        panic!("delivery");
+    };
+    storage
+        .decide(
+            &id,
+            Event::Delivered {
+                id: input.clone(),
+                action: *action,
+                native_turn: Some("native-turn".into()),
+            },
+            context(1101),
+            None,
+        )
+        .unwrap();
+    let mut expected = storage.header(&id).unwrap();
+    expected.details.updated_at = 1000;
+    for (index, observation) in [
+        Observation::Item {
+            id: "answer".into(),
+            deferred: false,
+            status: ItemStatus::Running,
+            body: ItemBody::AssistantText {
+                text: "paragraph\n\n".into(),
+                phase: AssistantPhase::default(),
+            },
+        },
+        Observation::Timing {
+            started_at: Some(42),
+            completed_at: None,
+            duration_ms: Some(10),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let committed = storage
+            .decide(
+                &id,
+                Event::Provider {
+                    attempt: attempt.id,
+                    native_turn: None,
+                    native_items: vec![],
+                    observation,
+                },
+                Context {
+                    now: 1000,
+                    ..context(1200 + index as u128)
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            committed
+                .rows
+                .iter()
+                .any(|row| row.key == Key::Thread(id.clone())),
+            index == 0
+        );
+        assert_eq!(storage.header(&id).unwrap(), expected);
+    }
+}
+
+#[test]
+fn opening_keeps_message_text_inline_and_defers_work_details_newest_first() {
+    use agent_protocol::models::{
+        Item as NativeItem, Thread as NativeThread, ThreadResponse, Turn as NativeTurn, TurnStatus,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("messages-inline");
+    let mut deferred = NativeItem::new(
+        "command-0".into(),
+        ItemStatus::Completed,
+        ItemBody::CommandExecution {
+            command: "old".into(),
+            cwd: None,
+            output: String::new(),
+            output_omitted: false,
+            exit_code: Some(0),
+        },
+    );
+    deferred.defer();
+    let turns = (0..10)
+        .map(|n| {
+            Arc::new(NativeTurn {
+                id: format!("turn-{n}").into(),
+                status: TurnStatus::Completed,
+                items: Some(vec![
+                    Arc::new(NativeItem::new(
+                        format!("user-{n}").into(),
+                        ItemStatus::Completed,
+                        ItemBody::UserMessage {
+                            text: Some("question".into()),
+                            content: vec![],
+                        },
+                    )),
+                    Arc::new(NativeItem::new(
+                        format!("text-{n}").into(),
+                        ItemStatus::Completed,
+                        ItemBody::AssistantText {
+                            text: "message".repeat(3000),
+                            phase: Default::default(),
+                        },
+                    )),
+                    Arc::new(if n == 0 {
+                        deferred.clone()
+                    } else {
+                        NativeItem::new(
+                            format!("command-{n}").into(),
+                            ItemStatus::Completed,
+                            ItemBody::CommandExecution {
+                                command: "work".into(),
+                                cwd: None,
+                                output: "x".repeat(64 * 1024),
+                                output_omitted: false,
+                                exit_code: Some(0),
+                            },
+                        )
+                    }),
+                ]),
+                ..Default::default()
+            })
+        })
+        .collect();
+    storage
+        .import(
+            &target,
+            &ThreadResponse {
+                thread: NativeThread {
+                    id: Some(target.clone()),
+                    turns: Some(turns),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Some(&target),
+            100,
+        )
+        .unwrap();
+    let Message::Snapshot {
+        cursor,
+        window,
+        rows,
+    } = storage.snapshot(&target, None, None).unwrap()
+    else {
+        panic!("snapshot");
+    };
+    let mut message_count = 0;
+    for row in &rows {
+        let (Content::Full(value) | Content::Summary(value)) = &row.content;
+        if let Record::Item(item) = value.as_ref()
+            && matches!(
+                item.content.body(),
+                ItemBody::UserMessage { .. } | ItemBody::AssistantText { .. }
+            )
+        {
+            message_count += 1;
+            assert!(matches!(row.content, Content::Full(_)));
+        }
+    }
+    assert_eq!(message_count, 20);
+    let item = |id: &str| {
+        rows.iter()
+            .find(|row| {
+                row.key
+                    == Key::Item {
+                        thread: target.clone(),
+                        id: id.into(),
+                    }
+            })
+            .unwrap()
+    };
+    assert!(matches!(item("command-1").content, Content::Summary(_)));
+    assert!(matches!(item("command-9").content, Content::Full(_)));
+    storage
+        .hydrate_body(
+            &target,
+            &"command-0".into(),
+            item("command-0").version,
+            ItemBody::CommandExecution {
+                command: "old".into(),
+                cwd: None,
+                output: "recovered details".into(),
+                output_omitted: false,
+                exit_code: Some(0),
+            },
+        )
+        .unwrap();
+    let Message::Changes { rows, .. } = storage.snapshot(&target, Some(cursor), window).unwrap()
+    else {
+        panic!("catch-up");
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(rows[0].content, Content::Full(_)),
+        "unrelated work must not consume a catch-up row's budget"
+    );
+}
+
+#[test]
+fn importing_a_prefix_keeps_each_providers_covered_position_on_the_same_turn() {
+    use agent_protocol::models::{
+        Thread as NativeThread, ThreadResponse, Turn as NativeTurn, TurnStatus,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let native = address("remap-native");
+    let turn = |id: &str| {
+        Arc::new(NativeTurn {
+            id: id.into(),
+            status: TurnStatus::Completed,
+            items: Some(vec![]),
+            ..Default::default()
+        })
+    };
+    let response = ThreadResponse {
+        thread: NativeThread {
+            id: Some(target.clone()),
+            active_provider: Some(ProviderKind::Claude),
+            turns: Some(vec![turn("first"), turn("anchor")]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage
+        .import(&target, &response, Some(&native), 100)
+        .unwrap();
+    storage
+        .with(|connection| {
+            let transaction = connection.transaction().map_err(failure)?;
+            let key = thread_key(&transaction, &target)?;
+            let state = rows::load(&transaction, key, storage.process)?;
+            rows::write(
+                &transaction,
+                &rows::WriteScope {
+                    key,
+                    id: &target,
+                    sequence: cursor(&transaction)?.sequence,
+                    at: 100,
+                    process: storage.process,
+                },
+                &Change::Binding {
+                    provider: ProviderKind::Codex,
+                    value: Some(Binding::Ready {
+                        source: "inactive".into(),
+                        covered: 2,
+                    }),
+                },
+                &state.turns,
+                &mut vec![],
+                &mut vec![],
+            )?;
+            transaction.commit().map_err(failure)
+        })
+        .unwrap();
+    storage.queue_import(&target, &native, 101).unwrap();
+    let claim = storage.claim(101, 16).unwrap().into_iter().find(|claim| matches!(&claim.work, jobs::Work::Import { target: saved, .. } if saved == &target)).unwrap();
+    let imported = ThreadResponse {
+        thread: NativeThread {
+            id: Some(native.clone()),
+            turns: Some(vec![turn("prefix"), turn("anchor")]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage
+        .reimport(&target, &native, claim.id, claim.attempt, &imported, 102)
+        .unwrap();
+    let state = storage.state(&target).unwrap();
+    assert_eq!(state.turns[&TurnId::from("anchor")].ordinal, 3);
+    assert!(matches!(
+        state.bindings.get(&ProviderKind::Codex),
+        Some(Binding::Ready { covered: 3, .. })
+    ));
+    assert!(matches!(
+        state.bindings.get(&ProviderKind::Claude),
+        Some(Binding::Ready { covered: 3, .. })
+    ));
+}
+
+#[test]
+fn stopped_checkout_cleanup_survives_a_restart_before_the_resource_effect() {
+    use agent_protocol::workspace::{SetupPhase, WorkspaceSetup, WorkspaceStrategy};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let storage = Storage::open(&path);
+    let target = address("stopped-checkout");
+    let generation = Uuid::new_v4();
+    let mut setup = WorkspaceSetup::new(Some("main".into()), 0);
+    setup.worktree_path = Some("/owned-checkout".into());
+    setup.branch = Some("owned-branch".into());
+    let mut header = header();
+    header.state.workspace = Workspace::Folder("/owned-checkout".into());
+    header.details.workspace = Some(Box::new(decision::records::WorkspacePreparation {
+        project_cwd: "/project".into(),
+        strategy: Some(WorkspaceStrategy::Worktree {
+            base_ref: "main".into(),
+            start_from_origin: false,
+        }),
+        generation,
+        created_worktree: true,
+        setup: Some(setup),
+        visible: true,
+    }));
+    storage.create(&target, &header).unwrap();
+    storage
+        .decide(&target, submit(5000), context(5000), None)
+        .unwrap();
+    storage
+        .decide(
+            &target,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(5001)),
+                command: Command::Interrupt { turn: None },
+                receipt: None,
+            },
+            context(5001),
+            None,
+        )
+        .unwrap();
+    let cancelled = storage.header(&target).unwrap().details.workspace.unwrap();
+    assert_eq!(
+        cancelled.setup.as_ref().unwrap().phase,
+        SetupPhase::Cancelled
+    );
+    assert!(cancelled.created_worktree);
+    assert_eq!(
+        cancelled.setup.as_ref().unwrap().worktree_path.as_deref(),
+        Some("/owned-checkout")
+    );
+    drop(storage); // The cancellation effect was never executed.
+    let storage = Storage::open(&path);
+    let recovered = storage
+        .decide(
+            &target,
+            Event::Restart {
+                updating: false,
+                continue_after_restart: false,
+            },
+            context(5002),
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(&recovered.step.actions[..], [decision::Action::CancelPreparation { discard: Some((saved, checkout)), .. }] if *saved == generation && checkout.path == "/owned-checkout" && checkout.branch == "owned-branch")
+    );
+    storage
+        .setup(&target, generation, workspace::SetupChange::Discarded, 103)
+        .unwrap();
+    let cleared = storage.header(&target).unwrap().details.workspace.unwrap();
+    assert!(!cleared.created_worktree);
+    assert!(cleared.setup.as_ref().unwrap().worktree_path.is_none());
+    assert!(cleared.setup.as_ref().unwrap().branch.is_none());
+    assert_eq!(
+        storage.header(&target).unwrap().state.workspace.cwd(),
+        Some("/project")
     );
 }

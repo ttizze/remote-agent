@@ -172,7 +172,7 @@ impl From<&crate::session::SessionRef> for DraftKey {
     }
 }
 impl DraftKey {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         matches!(self, Self::Local { key } if key.is_empty())
     }
 }
@@ -212,7 +212,7 @@ pub struct AccountState {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
-    /// The original folder/pane slot for an uncreated conversation's first input.
+    /// The original draft slot for a first input; the empty slot is the welcome composer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_draft_slot: Option<String>,
     #[serde(default)]
@@ -651,6 +651,12 @@ impl Snapshot {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn welcome_submission(&self, draft: DraftKey) -> bool {
+        self.sessions.pending_submissions.values().any(|pending| {
+            pending.new_draft_slot.as_deref() == Some("") && pending.draft_key == draft
+        })
+    }
+
     pub fn operation_phase(
         &self,
         key: operations::OperationKey,
@@ -1950,7 +1956,8 @@ fn submission(
         );
         return (next, Vec::new());
     }
-    if thread_id.is_none() && draft_key.is_empty() {
+    let welcome = thread_id.is_none() && draft_key.is_empty();
+    if welcome {
         let address = DraftKey::from(crate::session::SessionRef {
             provider: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -1993,17 +2000,21 @@ fn submission(
     Arc::make_mut(&mut next.sessions.pending_submissions).insert(
         client_user_message_id.clone(),
         Arc::new(PendingSubmission {
-            new_draft_slot: thread_id
-                .is_none()
-                .then(|| {
-                    previous
-                        .input
-                        .new_drafts
-                        .iter()
-                        .find(|(_, id)| DraftKey::from(*id) == draft_key)
-                        .map(|(slot, _)| slot.clone())
-                })
-                .flatten(),
+            new_draft_slot: if welcome {
+                Some(String::new())
+            } else {
+                thread_id
+                    .is_none()
+                    .then(|| {
+                        previous
+                            .input
+                            .new_drafts
+                            .iter()
+                            .find(|(_, id)| DraftKey::from(*id) == draft_key)
+                            .map(|(slot, _)| slot.clone())
+                    })
+                    .flatten()
+            },
             cursor: None,
             sequence,
             submitted_at_ms: None,
@@ -2055,6 +2066,7 @@ impl Snapshot {
         slot: Option<&str>,
     ) {
         let target = match (&original, slot) {
+            (_, Some("")) => DraftKey::Local { key: String::new() },
             (DraftKey::Session { session }, Some(slot))
                 if !self.sessions.conversations.contains_key(session) =>
             {

@@ -126,8 +126,8 @@ impl HostFixture {
             );
         }
         eprintln!("Host fixture: providers ready; starting RPC");
-        let projects = ProjectStore::new(directory.join("bex-worktrees.json"));
-        let service = HostRpcService::new(backends, projects.clone());
+        let service = HostRpcService::new(backends, directory.join("bex-worktrees.json"));
+        let projects = service.fixture_projects();
         #[cfg(unix)]
         service
             .enable_browser(directory.join("browser"))

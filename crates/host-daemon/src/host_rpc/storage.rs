@@ -235,6 +235,15 @@ impl Storage {
         })
     }
 
+    pub(in crate::host_rpc) fn input(
+        &self,
+        target: &SessionRef,
+        input: &ClientInputId,
+    ) -> Result<Option<decision::PendingInput>, String> {
+        self.with(|connection| {
+            rows::input(connection, thread_key(connection, target)?, input.clone())
+        })
+    }
     pub(super) fn item(
         &self,
         id: &SessionRef,
@@ -294,6 +303,7 @@ impl Storage {
             connection
                 .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
                 .map_err(failure)?;
+            upgrade::recover_update(&connection, path)?;
             cursor(&connection)?;
             // The Host lease is already held. Running work belonged to the
             // previous process; a live process never reclaims its own claims.
@@ -430,13 +440,13 @@ impl Storage {
                     (history::insert_header(&transaction, id, header, &Counters::default(), sequence.sequence)?, true)
                 }
             };
-            let mut state = rows::load(&transaction, key, self.process)?;
             if let Event::Provider {attempt,..}=&event
                 && !executions::read(&transaction,"e.thread=?2 AND e.attempt=?3",params![self.process.to_string(),key,attempt.to_string()])?.first().is_some_and(|execution|execution.accepting)
             {
                 return Ok(Committed {step:Step::default(),cursor:cursor(&transaction)?,rows:vec![],removed:vec![],reset:false});
             }
-            state = rows::hydrate(&transaction, key, self.process, state, &event)?;
+            let state = rows::load(&transaction, key, self.process)?;
+            let mut state = rows::hydrate(&transaction, key, self.process, state, &event)?;
             let native_turn = match &event {
                 Event::Provider { attempt, native_turn: Some(turn), .. } => Some((*attempt, turn.clone())),
                 Event::Delivered { id, action, native_turn: Some(turn) } => state.inputs.get(id).and_then(|input| {
@@ -447,6 +457,7 @@ impl Storage {
             };
             let native_items = match &event { Event::Provider { attempt, native_items, .. } => Some((*attempt, native_items.clone())), _ => None };
             let (mut header,counters)=rows::header(&transaction,key)?;
+            let previous_header = header.clone();
             let status_changed = if let Event::NativeStatus { provider, source, status } = &event
                 && decision::current_source(state.thread.provider, state.bindings.get(provider), *provider, source) {
                 let active = state.active_turn().map(|turn| (turn.observed, state.attempts.contains_key(&turn.id)));
@@ -528,15 +539,7 @@ change,
                 rows::bind_items(&transaction, key, attempt, self.process, &items)?;
             }
             if created || status_changed || !step.changes.is_empty() {
-                updated.push(rows::write_header(
-                    &transaction,
-                    key,
-                    id,
-                    &state,
-                    through.sequence,
-                    if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now},
-                    admitted,
-                )?);
+                updated.extend(rows::write_header(&transaction, &rows::WriteScope { key, id, sequence: through.sequence, at: if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now}, process: self.process }, &state, admitted, Some(&previous_header))?);
             }
             if let Some((operation, outcome)) = &step.receipt {
                 transaction
@@ -718,10 +721,10 @@ change,
             }),
         )?;
         let mut saved = rows::snapshot(connection, key, id, floor)?;
-        decision::records::summarize(&mut saved, 128 * 1024)?;
         let message = if resume && window == Some(floor) {
             let from = cached.expect("resumable cursor");
             saved.retain(|row| row.version > from.sequence);
+            decision::records::summarize(&mut saved, 128 * 1024)?;
             let removed = rows::removals(connection, key, id, from.sequence)?;
             Message::Changes {
                 from,
@@ -730,6 +733,7 @@ change,
                 removed,
             }
         } else {
+            decision::records::summarize(&mut saved, 128 * 1024)?;
             Message::Snapshot {
                 cursor: current,
                 window: Some(floor),

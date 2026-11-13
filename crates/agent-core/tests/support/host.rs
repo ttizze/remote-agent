@@ -432,11 +432,26 @@ impl Writer {
         subscription: uuid::Uuid,
         message: agent_protocol::conversation::records::Message,
     ) -> std::io::Result<()> {
+        let latest = {
+            let state = self.state.lock().unwrap();
+            state.list_subscription == Some(subscription)
+                || state.sessions.values().any(|id| *id == subscription)
+        };
         let mut streams = self.streams.lock().await;
-        let stream = streams
-            .get_mut(&subscription)
-            .ok_or_else(|| std::io::Error::other("subscription is missing"))?;
-        agent_transport::framing::write(stream, message).await
+        let Some(stream) = streams.get_mut(&subscription) else {
+            return if latest {
+                Err(std::io::Error::other("subscription is missing"))
+            } else {
+                Ok(())
+            };
+        };
+        let result = agent_transport::framing::write(stream, message).await;
+        if result.is_err() && !latest {
+            streams.remove(&subscription);
+            Ok(())
+        } else {
+            result
+        }
     }
     pub async fn reply(&self, request: &Request, value: Value) -> std::io::Result<()> {
         let mut value = self.prepare(Some(request), value)?.unwrap();
@@ -516,7 +531,10 @@ impl Writer {
             let id = serde_json::from_value::<SessionRef>(value["fixtureChanged"].clone()).ok();
             if let Some(id) = id {
                 state.sequence += 1;
-                let response: ThreadResponse = serde_json::from_value(state.threads[&id].clone())?;
+                let Some(thread) = state.threads.get(&id) else {
+                    return Ok(());
+                };
+                let response: ThreadResponse = serde_json::from_value(thread.clone())?;
                 let cached = state.replicas.get(&id).and_then(|replica| replica.cursor());
                 let message = state.rows(response, cached, false)?;
                 let mut messages = state
@@ -688,8 +706,10 @@ impl State {
             sync::{Content, Cursor, Key, Message, Position, Scope, Window},
         };
         let id = response.thread.id.clone().unwrap();
-        let has_more = response.thread.history_has_more == Some(true)
-            || response.thread.history_cursor.is_some();
+        let has_more = rows::history_has_more(
+            response.thread.history_has_more,
+            response.thread.history_cursor.as_deref(),
+        );
         let fresh = rows::replica_at(response, 1, self.sequence.max(7));
         let Message::Snapshot {
             rows: mut incoming, ..
@@ -847,7 +867,10 @@ impl State {
             let page: ThreadResponse = serde_json::from_value(value["result"].clone())?;
             (
                 page.thread.turns.unwrap_or_default(),
-                page.thread.history_has_more == Some(true) || page.thread.history_cursor.is_some(),
+                rows::history_has_more(
+                    page.thread.history_has_more,
+                    page.thread.history_cursor.as_deref(),
+                ),
             )
         } else {
             let page: agent_protocol::session::HistoryPage =

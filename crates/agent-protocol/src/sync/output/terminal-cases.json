@@ -116,6 +116,30 @@
       "after": "\n     x!\nthree"
     },
     {
+      "name": "clear settled and cursor",
+      "steps": [
+        {
+          "text": "old line\n",
+          "repeat": 100,
+          "expected": "old line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\n",
+          "truncated": false
+        },
+        {
+          "text": "\u001b[2J",
+          "repeat": 1,
+          "expected": "old line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\n",
+          "truncated": false
+        },
+        {
+          "text": "\u001b[3Atop",
+          "repeat": 1,
+          "expected": "old line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\ntop",
+          "truncated": false
+        }
+      ],
+      "after": "old line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\nold line\ntop!"
+    },
+    {
       "name": "clear all",
       "steps": [
         {

@@ -29,7 +29,7 @@ pub(in crate::host_rpc) mod list;
 pub(in crate::host_rpc) mod native_fixture;
 pub(in crate::host_rpc) mod output;
 mod preparation;
-mod recovery;
+pub(in crate::host_rpc) mod recovery;
 mod resources;
 mod rpc;
 #[cfg(test)]
@@ -341,8 +341,7 @@ impl Runtime {
         let storage = &service.inner.conversation.storage;
         let mut changed = storage.changes();
         loop {
-            let state = storage.state(&request.session)?;
-            if !state.inputs.get(id).is_some_and(|input| {
+            if !storage.input(&request.session, id)?.is_some_and(|input| {
                 matches!(
                     input.state,
                     decision::InputState::Unknown {
@@ -431,8 +430,14 @@ impl Runtime {
                     let _updates = source.updates.lock().await;
                     let tasks = source.background(attempt.id);
                     if background && result.is_ok() && tasks.is_empty() {
-                        Self::complete_command_outputs(service, &target, attempt.id, Some(native))
-                            .await?;
+                        Self::settle_command_outputs(
+                            service,
+                            &target,
+                            attempt.id,
+                            Some(native),
+                            agent_protocol::execution::TurnStatus::Completed,
+                        )
+                        .await?;
                     }
                     Self::event(
                         service,
@@ -462,6 +467,21 @@ impl Runtime {
             } => {
                 let source = runtime.source(&target, attempt);
                 let _io = source.io.lock().await;
+                // Callback and write owners are locked until the fence commits.
+                // Save their last buffered data while callbacks are still valid.
+                let _updates = source.updates.lock().await;
+                Self::flush_text(service, &source).await?;
+                Self::settle_command_outputs(
+                    service,
+                    &target,
+                    attempt.id,
+                    runtime
+                        .storage
+                        .execution(&target, attempt.id)?
+                        .and_then(|execution| execution.native_turn),
+                    agent_protocol::execution::TurnStatus::Interrupted,
+                )
+                .await?;
                 let Some(unload) = runtime
                     .storage
                     .fence_delivery(&target, id, token, attempt)?
@@ -498,44 +518,48 @@ impl Runtime {
             Action::Resume {
                 attempt,
                 cwd,
+                at,
                 error,
             } => {
-                Self::resume(service, &target, &attempt, &cwd, error).await?;
+                Self::resume(service, &target, &attempt, &cwd, at, error).await?;
             }
             Action::WaitUntil(at) => {
                 let delay = at.saturating_sub(now()).max(0) as u64;
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 Self::event(service, &target, Event::Wake).await?;
             }
-            Action::CancelPreparation { action } => {
-                if let Some(preparation) = runtime.preparations.lock().unwrap().get(&target)
-                    && let Some((current, cancel)) = &*preparation.active.lock().unwrap()
+            Action::CancelPreparation { action, discard } => {
+                let _retire = scopeguard::guard((), |_| runtime.retire_preparation(&target));
+                let preparation = runtime.preparation(&target);
+                if let Some((current, cancel)) = &*preparation.active.lock().unwrap()
                     && *current == action
                 {
                     cancel.cancel();
                 }
-                let state = runtime.storage.state(&target)?;
-                if !state
-                    .inputs
-                    .values()
-                    .any(|input| matches!(input.state, decision::InputState::Preparing { .. }))
-                    && let Some(workspace) = runtime.storage.header(&target)?.details.workspace
-                    && workspace
-                        .setup
-                        .as_ref()
-                        .is_some_and(|setup| setup.can_cancel)
-                {
+                // The same lock covers the gap between preparation stages and
+                // prevents cleanup from racing checkout creation or setup I/O.
+                let _io = preparation.io.lock().await;
+                if let Some((generation, checkout)) = discard {
+                    service
+                        .inner
+                        .worktrees
+                        .discard(checkout.path, Some(checkout.branch))
+                        .await
+                        .map_err(|error| error.to_string())?;
                     service
                         .setup_update(
                             &target,
-                            workspace.generation,
-                            super::storage::workspace::SetupChange::Finish {
-                                phase: agent_protocol::workspace::SetupPhase::Cancelled,
-                                error: None,
-                            },
+                            generation,
+                            super::storage::workspace::SetupChange::Discarded,
                         )
                         .await
                         .map_err(|error| error.to_string())?;
+                } else if let Some(workspace) = runtime.storage.header(&target)?.details.workspace
+                    && workspace.setup.as_ref().is_some_and(|setup| {
+                        setup.phase == agent_protocol::workspace::SetupPhase::Cancelled
+                    })
+                {
+                    service.schedule_setup_expiry(target.clone(), *workspace);
                 }
             }
         }

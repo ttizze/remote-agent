@@ -45,8 +45,25 @@ impl HostRpcService {
                 .state(&session)
                 .map_err(anyhow::Error::msg)?;
             tasks.push(InterruptedTask {
-                session,
-                input: uuid::Uuid::new_v4().to_string().into(),
+                native_session: self
+                    .inner
+                    .conversation
+                    .storage
+                    .active_source(&session)
+                    .map_err(anyhow::Error::msg)?
+                    .unwrap_or_else(|| session.clone()),
+                cwd: state.thread.workspace.cwd().map(str::to_owned),
+                submission: op::Submission {
+                    thread_id: session,
+                    client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+                    input: vec![op::Input::Text {
+                        text: super::super::runtime::recovery::CONTINUE.into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
                 last_turn: state
                     .turns
                     .values()
@@ -97,11 +114,11 @@ impl HostRpcService {
         };
         let mut changed = false;
         for task in &mut report.tasks {
-            if task.session != *target || task.last_turn.as_ref() != Some(source) {
+            if task.submission.thread_id != *target || task.last_turn.as_ref() != Some(source) {
                 continue;
             }
             changed = true;
-            task.input = job.to_string().into();
+            task.submission.client_user_message_id = job.to_string().into();
             match &outcome {
                 Outcome::Ignored => task.delivery = ContinuationDelivery::Completed,
                 Outcome::DeliveryUnknown => {
@@ -141,14 +158,14 @@ impl HostRpcService {
         let pending = self.inner.conversation.storage.continuations(target)?;
         let mut changed = false;
         for task in &mut report.tasks {
-            if task.session == *target
+            if task.submission.thread_id == *target
                 && matches!(task.delivery, ContinuationDelivery::Pending)
                 && !task
                     .last_turn
                     .as_ref()
                     .is_some_and(|turn| pending.contains(turn))
             {
-                let input = &task.input;
+                let input = &task.submission.client_user_message_id;
                 if self
                     .inner
                     .conversation
@@ -194,12 +211,15 @@ impl HostRpcService {
                     if !matches!(task.delivery, ContinuationDelivery::Pending) {
                         continue;
                     }
-                    let target = &task.session;
+                    let target = &task.submission.thread_id;
                     if let Some(item) = self
                         .inner
                         .conversation
                         .storage
-                        .item(target, &task.input.to_string().into())
+                        .item(
+                            target,
+                            &task.submission.client_user_message_id.to_string().into(),
+                        )
                         .map_err(anyhow::Error::msg)?
                     {
                         task.delivery = ContinuationDelivery::Accepted(item.turn);
@@ -223,7 +243,7 @@ impl HostRpcService {
                                 .storage
                                 .state(target)
                                 .map_err(anyhow::Error::msg)?;
-                            match state.inputs.get(&task.input) {
+                            match state.inputs.get(&task.submission.client_user_message_id) {
                                 Some(input) => match &input.state {
                                     agent_protocol::conversation::InputState::Failed(error) => task.delivery = ContinuationDelivery::Failed(error.message.clone()),
                                     agent_protocol::conversation::InputState::Unknown { .. } => task.delivery = ContinuationDelivery::Failed("継続の配送結果を確認できません。会話を開いて確認してください。".into()),
@@ -267,10 +287,8 @@ mod tests {
             use agent_protocol::conversation::{Observation, TurnState};
             let directory = tempfile::tempdir().unwrap();
             let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
-            let service = HostRpcService::new(
-                [agent.backend()],
-                crate::ProjectStore::new(directory.path().join("projects.json")),
-            );
+            let service =
+                HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
             service.set_history_scope(directory.path().into(), true);
             let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
             let native = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
@@ -424,7 +442,7 @@ mod tests {
             drop(service);
             let service = HostRpcService::new(
                 [agent.restarted().backend()],
-                crate::ProjectStore::new(directory.path().join("projects.json")),
+                directory.path().join("projects.json"),
             );
             service.set_history_scope(directory.path().into(), true);
             let _connection = service.open_session();
@@ -469,10 +487,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_interrupted_original_turn_does_not_confirm_a_pending_update_continuation() {
         let directory = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
-            [],
-            crate::ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
         let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
         let native = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
         let storage = &service.inner.conversation.storage;
@@ -503,8 +518,17 @@ mod tests {
             &path,
             &Recovery {
                 tasks: vec![InterruptedTask {
-                    session: target.clone(),
-                    input: input.to_string().into(),
+                    native_session: target.clone(),
+                    cwd: None,
+                    submission: op::Submission {
+                        thread_id: target.clone(),
+                        client_user_message_id: input.to_string().into(),
+                        input: vec![],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
                     last_turn: Some("original".into()),
                     delivery: ContinuationDelivery::Pending,
                 }],
@@ -593,10 +617,7 @@ mod tests {
     {
         for failed in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let service = HostRpcService::new(
-                [],
-                crate::ProjectStore::new(directory.path().join("projects.json")),
-            );
+            let service = HostRpcService::new([], directory.path().join("projects.json"));
             service.set_history_scope(directory.path().into(), true);
             let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
             service
@@ -624,8 +645,17 @@ mod tests {
                 &path,
                 &Recovery {
                     tasks: vec![InterruptedTask {
-                        session: target.clone(),
-                        input: uuid::Uuid::new_v4().to_string().into(),
+                        native_session: target.clone(),
+                        cwd: None,
+                        submission: op::Submission {
+                            thread_id: target.clone(),
+                            client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+                            input: vec![],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
                         last_turn: None,
                         delivery: ContinuationDelivery::Pending,
                     }],
@@ -680,10 +710,7 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         let marker = path.join("keep");
         std::fs::write(&marker, b"existing contents").unwrap();
-        let service = HostRpcService::new(
-            [],
-            crate::ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
         service.set_history_scope(reports, true);
         assert!(service.prepare_update().await.is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), b"existing contents");

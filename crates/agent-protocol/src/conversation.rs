@@ -75,6 +75,12 @@ pub struct PendingInput {
     pub state: InputState,
 }
 
+impl InputState {
+    pub fn preparing(&self, action: Uuid, stage: PreparationStage) -> bool {
+        matches!(self, Self::Preparing { action: current, stage: expected, .. } if *current == action && *expected == stage)
+    }
+}
+
 impl PendingInput {
     fn live_delivery(&self) -> Option<&PendingDelivery> {
         match &self.state {
@@ -280,6 +286,13 @@ pub struct State {
 }
 
 impl State {
+    fn queued_head(&self) -> Option<&PendingInput> {
+        self.inputs
+            .values()
+            .filter(|input| matches!(input.state, InputState::Queued { .. }))
+            .min_by_key(|input| input.position)
+    }
+
     fn has_queued_inputs(&self) -> bool {
         self.inputs.values().any(|input| {
             matches!(
@@ -364,7 +377,7 @@ impl State {
     pub fn permits(&self, action: &Action) -> bool {
         match action {
             Action::Prepare { id, action, stage, .. } => self.inputs.get(id).is_some_and(|input|
-                matches!(input.state, InputState::Preparing { action: current, stage: expected, .. } if current == *action && expected == *stage)),
+                input.state.preparing(*action, *stage)),
             Action::Deliver { id, action, attempt, .. } => self.inputs.get(id).is_some_and(|input|
                 matches!(&input.state, InputState::Delivering(delivery) if delivery.action == *action && &delivery.attempt == attempt)),
             Action::FenceDelivery { id, action, attempt } => self.inputs.get(id).is_some_and(|input|
@@ -428,7 +441,7 @@ impl State {
                 Change::Counters(counters) => next.counters = counters.clone(),
                 // Workspace strategy is owned by the resource metadata supplied
                 // in Context, and committed by the same writer as these changes.
-                Change::WorkspaceStrategy(_) => {}
+                Change::WorkspaceStrategy(_) | Change::CancelSetup(_) => {}
             }
         }
         next
@@ -439,6 +452,7 @@ impl State {
 pub enum Change {
     Thread(Thread),
     WorkspaceStrategy(crate::workspace::WorkspaceStrategy),
+    CancelSetup(Uuid),
     Input(PendingInput),
     RemoveInput(ClientInputId),
     Turn(Turn),
@@ -461,6 +475,7 @@ pub enum Change {
 enum ChangeKey {
     Thread,
     WorkspaceStrategy,
+    CancelSetup,
     Input(ClientInputId),
     Turn(TurnId),
     Item(ItemId),
@@ -475,6 +490,7 @@ impl Change {
         match self {
             Self::Thread(_) => ChangeKey::Thread,
             Self::WorkspaceStrategy(_) => ChangeKey::WorkspaceStrategy,
+            Self::CancelSetup(_) => ChangeKey::CancelSetup,
             Self::Input(input) => ChangeKey::Input(input.id.clone()),
             Self::RemoveInput(id) => ChangeKey::Input(id.clone()),
             Self::Turn(turn) => ChangeKey::Turn(turn.id.clone()),
@@ -558,6 +574,13 @@ pub enum Event {
     ExecutionLost {
         attempt: Uuid,
         error: ExecutionError,
+    },
+    /// An update acquired workspace ownership before a capacity retry started.
+    /// Preserve its due time for restart recovery without another native write.
+    ResumeDeferred {
+        attempt: Uuid,
+        at: i64,
+        error: Option<ExecutionError>,
     },
     NativeStatus {
         provider: ProviderKind,
@@ -682,6 +705,7 @@ pub enum Action {
     },
     CancelPreparation {
         action: Uuid,
+        discard: Option<(Uuid, crate::workspace::CreatedWorktree)>,
     },
     Prepare {
         id: ClientInputId,
@@ -706,6 +730,7 @@ pub enum Action {
     Resume {
         attempt: Attempt,
         cwd: String,
+        at: i64,
         error: Option<ExecutionError>,
     },
     Answer {

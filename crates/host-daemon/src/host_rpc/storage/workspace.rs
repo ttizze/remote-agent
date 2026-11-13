@@ -26,6 +26,7 @@ pub(in crate::host_rpc) enum SetupChange {
         error: Option<String>,
     },
     AgentStarted,
+    Discarded,
     Expire {
         ended_at: u64,
     },
@@ -48,6 +49,17 @@ impl Storage {
                     if rows::input(&transaction, key, input)?.is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action, .. } if action == generation)) {
                         header.details.workspace = Some(workspace); true
                     } else { false }
+                }
+                SetupChange::Discarded => {
+                    header.details.workspace.as_mut().filter(|workspace| workspace.generation == generation && workspace.created_worktree)
+                        .is_some_and(|workspace| {
+                            workspace.created_worktree = false;
+                            if let Some(setup) = &mut workspace.setup {
+                                setup.worktree_path = None; setup.branch = None;
+                                setup.finish(SetupPhase::Cancelled, None, now.max(0) as u64);
+                            }
+                            true
+                        })
                 }
                 SetupChange::Expire { ended_at } => {
                     if let Some(workspace) = header.details.workspace.as_mut().filter(|workspace| workspace.generation == generation && workspace.visible && workspace.setup.as_ref().is_some_and(|setup| setup.ended_at_ms == Some(ended_at))) {
@@ -152,7 +164,9 @@ fn apply(
             setup.can_cancel = false;
             setup.stage(SetupStageId::Agent, SetupStageStatus::Running, now);
         }
-        SetupChange::Begin { .. } | SetupChange::Expire { .. } => return false,
+        SetupChange::Begin { .. } | SetupChange::Expire { .. } | SetupChange::Discarded => {
+            return false;
+        }
     }
     if setup.phase == SetupPhase::Running
         && setup.stages.iter().all(|stage| {

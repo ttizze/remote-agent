@@ -87,6 +87,21 @@ pub(super) fn bind_turn(
 }
 
 impl Storage {
+    pub(in crate::host_rpc) fn turn_execution(
+        &self,
+        target: &SessionRef,
+        turn: &TurnId,
+    ) -> Result<Option<NativeExecution>, String> {
+        self.with(|connection| {
+            let key = thread_key(connection, target)?;
+            Ok(read(
+                connection,
+                "e.thread=?2 AND e.turn_id=?3 AND e.current=1 AND e.callbacks=1 AND e.process=?1",
+                params![self.process.to_string(), key, turn.as_str()],
+            )?
+            .pop())
+        })
+    }
     pub(in crate::host_rpc) fn execution(
         &self,
         target: &SessionRef,

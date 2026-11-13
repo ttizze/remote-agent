@@ -189,9 +189,9 @@ private fun ConversationContent(
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true, cwd, perform, timestampMs)
         is ConversationRowContent.Response -> ConversationResponse(content, context, perform, timestampMs)
         is ConversationRowContent.Activity ->
-            ThreadActivityCard(content.item, threadId, cwd, perform) { itemId ->
+            ThreadActivityCard(content.item, threadId, cwd, perform, { itemId ->
                 if (threadId != null) perform(Intent.ReadItem(ReadItem(threadId, content.turnId, itemId))) {}
-            }
+            }, threadId?.let { context.itemDetail(ReadItem(it, content.turnId, content.item.presentation().nativeId ?: content.item.presentation().id)) })
         is ConversationRowContent.ActivityHeader -> activityHeader(content.activity)
         is ConversationRowContent.PendingRequest ->
             RequestCard(content.request) { answer, complete ->

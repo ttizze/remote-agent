@@ -10,11 +10,11 @@
 use crate::{
     models::{ListQuery, SessionStatus},
     session::SessionRef,
-    state::{Snapshot, operations::HISTORY_WINDOW_TURNS},
+    state::Snapshot,
 };
 use agent_protocol::{
     conversation::records,
-    sync::{Message, Position, Scope},
+    sync::{Message, Scope},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -278,7 +278,6 @@ impl Saved {
                     .is_none_or(|previous| !Arc::ptr_eq(previous, thread))
                     && thread.cursor().is_some()
                     && !thread.expanded()
-                    && thread.rows().values().filter(|row| matches!(row.position, Position::Turn { .. })).count() <= HISTORY_WINDOW_TURNS as usize
                     // As T3 shouldPersistThread, keep the last settled copy while
                     // active work runs. A cold client resumes its durable cursor.
                     && !thread.rows().values().any(|row| {
@@ -457,6 +456,18 @@ mod tests {
             },
         );
         snapshot
+    }
+
+    #[tokio::test]
+    async fn an_unexpanded_window_with_more_than_ten_background_turns_is_cached() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = snapshot([thread("wakes", 11, TurnStatus::Completed)]);
+        assert!(
+            Saved::default()
+                .write_changes(directory.path(), &source)
+                .await
+        );
+        assert_eq!(restored(directory.path()).len(), 1);
     }
 
     #[tokio::test]
@@ -662,15 +673,29 @@ mod tests {
                 && !live.background.is_empty()
                 && !live.queue.inputs.is_empty()
         );
-        updates.send_replace(snapshot([
+        let mut expanded = thread("expanded", 11, TurnStatus::Completed);
+        expanded.history_cursor = Some("older".into());
+        let mut incoming = snapshot([
             thread("settled", 2, TurnStatus::Completed),
             running,
-            thread(
-                "expanded",
-                HISTORY_WINDOW_TURNS as usize + 1,
-                TurnStatus::Completed,
-            ),
-        ]));
+            expanded,
+        ]);
+        let id = SessionRef::new(ProviderKind::Claude, "expanded".into()).unwrap();
+        let old = &incoming.sessions.replicas[&id];
+        let expanded = old
+            .apply(
+                1,
+                Message::Extend {
+                    cursor: old.cursor().unwrap(),
+                    window: agent_protocol::sync::Window { turn: 0, item: 0 },
+                    rows: vec![],
+                },
+            )
+            .unwrap();
+        assert!(expanded.expanded());
+        Arc::make_mut(&mut Arc::make_mut(&mut incoming).sessions.replicas)
+            .insert(id, Arc::new(expanded));
+        updates.send_replace(incoming);
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(
             restored(&directory).is_empty(),

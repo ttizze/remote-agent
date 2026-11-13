@@ -11,16 +11,17 @@ impl Operation for AddProject {
     }
     fn apply(self, snapshot: &mut Snapshot, pane_id: &str, cwd: Self::Output) -> Vec<Effect> {
         let (next, mut effects) = reduce_intent(snapshot, pane_id, Intent::NewChat { cwd });
+        let query = (*next.lists.list_query).clone();
+        let (next, refresh) = super::super::list_sync::query(next, query, false);
         *snapshot = next;
-        effects.push(Effect::execute(super::super::list_sync::SubscribeCatalog {
-            refresh: false,
-        }));
+        effects.extend(refresh);
         effects
     }
-    fn stale(self, _snapshot: &mut Snapshot, _pane_id: &str, _: Self::Output) -> Vec<Effect> {
-        vec![Effect::execute(super::super::list_sync::SubscribeCatalog {
-            refresh: false,
-        })]
+    fn stale(self, snapshot: &mut Snapshot, _pane_id: &str, _: Self::Output) -> Vec<Effect> {
+        let query = (*snapshot.lists.list_query).clone();
+        let (next, effects) = super::super::list_sync::query(snapshot.clone(), query, false);
+        *snapshot = next;
+        effects
     }
 }
 

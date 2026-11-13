@@ -477,12 +477,24 @@ fn list_and_conversation_cursors_and_id_namespaces_are_independent() {
         )
         .unwrap();
     assert_eq!(next.rows.len(), 2);
-    assert_eq!(empty().cursor, None);
-    let mut other = input("same-id", 1, "other");
-    if let Key::Input { thread, .. } = &mut other.key {
-        *thread = "b".into();
+    let a = empty()
+        .apply(1, snapshot(1, window(0, 0), vec![turn("same-id", 1, 1)]))
+        .unwrap();
+    let mut foreign = vec![
+        input("same-id", 2, "other"),
+        turn("same-id", 2, 1),
+        item("same-id", 2, 1, "same-id", 1),
+    ];
+    for row in &mut foreign {
+        match &mut row.key {
+            Key::Input { thread, .. } | Key::Turn { thread, .. } | Key::Item { thread, .. } => {
+                *thread = "b".into()
+            }
+            _ => unreachable!(),
+        }
     }
-    assert_ne!(other.key, input("same-id", 1, "a").key);
+    let next = a.apply(1, changes(1, 2, foreign, vec![])).unwrap();
+    assert_eq!(next.rows(), a.rows());
 }
 
 #[test]
@@ -490,6 +502,8 @@ fn resume_boundaries_include_equal_history_and_pruning_sequences() {
     for c in 0..=12 {
         assert_eq!(can_resume(Some(cursor(c)), cursor(12), 5, 7), c >= 7);
     }
+    assert!(can_resume(Some(cursor(5)), cursor(12), 5, 0));
+    assert!(!can_resume(Some(cursor(4)), cursor(12), 5, 0));
     assert!(!can_resume(None, cursor(12), 0, 0));
     assert!(!can_resume(Some(cursor(13)), cursor(12), 0, 0));
     let other = Cursor {

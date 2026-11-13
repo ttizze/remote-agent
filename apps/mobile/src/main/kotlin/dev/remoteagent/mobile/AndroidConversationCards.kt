@@ -247,6 +247,7 @@ internal fun ThreadActivityCard(
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     loadDetails: (String) -> Unit,
+    detailState: dev.remoteagent.core.ItemDetail?,
 ) {
     val content = remember(item) { item.presentation() }
     var expanded by remember(content.id) { mutableStateOf(false) }
@@ -276,6 +277,10 @@ internal fun ThreadActivityCard(
                     (if (content.collapsible) if (expanded) "⌄ " else "› " else "") + title,
                     style = MaterialTheme.typography.labelLarge,
                 )
+            }
+            if (expanded) {
+                detailState?.error?.let { ErrorTextView(it) }
+                if (detailState?.loading == true) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
             if (expanded && !content.deferred) {
                 val blocks = remember(item) { item.detailBlocks() }

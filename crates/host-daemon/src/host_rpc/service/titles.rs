@@ -225,10 +225,8 @@ mod tests {
                 },
             );
         }
-        let service = HostRpcService::new(
-            [agent.backend()],
-            crate::ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let all = service
             .search_list(&agent_protocol::conversation::records::SearchList {
                 term: "matches".into(),
@@ -288,9 +286,9 @@ mod tests {
             )
             .await
             .unwrap();
-            let projects = ProjectStore::new(root.path().join("bex-projects.json"));
+            let projects = ProjectStore::fixture(root.path().join("bex-projects.json"));
             projects.register(&cwd).await.unwrap();
-            let service = HostRpcService::new([agent.into()], projects);
+            let service = HostRpcService::new([agent.into()], projects.path());
             if !restarting {
                 let agent = service
                     .inner
@@ -365,9 +363,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
+        let projects = ProjectStore::fixture(root.path().join("bex-worktrees.json"));
         projects.register(&cwd).await.unwrap();
-        let service = HostRpcService::new([agent.into()], projects);
+        let service = HostRpcService::new([agent.into()], projects.path());
         let page = service
             .search_list(&agent_protocol::conversation::records::SearchList {
                 term: String::new(),
@@ -400,7 +398,7 @@ mod tests {
         std::fs::write(state.with_file_name("bex-projects.json"), "{").unwrap();
         let service = HostRpcService::new(
             [crate::providers::codex::Codex::new(Err("provider is offline".into())).into()],
-            ProjectStore::new(state),
+            state,
         );
         let params = op::ReadListDecorations {
             scope: op::ListDecorationScope::Root,
@@ -422,7 +420,7 @@ mod tests {
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let workspace = dunce::canonicalize(&workspace).unwrap();
-        let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
+        let projects = ProjectStore::fixture(root.path().join("bex-worktrees.json"));
         projects.register(&workspace).await.unwrap();
         let registered = projects.load().await.unwrap().projects[0].id.clone();
         let native = root.path().join("native");
@@ -452,7 +450,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let service = HostRpcService::new([claude.into()], projects);
+        let service = HostRpcService::new([claude.into()], projects.path());
         let session = service.open_session();
         for repaired in [false, true] {
             if repaired {
@@ -508,7 +506,7 @@ mod tests {
         let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
-        let store = ProjectStore::new(root.join("bex-worktrees.json"));
+        let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
         store.register(&project).await.unwrap();
         let projects = store.load().await.unwrap();
         let registered = projects.projects[0].id.as_str();
@@ -568,7 +566,7 @@ mod tests {
         std::fs::create_dir_all(&transcript).unwrap();
         let id = "12345678-1234-4234-8234-123456789abc";
         std::fs::write(transcript.join(format!("{id}.jsonl")),serde_json::json!({"type":"user","sessionId":id,"cwd":dunce::canonicalize(&workspace).unwrap(),"message":{"content":"Branding task"}}).to_string()+"\n").unwrap();
-        let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
+        let projects = ProjectStore::fixture(root.path().join("bex-worktrees.json"));
         for workspace in &workspaces {
             projects.register(workspace).await.unwrap();
         }
@@ -584,7 +582,7 @@ mod tests {
                 Backend::unavailable(ProviderKind::Codex, "unavailable"),
                 claude.into(),
             ],
-            projects,
+            projects.path(),
         );
         use agent_core::state::operations::Operation;
         use agent_protocol::{

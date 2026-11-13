@@ -1,10 +1,7 @@
 use super::*;
 
 fn service(directory: &Path) -> HostRpcService {
-    HostRpcService::new(
-        [],
-        crate::ProjectStore::new(directory.join("projects.json")),
-    )
+    HostRpcService::new([], directory.join("projects.json"))
 }
 
 async fn change(

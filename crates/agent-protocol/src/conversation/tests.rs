@@ -1472,7 +1472,10 @@ fn cancelling_preparation_keeps_the_saved_stage_and_fences_its_late_completion()
     let cancelled = command(&state, 2, Command::Interrupt { turn: None });
     assert_eq!(
         cancelled.actions,
-        vec![Action::CancelPreparation { action: *action }]
+        vec![Action::CancelPreparation {
+            action: *action,
+            discard: None
+        }]
     );
     let state = state.apply(&cancelled.changes);
     assert!(matches!(&state.inputs[id].state, InputState::Failed(error)
@@ -4276,6 +4279,106 @@ fn compact_promotion_sends_only_the_selected_input_and_preserves_the_queue_hold(
             }
         }
     }
+}
+
+#[test]
+fn editing_the_promoted_queue_position_during_compact_respects_the_original_hold() {
+    for before_ack in [false, true] {
+        for held in [false, true] {
+            for remove in [false, true] {
+                for terminal in [
+                    Observation::Completed,
+                    Observation::Interrupted,
+                    Observation::Failed(None),
+                ] {
+                    let (mut state, compact_input, action, compact) = starting_compaction();
+                    if !before_ack {
+                        state = state.apply(
+                            &step(
+                                &state,
+                                Event::Delivered {
+                                    id: compact_input.clone(),
+                                    action,
+                                    native_turn: None,
+                                },
+                                context(201),
+                            )
+                            .changes,
+                        );
+                    }
+                    for n in [202, 203] {
+                        state = state.apply(&submit(&state, n, FollowUp::Queue).changes);
+                    }
+                    state.thread.queue_held = held;
+                    let first: ClientInputId = Uuid::from_u128(202).to_string().into();
+                    let selected: ClientInputId = Uuid::from_u128(203).to_string().into();
+                    let promoted = command(&state, 204, Command::SteerInput(selected.clone()));
+                    state = state.apply(&promoted.changes);
+                    let change = if remove {
+                        Command::RemoveInput(selected.clone())
+                    } else {
+                        Command::MoveInput {
+                            id: first.clone(),
+                            before: Some(selected.clone()),
+                        }
+                    };
+                    let changed = command(&state, 205, change);
+                    assert_eq!(changed.outcome, Outcome::Accepted);
+                    state = state.apply(&changed.changes);
+                    if before_ack {
+                        state = state.apply(
+                            &step(
+                                &state,
+                                Event::Delivered {
+                                    id: compact_input,
+                                    action,
+                                    native_turn: None,
+                                },
+                                context(206),
+                            )
+                            .changes,
+                        );
+                    }
+                    let ended = observe(&state, &compact, terminal, 207);
+                    if held {
+                        assert!(ended.actions.is_empty());
+                    } else {
+                        assert!(
+                            matches!(&ended.actions[..], [Action::Deliver { id, .. }] if id == &first)
+                        );
+                    }
+                    assert_eq!(state.apply(&ended.changes).thread.queue_held, held);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn another_compact_promotion_updates_the_selection_without_a_second_native_interrupt() {
+    let (state, input, action, _) = starting_compaction();
+    let mut state = state.apply(
+        &step(
+            &state,
+            Event::Delivered {
+                id: input,
+                action,
+                native_turn: None,
+            },
+            context(201),
+        )
+        .changes,
+    );
+    for n in [202, 203] {
+        state = state.apply(&submit(&state, n, FollowUp::Queue).changes);
+    }
+    let selected = |n| Uuid::from_u128(n).to_string().into();
+    let promoted = command(&state, 204, Command::SteerInput(selected(202)));
+    assert!(matches!(&promoted.actions[..], [Action::Interrupt { .. }]));
+    state = state.apply(&promoted.changes);
+    let again = command(&state, 205, Command::SteerInput(selected(203)));
+    assert_eq!(again.outcome, Outcome::Accepted);
+    assert!(again.actions.is_empty());
 }
 
 #[test]

@@ -93,7 +93,7 @@ fn retry(
             .as_ref()
             .is_some_and(|setup| setup.phase == SetupPhase::Cancelled)
     {
-        return Ok(Some((None, saved.project_cwd.clone())));
+        return Ok(Some((saved.strategy.clone(), saved.project_cwd.clone())));
     }
     let failed_script = saved.setup.as_ref().is_some_and(|setup| {
         setup.stages.iter().any(|stage| {
@@ -108,6 +108,20 @@ fn retry(
         (failed_script && matches!(input, Some(decision::InputState::Failed(_))))
             .then(|| (None, cwd.unwrap_or(&saved.project_cwd).to_owned())),
     )
+}
+
+// Only the fresh checkout owned by this cancelled attempt is discarded. Reused
+// and user-selected worktrees remain available after a failed preparation.
+pub(super) fn cancelled(
+    saved: Option<&WorkspacePreparation>,
+) -> Option<(Uuid, String, crate::workspace::CreatedWorktree)> {
+    let saved = saved.filter(|saved| saved.created_worktree)?;
+    let setup = saved.setup.as_ref()?;
+    let checkout = crate::workspace::CreatedWorktree {
+        path: setup.worktree_path.clone()?,
+        branch: setup.branch.clone()?,
+    };
+    Some((saved.generation, saved.project_cwd.clone(), checkout))
 }
 
 #[cfg(test)]
@@ -128,6 +142,62 @@ mod tests {
             created_worktree: false,
             setup: Some(WorkspaceSetup::new(Some("main".into()), 0)),
             visible: true,
+        }
+    }
+
+    #[test]
+    fn stop_cannot_cross_agent_start_for_its_matching_preparation() {
+        for phase in [SetupPhase::Running, SetupPhase::Done, SetupPhase::Cancelled] {
+            for can_cancel in [true, false] {
+                for active_turn in [true, false] {
+                    for target in [
+                        None,
+                        Some(TurnId::from("preparing")),
+                        Some(TurnId::from("other")),
+                    ] {
+                        let mut saved = saved();
+                        let setup = saved.setup.as_mut().unwrap();
+                        setup.phase = phase;
+                        setup.can_cancel = can_cancel;
+                        let input = PendingInput {
+                            id: "preparing".into(),
+                            position: 1,
+                            content: InputContent {
+                                parts: vec![],
+                                model: None,
+                                effort: None,
+                                service_tier: None,
+                                follow_up: Default::default(),
+                            },
+                            state: InputState::Preparing {
+                                stage: PreparationStage::Provider,
+                                action: Uuid::nil(),
+                                mode: DeliveryMode::Direct,
+                            },
+                        };
+                        let inputs = [(input.id.clone(), input)].into();
+                        let result = command(
+                            Some(&saved),
+                            &Command::Interrupt {
+                                turn: target.clone(),
+                            },
+                            &inputs,
+                            Some("/project"),
+                            true,
+                            active_turn,
+                        );
+                        let blocked = phase == SetupPhase::Running
+                            && !can_cancel
+                            && (!active_turn || target.is_some())
+                            && target.as_ref().is_none_or(|id| id.as_str() == "preparing");
+                        assert_eq!(
+                            result.is_err(),
+                            blocked,
+                            "{phase:?}, can_cancel={can_cancel}, active={active_turn}, target={target:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -164,6 +234,60 @@ mod tests {
         );
         assert!(retry(Some(&saved), Some(&failed), Some("/checkout"), false, true).is_err());
         assert!(retry(None, Some(&failed), Some("/checkout"), true, true).is_err());
+    }
+
+    #[test]
+    fn working_locally_retries_in_the_project_root_through_the_public_decision() {
+        let saved = saved();
+        let input = PendingInput {
+            id: "failed".into(),
+            position: 1,
+            content: InputContent {
+                parts: vec![InputPart::Text {
+                    text: "work".into(),
+                }],
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+            },
+            state: InputState::Failed(Default::default()),
+        };
+        let mut state = State::new(Thread {
+            name: String::new(),
+            workspace: Workspace::Folder("/checkout".into()),
+            provider: crate::session::ProviderKind::Codex,
+            queue_held: false,
+        });
+        state.inputs.insert(input.id.clone(), input);
+        let result = decision::step(
+            &state,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(10)),
+                command: Command::RetryInput {
+                    id: "failed".into(),
+                    work_locally: true,
+                },
+                receipt: None,
+            },
+            Context {
+                preparation: Some(&saved),
+                rewind_binding: None,
+                external_busy: false,
+                now: 100,
+                seed: Uuid::from_u128(11),
+                steers: false,
+                steer_ready: true,
+            },
+        );
+        assert_eq!(result.outcome, Outcome::Accepted);
+        assert_eq!(
+            state.apply(&result.changes).thread.workspace,
+            Workspace::Folder("/project".into())
+        );
+        assert!(
+            matches!(&result.actions[..], [Action::Prepare { cwd: Some(cwd), .. }] if cwd == "/project")
+        );
     }
 
     #[test]

@@ -268,7 +268,7 @@ async fn setup_catalog_isolates_stalled_native_providers(
 ) {
     use agent_core::{presentation::connections::AgentAvailability, state::operations::Operation};
     use agent_protocol::protocol::Response;
-    use host_daemon::{HostRpcService, ProjectStore};
+    use host_daemon::HostRpcService;
     use serde_json::json;
 
     let directory = tempfile::tempdir().unwrap();
@@ -312,10 +312,7 @@ async fn setup_catalog_isolates_stalled_native_providers(
     )
     .await
     .unwrap();
-    let service = HostRpcService::new(
-        [codex.into(), claude.into()],
-        ProjectStore::new(root.join("worktrees.json")),
-    );
+    let service = HostRpcService::new([codex.into(), claude.into()], root.join("worktrees.json"));
     let session = service.open_session();
     let accounts = service
         .dispatch(session.id(), &Call::ListAccounts(Empty {}))

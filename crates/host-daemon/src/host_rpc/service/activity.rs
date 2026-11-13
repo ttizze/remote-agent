@@ -168,7 +168,7 @@ mod tests {
     fn startup_reports_invalid_storage() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("bex-conversations.json"), b"invalid").unwrap();
-        let service = HostRpcService::new([], ProjectStore::new(root.path().join("projects.json")));
+        let service = HostRpcService::new([], root.path().join("projects.json"));
         assert!(
             service
                 .start()
@@ -276,7 +276,7 @@ rl.on('line', line => {
         );
         let service = HostRpcService::new(
             [crate::providers::codex::Codex::new(Ok(server.clone())).into()],
-            ProjectStore::new(directory.path().join("projects.json")),
+            directory.path().join("projects.json"),
         );
         let storage = &service.inner.conversation.storage;
         storage.queue_catalog(ProviderKind::Codex, 0).unwrap();
@@ -344,10 +344,8 @@ rl.on('line', line => {
         use agent_protocol::conversation::{Command, InputContent, records};
         let directory = tempfile::tempdir().unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
-        let service = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let phone = service.open_session();
         let desktop = service.open_session();
         let mut phone_list = open_list(&service, phone.id()).await;
@@ -422,10 +420,7 @@ rl.on('line', line => {
                 }
             }
         }
-        let restarted = HostRpcService::new(
-            [],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let restarted = HostRpcService::new([], directory.path().join("projects.json"));
         let reconnected = restarted.open_session();
         let list = open_list(&restarted, reconnected.id()).await;
         let state = restarted.inner.conversation.storage.activity().unwrap();
@@ -450,7 +445,7 @@ rl.on('line', line => {
         let directory = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             [crate::providers::codex::Codex::new(Err("provider is offline".into())).into()],
-            ProjectStore::new(directory.path().join("projects.json")),
+            directory.path().join("projects.json"),
         );
         let connection = service.open_session();
         let mut params = RegisterLiveActivity {
@@ -505,10 +500,7 @@ rl.on('line', line => {
             LiveActivityRegistration, PushEnvironment, RegisterLiveActivity,
         };
         let directory = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
-            [],
-            ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
         let apns = crate::apns::Apns::testing();
         service.inner.router.set_apns(Some(apns.clone()));
         let id = SessionRef::new(ProviderKind::Codex, "running-native".into()).unwrap();

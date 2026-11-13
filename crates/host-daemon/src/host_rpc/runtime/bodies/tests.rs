@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    ProjectStore,
-    host_rpc::runtime::native_fixture::{NativeAgent, call, own},
-};
+use crate::host_rpc::runtime::native_fixture::{NativeAgent, call, own};
 use agent_protocol::{
     execution::{ItemStatus, TurnStatus},
     items::{AssistantPhase, Item, ItemBody},
@@ -74,7 +71,7 @@ async fn unreadable_details_keep_other_history_and_can_be_retried_individually()
         agent.unreadable.lock().unwrap().insert("answer".into());
         let service = HostRpcService::new(
             [agent.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
+            directory.path().join("projects.json"),
         );
         let imported = Runtime::native_history(&service, &native).await.unwrap();
         let items = imported.thread.turns.as_ref().unwrap()[0]
@@ -213,7 +210,7 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
             .extend(["answer".into(), "image".into()]);
         let service = HostRpcService::new(
             [codex.backend(), claude.backend()],
-            ProjectStore::new(directory.path().join("projects.json")),
+            directory.path().join("projects.json"),
         );
         let connection = service.open_session();
         let read = |text_offset| {
