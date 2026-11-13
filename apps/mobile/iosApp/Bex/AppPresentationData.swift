@@ -27,7 +27,10 @@ final class ConversationItem: Sendable {
     init(_ source: RenderedItem) {
         self.source = source
         data = source.presentation()
-        markdown = !data.collapsible ? data.body
-            .map(ConversationMarkdownContent.parse) ?? [] : []
+        if data.kind == "plan" {
+            markdown = ConversationMarkdownContent.parts(source.detailBlocks())
+        } else {
+            markdown = !data.collapsible ? data.body.map(ConversationMarkdownContent.parse) ?? [] : []
+        }
     }
 }

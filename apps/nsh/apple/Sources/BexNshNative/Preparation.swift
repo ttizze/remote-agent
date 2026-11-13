@@ -10,6 +10,7 @@ struct ConversationPreparation: Decodable, Equatable {
         let dim: Bool
         let running: Bool
         let time: String?
+        var shimmer: MessageShimmer? = nil
     }
 
     struct Detail: Decodable, Equatable { let label: String; let value: String }
@@ -75,7 +76,7 @@ struct ConversationPreparation: Decodable, Equatable {
 @MainActor private final class NativePreparationStep: NSView {
     private let icon = NSImageView()
     private let progress = NSProgressIndicator()
-    private let label = NSTextField(labelWithString: "")
+    private let label = ShimmerLabel(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
     private let output = NSView()
@@ -109,6 +110,7 @@ struct ConversationPreparation: Decodable, Equatable {
 
     func update(_ step: ConversationPreparation.Step, document: MessageDocument) {
         label.stringValue = step.label; detail.stringValue = step.detail ?? ""; time.stringValue = step.time ?? ""
+        label.shimmer = step.shimmer
         icon.image = MessageAttributes.icon(step.icon, size: 14); icon.isHidden = step.running
         icon.contentTintColor = step.icon == "close" ? .systemRed : step
             .icon == "alert" ? .systemYellow : .secondaryLabelColor

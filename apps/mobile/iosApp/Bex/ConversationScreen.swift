@@ -24,10 +24,33 @@ struct ThreadScreen: View {
     @State var mediaPresentation = ConversationMediaPresentation()
     @State var scroll = ConversationScrollState()
     @State var expandedItemIds = Set<String>()
+    @State var planRequest: ConversationPlanRequest?
+    @State var editRequest: ConversationEditRequest?
 
     var body: some View {
         chatContent
             .modifier(ConversationMediaPresenter(presentation: mediaPresentation))
+            .modifier(ConversationPlanPresenter(request: $planRequest, write: { cwd, path, markdown, completion in
+                model.perform(.writeWorkspaceFile(WriteWorkspaceFile(cwd: cwd, relativePath: path, text: markdown))) {
+                    completion($0.map { _ in })
+                }
+            }))
+            .alert(
+                "ここから編集しますか？",
+                isPresented: Binding(get: { editRequest != nil }, set: {
+                    if !$0 {
+                        editRequest = nil
+                    }
+                }),
+                presenting: editRequest,
+                actions: { request in
+                    Button("巻き戻す", role: .destructive) { model.rewind(thread: request.thread, through: request.turn) }
+                    Button("キャンセル", role: .cancel) { editRequest = nil }
+                },
+                message: { _ in
+                    Text("この発言の前まで会話を巻き戻します。発言と添付は入力欄に戻ります。ファイルの変更はそのまま残ります。")
+                }
+            )
             .onDisappear(perform: mediaPresentation.cancelPending)
             .onChange(of: model.draftKey) {
                 expandedItemIds.removeAll()

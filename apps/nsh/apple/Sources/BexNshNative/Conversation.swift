@@ -10,6 +10,7 @@ struct ConversationButton: Decodable, Equatable {
     var enabled: Bool? = nil
     var accessibilityLabel: String? = nil
     var header: Bool? = nil
+    var shimmer: MessageShimmer? = nil
 }
 
 struct NativeConversationRow: Decodable, Equatable {
@@ -559,6 +560,7 @@ struct NativeConversationUpdate: Decodable {
     private let rowIcon = NSImageView()
     private let preparation = NativePreparationView(frame: .zero)
     private let preparationDetails = TranscriptBody()
+    private let fade = CAGradientLayer()
     private let expand = NSButton()
     private var buttons: [NSButton] = []
     private var row: NativeConversationRow?
@@ -596,6 +598,9 @@ struct NativeConversationUpdate: Decodable {
         ] {
             addSubview(child)
         }
+        body.wantsLayer = true
+        fade.colors = [NSColor.white.cgColor, NSColor.white.cgColor, NSColor.clear.cgColor]
+        fade.locations = [0, 0.8, 1]; fade.startPoint = CGPoint(x: 0, y: 0); fade.endPoint = CGPoint(x: 0, y: 1)
         bubble.wantsLayer = true; bubble.layer?.cornerRadius = 18
         bubble.layer?.backgroundColor = NSColor(white: 20.0 / 255, alpha: 1).cgColor
         rule.wantsLayer = true; rule.layer?.backgroundColor = NSColor(white: 22.0 / 255, alpha: 1).cgColor
@@ -700,7 +705,9 @@ struct NativeConversationUpdate: Decodable {
         if self.row?.buttons != row.buttons {
             buttons.forEach { $0.removeFromSuperview() }
             buttons = row.buttons.map { action in
-                let button = action.action == "copy" ? CopyActionButton() : NSButton()
+                let button = action.action == "copy" ? CopyActionButton() : action
+                    .shimmer == nil ? NSButton() : ShimmerButton()
+                (button as? ShimmerButton)?.shimmer = action.shimmer
                 button.title = action.title; button.target = self; button.action = #selector(pressed(_:))
                 button.identifier = .init(action.action); button.isBordered = false; button.isEnabled = action
                     .enabled ?? true
@@ -717,11 +724,15 @@ struct NativeConversationUpdate: Decodable {
                 addSubview(button); return button
             }
         }
-        if row.busy == true {
+        if row.busy == true, row.document.shimmer == nil, !row.buttons.contains(where: { $0.shimmer != nil }) {
             progress.startAnimation(nil)
         } else {
             progress.stopAnimation(nil)
         }
+        bubble.isHidden = !row.user && row.plan != true || row.parts.isEmpty
+        bubble.layer?.borderWidth = row.plan == true ? 1 : 0
+        bubble.layer?.borderColor = NSColor.separatorColor.cgColor
+        bubble.layer?.cornerRadius = row.plan == true ? 12 : 18
         self.row = row; lane = width
         rowIcon.image = MessageAttributes.icon(row.icon, size: 14); rowIcon.isHidden = rowIcon.image == nil
         agentBadge.isHidden = row.agentStatus == nil
@@ -771,11 +782,8 @@ struct NativeConversationUpdate: Decodable {
             width: width - inset * 2 - bodyIcon - headerTime,
             height: drawn
         )
-        body.wantsLayer = true; body.layer?.masksToBounds = collapsed
-        bubble.isHidden = !row.user && row.plan != true || row.parts.isEmpty
-        bubble.layer?.borderWidth = row.plan == true ? 1 : 0
-        bubble.layer?.borderColor = NSColor.separatorColor.cgColor
-        bubble.layer?.cornerRadius = row.plan == true ? 12 : 18
+        body.layer?.masksToBounds = collapsed
+        fade.frame = body.bounds; body.layer?.mask = collapsed ? fade : nil
         bubble.frame = NSRect(x: x, y: y, width: width, height: drawn + (row.user ? 24 : 0))
         y = max(body.frame.maxY, bubble.isHidden ? 0 : bubble.frame.maxY)
         if row.preparation != nil {

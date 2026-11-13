@@ -117,9 +117,17 @@ struct MessageDocument: Decodable, Equatable, Sendable {
     var mediaErrors: [String: String]? = nil
     /// A table's cell, `header` or `body`, whose text is smaller.
     var cell: String? = nil
+    var shimmer: MessageShimmer? = nil
 
     static let empty = MessageDocument(secondary: false, role: "assistant", target: "", sideChat: false,
                                        menu: MessageMenuTitles(quote: "", sideChat: ""))
+}
+
+struct MessageShimmer: Decodable, Equatable, Sendable {
+    let period: Double
+    let band: Double
+    let focus: Bool
+    let stops: [[Double]]
 }
 
 /// What a selection's menu calls adding it to the chat and asking about it in

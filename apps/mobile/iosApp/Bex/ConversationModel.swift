@@ -31,6 +31,7 @@ final class ConversationModel {
     }
 
     private(set) var agents: [AgentSummary] = []
+    private(set) var activityDecorations: [String: [ActivityDecoration]] = [:]
     var notice: String?
     var sideChatRequest: SideChatRequest?
     var composerFocusRequest: UUID?
@@ -44,6 +45,8 @@ final class ConversationModel {
     @ObservationIgnored private var pendingPresentation: ProjectionInput?
     @ObservationIgnored private var recentConversations: [ConversationPresentation] = []
     @ObservationIgnored private var activityExpansionOverrides = [String: String]()
+    @ObservationIgnored private var requestedSubagents = Set<SessionRef>()
+    @ObservationIgnored private var activityClock: Task<Void, Never>?
 
     var store: AgentStore? {
         session.store()
@@ -84,10 +87,25 @@ final class ConversationModel {
                 }
             }
         }
+        activityClock = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self else { return }
+                if activityDecorations.values.joined().contains(where: {
+                    if case let .subagent(_, _, _, _, status, _) = $0 {
+                        return status == "running"
+                    }
+                    return false
+                }) {
+                    refreshActivityDecorations()
+                }
+            }
+        }
     }
 
     deinit {
         observation?.cancel()
+        activityClock?.cancel()
         pane?.retire()
     }
 
@@ -146,6 +164,37 @@ final class ConversationModel {
         }
         if changes.conversation {
             projectConversation(value.conversation())
+        }
+        if changes.groups.sessions || changes.settings {
+            refreshActivityDecorations()
+        }
+    }
+
+    private func refreshActivityDecorations() {
+        guard let conversation, conversation.scope == snapshot.panelScope(host: host, draft: coreDraftKey) else {
+            activityDecorations = [:]; return
+        }
+        let now = Date().timeIntervalSince1970
+        var next: [String: [ActivityDecoration]] = [:]
+        var load: [SessionRef] = []
+        for row in conversation.rows {
+            guard case let .native(_, item?) = row.content else { continue }
+            let values = snapshot.activityDecorations(item: item.source, nowSeconds: now)
+            if !values.isEmpty {
+                next[row.id] = values
+            }
+            for value in values {
+                if case let .subagent(_, target?, _, _, _, _) = value,
+                   requestedSubagents.insert(target).inserted, target != selectedThreadId {
+                    load.append(target)
+                }
+            }
+        }
+        if next != activityDecorations {
+            activityDecorations = next
+        }
+        for target in load {
+            perform(.readThread(ReadThread(threadId: target, open: false)))
         }
     }
 
@@ -245,6 +294,23 @@ extension ConversationModel {
         }
     }
 
+    func resume() {
+        for intent in composer.resumeIntents(clientUserMessageId: UUID().uuidString) {
+            perform(intent)
+        }
+        persist()
+    }
+
+    func rewind(thread: SessionRef, through turn: String) {
+        guard selectedThreadId == thread else { return }
+        perform(.rewindSession(RewindSession(threadId: thread, turnId: turn))) { [weak self] result in
+            switch result {
+            case .success: self?.composerFocusRequest = UUID(); self?.persist()
+            case let .failure(error): self?.notice = error.localizedDescription
+            }
+        }
+    }
+
     func restoreUnknownSubmission(_ id: String) {
         perform(.restoreUnknownSubmission(clientUserMessageId: id)) { [weak self] _ in self?.persist() }
     }
@@ -323,11 +389,13 @@ extension ConversationModel {
             conversation = nil
             pendingPresentation = nil
             activityExpansionOverrides.removeAll()
+            requestedSubagents.removeAll(); activityDecorations = [:]
             return
         }
         let scope = snapshot.panelScope(host: host, draft: coreDraftKey)
         if conversation?.scope != scope {
             activityExpansionOverrides.removeAll()
+            requestedSubagents.removeAll(); activityDecorations = [:]
             conversation = recentConversations.first { $0.scope == scope }
         }
         pendingPresentation = ProjectionInput(
@@ -350,6 +418,7 @@ extension ConversationModel {
                    activityExpansionOverrides == input.expansion,
                    publication.conversation() != nil {
                     conversation = rendered
+                    refreshActivityDecorations()
                     // Expansion resets with the scope, so only collapsed rows can be shown on reopen.
                     if rendered.id != nil, input.expansion.isEmpty {
                         recentConversations.removeAll { $0.scope == rendered.scope }

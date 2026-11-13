@@ -92,6 +92,7 @@ pub(super) struct EditContext {
     picture: RefCell<Option<super::picture::Picture>>,
     cover: Cell<bool>,
     tooltip: RefCell<Option<super::tooltip::Tooltip>>,
+    effects: RefCell<super::effects::Effects>,
 }
 
 #[derive(Clone, Copy)]
@@ -231,10 +232,12 @@ fn preparation_parts(output: &mut Vec<Descriptor>, preparation: &Value) {
         } else {
             0xaaaaaa
         };
-        output.push(Descriptor::Text(rich_document::paragraphs(&[json!({"runs":[
+        let mut label = rich_document::paragraphs(&[json!({"runs":[
             {"text":step["label"],"darkColor":color},
             {"text":format!("  {}  {}",step["detail"].as_str().unwrap_or_default(),step["time"].as_str().unwrap_or_default()),"size":12,"darkColor":color}
-        ]})]),true));
+        ]})]);
+        label.shimmer = serde_json::from_value(step["shimmer"].clone()).ok();
+        output.push(Descriptor::Text(label, true));
         if let Some(tail) = step["tail"].as_str().filter(|tail| !tail.is_empty()) {
             output.push(Descriptor::Text(
                 rich_document::paragraphs(&[
@@ -265,7 +268,9 @@ fn append_part(
 ) {
     let labels = &document["labels"];
     if let Some(blocks) = part["Text"].as_array() {
-        output.push(Descriptor::Text(rich_document::paragraphs(blocks), true));
+        let mut text = rich_document::paragraphs(blocks);
+        text.shimmer = serde_json::from_value(document["shimmer"].clone()).ok();
+        output.push(Descriptor::Text(text, true));
     } else if let Some(code) = part.get("Code") {
         code_parts(output, code, key, state, width, labels);
     } else if let Some(table) = part.get("Table") {
@@ -466,6 +471,7 @@ impl Item {
             picture: RefCell::new(None),
             cover: Cell::new(false),
             tooltip: RefCell::new(None),
+            effects: RefCell::new(super::effects::Effects::default()),
         });
         let class = if button {
             w!("BUTTON")
@@ -551,6 +557,10 @@ impl Item {
             Descriptor::Icon(name) => {
                 *self.edit.context.payload.borrow_mut() = base;
                 self.edit.icon(Some(name), true);
+                self.edit.context.effects.borrow_mut().configure(
+                    self.edit.window,
+                    serde_json::from_value(row["document"]["shimmer"].clone()).ok(),
+                );
             }
             Descriptor::Button(title, action) => {
                 let visible_title = title.clone();
@@ -577,6 +587,10 @@ impl Item {
                     }
                 }
                 *self.edit.context.payload.borrow_mut() = base;
+                self.edit.context.effects.borrow_mut().configure(
+                    self.edit.window,
+                    serde_json::from_value(action["shimmer"].clone()).ok(),
+                );
             }
             Descriptor::Picture {
                 source,
@@ -642,6 +656,10 @@ impl Item {
             },
         );
         message(self.edit.window, EM_SETBKGNDCOLOR, 0, background as isize);
+        let mut effects = self.edit.context.effects.borrow_mut();
+        effects.background = background;
+        effects.configure(self.edit.window, document.shimmer.clone());
+        drop(effects);
         if self.edit.context.wrap.replace(wrap) != wrap {
             self.edit.context.width.set(0);
         }
@@ -708,6 +726,8 @@ impl Item {
                 }
         };
         let height = maximum.map_or(height, |maximum| height.min(maximum.max(0)));
+        context.effects.borrow_mut().fade =
+            maximum.is_some_and(|maximum| maximum > 0 && context.height.get() > maximum);
         if context.picture_kind && context.payload.borrow()["sent"] == true {
             self.picture_clip(
                 RECT {
@@ -1258,6 +1278,10 @@ unsafe extern "system" fn procedure(
         }
         return LRESULT(0);
     }
+    if msg == WM_TIMER && w.0 == super::effects::TIMER {
+        super::effects::Effects::tick(hwnd);
+        return LRESULT(0);
+    }
     if msg == WM_MOUSEMOVE {
         unsafe {
             let _ = PostMessageW(
@@ -1341,6 +1365,9 @@ unsafe extern "system" fn procedure(
         return LRESULT(0);
     }
     let result = unsafe { DefSubclassProc(hwnd, msg, w, l) };
+    if msg == WM_PAINT {
+        context.effects.borrow_mut().paint(hwnd);
+    }
     if text_control && msg == WM_LBUTTONUP {
         popup(hwnd, &context);
     }

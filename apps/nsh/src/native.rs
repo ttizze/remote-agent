@@ -5,6 +5,8 @@ use nsh_core::{element::NativeView, prelude::*};
 use serde_json::{Value, json};
 
 #[cfg(any(windows, test))]
+mod effects;
+#[cfg(any(windows, test))]
 mod rich_document;
 
 #[derive(Clone, PartialEq, serde::Serialize)]

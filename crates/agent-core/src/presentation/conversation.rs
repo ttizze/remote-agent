@@ -13,9 +13,11 @@ use std::{
 };
 mod follow;
 pub use follow::{ScrollPosition, away_from_end, follows_end};
+mod activity;
 mod images;
 pub mod rows;
 mod timeline;
+pub use activity::ActivityDecoration;
 pub use timeline::{TurnRow, plan_export, turn_rows};
 mod work;
 pub use work::{LiveActivity, WorkRowLabel};
@@ -541,6 +543,15 @@ impl PartialEq for RenderedItem {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl RenderedItem {
+    pub fn collapses_user_text(&self) -> bool {
+        self.data.kind == "user"
+            && self
+                .data
+                .body
+                .as_deref()
+                .is_some_and(should_collapse_user_message)
+    }
+
     pub fn unknown_submission_id(&self) -> Option<String> {
         match &self.source {
             ItemSource::Pending(id, pending) if pending.delivery_unknown => Some(id.clone()),

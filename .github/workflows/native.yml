@@ -102,7 +102,7 @@ jobs:
               crates/xtask/src/ios_e2e.rs) area='iphone-mac' ;;
               scripts/test-ios-scroll.sh) area=iphone ;;
               apps/native-focus/*) area=mac ;;
-              apps/native-browser/* | apps/native-settings/*) area='iphone-mac' ;;
+              apps/native-browser/* | apps/native-settings/* | apps/native-ui/*) area='iphone-mac' ;;
               # Desktop NSH also provides the browser renderer used by iPhone fixtures.
               apps/nsh/*) area=nsh ;;
               apps/mobile/src/* | apps/mobile/build.gradle.kts | build.gradle.kts | settings.gradle.kts | \

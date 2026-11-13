@@ -148,14 +148,15 @@ extension ThreadScreen {
                 id: projected.id(),
                 expanded: projected.expanded()
             )
-        case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
+        case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId, rowId: projected.id())
         case let (.error(error), _): ThreadErrorRow(error: error)
         case (.inProgress, _), (.pendingRequest, _), (_, nil): EmptyView()
         }
     }
 
     func userMessageRow(_ item: ConversationItem, row: VisibleConversationRow, timestampMs: UInt64?) -> some View {
-        ThreadMessageRow(
+        let thread = model.selectedThreadId
+        return ThreadMessageRow(
             row: row,
             item: item,
             isUser: true,
@@ -163,32 +164,62 @@ extension ThreadScreen {
             selection: selectionActions,
             timestampMs: timestampMs,
             restoreUnknown: { model.restoreUnknownSubmission($0) },
-            discardUnknown: { model.discardUnknownSubmission($0) }
+            discardUnknown: { model.discardUnknownSubmission($0) },
+            edit: row.data().editTurnId.map { turn in {
+                if let thread {
+                    editRequest = ConversationEditRequest(
+                        thread: thread,
+                        turn: turn
+                    )
+                }
+            } },
+            editingEnabled: model.composerControls.runningTurn == nil && !model.conversationContext.rewinding()
         ).equatable()
     }
 
-    func activityItem(_ item: ConversationItem, turnId: String) -> some View {
-        ThreadItemRow(
-            item: item,
-            media: mediaAccess,
-            selection: selectionActions,
-            isExpanded: expandedItemIds.contains(item.data.id),
-            toggleExpanded: {
-                scroll.following = false
-                if expandedItemIds.contains(item.data.id) {
-                    expandedItemIds.remove(item.data.id)
-                } else {
-                    expandedItemIds.insert(item.data.id)
+    @ViewBuilder
+    func activityItem(_ item: ConversationItem, turnId: String, rowId: String) -> some View {
+        let values = model.activityDecorations[rowId] ?? []
+        if !values.isEmpty {
+            ThreadDecoratedActivity(
+                values: values,
+                blocks: item.markdown,
+                media: mediaAccess,
+                selection: selectionActions,
+                canSave: model.isConnected && !model.cwd.isEmpty,
+                open: model.openThread,
+                plan: { destination, filename, markdown in
+                    planRequest = ConversationPlanRequest(
+                        destination: destination,
+                        cwd: model.cwd,
+                        filename: filename,
+                        markdown: markdown
+                    )
                 }
-            },
-            loadDetails: {
-                guard let threadId = conversation?.id else { return nil }
-                return await model.readItemDetails(
-                    threadId: threadId, turnId: turnId,
-                    itemId: item.data.nativeId ?? item.data.id
-                )
-            }
-        ).equatable()
+            )
+        } else {
+            ThreadItemRow(
+                item: item,
+                media: mediaAccess,
+                selection: selectionActions,
+                isExpanded: expandedItemIds.contains(item.data.id),
+                toggleExpanded: {
+                    scroll.following = false
+                    if expandedItemIds.contains(item.data.id) {
+                        expandedItemIds.remove(item.data.id)
+                    } else {
+                        expandedItemIds.insert(item.data.id)
+                    }
+                },
+                loadDetails: {
+                    guard let threadId = conversation?.id else { return nil }
+                    return await model.readItemDetails(
+                        threadId: threadId, turnId: turnId,
+                        itemId: item.data.nativeId ?? item.data.id
+                    )
+                }
+            ).equatable()
+        }
     }
 
     @ViewBuilder

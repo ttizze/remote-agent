@@ -10,6 +10,8 @@ pub(crate) struct Document {
     pub links: Vec<Link>,
     pub active: Option<(usize, usize)>,
     pub background: Option<u32>,
+    #[cfg(windows)]
+    pub shimmer: Option<super::effects::Shimmer>,
     decorations: Vec<(usize, usize)>,
 }
 
@@ -142,6 +144,8 @@ impl Writer {
             links: self.links,
             active: self.active,
             background: None,
+            #[cfg(windows)]
+            shimmer: None,
             decorations: self.decorations,
         }
     }

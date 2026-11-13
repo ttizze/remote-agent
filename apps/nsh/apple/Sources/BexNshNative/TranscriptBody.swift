@@ -225,6 +225,7 @@ private extension Optional {
         manager.ensureLayout(for: container)
         let height = ceil(manager.usedRect(for: container).maxY)
         text.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        text.updateShimmer()
         if let key = document.findKey, key != revealed {
             var active: NSRange?
             text.attributedString().enumerateAttribute(

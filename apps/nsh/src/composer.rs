@@ -94,12 +94,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
     };
     // A stop or failure held the queue, or stopped the latest turn: the send
     // button resumes it, as T3 Code's Resume.
-    let holding = move || follow_up.with(|f| f.held && !f.queue.is_empty());
-    let resuming = move || {
-        idle_input()
-            && controls.with(|c| c.running_turn.is_none())
-            && (holding() || follow_up.with(|f| f.resumable))
-    };
+    let resuming = move || idle_input() && composer.with(|composer| composer.can_resume());
     // What a send does while a turn runs: queue or steer, as T3 Code labels it.
     let action = move || {
         follow_up.with(|f| {
@@ -231,23 +226,13 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             });
         } else if stopping() {
             interrupt();
-        } else if resuming() && holding() {
-            queue(QueueAction::Resume);
         } else if resuming() {
             following.set(true);
-            let thread_id = controls.with_untracked(|c| c.navigation.thread_id.clone());
-            let draft_key = controls.with_untracked(|c| c.navigation.draft_key.clone());
-            let text = agent_core::presentation::composer::RESUME_PROMPT.to_owned();
-            connection.dispatch(Intent::EditComposer {
-                thread_id: draft_key,
-                cursor: text.len() as u32,
-                text,
-            });
-            connection.dispatch(Intent::Submit {
-                thread_id,
-                client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
-                alternate: false,
-            });
+            for intent in composer.with_untracked(|composer| {
+                composer.resume_intents(uuid::Uuid::new_v4().to_string().into())
+            }) {
+                connection.dispatch(intent);
+            }
         } else if composition.with_untracked(Option::is_some) {
             // Japanese live conversion keeps a whole message marked until
             // return. Commit it, as a click outside a browser's field does,

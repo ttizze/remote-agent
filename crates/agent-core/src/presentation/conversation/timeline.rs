@@ -280,7 +280,7 @@ fn request_label(language: UiLanguage, request: &super::Request) -> String {
 }
 
 /// Where T3 Code's timeline shows a work item.
-enum Place {
+pub(super) enum Place {
     /// Among the work, in its group or alone.
     Work,
     /// Apart from the work, which it ends: a plan, a subagent, a divider.
@@ -289,7 +289,7 @@ enum Place {
     Hidden,
 }
 
-fn place(language: UiLanguage, item: &RenderedItem) -> Place {
+pub(super) fn place(language: UiLanguage, item: &RenderedItem) -> Place {
     let ItemSource::Native(native) = &item.source else {
         return Place::Work;
     };

@@ -3,8 +3,6 @@ import SwiftUI
 import UIKit
 
 struct ThreadActivityHeader: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
     let summary: String
     let canCollapse: Bool
     let isInProgress: Bool
@@ -15,23 +13,7 @@ struct ThreadActivityHeader: View {
             .font(.system(size: 16))
             .lineLimit(1).truncationMode(.tail)
         HStack(spacing: 5) {
-            label.foregroundStyle(.secondary).overlay {
-                if isInProgress, !reduceMotion, scenePhase == .active {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
-                        // Share a clock across summary updates without restarting the sweep.
-                        let phase = context.date.timeIntervalSinceReferenceDate
-                            .truncatingRemainder(dividingBy: 2.8) / 2.8
-                        LinearGradient(
-                            colors: [.clear, .primary, .clear],
-                            startPoint: UnitPoint(x: phase * 2 - 0.7, y: 0.5),
-                            endPoint: UnitPoint(x: phase * 2, y: 0.5)
-                        )
-                    }
-                    .mask(label.foregroundStyle(.white))
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
-                }
-            }
+            NativeShimmer(label: label, active: isInProgress)
             if canCollapse {
                 Image(systemName: expanded ? "chevron.down" : "chevron.right")
                     .font(.caption2.weight(.semibold)).foregroundColor(.secondary)
@@ -87,7 +69,10 @@ struct ThreadMessageRow: View, Equatable {
     var forkError: ErrorText?
     var restoreUnknown: ((String) -> Void)?
     var discardUnknown: ((String) -> Void)?
+    var edit: (() -> Void)?
+    var editingEnabled = true
     @State private var copied = false
+    @State private var expanded = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.row == rhs.row && lhs.item === rhs.item
@@ -97,6 +82,7 @@ struct ThreadMessageRow: View, Equatable {
             && (lhs.selection.askInSideChat == nil) == (rhs.selection.askInSideChat == nil)
             && (lhs.restoreUnknown == nil) == (rhs.restoreUnknown == nil)
             && (lhs.discardUnknown == nil) == (rhs.discardUnknown == nil)
+            && (lhs.edit == nil) == (rhs.edit == nil) && lhs.editingEnabled == rhs.editingEnabled
     }
 
     @ViewBuilder private var images: some View {
@@ -123,12 +109,20 @@ struct ThreadMessageRow: View, Equatable {
 
     var body: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
+            if row.data().queued {
+                Label("キューから送信", systemImage: "tray.full").font(.caption).foregroundStyle(.secondary)
+            }
+            if row.data().steer {
+                Label("追加の指示", systemImage: "arrow.turn.down.right").font(.caption).foregroundStyle(.secondary)
+            }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
                 images
                 if let text = item.data.body, !text.isEmpty {
                     if isUser {
                         ConversationMarkdown(blocks: item.markdown, media: media, selection: selection,
                                              textIdentifier: "message.user-text")
+                            .frame(maxHeight: item.source.collapsesUserText() && !expanded ? 176 : nil, alignment: .top)
+                            .clipped()
                             .padding(14)
                             .background(Color(UIColor.secondarySystemBackground),
                                         in: RoundedRectangle(cornerRadius: 22))
@@ -141,6 +135,10 @@ struct ThreadMessageRow: View, Equatable {
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("item.\(item.data.id)")
+            if isUser, item.source.collapsesUserText() {
+                Button { expanded.toggle() } label: { Text(expanded ? "折りたたむ" : "全文を表示") }
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if isUser || showActions {
                 actions
             }
@@ -169,6 +167,11 @@ struct ThreadMessageRow: View, Equatable {
             }
         }
         .padding(.bottom, isUser ? 12 : 8)
+        .task(id: copied) {
+            guard copied else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            copied = false
+        }
     }
 
     /// Both speakers share copy and time; the user's row mirrors toward its bubble and cannot fork.
@@ -183,6 +186,12 @@ struct ThreadMessageRow: View, Equatable {
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                 }
                 .accessibilityLabel(LocalizedStringKey(copied ? "コピーしました" : isUser ? "発言をコピー" : "回答をコピー"))
+            }
+            if let edit {
+                Button(action: edit) { Image(systemName: "pencil") }
+                    .disabled(!editingEnabled)
+                    .accessibilityLabel("ここから編集")
+                    .accessibilityIdentifier("message.edit." + item.data.id)
             }
             if let fork {
                 Button(action: fork) {

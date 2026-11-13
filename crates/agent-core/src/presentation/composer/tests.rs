@@ -32,6 +32,69 @@ fn presentation(snapshot: &Snapshot) -> Arc<ComposerPresentation> {
 }
 
 #[test]
+fn resume_continues_the_same_interrupted_conversation_without_replacing_a_draft() {
+    let mut snapshot = snapshot();
+    let thread = Arc::make_mut(
+        Arc::make_mut(&mut snapshot.sessions.conversations)
+            .get_mut(&session())
+            .unwrap(),
+    );
+    thread.turns = Some(vec![Arc::new(Turn {
+        id: "interrupted".into(),
+        status: TurnStatus::Interrupted,
+        ..Default::default()
+    })]);
+    let composer = presentation(&snapshot);
+    assert!(composer.can_resume());
+    let intents = composer.resume_intents("continuation".into());
+    assert!(
+        matches!(&intents[..], [crate::state::Intent::EditComposer {thread_id,text,..},crate::state::Intent::Submit {thread_id:Some(target),client_user_message_id,alternate:false}]
+        if thread_id == &session().into() && target == &session() && text == "Continue where you left off." && client_user_message_id.as_str() == "continuation")
+    );
+    crate::state::set_draft_text(&mut snapshot, session().into(), "Keep this draft".into());
+    assert!(!presentation(&snapshot).can_resume());
+    assert!(
+        presentation(&snapshot)
+            .resume_intents("unused".into())
+            .is_empty()
+    );
+}
+
+#[test]
+fn resume_releases_held_input_in_order_instead_of_submitting_an_extra_message() {
+    let mut snapshot = snapshot();
+    let thread = Arc::make_mut(
+        Arc::make_mut(&mut snapshot.sessions.conversations)
+            .get_mut(&session())
+            .unwrap(),
+    );
+    thread.queue.held = true;
+    thread
+        .queue
+        .inputs
+        .push(agent_protocol::operations::Submission {
+            thread_id: session(),
+            client_user_message_id: "waiting".into(),
+            input: vec![],
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: FollowUp::Queue,
+        });
+    let composer = presentation(&snapshot);
+    assert!(composer.can_resume());
+    assert!(
+        matches!(&composer.resume_intents("unused".into())[..],[crate::state::Intent::Queue {thread_id,action:crate::state::follow_up::QueueAction::Resume}] if thread_id == &session())
+    );
+    snapshot.connection.connected = false;
+    assert!(
+        presentation(&snapshot)
+            .resume_intents("unused".into())
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_conversation_still_opening_or_failed_to_open_keeps_its_draft_but_sends_nothing() {
     let mut snapshot = snapshot();
     crate::state::set_draft_text(&mut snapshot, session().into(), "下書き".into());

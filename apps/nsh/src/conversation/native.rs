@@ -161,7 +161,18 @@ pub(super) fn project_row(
         parts = vec![crate::rich_text::plain(body.clone(), None)];
     }
     let labels = json!({"copyCode":tr("コードをコピー"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
-    let document = json!({"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
+    let focus = row.progress.is_some()
+        || row.status.is_some()
+        || row.preparation.as_ref().is_some_and(|setup| setup.shimmer);
+    let shine = row.detail.as_ref().is_some_and(|item| item.live);
+    let shimmer = (focus || shine).then(|| shimmer_style(focus));
+    for button in buttons
+        .iter_mut()
+        .filter(|button| button["header"] == true && button["action"] == "item")
+    {
+        button["shimmer"] = shimmer.clone().unwrap_or(Value::Null);
+    }
+    let document = json!({"shimmer":shimmer.filter(|_|row.detail.is_none()),"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
     json!({
         "id":row.id,"plan":matches!(row.shape,Shape::Plan),"timeAlways":row.kind == Kind::Activity,"preparation":row.preparation.as_ref().map(|setup| preparation_card(setup,open)),"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
         "collapsible":row.kind == Kind::User && agent_core::presentation::conversation::should_collapse_user_message(&row.body),
@@ -178,11 +189,15 @@ fn preparation_card(
     json!({
         "steps":setup.steps.iter().filter(|_|setup.show_steps).map(|step|json!({
             "id":step.id,"label":step.label,"detail":step.detail,"tail":step.tail.join("\n"),"dim":step.state == "pending",
-            "running":step.state == "running","icon":match step.state.as_str() {"done"=>"check","running"=>"running","skipped"=>"minus","failed"=>"close","warning"=>"alert",_=>"pending"}
+            "running":step.state == "running","shimmer":(step.state == "running").then(||shimmer_style(true)),"icon":match step.state.as_str() {"done"=>"check","running"=>"running","skipped"=>"minus","failed"=>"close","warning"=>"alert",_=>"pending"}
         })).collect::<Vec<_>>(),
         "details":setup.details.iter().filter(|_|open).map(|detail|json!({"label":detail.label,"value":detail.value})).collect::<Vec<_>>(),
         "error":setup.error,
     })
+}
+
+fn shimmer_style(focus: bool) -> Value {
+    json!({"period":2.2,"band":72.0,"focus":focus,"stops":if focus {vec![(0.0,0.0),(0.15,0.12),(0.35,0.55),(0.5,1.0),(0.65,0.55),(0.85,0.12),(1.0,0.0)]} else {vec![(0.0,0.0),(0.5,1.0),(1.0,0.0)]}})
 }
 
 fn row_icon(row: &Row) -> Option<&'static str> {
@@ -195,6 +210,9 @@ fn row_icon(row: &Row) -> Option<&'static str> {
             NotificationIcon::Zap => "zap",
             NotificationIcon::CircleAlert => "alert",
         });
+    }
+    if row.status == Some(crate::activity::Status::Thinking) {
+        return Some("thinking");
     }
     let kind = row
         .detail

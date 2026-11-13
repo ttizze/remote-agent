@@ -137,6 +137,7 @@ test('only affected native clients run while repository-only changes stay lightw
     [['apps/native-focus/src/lib.rs'], ['mac']],
     [['apps/native-browser/src/macos/mod.rs'], ['iphone', 'mac']],
     [['apps/native-browser/apple-views/Sources/NativeBrowserViews/RemoteBrowserCanvas.swift'], ['iphone', 'mac']],
+    [['apps/native-ui/Sources/NativeUI/Shimmer.swift'], ['iphone', 'mac']],
     [['apps/nsh/src/terminal_screen.rs'], ['windows', 'iphone', 'mac']],
     [['scripts/package-windows.ps1', 'scripts/windows-installer.iss'], ['windows']],
     [['apps/mobile/src/main/kotlin/Conversation.kt', 'apps/mobile/iosApp/Bex/ConversationView.swift'], ['android', 'iphone']],

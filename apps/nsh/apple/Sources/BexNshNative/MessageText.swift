@@ -5,6 +5,7 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
 final class MessageTextView: NSTextView, NSTextViewDelegate {
     var action: (([String: Any]) -> Void)?
     var document = MessageDocument.empty
+    private var sweep: NativeTextShimmer?
     private var selecting = false
     private var reported = false
     init() {
@@ -41,6 +42,15 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
     @available(*, unavailable)
     required init?(coder _: NSCoder) {
         fatalError("init(coder:) is unavailable")
+    }
+
+    func updateShimmer() {
+        if document.shimmer != nil, sweep == nil {
+            sweep = NativeTextShimmer(); addSubview(sweep!.view)
+        }
+        sweep?.update(document.shimmer, text: attributedString(), size: bounds.size,
+                      extent: layoutManager
+                          .flatMap { manager in textContainer.map { manager.usedRect(for: $0).width } } ?? bounds.width)
     }
 
     override func drawBackground(in rect: NSRect) {

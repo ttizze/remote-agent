@@ -1,5 +1,6 @@
 //! One Win32 viewport owns its native Rich Edit controls, scrolling and selection.
 mod control;
+mod effects;
 mod picture;
 mod tooltip;
 use control::{Edit, Item, items};

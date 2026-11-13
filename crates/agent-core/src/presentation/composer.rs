@@ -409,6 +409,50 @@ impl ComposerPresentation {
     pub fn can_attach(&self) -> bool {
         self.accepts_input()
     }
+
+    pub fn can_resume(&self) -> bool {
+        let follow_up = &self.controls.follow_up;
+        self.can_send(true)
+            && self.controls.navigation.thread_id.is_some()
+            && self.controls.running_turn.is_none()
+            && self.controls.question.is_none()
+            && self.draft.text.trim().is_empty()
+            && self.draft.attachments.is_empty()
+            && follow_up.editing.is_none()
+            && !follow_up.busy
+            && (follow_up.resumable || follow_up.held && !follow_up.queue.is_empty())
+    }
+
+    /// The owner dispatches these in order. Held input resumes in its original
+    /// conversation; an interrupted run without queued input gets one continuation.
+    pub fn resume_intents(
+        &self,
+        client_user_message_id: ClientInputId,
+    ) -> Vec<crate::state::Intent> {
+        use crate::state::{Intent, follow_up::QueueAction};
+        if !self.can_resume() {
+            return Vec::new();
+        }
+        let thread_id = self.controls.navigation.thread_id.clone().unwrap();
+        if self.controls.follow_up.held && !self.controls.follow_up.queue.is_empty() {
+            return vec![Intent::Queue {
+                thread_id,
+                action: QueueAction::Resume,
+            }];
+        }
+        vec![
+            Intent::EditComposer {
+                thread_id: self.controls.navigation.draft_key.clone(),
+                text: RESUME_PROMPT.into(),
+                cursor: RESUME_PROMPT.len() as u32,
+            },
+            Intent::Submit {
+                thread_id: Some(thread_id),
+                client_user_message_id,
+                alternate: false,
+            },
+        ]
+    }
 }
 
 impl ComposerPresentation {
