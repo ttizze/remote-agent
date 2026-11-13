@@ -1,3 +1,17 @@
+pub(super) fn events_since(
+    storage: &Storage,
+    id: &SessionRef,
+    after: Cursor,
+) -> Vec<decision::records::Event> {
+    match storage
+        .snapshot(id, Some(after), Some(Window { turn: 0, item: 0 }))
+        .unwrap()
+    {
+        Message::Events { events, .. } => events,
+        other => panic!("expected journal replay: {other:?}"),
+    }
+}
+
 use super::*;
 use agent_protocol::{
     execution::ItemStatus,
@@ -327,7 +341,7 @@ fn importing_children_preserves_unlisted_parents_and_resolves_owned_native_paren
 }
 
 #[test]
-fn list_replication_shares_committed_header_versions_and_recovers_after_reopen() {
+fn list_replication_replays_committed_events_and_recovers_after_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
     let storage = Storage::open(&path);
@@ -343,12 +357,8 @@ fn list_replication_shares_committed_header_versions_and_recovers_after_reopen()
     storage
         .with(|connection| {
             let transaction = connection.transaction().map_err(failure)?;
-            let sequence = Storage::advance(&transaction)?;
             transaction
-                .execute(
-                    "UPDATE threads SET seq=?1 WHERE id=?2",
-                    params![integer(sequence.sequence)?, id.id],
-                )
+                .execute("UPDATE threads SET updated_at=999 WHERE id=?1", [&id.id])
                 .map_err(failure)?;
             Err::<(), String>("forced rollback".into())
         })
@@ -378,7 +388,11 @@ fn list_replication_shares_committed_header_versions_and_recovers_after_reopen()
         .apply(1, storage.list(Some(before)).unwrap())
         .unwrap();
     let row = &replica.rows()[&Key::Thread(id.clone())];
-    assert_eq!(row.version, committed.cursor.sequence);
+    assert!(
+        events_since(&storage, &id, before)
+            .iter()
+            .any(|event| event.sequence == committed.cursor.sequence)
+    );
     assert!(
         matches!(&row.content,Content::Full(record) | Content::Summary(record) if matches!(record.as_ref(),Record::Thread(header) if header.state.name=="Renamed"))
     );
@@ -402,35 +416,27 @@ fn list_replication_shares_committed_header_versions_and_recovers_after_reopen()
     ));
 }
 
-#[test]
-fn list_catchup_over_one_thousand_rows_resets_to_a_complete_snapshot() {
+#[rstest::rstest]
+#[case(1000, false)]
+#[case(1001, true)]
+fn list_replay_bounds_the_global_sequence_gap(#[case] count: usize, #[case] reset: bool) {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));
     let initial = storage.list(None).unwrap();
     let replica = decision::records::Replica::new(agent_protocol::sync::Scope::List, 1)
         .apply(1, initial)
         .unwrap();
-    storage
-        .with(|connection| {
-            let transaction = connection.transaction().map_err(failure)?;
-            let sequence = Storage::advance(&transaction)?.sequence;
-            for index in 0..1001 {
-                projects::write(
-                    &transaction,
-                    &agent_protocol::models::Project {
-                        id: format!("project-{index}"),
-                        name: format!("Project {index}"),
-                        ..Default::default()
-                    },
-                    sequence,
-                )?;
-            }
-            transaction.commit().map_err(failure)
-        })
-        .unwrap();
+    for index in 0..count {
+        storage
+            .create(&address(&format!("listed-{index}")), &header())
+            .unwrap();
+    }
     let message = storage.list(replica.cursor()).unwrap();
-    assert!(matches!(&message,Message::Snapshot {window:None,rows,..} if rows.len()==1001));
-    assert_eq!(replica.apply(1, message).unwrap().rows().len(), 1001);
+    assert_eq!(
+        matches!(&message, Message::Snapshot { window: None, .. }),
+        reset
+    );
+    assert_eq!(replica.apply(1, message).unwrap().rows().len(), count);
 }
 
 #[test]
@@ -527,23 +533,29 @@ fn admission_receipt_and_rows_commit_together_and_replay_does_not_allocate_again
     let id = address("one");
     assert!(storage.create(&id, &header()).unwrap());
     ready(&storage, &id);
+    let before_first = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let first = storage.decide(&id, submit(1), context(1), None).unwrap();
     assert_eq!(first.step.outcome, Outcome::Accepted);
     let admitted_state = storage.state(&id).unwrap();
     assert_eq!(admitted_state.inputs.len(), 1);
     assert!(admitted_state.turns.is_empty());
-    let keys = first
-        .rows
+    let recorded = events_since(&storage, &id, before_first);
+    let rows: Vec<_> = recorded.iter().flat_map(|event| &event.rows).collect();
+    let keys = rows
         .iter()
         .map(|row| &row.key)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(keys.len(), first.rows.len());
+    assert_eq!(keys.len(), rows.len());
+    let before_replay = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let replay = storage.decide(&id, submit(1), context(2), None).unwrap();
     assert_eq!(replay.cursor, first.cursor);
     assert_eq!(storage.state(&id).unwrap(), admitted_state);
     assert!(replay.step.actions.is_empty());
-    assert!(replay.rows.is_empty());
-    assert!(replay.removed.is_empty());
+    assert_eq!(replay.cursor, before_replay);
     let other = address("two");
     storage.create(&other, &header()).unwrap();
     assert!(
@@ -555,7 +567,7 @@ fn admission_receipt_and_rows_commit_together_and_replay_does_not_allocate_again
 }
 
 #[test]
-fn one_day_removal_retention_resets_old_cursors_and_keeps_command_receipts() {
+fn one_day_event_retention_resets_old_cursors_and_keeps_command_receipts() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));
     let target = address("retention");
@@ -584,20 +596,33 @@ fn one_day_removal_retention_resets_old_cursors_and_keeps_command_receipts() {
             None,
         )
         .unwrap();
-    assert_eq!(removed.removed.len(), 1);
-    let day = 24 * 60 * 60 * 1000;
-    storage.claim(100 + day - 1, 0).unwrap();
-    assert!(
-        matches!(storage.snapshot(&target,Some(before),window).unwrap(),Message::Changes {removed,..} if removed.len()==1)
+    assert_eq!(
+        events_since(&storage, &target, before)
+            .iter()
+            .map(|event| event.removed.len())
+            .sum::<usize>(),
+        1
     );
-    storage.claim(100 + day, 0).unwrap();
+    let written: i64 = storage
+        .with(|connection| {
+            connection
+                .query_row("SELECT max(at) FROM journal", [], |row| row.get(0))
+                .map_err(failure)
+        })
+        .unwrap();
+    let day = 24 * 60 * 60 * 1000;
+    storage.claim(written + day - 1, 0).unwrap();
+    assert!(
+        matches!(storage.snapshot(&target,Some(before),window).unwrap(),Message::Events {events,..} if events.iter().map(|event|event.removed.len()).sum::<usize>()==1)
+    );
+    storage.claim(written + day, 0).unwrap();
     let Message::Snapshot { rows, .. } = storage.snapshot(&target, Some(before), window).unwrap()
     else {
         panic!("an expired deletion requires a replacing snapshot")
     };
     assert!(!rows.iter().any(|row| matches!(row.key, Key::Input { .. })));
     assert!(
-        matches!(storage.snapshot(&target,Some(removed.cursor),window).unwrap(),Message::Changes {removed,..} if removed.is_empty())
+        matches!(storage.snapshot(&target,Some(removed.cursor),window).unwrap(),Message::Events {events,..} if events.is_empty())
     );
     assert_eq!(
         storage
@@ -620,7 +645,9 @@ fn creation_and_first_input_are_one_recoverable_transaction() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));
     let id = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-    let before = storage.with(|connection| cursor(connection)).unwrap();
+    let before = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     storage.with(|connection| connection.execute_batch("CREATE TRIGGER reject_initial_input BEFORE INSERT ON inputs BEGIN SELECT RAISE(ABORT,'initial input failed'); END").map_err(failure)).unwrap();
     assert!(
         storage
@@ -636,7 +663,9 @@ fn creation_and_first_input_are_one_recoverable_transaction() {
             .is_empty()
     );
     assert_eq!(
-        storage.with(|connection| cursor(connection)).unwrap(),
+        storage
+            .with(|connection| super::cursor(connection))
+            .unwrap(),
         before
     );
     storage
@@ -652,10 +681,9 @@ fn creation_and_first_input_are_one_recoverable_transaction() {
     assert_eq!(created.step.outcome, Outcome::Accepted);
     assert_eq!(storage.state(&id).unwrap().inputs.len(), 1);
     assert!(
-        created
-            .rows
+        events_since(&storage, &id, before)
             .iter()
-            .all(|row| row.version == created.cursor.sequence)
+            .all(|event| event.sequence == created.cursor.sequence)
     );
     assert_eq!(
         storage.receipts(&id, &[Uuid::from_u128(800)]).unwrap()[0]
@@ -663,11 +691,14 @@ fn creation_and_first_input_are_one_recoverable_transaction() {
             .cursor,
         created.cursor
     );
+    let before_replay = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let replay = storage
         .decide(&id, submit(800), context(801), Some(&header()))
         .unwrap();
     assert!(replay.step.actions.is_empty());
-    assert!(replay.rows.is_empty());
+    assert_eq!(replay.cursor, before_replay);
     assert_eq!(replay.cursor, created.cursor);
 }
 
@@ -871,26 +902,29 @@ fn a_late_item_update_keeps_its_original_position_and_does_not_reopen_the_turn()
         native_items: vec![],
         observation: Observation::RemoveItem("reply".into()),
     };
+    let before_removal = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let removed = storage
         .decide(&id, removal.clone(), context(6), None)
         .unwrap();
     assert!(storage.item(&id, &"reply".into()).unwrap().is_none());
     assert_eq!(
-        removed.removed,
-        vec![Removal {
-            key: Key::Item {
-                thread: id.clone(),
-                id: "reply".into()
-            },
-            version: removed.cursor.sequence
+        events_since(&storage, &id, before_removal)
+            .into_iter()
+            .flat_map(|event| event.removed)
+            .collect::<Vec<_>>(),
+        vec![Key::Item {
+            thread: id.clone(),
+            id: "reply".into()
         }]
     );
-    assert!(
+    assert_eq!(
         storage
             .decide(&id, removal, context(7), None)
             .unwrap()
-            .removed
-            .is_empty()
+            .cursor,
+        removed.cursor
     );
 }
 
@@ -1014,6 +1048,9 @@ fn a_failed_unconfirmed_delivery_is_fenced_but_a_failed_steer_keeps_its_turn_liv
                     .is_empty()
             );
             let before = storage.history(&id, 0).unwrap();
+            let before_ignored = storage
+                .with(|connection| super::cursor(connection))
+                .unwrap();
             let ignored = storage
                 .decide(
                     &id,
@@ -1031,7 +1068,7 @@ fn a_failed_unconfirmed_delivery_is_fenced_but_a_failed_steer_keeps_its_turn_liv
                     None,
                 )
                 .unwrap();
-            assert!(ignored.rows.is_empty());
+            assert_eq!(ignored.cursor, before_ignored);
             assert_eq!(storage.history(&id, 0).unwrap(), before);
         }
     }
@@ -1082,7 +1119,9 @@ fn native_ack_and_item_bindings_commit_with_the_canonical_rows() {
             },
         },
     };
-    let before = storage.with(|connection| cursor(connection)).unwrap();
+    let before = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     assert!(
         storage
             .decide(&id, event.clone(), context(3), None)
@@ -1091,7 +1130,9 @@ fn native_ack_and_item_bindings_commit_with_the_canonical_rows() {
     );
     assert!(storage.item(&id, &"reply".into()).unwrap().is_none());
     assert_eq!(
-        storage.with(|connection| cursor(connection)).unwrap(),
+        storage
+            .with(|connection| super::cursor(connection))
+            .unwrap(),
         before
     );
     storage
@@ -1104,8 +1145,11 @@ fn native_ack_and_item_bindings_commit_with_the_canonical_rows() {
     storage
         .decide(&id, event.clone(), context(4), None)
         .unwrap();
+    let before_committed = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let committed = storage.decide(&id, event, context(5), None).unwrap();
-    assert!(committed.rows.is_empty());
+    assert_eq!(committed.cursor, before_committed);
     drop(storage);
     let reopened = Storage::open(&path);
     reopened
@@ -1725,10 +1769,15 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
         .unwrap();
     assert!(storage.loaded(&id).unwrap());
     assert!(storage.claim(104, 1).unwrap().is_empty());
-    let cursor = storage.with(|connection| cursor(connection)).unwrap();
+    let cursor = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
+    let before_repeated = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let repeated = storage.import_status(&id, 105).unwrap();
     assert_eq!(repeated.cursor, cursor);
-    assert!(repeated.rows.is_empty());
+    assert_eq!(repeated.cursor, before_repeated);
     assert!(storage.claim(105, 1).unwrap().is_empty());
     let loaded = storage.history(&id, 0).unwrap();
     assert_eq!(
@@ -2002,15 +2051,13 @@ fn repeated_catalog_native_parent_does_not_version_an_unchanged_public_child() {
     let before = replica.rows()[&key].clone();
     let again = storage.claim(60_100, 1).unwrap().pop().unwrap();
     assert!(
-        matches!(storage.list(replica.cursor()).unwrap(), Message::Changes { from, through, ref rows, ref removed } if from == through && rows.is_empty() && removed.is_empty())
+        matches!(storage.list(replica.cursor()).unwrap(), Message::Events { ref events, .. } if events.is_empty())
     );
     storage
         .catalog_page(&again, &[(child, child_header)], None, 60_100)
         .unwrap();
     let message = storage.list(replica.cursor()).unwrap();
-    assert!(
-        matches!(&message, Message::Changes { from, through, rows, removed } if from == through && rows.is_empty() && removed.is_empty())
-    );
+    assert!(matches!(&message, Message::Events { events, .. } if events.is_empty()));
     let replica = replica.apply(1, message).unwrap();
     assert_eq!(replica.rows()[&key], before);
 }
@@ -2263,7 +2310,7 @@ fn rewind_removes_the_suffix_without_resetting_loaded_pages_and_reimport_cannot_
     assert!(window.is_some());
     assert!(matches!(
         storage.snapshot(&target, replica.cursor(), window).unwrap(),
-        Message::Changes { .. }
+        Message::Events { .. }
     ));
     let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
     let rewind = storage
@@ -2280,7 +2327,9 @@ fn rewind_removes_the_suffix_without_resetting_loaded_pages_and_reimport_cannot_
         .unwrap();
     assert_eq!(rewind.step.outcome, Outcome::Accepted);
     let snapshot = storage.snapshot(&target, replica.cursor(), window).unwrap();
-    assert!(matches!(&snapshot, Message::Changes { removed, .. } if !removed.is_empty()));
+    assert!(
+        matches!(&snapshot, Message::Events { events, .. } if events.iter().any(|event|!event.removed.is_empty()))
+    );
     let after = replica.apply(1, snapshot).unwrap();
     assert_eq!(
         after.window(),
@@ -2629,6 +2678,9 @@ fn a_claimed_legacy_import_failure_is_unavailable_and_can_be_retried() {
         .unwrap();
     assert_eq!(failed.kind, HistoryReadKind::Unavailable);
     let before = storage.snapshot(&target, None, None).unwrap();
+    let before_repeated = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let repeated = storage
         .import_failed(
             &target,
@@ -2637,7 +2689,7 @@ fn a_claimed_legacy_import_failure_is_unavailable_and_can_be_retried() {
             "native unavailable".into(),
         )
         .unwrap();
-    assert!(repeated.rows.is_empty());
+    assert_eq!(repeated.cursor, before_repeated);
     assert_eq!(storage.snapshot(&target, None, None).unwrap(), before);
     storage.queue_import(&target, &source, 101).unwrap();
     let claim = storage
@@ -2727,7 +2779,10 @@ fn item_only_header_updates_follow_t3_shells_five_second_resend_window() {
         observation,
     };
     for index in 0..10 {
-        let committed = storage
+        let before_committed = storage
+            .with(|connection| super::cursor(connection))
+            .unwrap();
+        storage
             .decide(
                 &id,
                 event(Observation::Item {
@@ -2747,16 +2802,21 @@ fn item_only_header_updates_follow_t3_shells_five_second_resend_window() {
             )
             .unwrap();
         assert!(
-            !committed
-                .rows
+            !events_since(&storage, &id, before_committed)
                 .iter()
+                .flat_map(|event| &event.rows)
                 .any(|row| row.key == Key::Thread(id.clone()))
         );
         assert_eq!(storage.header(&id).unwrap(), original);
     }
     for (at, updated) in [(5099, false), (5100, true)] {
-        let before = storage.with(|connection| cursor(connection)).unwrap();
-        let committed = storage
+        let before = storage
+            .with(|connection| super::cursor(connection))
+            .unwrap();
+        let before_committed = storage
+            .with(|connection| super::cursor(connection))
+            .unwrap();
+        storage
             .decide(
                 &id,
                 event(Observation::Timing {
@@ -2772,22 +2832,28 @@ fn item_only_header_updates_follow_t3_shells_five_second_resend_window() {
             )
             .unwrap();
         assert_eq!(
-            committed
-                .rows
+            events_since(&storage, &id, before_committed)
                 .iter()
+                .flat_map(|event| &event.rows)
                 .any(|row| row.key == Key::Thread(id.clone())),
             updated,
             "at={at}"
         );
-        let Message::Changes { rows, .. } = storage.list(Some(before)).unwrap() else {
+        let Message::Events { events, .. } = storage.list(Some(before)).unwrap() else {
             panic!("list catchup")
         };
         assert_eq!(
-            rows.iter().any(|row| row.key == Key::Thread(id.clone())),
+            events
+                .iter()
+                .flat_map(|event| &event.rows)
+                .any(|row| row.key == Key::Thread(id.clone())),
             updated
         );
     }
-    let ended = storage
+    let before_ended = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
+    storage
         .decide(
             &id,
             event(Observation::Completed),
@@ -2799,9 +2865,9 @@ fn item_only_header_updates_follow_t3_shells_five_second_resend_window() {
         )
         .unwrap();
     assert!(
-        ended
-            .rows
+        events_since(&storage, &id, before_ended)
             .iter()
+            .flat_map(|event| &event.rows)
             .any(|row| row.key == Key::Thread(id.clone())),
         "status changes publish immediately"
     );
@@ -2934,10 +3000,11 @@ fn opening_keeps_message_text_inline_and_defers_work_details_newest_first() {
             },
         )
         .unwrap();
-    let Message::Changes { rows, .. } = storage.snapshot(&target, Some(cursor), window).unwrap()
+    let Message::Events { events, .. } = storage.snapshot(&target, Some(cursor), window).unwrap()
     else {
         panic!("catch-up");
     };
+    let rows: Vec<_> = events.iter().flat_map(|event| &event.rows).collect();
     assert_eq!(rows.len(), 1);
     assert!(
         matches!(rows[0].content, Content::Full(_)),
@@ -3273,16 +3340,24 @@ fn a_failed_import_finishes_and_a_new_source_supersedes_an_old_claim() {
     assert!(
         matches!(&current[..],[jobs::Claim {work:jobs::Work::Import {source,..},..}] if source==&replacement)
     );
-    let cursor = storage.with(|connection| cursor(connection)).unwrap();
+    let cursor = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
+    let before_ignored = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let ignored = storage
         .import_failed(&target, stale.id, stale.attempt, "late old failure".into())
         .unwrap();
     assert_eq!(ignored.cursor, cursor);
-    assert!(ignored.rows.is_empty());
+    assert_eq!(ignored.cursor, before_ignored);
+    let before_replay = storage
+        .with(|connection| super::cursor(connection))
+        .unwrap();
     let replay = storage
         .reimport(&target, &target, stale.id, stale.attempt, &response, 5)
         .unwrap();
-    assert!(replay.rows.is_empty());
+    assert_eq!(replay.cursor, before_replay);
     assert!(
         !storage
             .retry(stale.id, stale.attempt, 6, "must not block replacement")
@@ -3301,13 +3376,9 @@ fn a_failed_import_finishes_and_a_new_source_supersedes_an_old_claim() {
         )
         .unwrap();
     assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
-    assert!(
-        !rejected.reset,
-        "a rejected import must preserve expanded pages"
-    );
-    assert!(
-        rejected.rows.is_empty(),
-        "the existing Unavailable header has not changed"
+    assert_eq!(
+        rejected.cursor, cursor,
+        "rejected import must preserve the current header and expanded pages"
     );
 }
 
@@ -3337,7 +3408,7 @@ fn projects_keep_registration_order_in_storage_and_synced_positions() {
         ["z", "a", "m"]
     );
     let rows = storage
-        .with(|connection| projects::read(connection, 0))
+        .with(|connection| projects::read(connection))
         .unwrap();
     assert_eq!(
         rows.iter()
@@ -3609,4 +3680,319 @@ fn storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer() {
     assert!(invalid.headers(true).is_err());
     assert!(invalid.list(None).is_err());
     assert!(invalid.state(&address("invalid")).is_err());
+}
+
+#[rstest::rstest]
+#[case(128, false)]
+#[case(129, true)]
+fn conversation_replay_limits_transactions(#[case] count: u128, #[case] reset: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let id = address("event-limit");
+    storage.create(&id, &header()).unwrap();
+    let initial = storage.snapshot(&id, None, None).unwrap();
+    let Message::Snapshot { cursor, window, .. } = &initial else {
+        panic!("initial snapshot")
+    };
+    for index in 0..count {
+        storage
+            .decide(
+                &id,
+                Event::Command {
+                    id: OperationId::Client(Uuid::from_u128(index + 1)),
+                    receipt: None,
+                    command: Command::Rename(format!("name-{index}")),
+                },
+                context(index + 1),
+                None,
+            )
+            .unwrap();
+    }
+    let resumed = storage.snapshot(&id, Some(*cursor), *window).unwrap();
+    assert_eq!(matches!(resumed, Message::Snapshot { .. }), reset);
+    if let Message::Events { events, .. } = &resumed {
+        assert_eq!(events.len(), count as usize);
+    }
+    let resumed =
+        decision::records::Replica::new(agent_protocol::sync::Scope::Conversation(id.clone()), 1)
+            .apply(1, initial)
+            .unwrap()
+            .apply(1, resumed)
+            .unwrap();
+    let fresh =
+        decision::records::Replica::new(agent_protocol::sync::Scope::Conversation(id.clone()), 1)
+            .apply(1, storage.snapshot(&id, None, None).unwrap())
+            .unwrap();
+    assert_eq!(resumed, fresh);
+}
+
+#[test]
+fn journal_failure_rolls_back_projection_receipt_and_notification_then_retry_replays_in_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let id = address("atomic-events");
+    storage.create(&id, &header()).unwrap();
+    let before = storage.with(|connection| cursor(connection)).unwrap();
+    let previous = storage.header(&id).unwrap();
+    let rename = |name: &str| Event::Command {
+        id: OperationId::Client(Uuid::from_u128(31)),
+        receipt: None,
+        command: Command::Rename(name.into()),
+    };
+    let mut changed = storage.changes();
+    changed.borrow_and_update();
+    storage.with(|connection|connection.execute_batch("CREATE TRIGGER fail_journal BEFORE INSERT ON journal BEGIN SELECT RAISE(ABORT,'journal failed'); END").map_err(failure)).unwrap();
+    assert!(
+        storage
+            .decide(&id, rename("one"), context(31), None)
+            .unwrap_err()
+            .contains("journal failed")
+    );
+    assert_eq!(storage.header(&id).unwrap(), previous);
+    assert_eq!(
+        storage.with(|connection| cursor(connection)).unwrap(),
+        before
+    );
+    assert!(
+        storage
+            .receipts(&id, &[Uuid::from_u128(31)])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!changed.has_changed().unwrap());
+    storage
+        .with(|connection| {
+            connection
+                .execute_batch("DROP TRIGGER fail_journal")
+                .map_err(failure)
+        })
+        .unwrap();
+    let accepted = storage
+        .decide(&id, rename("one"), context(31), None)
+        .unwrap();
+    storage
+        .decide(
+            &id,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(32)),
+                receipt: None,
+                command: Command::Rename("two".into()),
+            },
+            context(32),
+            None,
+        )
+        .unwrap();
+    let events = events_since(&storage, &id, before);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].sequence, accepted.cursor.sequence);
+    let names: Vec<_> = events
+        .iter()
+        .flat_map(|event| &event.rows)
+        .filter_map(|row| match &row.content {
+            Content::Full(record) | Content::Summary(record) => match record.as_ref() {
+                Record::Thread(header) => Some(header.state.name.as_str()),
+                _ => None,
+            },
+        })
+        .collect();
+    assert_eq!(names, vec!["one", "two"]);
+    let before_noop = storage.with(|connection| cursor(connection)).unwrap();
+    let rejected = storage
+        .decide(
+            &id,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(33)),
+                receipt: None,
+                command: Command::Rename(String::new()),
+            },
+            context(33),
+            None,
+        )
+        .unwrap();
+    assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
+    assert_eq!(rejected.cursor, before_noop);
+    assert!(events_since(&storage, &id, before_noop).is_empty());
+    assert_eq!(
+        storage.receipts(&id, &[Uuid::from_u128(33)]).unwrap()[0]
+            .1
+            .cursor,
+        before_noop
+    );
+}
+
+#[rstest::rstest]
+#[case(1024*1024-4096, false)]
+#[case(1024*1024, true)]
+fn conversation_replay_obeys_byte_budget(#[case] bytes: usize, #[case] reset: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let id = address("bytes");
+    storage.create(&id, &header()).unwrap();
+    let before = storage.with(|connection| cursor(connection)).unwrap();
+    storage
+        .decide(
+            &id,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(1)),
+                receipt: None,
+                command: Command::Rename("x".repeat(bytes)),
+            },
+            context(1),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        matches!(
+            storage
+                .snapshot(&id, Some(before), Some(Window { turn: 0, item: 0 }))
+                .unwrap(),
+            Message::Snapshot { .. }
+        ),
+        reset
+    );
+}
+
+#[test]
+fn list_replay_counts_sequence_positions_instead_of_projection_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let before = storage.with(|connection| cursor(connection)).unwrap();
+    let projects: Vec<_> = (0..1001)
+        .map(|index| agent_protocol::models::Project {
+            id: format!("p-{index}"),
+            name: format!("Project {index}"),
+            ..Default::default()
+        })
+        .collect();
+    storage.replace_projects(&projects).unwrap();
+    let Message::Events { events, .. } = storage.list(Some(before)).unwrap() else {
+        panic!("one transaction fits the replay budget")
+    };
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].rows.len(), 1001);
+    let before = storage.with(|connection| cursor(connection)).unwrap();
+    let initial = storage.list(None).unwrap();
+    storage.replace_projects(&projects[1..]).unwrap();
+    let Message::Events { events, .. } = storage.list(Some(before)).unwrap() else {
+        panic!("project removal replay")
+    };
+    assert_eq!(events[0].removed, vec![Key::Project("p-0".into())]);
+    let replica = decision::records::Replica::new(agent_protocol::sync::Scope::List, 1)
+        .apply(1, initial)
+        .unwrap()
+        .apply(1, storage.list(Some(before)).unwrap())
+        .unwrap();
+    assert_eq!(replica.rows().len(), 1000);
+}
+
+#[test]
+fn a_page_request_after_retention_extends_the_replacement_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let id = address("page-reset");
+    let response = agent_protocol::models::ThreadResponse {
+        thread: agent_protocol::models::Thread {
+            id: Some(id.clone()),
+            turns: Some(
+                (1..=30)
+                    .map(|index| {
+                        Arc::new(agent_protocol::models::Turn {
+                            id: format!("t-{index}").into(),
+                            status: agent_protocol::models::TurnStatus::Completed,
+                            items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                                format!("i-{index}").into(),
+                                ItemStatus::Completed,
+                                ItemBody::UserMessage {
+                                    text: Some(format!("question {index}")),
+                                    content: vec![],
+                                },
+                            ))]),
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage.import(&id, &response, Some(&id), 100).unwrap();
+    let initial = storage.snapshot(&id, None, None).unwrap();
+    let Message::Snapshot {
+        cursor,
+        window: Some(window),
+        ..
+    } = &initial
+    else {
+        panic!("initial")
+    };
+    let (messages, expanded, cached) = storage.read_page(&id, *cursor, *window, None).unwrap();
+    assert!(expanded.turn < window.turn);
+    let mut replica =
+        decision::records::Replica::new(agent_protocol::sync::Scope::Conversation(id.clone()), 1)
+            .apply(1, initial)
+            .unwrap();
+    for message in messages {
+        replica = replica.apply(1, message).unwrap();
+    }
+    storage
+        .decide(
+            &id,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(80)),
+                receipt: None,
+                command: Command::Rename("new title".into()),
+            },
+            context(80),
+            None,
+        )
+        .unwrap();
+    let at: i64 = storage
+        .with(|connection| {
+            connection
+                .query_row("SELECT max(at) FROM journal", [], |row| row.get(0))
+                .map_err(failure)
+        })
+        .unwrap();
+    storage.claim(at + 24 * 60 * 60 * 1000, 0).unwrap();
+    let (messages, floor, _) = storage.read_page(&id, cached, expanded, None).unwrap();
+    assert!(matches!(messages[0], Message::Snapshot { .. }));
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message,Message::Extend {rows,..} if !rows.is_empty()))
+    );
+    for message in messages {
+        replica = replica.apply(1, message).unwrap();
+    }
+    assert_eq!(replica.window(), Some(floor));
+    assert!(
+        replica
+            .rows()
+            .values()
+            .any(|row| matches!(row.position,Position::Turn {ordinal} if ordinal==floor.turn))
+    );
+}
+
+#[rstest::rstest]
+#[case(8*1024*1024-4096,false)]
+#[case(8*1024*1024,true)]
+fn list_replay_obeys_its_byte_budget(#[case] bytes: usize, #[case] reset: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let before = storage.with(|connection| cursor(connection)).unwrap();
+    storage
+        .replace_projects(&[agent_protocol::models::Project {
+            id: "large".into(),
+            name: "x".repeat(bytes),
+            ..Default::default()
+        }])
+        .unwrap();
+    assert_eq!(
+        matches!(
+            storage.list(Some(before)).unwrap(),
+            Message::Snapshot { .. }
+        ),
+        reset
+    );
 }

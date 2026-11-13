@@ -11,14 +11,14 @@ pub struct Subscription {
 fn through(message: &records::Message) -> Cursor {
     match message {
         records::Message::Snapshot { cursor, .. } => *cursor,
-        records::Message::Changes { through, .. } => *through,
+        records::Message::Events { through, .. } => *through,
         _ => unreachable!("list sends snapshots or changes"),
     }
 }
 
-pub(super) fn unchanged(message: &records::Message) -> bool {
-    matches!(message, records::Message::Changes { rows, removed, .. }
-        if rows.is_empty() && removed.is_empty())
+pub(in crate::host_rpc) fn unchanged(message: &records::Message) -> bool {
+    matches!(message, records::Message::Events { events, .. }
+        if events.is_empty())
 }
 
 pub(super) async fn subscribe(
@@ -165,7 +165,7 @@ mod tests {
             .unwrap();
         let message = protocol::decode(&frame).unwrap();
         assert!(
-            matches!(&message, records::Message::Changes { from, rows, .. } if *from == cursor && !rows.is_empty())
+            matches!(&message, records::Message::Events { events, .. } if events.iter().any(|event|!event.rows.is_empty()))
         );
         let replica = records::Replica::new(agent_protocol::sync::Scope::List, 1)
             .apply(1, initial)

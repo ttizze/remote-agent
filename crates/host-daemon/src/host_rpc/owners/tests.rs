@@ -3,6 +3,7 @@ use agent_protocol::conversation::{
     Command, InputContent, OperationId, Thread, Workspace,
     records::{Details, Header, Replica},
 };
+use agent_protocol::sync::Scope;
 use agent_protocol::{
     operations::{FollowUp, Input as Part},
     session::ProviderKind,
@@ -348,4 +349,71 @@ async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
     second.send(vec![2]).unwrap();
     assert_eq!(second_read.recv().await.unwrap(), vec![2]);
     assert_eq!(budget.load(Relaxed), 0);
+}
+
+#[tokio::test]
+async fn commits_outside_the_conversation_receiver_use_the_same_live_and_replay_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.sqlite")));
+    let target = address("outside-owner");
+    storage.create(&target, &header()).unwrap();
+    let (owners, _effects) = Owners::new(storage.clone());
+    let opened = owners
+        .subscribe(&target, 1, Uuid::new_v4(), None, None, Arc::default())
+        .await
+        .unwrap();
+    let Message::Snapshot { cursor, window, .. } = opened.initial else {
+        panic!("initial snapshot")
+    };
+    let mut stream = opened.subscription;
+    storage
+        .decide(
+            &target,
+            command(51, Command::Rename("external commit".into())),
+            context(51),
+            None,
+        )
+        .unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let live: Message = protocol::decode(&frame).unwrap();
+    assert_eq!(
+        live,
+        storage.snapshot(&target, Some(cursor), window).unwrap()
+    );
+    assert!(matches!(live,Message::Events {events,..} if events.len()==1));
+}
+
+#[tokio::test]
+async fn coalesced_live_commits_use_the_reconnect_snapshot_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Arc::new(Storage::open(&directory.path().join("state.sqlite")));
+    let target = address("coalesced");
+    storage.create(&target, &header()).unwrap();
+    let (owners, _effects) = Owners::new(storage.clone());
+    let mut stream = owners
+        .subscribe(&target, 1, Uuid::new_v4(), None, None, Arc::default())
+        .await
+        .unwrap()
+        .subscription;
+    // This current-thread runtime cannot read the wake until these commits end.
+    for index in 0..129 {
+        storage
+            .decide(
+                &target,
+                command(100 + index, Command::Rename(format!("name-{index}"))),
+                context(100 + index),
+                None,
+            )
+            .unwrap();
+    }
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let live: Message = protocol::decode(&frame).unwrap();
+    assert!(matches!(live, Message::Snapshot { .. }));
+    assert_eq!(live, storage.snapshot(&target, None, None).unwrap());
 }

@@ -19,7 +19,7 @@ struct Host {
     next_item: u64,
     position: u64,
     groups: BTreeMap<u64, Group>,
-    removed: Vec<Removal<String>>,
+    events: Vec<Event<String, String>>,
     window: Window,
     pending: VecDeque<Message<String, String>>,
     generation: u64,
@@ -35,7 +35,7 @@ impl Host {
             next_item: 0,
             position: 0,
             groups: BTreeMap::new(),
-            removed: vec![],
+            events: vec![],
             window: Window { item: 0, turn: 0 },
             pending: VecDeque::new(),
             generation: 1,
@@ -65,7 +65,6 @@ impl Host {
     }
 
     fn write(&mut self, kind: u8, target: u8, value: u16) {
-        let from = self.at;
         self.at.sequence += 1;
         let existing = self
             .groups
@@ -76,11 +75,7 @@ impl Host {
         match (kind, existing) {
             (3, Some(ordinal)) => {
                 self.groups.remove(&ordinal);
-                removed.push(Removal {
-                    key: turn(&format!("turn-{ordinal}"), 0, ordinal).key,
-                    version: self.at.sequence,
-                });
-                self.removed.extend(removed.clone());
+                removed.push(turn(&format!("turn-{ordinal}"), 0, ordinal).key);
             }
             (1, Some(ordinal)) if !self.groups[&ordinal].parts.is_empty() => {
                 let group = self.groups.get_mut(&ordinal).unwrap();
@@ -113,15 +108,19 @@ impl Host {
             }
         }
         let rows = self
-            .rows(self.window)
+            .rows(Window { turn: 0, item: 0 })
             .into_iter()
             .filter(|row| row.version == self.at.sequence)
             .collect();
-        self.pending.push_back(Message::Changes {
-            from,
-            through: self.at,
+        let event = Event {
+            sequence: self.at.sequence,
             rows,
             removed,
+        };
+        self.events.push(event.clone());
+        self.pending.push_back(Message::Events {
+            through: self.at,
+            events: vec![event],
         });
     }
 
@@ -176,25 +175,20 @@ impl Host {
         if let Some(stale) = stale {
             assert_eq!(client.apply(old_generation, stale).unwrap(), *client);
         }
-        if can_resume(client.cursor, self.at, self.pruned, self.history) {
+        if can_resume(client.cursor, self.at, self.pruned)
+            && client.cursor.unwrap().sequence >= self.history
+        {
             self.window = client.window.unwrap();
-            let from = client.cursor.unwrap();
-            let rows = self
-                .rows(self.window)
-                .into_iter()
-                .filter(|row| row.version > from.sequence)
-                .collect();
-            let removed = self
-                .removed
+            let after = client.cursor.unwrap().sequence;
+            let events = self
+                .events
                 .iter()
-                .filter(|row| row.version > from.sequence)
+                .filter(|event| event.sequence > after)
                 .cloned()
                 .collect();
-            self.pending.push_back(Message::Changes {
-                from,
+            self.pending.push_back(Message::Events {
                 through: self.at,
-                rows,
-                removed,
+                events,
             });
         } else {
             self.snapshot();
@@ -215,7 +209,7 @@ impl Host {
 
     fn restore(&mut self, client: &mut Replica<String, String>) {
         self.groups.clear();
-        self.removed.clear();
+        self.events.clear();
         self.at.sequence = 0;
         self.pruned = 0;
         self.history = 0;
@@ -232,7 +226,7 @@ impl Host {
             5 => self.deliver_one(client),
             6 => self.reconnect(client),
             7 => {
-                self.removed.clear();
+                self.events.clear();
                 self.pruned = self.at.sequence;
             }
             8 => self.replace(),

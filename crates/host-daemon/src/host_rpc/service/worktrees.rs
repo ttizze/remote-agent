@@ -68,7 +68,7 @@ impl HostRpcService {
             .headers(true)
             .map_err(super::super::runtime::storage_failure)?
             .into_iter()
-            .map(|(id, header, _)| {
+            .map(|(id, header)| {
                 let waiting = header.details.activity.facts().waiting;
                 let thread = agent_protocol::conversation::records::summary(&id, &header);
                 (id, (thread, waiting))

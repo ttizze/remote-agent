@@ -1,12 +1,12 @@
 //! Each conversation has one receiver. It commits decisions before publishing
 //! rows or asking the resource executor to perform an action.
 use super::routing::{MAX_QUEUED_BYTES, frame_cost};
-use super::storage::{Committed, Storage};
+use super::storage::Storage;
 use agent_protocol::{
     conversation::{Action, Context, Event, Outcome, records::Message},
     protocol,
     session::SessionRef,
-    sync::{Cursor, Scope, Window},
+    sync::{Cursor, Window},
 };
 use std::{
     collections::HashMap,
@@ -319,7 +319,18 @@ async fn run(
     mut input: mpsc::UnboundedReceiver<Input>,
 ) {
     let mut subscribers = HashMap::<Uuid, Subscriber>::new();
-    while let Some(message) = input.recv().await {
+    // Observe commits before the first read, including changes made by catalog
+    // and workspace owners outside this receiver.
+    let mut changed = storage.changes();
+    loop {
+        let message = tokio::select! {
+            message=input.recv()=>match message {Some(message)=>message,None=>break},
+            result=changed.changed(), if !subscribers.is_empty()=>{
+                if result.is_err() {break;}
+                catch_up(&storage,&target,&mut subscribers).await;
+                continue;
+            }
+        };
         match message {
             Input::Write { write, reply } => {
                 let records = storage.clone();
@@ -364,7 +375,7 @@ async fn run(
                 .and_then(|result| result);
                 let result = async {
                     let committed = result?;
-                    publish(&storage, &target, &committed, &mut subscribers).await;
+                    catch_up(&storage, &target, &mut subscribers).await;
                     for action in committed.step.actions {
                         effects
                             .send(Effect {
@@ -402,7 +413,7 @@ async fn run(
                                     window: Some(window),
                                     ..
                                 } => (*cursor, *window),
-                                Message::Changes { through, .. } => {
+                                Message::Events { through, .. } => {
                                     (*through, window.ok_or("subscription window is missing")?)
                                 }
                                 Message::Missing => {
@@ -544,84 +555,45 @@ async fn run(
     }
 }
 
-async fn publish(
+/// Delivery and reconnect use the same journal reader and fallback bounds.
+async fn catch_up(
     storage: &Arc<Storage>,
     target: &SessionRef,
-    committed: &Committed,
     subscribers: &mut HashMap<Uuid, Subscriber>,
 ) {
-    let reset = if committed.reset {
-        let store = storage.clone();
-        let thread = target.clone();
-        Some(
-            tokio::task::spawn_blocking(move || store.snapshot(&thread, None, None))
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|result| result),
-        )
-    } else {
-        None
-    };
-    let scope = Scope::Conversation(target.clone());
     let mut failed = Vec::new();
     for (id, subscriber) in subscribers.iter_mut() {
-        if subscriber.cursor.sequence >= committed.cursor.sequence {
-            continue;
-        }
-        let frame = (|| -> Result<Vec<u8>, String> {
-            let message = if committed.reset {
-                let snapshot = reset.as_ref().expect("reset frame").clone()?;
-                if let Message::Snapshot {
+        let store = storage.clone();
+        let thread = target.clone();
+        let cached = subscriber.cursor;
+        let window = subscriber.window;
+        let result = tokio::task::spawn_blocking(move || {
+            store.snapshot(&thread, Some(cached), Some(window))
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result)
+        .and_then(|message| {
+            match &message {
+                Message::Snapshot {
                     cursor,
                     window: Some(window),
                     ..
-                } = &snapshot
-                {
-                    subscriber.window = *window;
+                } => {
                     subscriber.cursor = *cursor;
+                    subscriber.window = *window;
                 }
-                snapshot
-            } else {
-                let mut rows: Vec<_> = committed
-                    .rows
-                    .iter()
-                    .filter(|row| {
-                        agent_protocol::sync::contains(
-                            &scope,
-                            Some(subscriber.window),
-                            &row.key,
-                            &row.position,
-                        )
-                    })
-                    .cloned()
-                    .collect();
-                agent_protocol::conversation::records::summarize(
-                    &mut rows,
-                    agent_protocol::conversation::records::WORK_DETAIL_BYTES,
-                )?;
-                Message::Changes {
-                    from: subscriber.cursor,
-                    through: committed.cursor,
-                    rows,
-                    removed: committed.removed.clone(),
-                }
-            };
-            protocol::encode(message).map_err(|error| error.to_string())
-        })();
-        let frame = match frame {
-            Ok(frame) => frame,
-            Err(error) => {
-                tracing::error!(target:"agent",operation="conversation.publish",%error);
-                failed.push(*id);
-                continue;
+                Message::Events { through, .. } => subscriber.cursor = *through,
+                _ => return Err("conversation disappeared".into()),
             }
-        };
-        if subscriber.send(frame).is_err() {
+            if super::runtime::list::unchanged(&message) {
+                return Ok(());
+            }
+            subscriber.send(protocol::encode(message).map_err(|error| error.to_string())?)
+        });
+        if let Err(error) = result {
+            tracing::warn!(target:"agent",operation="conversation.catch_up",%error);
             failed.push(*id);
-            continue;
-        }
-        if !committed.reset {
-            subscriber.cursor = committed.cursor;
         }
     }
     for id in failed {

@@ -102,9 +102,6 @@ impl Storage {
                 return Ok(Committed {
                     step: Step::default(),
                     cursor: cursor(&transaction)?,
-                    rows: vec![],
-                    removed: vec![],
-                    reset: false,
                 });
             };
             let jobs::Work::Import {
@@ -124,38 +121,34 @@ impl Storage {
             let mut sequence = cursor(&transaction)?;
             let mut rows = Vec::new();
             if current && header.details.history_read_state.as_ref() != Some(&read) {
-                sequence = Self::advance(&transaction)?;
+                sequence = Self::next_cursor(&transaction)?;
                 header.details.history_read_state = Some(read);
                 transaction
                     .execute(
-                        "UPDATE threads SET seq=?1,body=?2 WHERE key=?3",
-                        params![
-                            integer(sequence.sequence)?,
-                            codec::header(&header, &counters)?,
-                            key
-                        ],
+                        "UPDATE threads SET body=?1 WHERE key=?2",
+                        params![codec::header(&header, &counters)?, key],
                     )
                     .map_err(failure)?;
                 rows.push(Row {
                     key: Key::Thread(target.clone()),
-                    version: sequence.sequence,
+                    version: 0,
                     position: Position::Unordered,
                     content: Content::Full(Arc::new(Record::Thread(header))),
                 });
             }
             let outcome = Outcome::Rejected(error);
             settle(&transaction, target, operation, claim, sequence, &outcome)?;
-            transaction.commit().map_err(failure)?;
-            Ok(Committed {
-                step: Step {
+            Self::commit(
+                transaction,
+                Some(target),
+                Step {
                     outcome,
                     ..Default::default()
                 },
-                cursor: sequence,
                 rows,
-                removed: vec![],
-                reset: false,
-            })
+                Vec::new(),
+                false,
+            )
         })
     }
 
@@ -170,16 +163,12 @@ impl Storage {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
-            let sequence = Self::advance(&transaction)?;
+            let sequence = Self::next_cursor(&transaction)?;
             let key = match existing_key(&transaction, target)? {
                 Some(key) => key,
-                None => history::insert_header(
-                    &transaction,
-                    target,
-                    observed,
-                    &Counters::default(),
-                    sequence.sequence,
-                )?,
+                None => {
+                    history::insert_header(&transaction, target, observed, &Counters::default())?
+                }
             };
             let (mut header, counters) = rows::header(&transaction, key)?;
             header.details.can_accept_direct_input = Some(false);
@@ -196,12 +185,7 @@ impl Storage {
                     ],
                 )
                 .map_err(failure)?;
-            history::link_parent(
-                &transaction,
-                key,
-                observed.details.parent.as_ref(),
-                sequence.sequence,
-            )?;
+            history::link_parent(&transaction, key, observed.details.parent.as_ref())?;
             let mut state = rows::load(&transaction, key, self.process)?;
             let provider = source.native_provider().map_err(failure)?;
             rows::source(&transaction, key, provider, &source.id)?;
@@ -244,17 +228,17 @@ impl Storage {
                 None,
                 None,
             )?);
-            transaction.commit().map_err(failure)?;
-            Ok(Committed {
-                step: Step {
+            Self::commit(
+                transaction,
+                Some(target),
+                Step {
                     outcome: Outcome::Accepted,
                     ..Default::default()
                 },
-                cursor: sequence,
-                rows: updated,
-                removed: vec![],
-                reset: false,
-            })
+                updated,
+                Vec::new(),
+                false,
+            )
         })
     }
 
@@ -286,9 +270,6 @@ impl Storage {
                 return Ok(Committed {
                     step: Step::default(),
                     cursor: cursor(&transaction)?,
-                    rows: vec![],
-                    removed: vec![],
-                    reset: false,
                 });
             }
             let (mut header, counters) = if let Some(key) = existing {
@@ -315,22 +296,12 @@ impl Storage {
                 return Ok(Committed {
                     step: Step::default(),
                     cursor: current,
-                    rows: vec![],
-                    removed: vec![],
-                    reset: false,
                 });
             }
             header.details.history_read_state = Some(read);
-            let sequence = Self::advance(&transaction)?;
             let key = match existing {
                 Some(key) => key,
-                None => history::insert_header(
-                    &transaction,
-                    target,
-                    &header,
-                    &counters,
-                    sequence.sequence,
-                )?,
+                None => history::insert_header(&transaction, target, &header, &counters)?,
             };
             if existing.is_none() {
                 transaction
@@ -339,27 +310,24 @@ impl Storage {
             }
             transaction
                 .execute(
-                    "UPDATE threads SET seq=?1,body=?2 WHERE key=?3",
-                    params![
-                        integer(sequence.sequence)?,
-                        codec::header(&header, &counters)?,
-                        key
-                    ],
+                    "UPDATE threads SET body=?1 WHERE key=?2",
+                    params![codec::header(&header, &counters)?, key],
                 )
                 .map_err(failure)?;
-            transaction.commit().map_err(failure)?;
-            Ok(Committed {
-                step: Step::default(),
-                cursor: sequence,
-                rows: vec![Row {
-                    key: Key::Thread(target.clone()),
-                    version: sequence.sequence,
-                    position: Position::Unordered,
-                    content: Content::Full(Arc::new(Record::Thread(header))),
-                }],
-                removed: vec![],
-                reset: false,
-            })
+            let updated = vec![Row {
+                key: Key::Thread(target.clone()),
+                version: 0,
+                position: Position::Unordered,
+                content: Content::Full(Arc::new(Record::Thread(header))),
+            }];
+            Self::commit(
+                transaction,
+                Some(target),
+                Step::default(),
+                updated,
+                Vec::new(),
+                false,
+            )
         })
     }
 
@@ -392,37 +360,36 @@ impl Storage {
             let key = thread_key(&transaction, target)?;
             let receipt = decision::OperationId::Job(operation).receipt_key();
             let accepted: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM receipts WHERE operation_id=?1 AND provider IS ?2 AND thread_id=?3)", params![receipt,target.provider.map(ProviderKind::key),target.id], |row| row.get(0)).map_err(failure)?;
-            if accepted { return Ok(Committed { step: Step::default(), cursor: cursor(&transaction)?, rows: vec![], removed: vec![], reset: false }); }
+            if accepted { return Ok(Committed { step: Step::default(), cursor: cursor(&transaction)? }); }
             let current_claim: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND state='running' AND attempts=?2)", params![operation.to_string(),integer(claim)?], |row| row.get(0)).map_err(failure)?;
             if !current_claim { return Err("import claim is obsolete".into()); }
             let loaded: bool = transaction.query_row("SELECT loaded=1 FROM threads WHERE key=?1", [key], |row| row.get(0)).map_err(failure)?;
             if !loaded {
-                let sequence = Self::advance(&transaction)?;
+                let sequence = Self::next_cursor(&transaction)?;
                 history::install(&transaction, target, response, Some(source), sequence.sequence, self.process, now)?;
                 settle(&transaction, target, operation, claim, sequence, &Outcome::Accepted)?;
-                transaction.commit().map_err(failure)?;
-                return Ok(Committed { step: Step { outcome: Outcome::Accepted, ..Default::default() }, cursor: sequence, rows: vec![], removed: vec![], reset: true });
+                return Self::commit(transaction,Some(target),Step {outcome:Outcome::Accepted,..Default::default()},Vec::new(),Vec::new(),true);
             }
             let mut state = rows::load(&transaction, key, self.process)?;
             if state.thread.name.is_empty() { state.thread.name = response.thread.name.clone().unwrap_or_default(); }
             if !source_matches(&transaction,key,state.thread.provider,source)? {
-                let sequence = Self::advance(&transaction)?;
+                let sequence = Self::next_cursor(&transaction)?;
                 let outcome = Outcome::Rejected("native import source changed".into());
                 let (mut header, counters) = rows::header(&transaction, key)?;
                 let mut rows = Vec::new();
                 if header.details.history_read_state.as_ref().is_some_and(|read| read.kind == agent_protocol::session::HistoryReadKind::Loading) {
                     header.details.history_read_state = Some(agent_protocol::session::HistoryReadState::new(agent_protocol::session::HistoryReadKind::Unavailable, vec!["native import source changed".into()]));
-                    transaction.execute("UPDATE threads SET seq=?1,body=?2 WHERE key=?3", params![integer(sequence.sequence)?, codec::header(&header, &counters)?, key]).map_err(failure)?;
-                    rows.push(Row { key: Key::Thread(target.clone()), version: sequence.sequence, position: Position::Unordered, content: Content::Full(Arc::new(Record::Thread(header))) });
+                    transaction.execute("UPDATE threads SET body=?1 WHERE key=?2",params![codec::header(&header, &counters)?,key]).map_err(failure)?;
+                    rows.push(Row { key: Key::Thread(target.clone()), version: 0, position: Position::Unordered, content: Content::Full(Arc::new(Record::Thread(header))) });
                 }
-                settle(&transaction,target,operation,claim,sequence,&outcome)?;
-                transaction.commit().map_err(failure)?;
-                return Ok(Committed { step: Step { outcome, ..Default::default() }, cursor: sequence, rows, removed: vec![], reset: false });
+                let receipt_cursor=if rows.is_empty() {cursor(&transaction)?} else {sequence};
+                settle(&transaction,target,operation,claim,receipt_cursor,&outcome)?;
+                return Self::commit(transaction,Some(target),Step {outcome,..Default::default()},rows,Vec::new(),false);
             }
             if state.active_turn().is_some_and(|turn| !turn.observed || state.attempts.contains_key(&turn.id) || response.thread.status==agent_protocol::models::SessionStatus::Running) || state.inputs.values().any(|input| !matches!(input.state, decision::InputState::Queued { .. } | decision::InputState::Failed { .. })) { return Err("conversation is busy; native import will resume when it is idle".into()); }
             let caught_up = matches!(state.bindings.get(&state.thread.provider), Some(decision::Binding::Ready { covered, .. }) if *covered == state.history_end());
             let source_key = rows::source(&transaction, key, source.native_provider().map_err(failure)?, &source.id)?;
-            let sequence = Self::advance(&transaction)?;
+            let sequence = Self::next_cursor(&transaction)?;
             let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, source.to_string().as_bytes());
             let import = Import { source, source_key, namespace, write: rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process } };
             let previous_order: Vec<TurnId> = rows::read::<Turn>(&transaction, "turns", "thread=?1 ORDER BY ordinal", vec![key.into()], rows::TURN, true)?.into_iter().map(|(_, turn)| turn.id).collect();
@@ -447,10 +414,9 @@ impl Storage {
             // Reimport publishes a reset, including the native reader's final completeness.
             let (mut header, _) = rows::header(&transaction, key)?;
             header.details.history_read_state = response.thread.history_read_state.clone();
-            transaction.execute("UPDATE threads SET history_seq=?1,body=?2 WHERE key=?3", params![integer(sequence.sequence)?,codec::header(&header, &state.counters)?,key]).map_err(failure)?;
+            transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header, &state.counters)?,key]).map_err(failure)?;
             settle(&transaction,target,operation,claim,sequence,&Outcome::Accepted)?;
-            transaction.commit().map_err(failure)?;
-            Ok(Committed { step: Step { outcome: Outcome::Accepted, ..Default::default() }, cursor: sequence, rows: vec![], removed: vec![], reset: true })
+            Self::commit(transaction,Some(target),Step {outcome:Outcome::Accepted,..Default::default()},Vec::new(),Vec::new(),true)
         })
     }
 }

@@ -384,19 +384,22 @@ fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_t
     let next = replica
         .apply(
             replica.subscription(),
-            Message::Changes {
-                from,
+            Message::Events {
                 through: Cursor {
                     sequence: accepted.sequence + 1,
                     ..accepted
                 },
-                rows: Vec::new(),
-                removed: vec![agent_protocol::sync::Removal {
-                    key: Key::Input {
+                events: vec![agent_protocol::sync::Event {
+                    sequence: (Cursor {
+                        sequence: accepted.sequence + 1,
+                        ..accepted
+                    })
+                    .sequence,
+                    rows: Vec::new(),
+                    removed: vec![Key::Input {
                         thread: session(),
                         id: input.into(),
-                    },
-                    version: accepted.sequence + 1,
+                    }],
                 }],
             },
         )

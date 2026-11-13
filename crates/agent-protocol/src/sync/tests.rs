@@ -68,29 +68,25 @@ fn snapshot(
         rows,
     }
 }
-fn changes(
-    from: u64,
+fn change(
     through: u64,
     rows: Vec<Row<String, String>>,
-    removed: Vec<Removal<String>>,
+    removed: Vec<Key<String>>,
 ) -> Message<String, String> {
-    Message::Changes {
-        from: cursor(from),
+    Message::Events {
         through: cursor(through),
-        rows,
-        removed,
+        events: vec![Event {
+            sequence: (cursor(through)).sequence,
+            rows,
+            removed,
+        }],
     }
 }
 
 #[test]
 fn two_changed_targets_survive_catchup_and_duplicate_delivery() {
     let cached = empty().apply(1, snapshot(9, window(0, 0), vec![])).unwrap();
-    let frame = changes(
-        9,
-        11,
-        vec![input("a", 10, "A"), input("b", 11, "B")],
-        vec![],
-    );
+    let frame = change(11, vec![input("a", 10, "A"), input("b", 11, "B")], vec![]);
     let next = cached.apply(1, frame.clone()).unwrap();
     assert_eq!(next.rows.len(), 2);
     assert_eq!(next.cursor, Some(cursor(11)));
@@ -139,14 +135,18 @@ fn a_new_generation_receives_current_frames_and_rejects_old_ones() {
 }
 
 #[test]
-fn missing_predecessor_or_wrong_store_cannot_advance_the_cursor() {
+fn scope_sequence_gaps_are_valid_but_a_wrong_store_is_rejected() {
     let cached = empty().apply(1, snapshot(9, window(0, 0), vec![])).unwrap();
+    let gap = cached
+        .apply(1, change(11, vec![input("b", 0, "B")], vec![]))
+        .unwrap();
+    assert_eq!(gap.cursor, Some(cursor(11)));
     assert_eq!(
-        cached.apply(1, changes(10, 11, vec![input("b", 11, "B")], vec![])),
-        Err(ApplyError::Discontinuity)
+        gap.rows[&input("b", 0, "").key].content,
+        Content::Full("B".into())
     );
-    let mut frame = changes(9, 11, vec![], vec![]);
-    if let Message::Changes { through, .. } = &mut frame {
+    let mut frame = change(11, vec![], vec![]);
+    if let Message::Events { through, .. } = &mut frame {
         through.store = uuid::Uuid::from_u128(2);
     }
     assert_eq!(cached.apply(1, frame), Err(ApplyError::Store));
@@ -176,7 +176,7 @@ fn extension_changes_membership_before_subsequent_live_changes() {
         )
         .unwrap();
     let next = expanded
-        .apply(1, changes(4, 5, vec![item("old", 5, 75, "old", 1)], vec![]))
+        .apply(1, change(5, vec![item("old", 5, 75, "old", 1)], vec![]))
         .unwrap();
     assert_eq!(next.rows[&item("old", 5, 75, "old", 1).key].version, 5);
     assert_eq!(cached.window, window(100, 2));
@@ -196,18 +196,7 @@ fn removing_a_turn_cascades_items_and_keeps_the_loaded_window() {
         )
         .unwrap();
     let next = cached
-        .apply(
-            1,
-            changes(
-                2,
-                3,
-                vec![],
-                vec![Removal {
-                    key: turn("t", 1, 2).key,
-                    version: 3,
-                }],
-            ),
-        )
+        .apply(1, change(3, vec![], vec![turn("t", 1, 2).key]))
         .unwrap();
     assert!(next.rows.is_empty());
     assert_eq!(next.cursor, Some(cursor(3)));
@@ -344,7 +333,7 @@ fn unrelated_streaming_does_not_starve_a_valid_hydration() {
         )
         .unwrap();
     let streaming = cached
-        .apply(1, changes(2, 10, vec![input("another", 10, "new")], vec![]))
+        .apply(1, change(10, vec![input("another", 10, "new")], vec![]))
         .unwrap();
     let full = item("i", 2, 1, "t", 1);
     let hydrated = streaming
@@ -359,18 +348,7 @@ fn unrelated_streaming_does_not_starve_a_valid_hydration() {
     assert_eq!(hydrated.rows()[&full.key], full);
     assert_eq!(hydrated.cursor(), Some(cursor(10)));
     let removed = streaming
-        .apply(
-            1,
-            changes(
-                10,
-                11,
-                vec![],
-                vec![Removal {
-                    key: full.key.clone(),
-                    version: 11,
-                }],
-            ),
-        )
+        .apply(1, change(11, vec![], vec![full.key.clone()]))
         .unwrap();
     assert_eq!(
         removed
@@ -433,19 +411,28 @@ fn malformed_frames_are_atomic_and_cannot_create_orphans() {
     assert_eq!(
         cached.apply(
             1,
-            changes(
-                2,
-                3,
-                vec![input("a", 3, "new"), input("bad", 4, "future")],
-                vec![]
-            )
+            Message::Events {
+                through: cursor(3),
+                events: vec![
+                    Event {
+                        sequence: 3,
+                        rows: vec![input("a", 0, "new")],
+                        removed: vec![]
+                    },
+                    Event {
+                        sequence: 4,
+                        rows: vec![],
+                        removed: vec![]
+                    },
+                ]
+            }
         ),
         Err(ApplyError::Version)
     );
     assert_eq!(
         cached.apply(
             1,
-            changes(2, 3, vec![item("orphan", 3, 1, "missing", 1)], vec![])
+            change(3, vec![item("orphan", 3, 1, "missing", 1)], vec![])
         ),
         Err(ApplyError::Parent)
     );
@@ -493,28 +480,28 @@ fn list_and_conversation_cursors_and_id_namespaces_are_independent() {
             _ => unreachable!(),
         }
     }
-    let next = a.apply(1, changes(1, 2, foreign, vec![])).unwrap();
+    let next = a.apply(1, change(2, foreign, vec![])).unwrap();
     assert_eq!(next.rows(), a.rows());
 }
 
 #[test]
-fn resume_boundaries_include_equal_history_and_pruning_sequences() {
+fn resume_boundaries_include_the_pruning_sequence() {
     for c in 0..=12 {
-        assert_eq!(can_resume(Some(cursor(c)), cursor(12), 5, 7), c >= 7);
+        assert_eq!(can_resume(Some(cursor(c)), cursor(12), 5), c >= 5);
     }
-    assert!(can_resume(Some(cursor(5)), cursor(12), 5, 0));
-    assert!(!can_resume(Some(cursor(4)), cursor(12), 5, 0));
-    assert!(!can_resume(None, cursor(12), 0, 0));
-    assert!(!can_resume(Some(cursor(13)), cursor(12), 0, 0));
+    assert!(can_resume(Some(cursor(5)), cursor(12), 5));
+    assert!(!can_resume(Some(cursor(4)), cursor(12), 5));
+    assert!(!can_resume(None, cursor(12), 0));
+    assert!(!can_resume(Some(cursor(13)), cursor(12), 0));
     let other = Cursor {
         store: uuid::Uuid::from_u128(2),
         sequence: 12,
     };
-    assert!(!can_resume(Some(other), cursor(12), 0, 0));
+    assert!(!can_resume(Some(other), cursor(12), 0));
 }
 
 #[test]
-fn only_applying_the_replacement_snapshot_makes_its_cursor_resumable() {
+fn replacement_snapshot_resets_expanded_membership() {
     let cached = empty()
         .apply(
             1,
@@ -525,9 +512,8 @@ fn only_applying_the_replacement_snapshot_makes_its_cursor_resumable() {
             ),
         )
         .unwrap();
-    assert!(!can_resume(cached.cursor, cursor(2), 0, 2));
     // History replacement occupies one stream position with a snapshot, never
-    // a preceding Changes frame that could advance the cursor before the reset.
+    // a preceding event frame that could advance the cursor before the reset.
     let replaced = cached
         .apply(
             1,
@@ -542,7 +528,7 @@ fn only_applying_the_replacement_snapshot_makes_its_cursor_resumable() {
         replaced.rows[&item("i", 2, 50, "t", 1).key].position,
         item("i", 2, 50, "t", 1).position
     );
-    assert!(can_resume(replaced.cursor, cursor(2), 0, 2));
+    assert!(can_resume(replaced.cursor, cursor(2), 0));
 }
 
 #[test]
@@ -634,26 +620,27 @@ proptest! {
         // Oracle: the Host's current input values, independent of replica application.
         // A removed ID is never reused. A later creation gets a fresh ID.
         let mut host = std::collections::BTreeMap::<String, (u64, String)>::new();
-        let mut deletions = Vec::new();
+        let mut journal = Vec::new();
         let mut client = empty().apply(1, snapshot(0, window(0, 0), vec![])).unwrap();
         let mut seq = 0;
         let mut unique = 0;
         let mut frozen = None;
         for (index, (delete, target, value)) in actions.into_iter().enumerate() {
             if index == disconnect_at { frozen = Some(client.clone()); }
-            let previous = seq;
             seq += 1;
             let existing = host.keys().nth(target % host.len().max(1)).cloned();
             let (rows, removed) = if delete && existing.is_some() {
                 let id = existing.unwrap(); host.remove(&id);
-                let deletion = Removal { key: input(&id, seq, "").key, version: seq };
-                deletions.push(deletion.clone()); (vec![], vec![deletion])
+                let deletion = input(&id, seq, "").key;
+                (vec![], vec![deletion])
             } else {
                 let id = existing.unwrap_or_else(|| { unique += 1; format!("input-{unique}") });
                 let value = value.to_string(); host.insert(id.clone(), (seq, value.clone()));
                 (vec![input(&id, seq, &value)], vec![])
             };
-            client = client.apply(1, changes(previous, seq, rows, removed)).unwrap();
+            let event=Event {sequence:seq,rows,removed};
+            journal.push(event.clone());
+            client=client.apply(1,Message::Events {through:cursor(seq),events:vec![event]}).unwrap();
             let expected: std::collections::BTreeMap<_, _> = host.iter().map(|(id,(v,text))| {
                 let row = input(id,*v,text); (row.key.clone(),row)
             }).collect();
@@ -661,11 +648,67 @@ proptest! {
         }
         let frozen = frozen.unwrap_or_else(|| empty().apply(1, snapshot(0, window(0,0), vec![])).unwrap());
         let from = frozen.cursor.unwrap().sequence;
-        let rows = host.iter().filter(|(_, (v,_))| *v > from).map(|(id,(v,text))| input(id,*v,text)).collect();
-        let removed = deletions.into_iter().filter(|d| d.version > from).collect();
-        let caught_up = frozen.apply(1, changes(from,seq,rows,removed)).unwrap();
+        let events=journal.into_iter().filter(|event|event.sequence>from).collect();
+        let caught_up = frozen.apply(1,Message::Events {through:cursor(seq),events}).unwrap();
         prop_assert_eq!(&caught_up.rows, &client.rows);
         let snap = snapshot(seq,window(0,0),host.iter().map(|(id,(v,text))| input(id,*v,text)).collect());
         prop_assert_eq!(caught_up, empty().apply(1,snap).unwrap());
     }
+}
+
+#[test]
+fn ordered_events_replace_zero_version_rows_and_skip_whole_old_transactions() {
+    let cached = empty()
+        .apply(
+            1,
+            snapshot(2, window(0, 0), vec![input("a", 0, "original")]),
+        )
+        .unwrap();
+    let frame = Message::Events {
+        through: cursor(9),
+        events: vec![
+            Event {
+                sequence: 1,
+                rows: vec![],
+                removed: vec![input("a", 0, "").key],
+            },
+            Event {
+                sequence: 5,
+                rows: vec![input("a", 0, "first")],
+                removed: vec![],
+            },
+            Event {
+                sequence: 8,
+                rows: vec![input("a", 0, "second")],
+                removed: vec![],
+            },
+        ],
+    };
+    let next = cached.apply(1, frame.clone()).unwrap();
+    assert_eq!(
+        next.rows[&input("a", 0, "").key].content,
+        Content::Full("second".into())
+    );
+    assert_eq!(next.cursor, Some(cursor(9)));
+    assert_eq!(next.apply(1, frame).unwrap(), next);
+    let disorder = Message::Events {
+        through: cursor(12),
+        events: vec![
+            Event {
+                sequence: 11,
+                rows: vec![input("a", 0, "must roll back")],
+                removed: vec![],
+            },
+            Event {
+                sequence: 10,
+                rows: vec![],
+                removed: vec![],
+            },
+        ],
+    };
+    assert_eq!(next.apply(1, disorder), Err(ApplyError::Version));
+    assert_eq!(
+        next.rows[&input("a", 0, "").key].content,
+        Content::Full("second".into())
+    );
 }

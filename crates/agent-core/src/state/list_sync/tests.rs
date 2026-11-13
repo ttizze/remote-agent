@@ -138,14 +138,20 @@ fn changes_update_titles_and_unread_without_reloading_or_losing_drafts() {
     header.details.activity.completion = Some("completed".into());
     header.details.activity.latest = Some(crate::models::TurnStatus::Completed);
     let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
-    let message = Message::Changes {
-        from,
+    let message = Message::Events {
         through: Cursor {
             sequence: 11,
             ..from
         },
-        rows: vec![updated],
-        removed: Vec::new(),
+        events: vec![agent_protocol::sync::Event {
+            sequence: (Cursor {
+                sequence: 11,
+                ..from
+            })
+            .sequence,
+            rows: vec![updated],
+            removed: Vec::new(),
+        }],
     };
     let subscription = snapshot.lists.subscription.unwrap();
     let (next, effects) = received(&snapshot, subscription, message.clone());
@@ -190,14 +196,20 @@ fn a_side_pane_does_not_mark_the_conversation_read_for_other_devices() {
     let (next, effects) = received(
         &snapshot,
         subscription,
-        Message::Changes {
-            from,
+        Message::Events {
             through: Cursor {
                 sequence: 11,
                 ..from
             },
-            rows: vec![updated],
-            removed: vec![],
+            events: vec![agent_protocol::sync::Event {
+                sequence: (Cursor {
+                    sequence: 11,
+                    ..from
+                })
+                .sequence,
+                rows: vec![updated],
+                removed: vec![],
+            }],
         },
     );
     assert!(
@@ -328,14 +340,20 @@ fn child_activity_updates_the_fleet_and_discovers_new_children_once(
     let (mut next, effects) = received(
         &snapshot,
         subscription,
-        Message::Changes {
-            from: cursor,
+        Message::Events {
             through: Cursor {
                 sequence: 11,
                 ..cursor
             },
-            rows: vec![child],
-            removed: vec![],
+            events: vec![agent_protocol::sync::Event {
+                sequence: (Cursor {
+                    sequence: 11,
+                    ..cursor
+                })
+                .sequence,
+                rows: vec![child],
+                removed: vec![],
+            }],
         },
     );
     assert_eq!(
@@ -453,11 +471,13 @@ fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures(
     state = received(
         &state,
         state.lists.subscription.unwrap(),
-        Message::Changes {
-            from,
-            through,
-            rows,
-            removed: Vec::new(),
+        Message::Events {
+            through: through,
+            events: vec![agent_protocol::sync::Event {
+                sequence: (through).sequence,
+                rows: rows,
+                removed: Vec::new(),
+            }],
         },
     )
     .0;
@@ -530,11 +550,13 @@ fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion()
     let (next, _) = received(
         &state,
         state.lists.subscription.unwrap(),
-        Message::Changes {
-            from,
-            through,
-            rows: vec![row(0, false, through.sequence)],
-            removed: Vec::new(),
+        Message::Events {
+            through: through,
+            events: vec![agent_protocol::sync::Event {
+                sequence: (through).sequence,
+                rows: vec![row(0, false, through.sequence)],
+                removed: Vec::new(),
+            }],
         },
     );
     assert!(!next.sessions.subscriptions.contains_key(&id));

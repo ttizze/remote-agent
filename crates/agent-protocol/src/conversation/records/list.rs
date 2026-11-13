@@ -19,33 +19,18 @@ pub struct OpenedList {
 
 pub fn validate(message: &Message) -> Result<(), crate::sync::ApplyError> {
     validate_message(message)?;
-    let rows = match message {
+    let valid_key =
+        |key: &Key<SessionRef>| matches!(key, Key::Thread(_) | Key::Project(_) | Key::Catalog(_));
+    let valid = match message {
         Message::Snapshot {
             window: None, rows, ..
-        } => rows,
-        Message::Changes { rows, removed, .. } => {
-            if removed.iter().any(|row| {
-                !matches!(
-                    row.key,
-                    crate::sync::Key::Thread(_)
-                        | crate::sync::Key::Project(_)
-                        | crate::sync::Key::Catalog(_)
-                )
-            }) {
-                return Err(crate::sync::ApplyError::Identity);
-            }
-            rows
-        }
+        } => rows.iter().all(|row| valid_key(&row.key)),
+        Message::Events { events, .. } => events.iter().all(|event| {
+            event.rows.iter().all(|row| valid_key(&row.key)) && event.removed.iter().all(valid_key)
+        }),
         _ => return Err(crate::sync::ApplyError::Window),
     };
-    if rows.iter().any(|row| {
-        !matches!(
-            row.key,
-            crate::sync::Key::Thread(_)
-                | crate::sync::Key::Project(_)
-                | crate::sync::Key::Catalog(_)
-        )
-    }) {
+    if !valid {
         return Err(crate::sync::ApplyError::Identity);
     }
     Ok(())

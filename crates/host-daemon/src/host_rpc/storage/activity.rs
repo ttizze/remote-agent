@@ -23,41 +23,35 @@ impl Storage {
                 .map_err(failure)?;
             let key = thread_key(&transaction, id)?;
             let (mut header, counters) = rows::header(&transaction, key)?;
-            let mut current = cursor(&transaction)?;
             let mut changed = Vec::new();
             if header.details.activity.completion.as_ref() == Some(turn)
                 && header.details.read_through.as_ref() != Some(turn)
             {
                 header.details.read_through = Some(turn.clone());
-                current = Self::advance(&transaction)?;
                 transaction
                     .execute(
-                        "UPDATE threads SET seq=?1,body=?2 WHERE key=?3",
-                        params![
-                            integer(current.sequence)?,
-                            codec::header(&header, &counters)?,
-                            key
-                        ],
+                        "UPDATE threads SET body=?1 WHERE key=?2",
+                        params![codec::header(&header, &counters)?, key],
                     )
                     .map_err(failure)?;
                 changed.push(Row {
                     key: Key::Thread(id.clone()),
-                    version: current.sequence,
+                    version: 0,
                     position: Position::Unordered,
                     content: Content::Full(Arc::new(Record::Thread(header))),
                 });
             }
-            transaction.commit().map_err(failure)?;
-            Ok(Committed {
-                step: Step {
+            Self::commit(
+                transaction,
+                Some(id),
+                Step {
                     outcome: Outcome::Accepted,
                     ..Default::default()
                 },
-                cursor: current,
-                rows: changed,
-                removed: Vec::new(),
-                reset: false,
-            })
+                changed,
+                Vec::new(),
+                false,
+            )
         })
     }
 }

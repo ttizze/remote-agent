@@ -51,16 +51,19 @@ fn save(
         &fields.iter().map(|(_, wire)| *wire).collect::<Vec<_>>(),
         state,
     )?;
-    let mut columns = vec!["thread", "seq"];
+    let mut columns = vec!["thread"];
+    if table == "items" {
+        columns.push("seq");
+    }
     columns.extend(fields.iter().map(|(sql, _)| *sql));
     if state {
         columns.push("state");
     }
     columns.push("body");
-    let mut values = vec![
-        SqlValue::Integer(key),
-        SqlValue::Integer(integer(sequence)?),
-    ];
+    let mut values = vec![SqlValue::Integer(key)];
+    if table == "items" {
+        values.push(SqlValue::Integer(integer(sequence)?));
+    }
     for (_, name) in fields {
         values.push(scalar(value.get(*name).ok_or("missing indexed field")?)?);
     }
@@ -104,7 +107,7 @@ pub(super) fn read<T: DeserializeOwned>(
     if state {
         columns.push("state");
     }
-    columns.push("seq");
+    columns.push(if table == "items" { "seq" } else { "0" });
     columns.push("body");
     let sql = format!("SELECT {} FROM {table} WHERE {filter}", columns.join(","));
     let mut statement = connection.prepare(&sql).map_err(failure)?;
@@ -221,6 +224,20 @@ pub(super) fn item_row(
     }))
 }
 
+pub(super) fn thread_row(
+    connection: &Connection,
+    key: i64,
+    id: &SessionRef,
+) -> Result<Row, String> {
+    let (header, _) = header(connection, key)?;
+    Ok(Row {
+        key: Key::Thread(id.clone()),
+        version: 0,
+        position: Position::Unordered,
+        content: Content::Full(Arc::new(Record::Thread(header))),
+    })
+}
+
 pub(super) fn older_window(
     connection: &Connection,
     key: i64,
@@ -316,30 +333,27 @@ fn page_floor(connection: &Connection, key: i64, before: Option<Window>) -> Resu
 
 pub(super) fn headers(
     connection: &Connection,
-    after: u64,
     loaded_only: bool,
-) -> Result<Vec<(SessionRef, Header, u64)>, String> {
+) -> Result<Vec<(SessionRef, Header)>, String> {
     let mut statement=connection.prepare(
-        "SELECT t.provider,t.id,t.seq,t.cwd,p.provider,p.id,t.updated_at,t.body FROM threads t LEFT JOIN threads p ON p.key=t.parent WHERE t.seq>?1 AND t.loaded>=0 AND (?2=0 OR t.loaded=1) ORDER BY t.updated_at DESC,t.key"
+        "SELECT t.provider,t.id,t.cwd,p.provider,p.id,t.updated_at,t.body FROM threads t LEFT JOIN threads p ON p.key=t.parent WHERE t.loaded>=0 AND (?1=0 OR t.loaded=1) ORDER BY t.updated_at DESC,t.key"
     ).map_err(failure)?;
     let entries = statement
-        .query_map(params![integer(after)?, loaded_only], |row| {
+        .query_map([loaded_only], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Vec<u8>>(7)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
             ))
         })
         .map_err(failure)?;
     entries
         .map(|entry| {
-            let (kind, id, version, cwd, parent_kind, parent_id, updated, body) =
-                entry.map_err(failure)?;
+            let (kind, id, cwd, parent_kind, parent_id, updated, body) = entry.map_err(failure)?;
             let parent = parent_id
                 .map(|id| {
                     SessionRef::new(parent_kind.as_deref().map(provider).transpose()?, id)
@@ -350,7 +364,6 @@ pub(super) fn headers(
             Ok((
                 SessionRef::new(kind.as_deref().map(provider).transpose()?, id).map_err(failure)?,
                 header,
-                version.try_into().map_err(failure)?,
             ))
         })
         .collect()
@@ -552,7 +565,7 @@ pub(super) fn write(
     change: &Change,
     turns: &std::collections::BTreeMap<TurnId, Turn>,
     updated: &mut Vec<Row>,
-    removed: &mut Vec<Removal<SessionRef>>,
+    removed: &mut Vec<Key<SessionRef>>,
 ) -> Result<(), String> {
     let &WriteScope {
         key,
@@ -618,18 +631,9 @@ pub(super) fn write(
         Change::Turn(value) => {
             save(transaction, key, "turns", value, TURN, true, sequence)?;
             if value.state == decision::TurnState::RolledBack {
-                transaction
-                    .execute(
-                        "INSERT INTO removals(seq,kind,id,thread,at) VALUES (?1,'turn',?2,?3,?4)",
-                        params![integer(sequence)?, value.id.as_str(), key, scope.at],
-                    )
-                    .map_err(failure)?;
-                removed.push(Removal {
-                    key: Key::Turn {
-                        thread: id.clone(),
-                        id: value.id.clone(),
-                    },
-                    version: sequence,
+                removed.push(Key::Turn {
+                    thread: id.clone(),
+                    id: value.id.clone(),
                 });
                 return Ok(());
             }
@@ -798,8 +802,12 @@ pub(super) fn write(
         }
     };
     updated.push(Row {
+        version: if matches!(entity, Key::Item { .. }) {
+            sequence
+        } else {
+            0
+        },
         key: entity,
-        version: sequence,
         position,
         content: Content::Full(Arc::new(record)),
     });
@@ -814,13 +822,7 @@ pub(super) fn write_header(
     previous: Option<&Header>,
     steers: Option<bool>,
 ) -> Result<Option<Row>, String> {
-    let &WriteScope {
-        key,
-        id,
-        sequence,
-        at,
-        ..
-    } = scope;
+    let &WriteScope { key, id, at, .. } = scope;
     let (mut header, counters) = header(transaction, key)?;
     let external_status = (state.active_turn().is_none()
         && (header.details.activity.unobserved_running()
@@ -965,9 +967,8 @@ pub(super) fn write_header(
     }
     transaction
         .execute(
-            "UPDATE threads SET seq=?1,cwd=?2,updated_at=?3,body=?4 WHERE key=?5",
+            "UPDATE threads SET cwd=?1,updated_at=?2,body=?3 WHERE key=?4",
             params![
-                integer(sequence)?,
                 header.state.workspace.cwd(),
                 at,
                 codec::header(&header, &state.counters)?,
@@ -977,7 +978,7 @@ pub(super) fn write_header(
         .map_err(failure)?;
     Ok(Some(Row {
         key: Key::Thread(id.clone()),
-        version: sequence,
+        version: 0,
         position: Position::Unordered,
         content: Content::Full(Arc::new(Record::Thread(header))),
     }))
@@ -1085,15 +1086,9 @@ fn remove(
     table: &str,
     kind: &str,
     record: &str,
-    removed: &mut Vec<Removal<SessionRef>>,
+    removed: &mut Vec<Key<SessionRef>>,
 ) -> Result<(), String> {
-    let &WriteScope {
-        key,
-        id,
-        sequence,
-        at,
-        ..
-    } = scope;
+    let &WriteScope { key, id, .. } = scope;
     let deleted = transaction
         .execute(
             &format!("DELETE FROM {table} WHERE thread=?1 AND id=?2"),
@@ -1103,12 +1098,6 @@ fn remove(
     if deleted == 0 {
         return Ok(());
     }
-    transaction
-        .execute(
-            "INSERT INTO removals(seq,kind,id,thread,at) VALUES (?1,?2,?3,?4,?5)",
-            params![integer(sequence)?, kind, record, key, at],
-        )
-        .map_err(failure)?;
     let entity = match kind {
         "input" => Key::Input {
             thread: id.clone(),
@@ -1124,10 +1113,7 @@ fn remove(
         },
         _ => unreachable!("owned removable record"),
     };
-    removed.push(Removal {
-        key: entity,
-        version: sequence,
-    });
+    removed.push(entity);
     Ok(())
 }
 
@@ -1162,18 +1148,7 @@ pub(super) fn snapshot(
     id: &SessionRef,
     window: Window,
 ) -> Result<Vec<Row>, String> {
-    let (header, _) = header(connection, key)?;
-    let version: i64 = connection
-        .query_row("SELECT seq FROM threads WHERE key=?1", [key], |row| {
-            row.get(0)
-        })
-        .map_err(failure)?;
-    let mut rows = vec![Row {
-        key: Key::Thread(id.clone()),
-        version: u64::try_from(version).map_err(failure)?,
-        position: Position::Unordered,
-        content: Content::Full(Arc::new(Record::Thread(header))),
-    }];
+    let mut rows = vec![thread_row(connection, key, id)?];
     let mut ordinals = std::collections::BTreeMap::new();
     for (version, turn) in read::<Turn>(
         connection,
@@ -1260,50 +1235,6 @@ pub(super) fn snapshot(
         });
     }
     Ok(rows)
-}
-
-pub(super) fn removals(
-    connection: &Connection,
-    key: i64,
-    id: &SessionRef,
-    after: u64,
-) -> Result<Vec<Removal<SessionRef>>, String> {
-    let mut statement = connection
-        .prepare("SELECT kind,id,seq FROM removals WHERE thread=?1 AND seq>?2")
-        .map_err(failure)?;
-    let mut saved = statement
-        .query(params![key, integer(after)?])
-        .map_err(failure)?;
-    let mut removed = Vec::new();
-    while let Some(row) = saved.next().map_err(failure)? {
-        let kind: String = row.get(0).map_err(failure)?;
-        let record: String = row.get(1).map_err(failure)?;
-        let version: i64 = row.get(2).map_err(failure)?;
-        let key = match kind.as_str() {
-            "input" => Key::Input {
-                thread: id.clone(),
-                id: record.into(),
-            },
-            "turn" => Key::Turn {
-                thread: id.clone(),
-                id: record.into(),
-            },
-            "item" => Key::Item {
-                thread: id.clone(),
-                id: record.into(),
-            },
-            "request" => Key::Request {
-                thread: id.clone(),
-                id: record.into(),
-            },
-            _ => return Err("invalid conversation removal".into()),
-        };
-        removed.push(Removal {
-            key,
-            version: u64::try_from(version).map_err(failure)?,
-        });
-    }
-    Ok(removed)
 }
 
 pub(super) fn bind_items(

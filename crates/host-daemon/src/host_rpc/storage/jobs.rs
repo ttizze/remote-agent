@@ -89,15 +89,15 @@ impl Storage {
     pub(in crate::host_rpc) fn claim(&self, now: i64, limit: u32) -> Result<Vec<Claim>, String> {
         self.with(|connection| {
             let transaction=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
-            // A client older than a deleted tombstone must replace its scope
+            // A client older than a retained event must replace its scope
             // with a snapshot. Receipts remain durable after this one-day tail.
             let cutoff = now.saturating_sub(24 * 60 * 60 * 1000);
             let expired: Option<i64> = transaction.query_row(
-                "SELECT max(seq) FROM removals WHERE at<=?1", [cutoff], |row|row.get(0)
+                "SELECT max(seq) FROM journal WHERE at<=?1", [cutoff], |row|row.get(0)
             ).map_err(failure)?;
             if let Some(through) = expired {
-                transaction.execute("UPDATE store SET removals_pruned_through=max(removals_pruned_through,?1)",[through]).map_err(failure)?;
-                transaction.execute("DELETE FROM removals WHERE at<=?1",[cutoff]).map_err(failure)?;
+                transaction.execute("UPDATE store SET pruned_through=max(pruned_through,?1)",[through]).map_err(failure)?;
+                transaction.execute("DELETE FROM journal WHERE at<=?1",[cutoff]).map_err(failure)?;
             }
             let claims={
                 let mut statement=transaction.prepare("UPDATE jobs SET state='running',attempts=attempts+1 WHERE position IN (
@@ -130,11 +130,10 @@ impl Storage {
     ) -> Result<bool, String> {
         self.with(|connection| {
             let transaction=connection.transaction().map_err(failure)?;
-            let previous: Option<(String, Option<String>, i64)> = transaction.query_row("SELECT kind,last_error,seq FROM jobs WHERE id=?1 AND state='running' AND attempts=?2",params![id.to_string(),integer(attempt)?],|row|Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(failure)?;
-            let Some((kind, previous_error, previous_sequence)) = previous else { return Ok(false); };
-            let sequence=if kind == "catalog" && previous_error.as_deref() != Some(error) {integer(Self::advance(&transaction)?.sequence)?} else {previous_sequence};
-            let changed=transaction.execute("UPDATE jobs SET state='pending',run_after=?1,last_error=?2,seq=?5 WHERE id=?3 AND state='running' AND attempts=?4",params![at,error,id.to_string(),integer(attempt)?,sequence]).map_err(failure)?==1;
-            transaction.commit().map_err(failure)?;
+            let before = list::catalogs(&transaction)?;
+            let changed=transaction.execute("UPDATE jobs SET state='pending',run_after=?1,last_error=?2 WHERE id=?3 AND state='running' AND attempts=?4",params![at,error,id.to_string(),integer(attempt)?]).map_err(failure)?==1;
+            let updated=list::catalogs(&transaction)?.into_iter().filter(|row|!before.contains(row)).collect();
+            Self::commit(transaction,None,Step::default(),updated,Vec::new(),false)?;
             Ok(changed)
         })
     }

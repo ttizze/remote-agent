@@ -31,8 +31,6 @@ mod tests {
         use crate::state::{Attachment, DraftKey};
         use agent_protocol::composer::{Invocation, InvocationKind};
         let mut snapshot = Snapshot::default();
-        let welcome = DraftKey::Local { key: String::new() };
-        let new = DraftKey::Local { key: "new:".into() };
         let draft = |name: &str| {
             Arc::new(Draft {
                 text: name.into(),
@@ -52,8 +50,25 @@ mod tests {
         };
         let first = draft("welcome");
         let second = draft("new-chat");
-        Arc::make_mut(&mut snapshot.input.drafts).insert(welcome.clone(), first.clone());
-        Arc::make_mut(&mut snapshot.input.drafts).insert(new, second.clone());
+        use crate::state::{Event, Intent, reduce};
+        let apply = |snapshot: &Snapshot, intent| reduce(snapshot, "", Event::Intent(intent)).0;
+        snapshot = apply(
+            &snapshot,
+            Intent::SetDraft {
+                thread_id: DraftKey::default(),
+                draft: (*first).clone(),
+            },
+        );
+        snapshot = apply(&snapshot, Intent::NewChat { cwd: String::new() });
+        let new = snapshot.panes.primary().navigation.draft_key.clone();
+        snapshot = apply(
+            &snapshot,
+            Intent::SetDraft {
+                thread_id: new,
+                draft: (*second).clone(),
+            },
+        );
+        snapshot = apply(&snapshot, Intent::ShowThreadList);
         let restored = decode(&encode(&snapshot).unwrap()).unwrap();
         assert_eq!(restored.input.drafts.len(), 2);
         let welcome = DraftKey::from(&restored.input.new_drafts[crate::state::WELCOME_DRAFT_SLOT]);

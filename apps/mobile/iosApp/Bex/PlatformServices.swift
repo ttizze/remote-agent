@@ -20,7 +20,7 @@ final class MobileSessionStorage: ClientStorage, ClientPlatform, @unchecked Send
         ).appendingPathComponent("snapshots", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let name = Data(host.utf8).base64EncodedString().replacingOccurrences(of: "/", with: "_")
-        return directory.appendingPathComponent(name).appendingPathExtension("json")
+        return directory.appendingPathComponent(name).appendingPathExtension("v3.json")
     }
 
     private func access<T>(_ body: () throws -> T) throws -> T {

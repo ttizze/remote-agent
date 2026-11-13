@@ -4987,7 +4987,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
 #[case::restored(true)]
 #[case::read_failed(false)]
 #[tokio::test]
-async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
+async fn session_storage_change_preserves_history_and_only_reports_failed_recovery(
     #[case] restored: bool,
 ) {
     use agent_protocol::session::{SessionChange, TextField};
@@ -5011,17 +5011,20 @@ async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
     writer
         .send_rows(
             old_subscription,
-            agent_protocol::sync::Message::Changes {
-                from: agent_protocol::sync::Cursor {
-                    sequence: cursor.sequence + 1,
-                    ..cursor
-                },
+            agent_protocol::sync::Message::Events {
                 through: agent_protocol::sync::Cursor {
+                    store: uuid::Uuid::new_v4(),
                     sequence: cursor.sequence + 2,
-                    ..cursor
                 },
-                rows: vec![],
-                removed: vec![],
+                events: vec![agent_protocol::sync::Event {
+                    sequence: (agent_protocol::sync::Cursor {
+                        sequence: cursor.sequence + 2,
+                        ..cursor
+                    })
+                    .sequence,
+                    rows: vec![],
+                    removed: vec![],
+                }],
             },
         )
         .await
@@ -6089,7 +6092,7 @@ async fn local_unknown_input_restore_and_discard_follow_the_user_intent_after_ho
 async fn gallery_finishes_with_an_error_when_the_hydrated_image_was_removed() {
     use agent_protocol::{
         conversation::records,
-        sync::{Key, Message, Removal},
+        sync::{Key, Message},
     };
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let id = SessionRef::new(ProviderKind::Codex, "removed-gallery".into()).unwrap();
@@ -6109,16 +6112,15 @@ async fn gallery_finishes_with_an_error_when_the_hydrated_image_was_removed() {
         writer
             .send_rows(
                 subscription,
-                Message::Changes {
-                    from,
-                    through,
-                    rows: vec![],
-                    removed: vec![Removal {
-                        key: Key::Item {
+                Message::Events {
+                    through: through,
+                    events: vec![agent_protocol::sync::Event {
+                        sequence: (through).sequence,
+                        rows: vec![],
+                        removed: vec![Key::Item {
                             thread: target,
                             id: "image".into(),
-                        },
-                        version: through.sequence,
+                        }],
                     }],
                 },
             )

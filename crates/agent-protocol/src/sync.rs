@@ -1,6 +1,6 @@
-//! Ordered replication of saved rows. The same values and pure application
-//! rules serve Host projections and client caches. Payload types belong to the
-//! domain using the replica; no transport, database or provider state is held here.
+//! Snapshots and ordered replay of committed events. Current projections serve
+//! display and paging; the event sequence alone orders live and replayed changes.
+//! Payload types belong to the domain, with no transport or database dependency.
 use crate::ids::{ClientInputId, ItemId, RequestId, TurnId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,15 +72,18 @@ pub enum Content<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row<C, T> {
     pub key: Key<C>,
+    /// Revision of separately fetched item bytes; never used to order events.
     pub version: u64,
     pub position: Position,
     pub content: Content<T>,
 }
 
+/// One committed transaction, replayed without merging it with later events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Removal<C> {
-    pub key: Key<C>,
-    pub version: u64,
+pub struct Event<C, T> {
+    pub sequence: u64,
+    pub rows: Vec<Row<C, T>>,
+    pub removed: Vec<Key<C>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,13 +93,10 @@ pub enum Message<C, T> {
         window: Option<Window>,
         rows: Vec<Row<C, T>>,
     },
-    /// Both live transactions and compacted catch-up describe complete coverage
-    /// from one cursor through another. Numeric gaps are normal across scopes.
-    Changes {
-        from: Cursor,
+    /// The read high-water is a completion marker, not a continuity contract.
+    Events {
         through: Cursor,
-        rows: Vec<Row<C, T>>,
-        removed: Vec<Removal<C>>,
+        events: Vec<Event<C, T>>,
     },
     Extend {
         cursor: Cursor,
@@ -120,7 +120,7 @@ pub enum ApplyError {
     Discontinuity,
     #[error("the window does not match this scope")]
     Window,
-    #[error("a row or removal has an invalid version")]
+    #[error("events are not ordered within their read high-water")]
     Version,
     #[error("a change contains a duplicate entity")]
     Duplicate,
@@ -145,12 +145,11 @@ pub struct Replica<C: Ord, T> {
     subscription: u64,
 }
 
-pub fn can_resume(cached: Option<Cursor>, current: Cursor, pruned: u64, history: u64) -> bool {
+pub fn can_resume(cached: Option<Cursor>, current: Cursor, pruned: u64) -> bool {
     cached.is_some_and(|cached| {
         cached.store == current.store
             && cached.sequence <= current.sequence
             && cached.sequence >= pruned
-            && cached.sequence >= history
     })
 }
 
@@ -226,35 +225,34 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                 next.rows.clear();
                 next.window = window;
                 next.expanded = false;
-                next.insert(rows, 0, cursor.sequence)?;
+                next.insert(rows)?;
                 next.cursor = Some(cursor);
             }
-            Message::Changes {
-                from,
-                through,
-                rows,
-                removed,
-            } => {
+            Message::Events { through, events } => {
                 let current = self.cursor.ok_or(ApplyError::Discontinuity)?;
-                if current.store != through.store || from.store != through.store {
+                if current.store != through.store {
                     return Err(ApplyError::Store);
                 }
                 if through.sequence <= current.sequence {
                     return Ok(next);
                 }
-                if current != from {
-                    return Err(ApplyError::Discontinuity);
-                }
-                let mut seen =
-                    next.insert(rows, from.sequence.saturating_add(1), through.sequence)?;
-                for removal in removed {
-                    if !seen.insert(removal.key.clone()) {
-                        return Err(ApplyError::Duplicate);
-                    }
-                    if removal.version <= from.sequence || removal.version > through.sequence {
+                let mut previous = 0;
+                for event in events {
+                    if event.sequence <= previous || event.sequence > through.sequence {
                         return Err(ApplyError::Version);
                     }
-                    next.remove(removal);
+                    previous = event.sequence;
+                    if event.sequence <= current.sequence {
+                        continue;
+                    }
+                    let mut seen = next.insert(event.rows)?;
+                    for key in event.removed {
+                        if !seen.insert(key.clone()) {
+                            return Err(ApplyError::Duplicate);
+                        }
+                        next.remove(key);
+                    }
+                    next.check_parents()?;
                 }
                 next.cursor = Some(through);
             }
@@ -272,7 +270,7 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                 }
                 next.window = Some(window);
                 next.expanded |= window != old;
-                next.insert(rows, 0, cursor.sequence)?;
+                next.insert(rows)?;
             }
             Message::Hydrate { cursor, row } => {
                 if !self.cursor.is_some_and(|current| {
@@ -294,7 +292,7 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                     .get(&row.key)
                     .is_some_and(|old| old.version == row.version)
                 {
-                    next.insert(vec![row], 0, cursor.sequence)?;
+                    next.insert(vec![row])?;
                 }
             }
             Message::Missing => {
@@ -307,49 +305,36 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
         Ok(next)
     }
 
-    fn insert(
-        &mut self,
-        rows: Vec<Row<C, T>>,
-        minimum: u64,
-        maximum: u64,
-    ) -> Result<BTreeSet<Key<C>>, ApplyError> {
+    fn insert(&mut self, rows: Vec<Row<C, T>>) -> Result<BTreeSet<Key<C>>, ApplyError> {
         let mut seen = BTreeSet::new();
         for row in rows {
             if !seen.insert(row.key.clone()) {
                 return Err(ApplyError::Duplicate);
             }
-            if row.version < minimum || row.version > maximum {
-                return Err(ApplyError::Version);
-            }
             check_position(&row.key, &row.position)?;
             if !contains(&self.scope, self.window, &row.key, &row.position) {
                 continue;
             }
-            let replace = self.rows.get(&row.key).is_none_or(|old| {
-                row.version > old.version
-                    || (row.version == old.version
+            // A fetched body at the same item revision survives a thin page
+            // or event. No row version participates in causal ordering.
+            let keep_body = matches!(row.key, Key::Item { .. })
+                && self.rows.get(&row.key).is_some_and(|old| {
+                    old.version == row.version
                         && matches!(
                             (&old.content, &row.content),
-                            (Content::Summary(_), Content::Full(_))
-                        ))
-            });
-            if replace {
+                            (Content::Full(_), Content::Summary(_))
+                        )
+                });
+            if !keep_body {
                 self.rows.insert(row.key.clone(), row);
             }
         }
         Ok(seen)
     }
 
-    fn remove(&mut self, removal: Removal<C>) {
-        if self
-            .rows
-            .get(&removal.key)
-            .is_some_and(|row| row.version >= removal.version)
-        {
-            return;
-        }
-        self.rows.remove(&removal.key);
-        if let Key::Turn { thread, id } = removal.key {
+    fn remove(&mut self, key: Key<C>) {
+        self.rows.remove(&key);
+        if let Key::Turn { thread, id } = key {
             self.rows.retain(|key, row| !matches!((key, &row.position),
                 (Key::Item { thread: owner, .. }, Position::Item { turn, .. }) if owner == &thread && turn == &id));
         }

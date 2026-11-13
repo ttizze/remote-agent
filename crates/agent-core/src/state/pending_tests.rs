@@ -121,14 +121,20 @@ fn a_receipt_needs_the_same_store_and_coverage_before_retiring_an_input() {
         let next = replica
             .apply(
                 replica.subscription(),
-                Message::Changes {
-                    from: current,
+                Message::Events {
                     through: Cursor {
                         sequence: current.sequence + 1,
                         ..current
                     },
-                    rows: vec![],
-                    removed: vec![],
+                    events: vec![agent_protocol::sync::Event {
+                        sequence: (Cursor {
+                            sequence: current.sequence + 1,
+                            ..current
+                        })
+                        .sequence,
+                        rows: vec![],
+                        removed: vec![],
+                    }],
                 },
             )
             .unwrap();

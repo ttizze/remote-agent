@@ -201,11 +201,13 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
             apply(
                 &mut snapshot,
                 &id,
-                vec![Message::Changes {
-                    from: cursor,
-                    through,
-                    rows: vec![],
-                    removed: vec![],
+                vec![Message::Events {
+                    through: through,
+                    events: vec![agent_protocol::sync::Event {
+                        sequence: (through).sequence,
+                        rows: vec![],
+                        removed: vec![],
+                    }],
                 }],
             )
             .unwrap();
@@ -275,14 +277,20 @@ fn streaming_a_conversation_without_a_folder_keeps_the_panes_context_and_error()
     apply(
         &mut snapshot,
         &id,
-        vec![Message::Changes {
-            from: cursor,
+        vec![Message::Events {
             through: Cursor {
                 sequence: cursor.sequence + 1,
                 ..cursor
             },
-            rows: vec![],
-            removed: vec![],
+            events: vec![agent_protocol::sync::Event {
+                sequence: (Cursor {
+                    sequence: cursor.sequence + 1,
+                    ..cursor
+                })
+                .sequence,
+                rows: vec![],
+                removed: vec![],
+            }],
         }],
     )
     .unwrap();
@@ -358,11 +366,13 @@ fn hydration_finishes_after_unrelated_live_updates_without_restarting_the_read()
     apply(
         &mut snapshot,
         &id,
-        vec![Message::Changes {
-            from: cursor,
+        vec![Message::Events {
             through: latest,
-            rows: vec![],
-            removed: vec![],
+            events: vec![agent_protocol::sync::Event {
+                sequence: (latest).sequence,
+                rows: vec![],
+                removed: vec![],
+            }],
         }],
     )
     .unwrap();

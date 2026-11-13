@@ -13,8 +13,8 @@ impl Storage {
     pub(in crate::host_rpc) fn headers(
         &self,
         loaded_only: bool,
-    ) -> Result<Vec<(SessionRef, Header, u64)>, String> {
-        self.with(|connection| rows::headers(connection, 0, loaded_only))
+    ) -> Result<Vec<(SessionRef, Header)>, String> {
+        self.with(|connection| rows::headers(connection, loaded_only))
     }
 
     pub(in crate::host_rpc) fn summaries(
@@ -26,7 +26,7 @@ impl Storage {
         Ok(self
             .headers(loaded_only)?
             .into_iter()
-            .filter_map(|(id, header, _)| {
+            .filter_map(|(id, header)| {
                 if !format!(
                     "{} {}",
                     header.state.name,
@@ -117,36 +117,38 @@ impl Storage {
                 .map_err(failure)?;
             let key = thread_key(&transaction, id)?;
             let (mut header, counters) = rows::header(&transaction, key)?;
-            let mut committed = Committed {
-                step: Step::default(),
-                cursor: cursor(&transaction)?,
-                rows: vec![],
-                removed: vec![],
-                reset: false,
-            };
+            let mut updated = Vec::new();
             if header.state.workspace.cwd() != Some(cwd) || header.details.project == membership {
-                return Ok(committed);
+                return Self::commit(
+                    transaction,
+                    Some(id),
+                    Step::default(),
+                    updated,
+                    Vec::new(),
+                    false,
+                );
             }
             header.details.project = membership;
-            committed.cursor = Self::advance(&transaction)?;
             transaction
                 .execute(
-                    "UPDATE threads SET seq=?1,body=?2 WHERE key=?3",
-                    params![
-                        integer(committed.cursor.sequence)?,
-                        codec::header(&header, &counters)?,
-                        key
-                    ],
+                    "UPDATE threads SET body=?1 WHERE key=?2",
+                    params![codec::header(&header, &counters)?, key],
                 )
                 .map_err(failure)?;
-            committed.rows.push(Row {
+            updated.push(Row {
                 key: Key::Thread(id.clone()),
-                version: committed.cursor.sequence,
+                version: 0,
                 position: Position::Unordered,
                 content: Content::Full(Arc::new(Record::Thread(header))),
             });
-            transaction.commit().map_err(failure)?;
-            Ok(committed)
+            Self::commit(
+                transaction,
+                Some(id),
+                Step::default(),
+                updated,
+                Vec::new(),
+                false,
+            )
         })
     }
 }

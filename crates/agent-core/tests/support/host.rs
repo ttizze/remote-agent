@@ -629,14 +629,20 @@ impl State {
         if header.version <= from.sequence {
             return Ok(None);
         }
-        let message = Message::Changes {
-            from,
+        let message = Message::Events {
             through: Cursor {
                 sequence: self.sequence,
                 ..from
             },
-            rows: vec![header],
-            removed: Vec::new(),
+            events: vec![agent_protocol::sync::Event {
+                sequence: (Cursor {
+                    sequence: self.sequence,
+                    ..from
+                })
+                .sequence,
+                rows: vec![header],
+                removed: Vec::new(),
+            }],
         };
         self.list_replica = Some(
             replica
@@ -835,14 +841,16 @@ impl State {
                 window: floor,
                 rows: incoming,
             }
-        } else if let Some(from) =
-            cached.filter(|cursor| previous.and_then(|replica| replica.cursor()) == Some(*cursor))
+        } else if cached
+            .is_some_and(|cursor| previous.and_then(|replica| replica.cursor()) == Some(cursor))
         {
-            Message::Changes {
-                from,
+            Message::Events {
                 through: cursor,
-                rows: incoming,
-                removed: vec![],
+                events: vec![agent_protocol::sync::Event {
+                    sequence: (cursor).sequence,
+                    rows: incoming,
+                    removed: vec![],
+                }],
             }
         } else {
             Message::Snapshot {

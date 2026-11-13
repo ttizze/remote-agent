@@ -90,7 +90,6 @@ pub(super) fn insert_header(
     id: &SessionRef,
     header: &Header,
     counters: &Counters,
-    sequence: u64,
 ) -> Result<i64, String> {
     let parent = header
         .details
@@ -99,8 +98,8 @@ pub(super) fn insert_header(
         .map(|id| thread_key(transaction, id))
         .transpose()?;
     transaction.execute(
-        "INSERT INTO threads(provider,id,seq,parent,cwd,updated_at,history_seq,body) VALUES (?1,?2,?3,?4,?5,?6,?3,?7)",
-        params![id.provider.map(ProviderKind::key), id.id, integer(sequence)?, parent, header.state.workspace.cwd(), header.details.updated_at, codec::header(header, counters)?],
+        "INSERT INTO threads(provider,id,parent,cwd,updated_at,body) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![id.provider.map(ProviderKind::key), id.id, parent, header.state.workspace.cwd(), header.details.updated_at, codec::header(header, counters)?],
     ).map_err(failure)?;
     Ok(transaction.last_insert_rowid())
 }
@@ -111,7 +110,6 @@ pub(super) fn link_parent(
     transaction: &Transaction<'_>,
     child: i64,
     parent: Option<&SessionRef>,
-    sequence: u64,
 ) -> Result<(), String> {
     let parent = if let Some(parent) = parent {
         let owner = transaction
@@ -140,7 +138,7 @@ pub(super) fn link_parent(
                     ..Default::default()
                 },
             };
-            let key = insert_header(transaction, parent, &header, &Counters::default(), sequence)?;
+            let key = insert_header(transaction, parent, &header, &Counters::default())?;
             transaction
                 .execute("UPDATE threads SET loaded=-1 WHERE key=?1", [key])
                 .map_err(failure)?;
@@ -358,16 +356,22 @@ pub(super) fn install(
                 .or(header.details.selection.service_tier),
         };
         let parent: Option<i64> = None;
-        transaction.execute("UPDATE threads SET seq=?1,loaded=1,parent=?2,cwd=?3,updated_at=?4,history_seq=?1,body=?5 WHERE key=?6", params![integer(sequence)?,parent,header.state.workspace.cwd(),header.details.updated_at,codec::header(&header,&counters)?,key]).map_err(failure)?;
+        transaction
+            .execute(
+                "UPDATE threads SET loaded=1,parent=?1,cwd=?2,updated_at=?3,body=?4 WHERE key=?5",
+                params![
+                    parent,
+                    header.state.workspace.cwd(),
+                    header.details.updated_at,
+                    codec::header(&header, &counters)?,
+                    key
+                ],
+            )
+            .map_err(failure)?;
     } else {
-        insert_header(transaction, id, &header, &Counters::default(), sequence)?;
+        insert_header(transaction, id, &header, &Counters::default())?;
     }
-    link_parent(
-        transaction,
-        thread_key(transaction, id)?,
-        parent.as_ref(),
-        sequence,
-    )?;
+    link_parent(transaction, thread_key(transaction, id)?, parent.as_ref())?;
     write_history(transaction, id, response, source, sequence, process, now)?;
     if let Some(source) = source {
         let key = thread_key(transaction, id)?;
@@ -432,9 +436,9 @@ impl Storage {
             header.details.activity = Default::default();
             header.details.updated_at = now;
             if header.details.selection.model.as_ref().is_some_and(|model| model.provider != turn.provider) { header.details.selection = Default::default(); }
-            let sequence = Self::advance(&transaction)?;
-            let target_key = insert_header(&transaction, target, &header, &Counters::default(), sequence.sequence)?;
-            transaction.execute("INSERT INTO turns(id,thread,seq,ordinal,state,body) SELECT id,?1,?2,ordinal,state,body FROM turns WHERE thread=?3 AND ordinal<=?4 AND state!='rolled_back'", params![target_key, integer(sequence.sequence)?, source_key, integer(turn.ordinal)?]).map_err(failure)?;
+            let sequence = Self::next_cursor(&transaction)?;
+            let target_key = insert_header(&transaction,target,&header,&Counters::default())?;
+            transaction.execute("INSERT INTO turns(id,thread,ordinal,state,body) SELECT id,?1,ordinal,state,body FROM turns WHERE thread=?2 AND ordinal<=?3 AND state!='rolled_back'", params![target_key, source_key, integer(turn.ordinal)?]).map_err(failure)?;
             transaction.execute("INSERT INTO items(id,thread,turn_id,seq,position,status,body) SELECT items.id,?1,items.turn_id,?2,items.position,items.status,items.body FROM items JOIN turns ON turns.thread=items.thread AND turns.id=items.turn_id WHERE items.thread=?3 AND turns.ordinal<=?4 AND turns.state!='rolled_back'", params![target_key, integer(sequence.sequence)?, source_key, integer(turn.ordinal)?]).map_err(failure)?;
             copy_executions(&transaction, source_key, target_key)?;
             // Native history preserves tool context when the selected prefix
@@ -459,7 +463,7 @@ impl Storage {
             state.counters.item = transaction.query_row("SELECT coalesce(max(position),0) FROM items WHERE thread=?1", [target_key], |row| row.get::<_,i64>(0)).map_err(failure)?.try_into().map_err(failure)?;
             rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None, None)?;
             transaction.execute("INSERT INTO receipts(operation_id,provider,thread_id,seq,outcome) VALUES (?1,?2,?3,?4,?5)", params![target.id, target.provider.map(ProviderKind::key), target.id, integer(sequence.sequence)?, protocol::encode(Outcome::Accepted).map_err(failure)?]).map_err(failure)?;
-            transaction.commit().map_err(failure)
+            Self::commit(transaction,Some(target),Step::default(),Vec::new(),Vec::new(),true).map(|_|())
         })
     }
 
@@ -480,7 +484,7 @@ impl Storage {
                     window: Some(window),
                     ..
                 } => (*cursor, *window),
-                Message::Changes { through, .. } => (*through, window),
+                Message::Events { through, .. } => (*through, window),
                 _ => return Err("conversation does not exist".into()),
             };
             let mut messages = vec![initial];
@@ -499,12 +503,13 @@ impl Storage {
                     });
                 }
             } else if floor.turn != 0 || floor.item != 0 {
+                let previous = floor;
                 floor = rows::older_window(&transaction, key, floor)?;
                 let mut rows = rows::snapshot(&transaction, key, id, floor)?;
                 rows.retain(|row| {
                     !agent_protocol::sync::contains(
                         &Scope::Conversation(id.clone()),
-                        Some(window),
+                        Some(previous),
                         &row.key,
                         &row.position,
                     )
@@ -544,7 +549,7 @@ impl Storage {
             }) {
                 return Ok(false);
             }
-            let sequence = Self::advance(&transaction)?;
+            let sequence = Self::next_cursor(&transaction)?;
             install(
                 &transaction,
                 id,
@@ -554,7 +559,14 @@ impl Storage {
                 self.process,
                 now,
             )?;
-            transaction.commit().map_err(failure)?;
+            Self::commit(
+                transaction,
+                Some(id),
+                Step::default(),
+                Vec::new(),
+                Vec::new(),
+                true,
+            )?;
             Ok(true)
         })
     }

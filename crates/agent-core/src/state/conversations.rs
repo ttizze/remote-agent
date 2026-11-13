@@ -282,17 +282,21 @@ pub(crate) fn apply(
     id: &crate::session::SessionRef,
     messages: Vec<records::Message>,
 ) -> Result<Vec<Effect>, agent_protocol::sync::ApplyError> {
-    let mut details = Vec::new();
+    let mut detail_keys = std::collections::BTreeSet::new();
     for message in &messages {
         records::validate_message(message)?;
-        let rows = match message {
-            records::Message::Snapshot { rows, .. }
-            | records::Message::Changes { rows, .. }
-            | records::Message::Extend { rows, .. } => rows.as_slice(),
-            records::Message::Hydrate { row, .. } => std::slice::from_ref(row),
-            _ => &[],
+        let (rows, events) = match message {
+            records::Message::Snapshot { rows, .. } | records::Message::Extend { rows, .. } => {
+                (rows.as_slice(), &[][..])
+            }
+            records::Message::Events { events, .. } => (&[][..], events.as_slice()),
+            records::Message::Hydrate { row, .. } => (std::slice::from_ref(row), &[][..]),
+            records::Message::Missing => (&[][..], &[][..]),
         };
-        for row in rows {
+        for row in rows
+            .iter()
+            .chain(events.iter().flat_map(|event| &event.rows))
+        {
             let value = match &row.content {
                 agent_protocol::sync::Content::Full(value)
                 | agent_protocol::sync::Content::Summary(value) => value,
@@ -300,7 +304,7 @@ pub(crate) fn apply(
             if let records::Record::Item(item) = value.as_ref()
                 && item.content.is_deferred()
             {
-                details.extend(op::item_detail(id, &item.turn, &item.content));
+                detail_keys.insert(row.key.clone());
             }
         }
     }
@@ -319,6 +323,20 @@ pub(crate) fn apply(
         }
         replica = replica.apply(replica.subscription(), message)?;
     }
+    let details = detail_keys
+        .iter()
+        .filter_map(|key| replica.rows().get(key))
+        .flat_map(|row| {
+            let (agent_protocol::sync::Content::Full(value)
+            | agent_protocol::sync::Content::Summary(value)) = &row.content;
+            match value.as_ref() {
+                records::Record::Item(item) if item.content.is_deferred() => {
+                    op::item_detail(id, &item.turn, &item.content)
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
     let projected = records::project(&replica);
     Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
     let Some(mut projected) = projected else {

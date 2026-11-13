@@ -59,7 +59,7 @@ impl Storage {
         )
     }
     fn state(&self) -> PathBuf {
-        self.host_directory().join("state.json")
+        self.host_directory().join("state-v3.json")
     }
 
     /// Forgets a removed Host on this device: its state, conversations and

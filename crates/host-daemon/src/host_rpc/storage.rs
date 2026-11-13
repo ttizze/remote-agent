@@ -7,7 +7,7 @@ use agent_protocol::{
     ids::{ClientInputId, TurnId},
     protocol,
     session::{ProviderKind, SessionRef},
-    sync::{Content, Cursor, Key, Position, Removal, Window},
+    sync::{Content, Cursor, Key, Position, Window},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::{
@@ -24,6 +24,7 @@ mod executions;
 pub(in crate::host_rpc) mod history;
 mod imports;
 pub(super) mod jobs;
+mod journal;
 mod list;
 mod projects;
 mod rows;
@@ -43,9 +44,6 @@ pub(crate) struct Storage {
 pub(super) struct Committed {
     pub step: Step,
     pub cursor: Cursor,
-    pub rows: Vec<Row>,
-    pub removed: Vec<Removal<SessionRef>>,
-    pub reset: bool,
 }
 
 fn failure(error: impl std::fmt::Display) -> String {
@@ -340,12 +338,15 @@ impl Storage {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let connection = owned.as_mut().map_err(|error| error.clone())?;
+        let before = connection.total_changes();
         let result = read(connection);
-        // Publish only committed cursors, while still holding the single writer
-        // lock. Slow readers coalesce to one cursor and catch up from the rows.
+        let written = result.is_ok() && connection.total_changes() != before;
+        // Wake private resource waiters as well as streams after a successful
+        // write. Private changes keep the same public cursor; read transactions
+        // never notify themselves. Streams catch up from the journal.
         if let Ok(current) = cursor(connection) {
             self.changed.send_if_modified(|last| {
-                if *last == Some(current) {
+                if *last == Some(current) && !written {
                     return false;
                 }
                 *last = Some(current);
@@ -364,31 +365,16 @@ impl Storage {
             if existing_key(&transaction, id)?.is_some() {
                 return Ok(false);
             }
-            let sequence = Self::advance(&transaction)?;
-            history::insert_header(
-                &transaction,
-                id,
-                header,
-                &Counters::default(),
-                sequence.sequence,
+            history::insert_header(&transaction, id, header, &Counters::default())?;
+            Self::commit(
+                transaction,
+                Some(id),
+                Step::default(),
+                Vec::new(),
+                Vec::new(),
+                true,
             )?;
-            transaction.commit().map_err(failure)?;
             Ok(true)
-        })
-    }
-
-    fn advance(transaction: &Transaction<'_>) -> Result<Cursor, String> {
-        let previous = cursor(transaction)?;
-        let sequence = previous
-            .sequence
-            .checked_add(1)
-            .ok_or("conversation sequence exhausted")?;
-        transaction
-            .execute("UPDATE store SET seq=?1", [integer(sequence)?])
-            .map_err(failure)?;
-        Ok(Cursor {
-            sequence,
-            ..previous
         })
     }
 
@@ -409,14 +395,13 @@ impl Storage {
                 None => {
                     if matches!(&event, Event::Command { receipt: Some(_), .. } | Event::RejectedCommand { receipt: Some(_), .. }) { return self.missing(transaction, id, event); }
                     let Some(header) = create else { return self.missing(transaction, id, event); };
-                    let sequence = Self::advance(&transaction)?;
-                    (history::insert_header(&transaction, id, header, &Counters::default(), sequence.sequence)?, true)
+                    (history::insert_header(&transaction,id,header,&Counters::default())?, true)
                 }
             };
             if let Event::Provider {attempt,..}=&event
                 && !executions::read(&transaction,"e.thread=?2 AND e.attempt=?3",params![self.process.to_string(),key,attempt.to_string()])?.first().is_some_and(|execution|execution.accepting)
             {
-                return Ok(Committed {step:Step::default(),cursor:cursor(&transaction)?,rows:vec![],removed:vec![],reset:false});
+                return Ok(Committed {step:Step::default(),cursor:cursor(&transaction)?});
             }
             let state = rows::load(&transaction, key, self.process)?;
             let mut state = rows::hydrate(&transaction, key, self.process, state, &event)?;
@@ -455,13 +440,8 @@ impl Storage {
             let mut step = decision::step(&state, event, context);
             let from = cursor(&transaction)?;
             let changed = status_changed || !step.changes.is_empty()
-                || step.receipt.is_some()
                 || !step.continuations.is_empty();
-            let through = if changed && !created {
-                Self::advance(&transaction)?
-            } else {
-                from
-            };
+            let through = if changed || created { Self::next_cursor(&transaction)? } else { from };
             let admitted = step.changes.iter().find_map(|change| {
                 let Change::Item(item) = change else { return None; };
                 if !matches!(item.body, agent_protocol::items::ItemBody::UserMessage { .. }) { return None; }
@@ -507,20 +487,6 @@ change,
             if created || status_changed || !step.changes.is_empty() {
                 updated.extend(rows::write_header(&transaction, &rows::WriteScope { key, id, sequence: through.sequence, at: if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now}, process: self.process }, &state, admitted, Some(&previous_header), Some(context.steers))?);
             }
-            if let Some((operation, outcome)) = &step.receipt {
-                transaction
-                    .execute(
-                        "INSERT INTO receipts VALUES (?1,?2,?3,?4,?5)",
-                        params![
-                            operation.receipt_key(),
-                            id.provider.map(ProviderKind::key),
-                            id.id,
-                            integer(through.sequence)?,
-                            protocol::encode(outcome).map_err(failure)?,
-                        ],
-                    )
-                    .map_err(failure)?;
-            }
             for continuation in &step.continuations {
                 jobs::enqueue(
                     &transaction,
@@ -533,14 +499,7 @@ change,
                     },
                 )?;
             }
-            transaction.commit().map_err(failure)?;
-            Ok(Committed {
-                step,
-                cursor: through,
-                rows: updated,
-                removed,
-                reset: false,
-            })
+            Self::commit(transaction, Some(id), step, updated, removed, false)
         })
     }
 
@@ -564,35 +523,13 @@ change,
             return Err("conversation does not exist".into());
         };
         let mut step = Step::default();
-        let sequence = if let Some(outcome) = receipt {
+        if let Some(outcome) = receipt {
             step.outcome = outcome;
-            cursor(&transaction)?
         } else {
             step.outcome = Outcome::Rejected("conversation does not exist".into());
             step.receipt = Some((operation, step.outcome.clone()));
-            let sequence = Self::advance(&transaction)?;
-            transaction
-                .execute(
-                    "INSERT INTO receipts VALUES (?1,?2,?3,?4,?5)",
-                    params![
-                        operation.receipt_key(),
-                        id.provider.map(ProviderKind::key),
-                        id.id,
-                        integer(sequence.sequence)?,
-                        protocol::encode(&step.outcome).map_err(failure)?
-                    ],
-                )
-                .map_err(failure)?;
-            sequence
-        };
-        transaction.commit().map_err(failure)?;
-        Ok(Committed {
-            step,
-            cursor: sequence,
-            rows: Vec::new(),
-            removed: Vec::new(),
-            reset: false,
-        })
+        }
+        Self::commit(transaction, Some(id), step, Vec::new(), Vec::new(), false)
     }
 
     fn receipted(
@@ -667,44 +604,19 @@ change,
             return Ok(Message::Missing);
         };
         let current = cursor(connection)?;
-        let (pruned,history):(i64,i64)=connection.query_row("SELECT store.removals_pruned_through,t.history_seq FROM store,threads t WHERE t.key=?1",[key],|row|Ok((row.get(0)?,row.get(1)?))).map_err(failure)?;
-        let history = u64::try_from(history).map_err(failure)?;
-        let resume = agent_protocol::sync::can_resume(
-            cached,
-            current,
-            u64::try_from(pruned).map_err(failure)?,
-            history,
-        );
-        let floor = rows::window(
-            connection,
-            key,
-            // A replaced history, including its first completed import, resets
-            // the window just as the live replacement snapshot does.
-            window.filter(|_| {
-                cached.is_some_and(|cached| {
-                    cached.store == current.store && cached.sequence >= history
-                })
-            }),
-        )?;
+        if let Some(requested) = window
+            && rows::window(connection, key, Some(requested))? == requested
+            && let Some(message) = journal::replay(connection, Some(key), cached, current)?
+        {
+            return Ok(message);
+        }
+        let floor = rows::window(connection, key, None)?;
         let mut saved = rows::snapshot(connection, key, id, floor)?;
-        let message = if resume && window == Some(floor) {
-            let from = cached.expect("resumable cursor");
-            saved.retain(|row| row.version > from.sequence);
-            decision::records::summarize(&mut saved, decision::records::WORK_DETAIL_BYTES)?;
-            let removed = rows::removals(connection, key, id, from.sequence)?;
-            Message::Changes {
-                from,
-                through: current,
-                rows: saved,
-                removed,
-            }
-        } else {
-            decision::records::summarize(&mut saved, decision::records::WORK_DETAIL_BYTES)?;
-            Message::Snapshot {
-                cursor: current,
-                window: Some(floor),
-                rows: saved,
-            }
+        decision::records::summarize(&mut saved, decision::records::WORK_DETAIL_BYTES)?;
+        let message = Message::Snapshot {
+            cursor: current,
+            window: Some(floor),
+            rows: saved,
         };
         Ok(message)
     }

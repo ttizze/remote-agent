@@ -47,13 +47,9 @@ impl Storage {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
             let key = thread_key(&transaction, target)?;
-            let mut committed = Committed {
-                step: Step::default(),
-                cursor: cursor(&transaction)?,
-                rows: vec![],
-                removed: vec![],
-                reset: false,
-            };
+            let mut step = Step::default();
+            let mut updated = Vec::new();
+            let mut removed = Vec::new();
             let current = transaction
                 .query_row(
                     "SELECT seq FROM items WHERE thread=?1 AND id=?2",
@@ -71,25 +67,24 @@ impl Storage {
                 let turns = [(turn.id.clone(), turn)].into();
                 item.body = body;
                 item.deferred = false;
-                committed.cursor = Self::advance(&transaction)?;
+                let sequence = Self::next_cursor(&transaction)?;
                 rows::write(
                     &transaction,
                     &rows::WriteScope {
                         key,
                         id: target,
-                        sequence: committed.cursor.sequence,
+                        sequence: sequence.sequence,
                         at: 0,
                         process: self.process,
                     },
                     &Change::Item(item),
                     &turns,
-                    &mut committed.rows,
-                    &mut committed.removed,
+                    &mut updated,
+                    &mut removed,
                 )?;
-                committed.step.outcome = Outcome::Accepted;
+                step.outcome = Outcome::Accepted;
             }
-            transaction.commit().map_err(failure)?;
-            Ok(committed)
+            Self::commit(transaction, Some(target), step, updated, removed, false)
         })
     }
 }
@@ -159,10 +154,11 @@ mod tests {
             text: "full body".into(),
             phase: AssistantPhase::Final,
         };
+        let before_stale = storage.with(|connection| cursor(connection)).unwrap();
         let stale = storage
             .hydrate_body(&fork, &"item".into(), before.version, body.clone())
             .unwrap();
-        assert!(stale.rows.is_empty());
+        assert_eq!(stale.cursor, before_stale);
         assert!(
             storage
                 .item(&fork, &"item".into())
@@ -173,7 +169,13 @@ mod tests {
         let filled = storage
             .hydrate_body(&fork, &"item".into(), native.version, body.clone())
             .unwrap();
-        assert_eq!(filled.rows.len(), 1);
+        assert_eq!(
+            super::super::tests::events_since(&storage, &fork, before_stale)
+                .iter()
+                .map(|event| event.rows.len())
+                .sum::<usize>(),
+            1
+        );
         assert!(filled.cursor.sequence > native.version);
         let item = storage.item(&fork, &"item".into()).unwrap().unwrap();
         assert!(!item.deferred);
@@ -190,7 +192,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(duplicate.rows.is_empty());
+        assert_eq!(duplicate.cursor, filled.cursor);
         assert_eq!(
             storage.item(&fork, &"item".into()).unwrap().unwrap().body,
             body

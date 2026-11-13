@@ -69,15 +69,14 @@ impl Storage {
                 update => header.details.workspace.as_mut().filter(|workspace| workspace.generation == generation)
                     .and_then(|workspace| workspace.setup.as_mut()).is_some_and(|setup| apply(setup, update, now.max(0) as u64)),
             };
-            let mut result = Committed { step: Step::default(), cursor: cursor(&transaction)?, rows: vec![], removed: vec![], reset: false };
+            let mut step = Step::default();
+            let mut updated = Vec::new();
             if changed {
-                result.step.outcome = Outcome::Accepted;
-                result.cursor = Self::advance(&transaction)?;
-                transaction.execute("UPDATE threads SET seq=?1,body=?2 WHERE key=?3", params![integer(result.cursor.sequence)?, codec::header(&header, &counters)?, key]).map_err(failure)?;
-                result.rows.push(Row { key: Key::Thread(target.clone()), version: result.cursor.sequence, position: Position::Unordered, content: Content::Full(Arc::new(Record::Thread(header))) });
+                step.outcome = Outcome::Accepted;
+                transaction.execute("UPDATE threads SET body=?1 WHERE key=?2",params![codec::header(&header, &counters)?,key]).map_err(failure)?;
+                updated.push(Row { key: Key::Thread(target.clone()), version: 0, position: Position::Unordered, content: Content::Full(Arc::new(Record::Thread(header))) });
             }
-            transaction.commit().map_err(failure)?;
-            Ok(result)
+            Self::commit(transaction, Some(target), step, updated, Vec::new(), false)
         })
     }
     pub(in crate::host_rpc) fn workspace_scripts(

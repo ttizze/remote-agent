@@ -302,45 +302,48 @@ pub enum Catalog {
 
 // Replica updates can copy row maps without copying old message bodies.
 pub type Message = crate::sync::Message<SessionRef, std::sync::Arc<Record>>;
+pub type Event = crate::sync::Event<SessionRef, std::sync::Arc<Record>>;
 pub type Row = crate::sync::Row<SessionRef, std::sync::Arc<Record>>;
 pub type Replica = crate::sync::Replica<SessionRef, std::sync::Arc<Record>>;
 
 /// Every row has one identity and one position, including when its body is
 /// deferred. Check the domain content before applying any part of a frame.
 pub fn validate_message(message: &Message) -> Result<(), crate::sync::ApplyError> {
-    use crate::sync::{Content, Key, Position};
-    let rows = match message {
-        Message::Snapshot { rows, .. }
-        | Message::Changes { rows, .. }
-        | Message::Extend { rows, .. } => rows.as_slice(),
-        Message::Hydrate { row, .. } => std::slice::from_ref(row),
-        Message::Missing => return Ok(()),
-    };
-    for row in rows {
-        let record = match &row.content {
-            Content::Full(value) | Content::Summary(value) => value.as_ref(),
-        };
-        let valid = match (&row.key, &row.position, record) {
-            (Key::Thread(_), Position::Unordered, Record::Thread(_))
-            | (Key::Catalog(_), Position::Unordered, Record::Catalog(_)) => true,
-            (Key::Project(id), Position::Project { .. }, Record::Project(project)) => {
-                id == &project.id
-            }
-            (Key::Input { id, .. }, Position::Unordered, Record::Input(input)) => id == &input.id,
-            (Key::Request { id, .. }, Position::Unordered, Record::Request(request)) => {
-                id == &request.id
-            }
-            (Key::Turn { id, .. }, Position::Turn { ordinal }, Record::Turn(turn)) => {
-                id == &turn.id && ordinal == &turn.ordinal
-            }
-            (Key::Item { id, .. }, Position::Item { turn, position, .. }, Record::Item(item)) => {
-                id == &item.content.id && turn == &item.turn && position == &item.position
-            }
-            _ => false,
-        };
-        if !valid {
-            return Err(crate::sync::ApplyError::Identity);
+    match message {
+        Message::Snapshot { rows, .. } | Message::Extend { rows, .. } => {
+            rows.iter().try_for_each(validate_row)
         }
+        Message::Events { events, .. } => events
+            .iter()
+            .try_for_each(|event| event.rows.iter().try_for_each(validate_row)),
+        Message::Hydrate { row, .. } => validate_row(row),
+        Message::Missing => Ok(()),
+    }
+}
+
+fn validate_row(row: &Row) -> Result<(), crate::sync::ApplyError> {
+    use crate::sync::{Content, Key, Position};
+    let record = match &row.content {
+        Content::Full(value) | Content::Summary(value) => value.as_ref(),
+    };
+    let valid = match (&row.key, &row.position, record) {
+        (Key::Thread(_), Position::Unordered, Record::Thread(_))
+        | (Key::Catalog(_), Position::Unordered, Record::Catalog(_)) => true,
+        (Key::Project(id), Position::Project { .. }, Record::Project(project)) => id == &project.id,
+        (Key::Input { id, .. }, Position::Unordered, Record::Input(input)) => id == &input.id,
+        (Key::Request { id, .. }, Position::Unordered, Record::Request(request)) => {
+            id == &request.id
+        }
+        (Key::Turn { id, .. }, Position::Turn { ordinal }, Record::Turn(turn)) => {
+            id == &turn.id && ordinal == &turn.ordinal
+        }
+        (Key::Item { id, .. }, Position::Item { turn, position, .. }, Record::Item(item)) => {
+            id == &item.content.id && turn == &item.turn && position == &item.position
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err(crate::sync::ApplyError::Identity);
     }
     Ok(())
 }
@@ -383,7 +386,7 @@ fn validate_opened(expected: &SessionRef, output: &Opened) -> Result<(), &'stati
             if rows
                 .iter()
                 .any(|row| row.key == crate::sync::Key::Thread(expected.clone())) => {}
-        Message::Changes { .. } => {}
+        Message::Events { .. } => {}
         _ => return Err("conversation header is missing"),
     }
     validate_message(&output.initial).map_err(|_| "conversation row identity changed")

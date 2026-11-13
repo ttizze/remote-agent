@@ -1643,19 +1643,10 @@ async fn explicit_native_imports_append_missing_text_and_keep_settled_messages()
         .as_mut()
         .unwrap()[1] = Arc::new(external("updated answer"));
     let version = |message: records::Message| {
-        let agent_protocol::sync::Message::Snapshot { rows, .. } = message else {
+        let agent_protocol::sync::Message::Snapshot { cursor, .. } = message else {
             panic!("snapshot")
         };
-        rows.into_iter()
-            .find(|row| {
-                row.key
-                    == agent_protocol::sync::Key::Turn {
-                        thread: target.clone(),
-                        id: id.clone(),
-                    }
-            })
-            .unwrap()
-            .version
+        cursor.sequence
     };
     let before = version(storage.snapshot(&target, None, None).unwrap());
     storage.queue_import(&target, &native, now()).unwrap();
@@ -1663,7 +1654,7 @@ async fn explicit_native_imports_append_missing_text_and_keep_settled_messages()
         loop {
             let history = storage.history(&target, 0).unwrap();
             let turns = history.thread.turns.unwrap();
-            // Observe a versioned import result before asserting immutability.
+            // Observe the committed import event before asserting immutability.
             if version(storage.snapshot(&target, None, None).unwrap()) > before {
                 assert!(matches!(turns.last().unwrap().items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "external answer"));
                 assert_eq!(turns.len(), 2);

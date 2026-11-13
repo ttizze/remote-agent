@@ -695,11 +695,13 @@ pub(crate) fn set_activity(
         row.version = sequence;
         rows.push(row);
     }
-    let message = records::Message::Changes {
-        from,
+    let message = records::Message::Events {
         through: agent_protocol::sync::Cursor { sequence, ..from },
-        rows,
-        removed: Vec::new(),
+        events: vec![agent_protocol::sync::Event {
+            sequence: (agent_protocol::sync::Cursor { sequence, ..from }).sequence,
+            rows: rows,
+            removed: Vec::new(),
+        }],
     };
     let (next, _) = received(
         snapshot,

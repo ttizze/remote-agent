@@ -213,7 +213,7 @@ impl Runtime {
                         .project_snapshot()
                         .await
                         .map_err(|error| error.to_string())?;
-                    for (id, header, _) in storage.headers(false)? {
+                    for (id, header) in storage.headers(false)? {
                         if let Some(cwd) = header.state.workspace.cwd() {
                             service
                                 .inner

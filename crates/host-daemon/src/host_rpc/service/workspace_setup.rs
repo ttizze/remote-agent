@@ -175,7 +175,7 @@ impl HostRpcService {
                 Ok(Ok(headers)) => {
                     if let Some(inner) = owner.upgrade() {
                         let service = HostRpcService { inner };
-                        for (id, header, _) in headers {
+                        for (id, header) in headers {
                             if let Some(workspace) = header.details.workspace {
                                 service.schedule_setup_expiry(id, *workspace);
                             }

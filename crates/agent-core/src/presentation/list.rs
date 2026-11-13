@@ -1224,19 +1224,25 @@ mod tests {
             )
             .unwrap();
             let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
-            let message = records::Message::Changes {
-                from,
+            let message = records::Message::Events {
                 through: Cursor {
                     sequence: from.sequence + 1,
                     ..from
                 },
-                rows: vec![records::Row {
-                    key: Key::Project(project.id.clone()),
-                    version: from.sequence + 1,
-                    position: Position::Project { position: 100 },
-                    content: Content::Full(Arc::new(records::Record::Project(project))),
+                events: vec![agent_protocol::sync::Event {
+                    sequence: (Cursor {
+                        sequence: from.sequence + 1,
+                        ..from
+                    })
+                    .sequence,
+                    rows: vec![records::Row {
+                        key: Key::Project(project.id.clone()),
+                        version: from.sequence + 1,
+                        position: Position::Project { position: 100 },
+                        content: Content::Full(Arc::new(records::Record::Project(project))),
+                    }],
+                    removed: Vec::new(),
                 }],
-                removed: Vec::new(),
             };
             snapshot = crate::state::list_sync::received(
                 &snapshot,
