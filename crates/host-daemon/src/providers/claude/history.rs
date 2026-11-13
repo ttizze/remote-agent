@@ -245,8 +245,8 @@ struct SummaryMetadata<'a> {
 pub(super) struct Summary {
     pub thread: Thread,
     pub branch: Option<String>,
-    /// SDK entrypoints also occur on CLI reviews launched from an SDK session.
-    /// Only Host ownership distinguishes these from the person's Bex conversations.
+    /// SDK runs can use a custom entrypoint; their first input still has SDK provenance.
+    /// Host ownership distinguishes these from the person's Bex conversations.
     pub automated: bool,
 }
 
@@ -292,6 +292,7 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
     };
     let mut branch = None;
     let mut entrypoint = None;
+    let mut sdk_input = None;
     for line in head.split(|byte| *byte == b'\n').chain(
         tail.split(|byte| *byte == b'\n')
             .skip(usize::from(offset > head.len() as u64)),
@@ -311,6 +312,9 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
         }
         if entrypoint.is_none() {
             entrypoint = value.entrypoint.as_str().map(str::to_owned);
+        }
+        if sdk_input.is_none() && value.kind == "user" {
+            sdk_input = Some(value.prompt_source.as_str() == Some("sdk"));
         }
         if let Some(saved_branch) = value.git_branch.as_str() {
             branch = Some(saved_branch.to_owned());
@@ -337,7 +341,8 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
     Ok(Summary {
         thread,
         branch,
-        automated: matches!(entrypoint.as_deref(), Some("sdk-cli" | "sdk-ts" | "sdk-py")),
+        automated: sdk_input == Some(true)
+            || matches!(entrypoint.as_deref(), Some("sdk-cli" | "sdk-ts" | "sdk-py")),
     })
 }
 
@@ -1239,6 +1244,53 @@ mod tests {
             .data
             .is_empty()
         );
+    }
+
+    #[test]
+    fn sdk_input_with_a_custom_entrypoint_stays_out_of_task_lists() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("projects/p");
+        fs::create_dir_all(&project).unwrap();
+        let transcripts = [
+            ("review", ["sdk", "sdk"]),
+            ("host", ["sdk", "sdk"]),
+            ("review-resumed-interactively", ["sdk", "cli"]),
+            ("terminal-resumed-by-sdk", ["cli", "sdk"]),
+            ("legacy-terminal-resumed-by-sdk", ["", "sdk"]),
+        ];
+        for (index, (name, sources)) in transcripts.into_iter().enumerate() {
+            let id = Uuid::from_u128(index as u128 + 1).to_string();
+            let mut rows = json!({"type":"attachment","sessionId":id,"entrypoint":"t3-code","promptSource":"sdk"}).to_string() + "\n";
+            for source in sources {
+                let mut row = json!({"type":"user","sessionId":id,"entrypoint":"t3-code","message":{"content":name}});
+                if !source.is_empty() {
+                    row["promptSource"] = json!(source);
+                }
+                rows.push_str(&format!("{row}\n"));
+            }
+            fs::write(project.join(format!("{id}.jsonl")), rows).unwrap();
+        }
+        let owned = HashSet::from([Uuid::from_u128(2).to_string()]);
+        let listed = |search, owned| {
+            let mut names: Vec<_> = list_page(root.path(), vec![], search, None, owned, 10)
+                .unwrap()
+                .data
+                .into_iter()
+                .map(|summary| summary.thread.preview.unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            listed("", Some(&owned)),
+            [
+                "host",
+                "legacy-terminal-resumed-by-sdk",
+                "terminal-resumed-by-sdk"
+            ]
+        );
+        assert!(listed("review", Some(&owned)).is_empty());
+        assert_eq!(listed("", None).len(), transcripts.len());
     }
     #[test]
     fn a_send_now_prompt_continues_the_turn_it_cut() {
