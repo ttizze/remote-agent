@@ -237,7 +237,7 @@ extension LaunchUITests {
         XCTAssertFalse(app.staticTexts["notice"].exists)
         app.terminate()
         app.launch()
-        let row = prefixedElement(app, prefix: "tasks.row.claude:")
+        let row = prefixedElement(app, prefix: "tasks.row.bex:")
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         XCTAssertTrue(answer.waitUntilExists(timeout: 20))
         message.tap()

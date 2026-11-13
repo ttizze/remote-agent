@@ -210,49 +210,7 @@ impl HostRpcService {
             })
             .and_then(|setup| setup.worktree_path.clone())
             .filter(|path| Path::new(path).exists());
-        if matches!(strategy, WorkspaceStrategy::Root)
-            && workspace.created_worktree
-            && let Some(path) = previous
-                .as_ref()
-                .and_then(|setup| setup.worktree_path.as_ref())
-            && previous
-                .as_ref()
-                .and_then(|setup| setup.branch.as_ref())
-                .is_some_and(|branch| !branch.is_empty())
-            && path != &workspace.project_cwd
-            && !self
-                .inner
-                .conversation
-                .storage
-                .has_bindings(target)
-                .map_err(super::super::runtime::storage_failure)?
-        {
-            self.cleanup_setup_resources(
-                Some(path.clone()),
-                previous.as_ref().and_then(|setup| setup.branch.clone()),
-                previous
-                    .as_ref()
-                    .and_then(|setup| setup.terminal_handle.as_deref()),
-            )
-            .await?;
-        }
-        if workspace.created_worktree
-            && previous
-                .as_ref()
-                .is_some_and(|setup| setup.phase == SetupPhase::Cancelled)
-            && let Some(path) = previous
-                .as_ref()
-                .and_then(|setup| setup.worktree_path.clone())
-        {
-            self.cleanup_setup_resources(
-                Some(path),
-                previous.as_ref().and_then(|setup| setup.branch.clone()),
-                previous
-                    .as_ref()
-                    .and_then(|setup| setup.terminal_handle.as_deref()),
-            )
-            .await?;
-        }
+
         workspace.created_worktree =
             matches!(strategy, WorkspaceStrategy::Worktree { .. }) && retained.is_none();
         let mut setup = match &strategy {

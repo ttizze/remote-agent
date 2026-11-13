@@ -172,13 +172,12 @@ impl HostRpcService {
                     .storage
                     .item(target, &input.to_string().into())?
                     .is_none()
-                    && !self
+                    && self
                         .inner
                         .conversation
                         .storage
-                        .state(target)?
-                        .inputs
-                        .contains_key(input)
+                        .input(target, input)?
+                        .is_none()
                 {
                     task.delivery = ContinuationDelivery::Completed;
                     changed = true;
@@ -237,13 +236,13 @@ impl HostRpcService {
                         if completed {
                             task.delivery = ContinuationDelivery::Completed;
                         } else {
-                            let state = self
+                            let input = self
                                 .inner
                                 .conversation
                                 .storage
-                                .state(target)
+                                .input(target, &task.submission.client_user_message_id)
                                 .map_err(anyhow::Error::msg)?;
-                            match state.inputs.get(&task.submission.client_user_message_id) {
+                            match input {
                                 Some(input) => match &input.state {
                                     agent_protocol::conversation::InputState::Failed(error) => task.delivery = ContinuationDelivery::Failed(error.message.clone()),
                                     agent_protocol::conversation::InputState::Unknown { .. } => task.delivery = ContinuationDelivery::Failed("継続の配送結果を確認できません。会話を開いて確認してください。".into()),
@@ -281,6 +280,19 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn update_without_an_installed_codex_records_no_interrupted_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let codex = crate::providers::codex::Codex::new(Err("not installed".into()));
+        let service = HostRpcService::new([codex.into()], directory.path().join("projects.json"));
+        service.set_history_scope(directory.path().to_owned(), true);
+        service.prepare_update().await.unwrap();
+        let saved: Recovery =
+            serde_json::from_slice(&std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap())
+                .unwrap();
+        assert!(saved.tasks.is_empty());
+    }
+
+    #[tokio::test]
     async fn update_handover_continues_running_work_once_and_settles_stopped_or_retrying_work() {
         for mode in ["stopped", "retrying", "running"] {
             use crate::host_rpc::runtime::{Runtime, native_fixture::NativeAgent};
@@ -313,6 +325,7 @@ mod tests {
             let context = Context {
                 preparation: None,
                 rewind_binding: None,
+                imported_turns: &[],
                 now: 100,
                 seed: uuid::Uuid::new_v4(),
                 steers: true,
@@ -545,6 +558,7 @@ mod tests {
         let context = Context {
             preparation: None,
             rewind_binding: None,
+            imported_turns: &[],
             now: 200,
             seed: uuid::Uuid::new_v4(),
             steers: true,

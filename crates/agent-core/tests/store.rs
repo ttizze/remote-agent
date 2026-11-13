@@ -3139,7 +3139,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
         if navigate {
             new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
-        writer.reply(&request, json!({"result":{"model":{"provider":"codex","id":"fork-model"},"thread":{"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
+        writer.reply(&request, json!({"result":{"model":{"provider":"codex","id":"fork-model"},"thread":{"activeProvider":"codex","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
         if !navigate {
             loop {
                 let opening = read(&mut reader).await;

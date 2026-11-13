@@ -848,7 +848,7 @@ struct Worker {
     stream: Option<String>,
     interrupt: watch::Sender<Option<(String, Result<(), String>)>>,
     work: watch::Sender<Work>,
-    /// The roster last published as the conversation's Waiting state.
+    /// The last published background roster, including while the turn is running.
     waiting: Vec<BackgroundTask>,
     /// Background work that ended while Claude waited, keyed by its task, for
     /// the notification that starts the turn Claude wakes for.
@@ -1197,8 +1197,6 @@ impl Worker {
                                 response.steer();
                             }
                         }
-                        // A requested stop owns the response's terminal result,
-                        // which can reach the Host before its acknowledgement.
                         self.publish_waiting(&response).await?;
                         continue;
                     }

@@ -461,9 +461,6 @@ impl Screen {
     fn print(&mut self, ch: char) {
         #[cfg(test)]
         PRINTED_UNITS.set(PRINTED_UNITS.get() + ch.len_utf16());
-        if ('\u{80}'..='\u{9f}').contains(&ch) {
-            return;
-        }
         let line = &mut self.lines[self.row];
         let plain = Arc::default();
         while line.cells.len() < self.col {
@@ -501,7 +498,6 @@ impl Screen {
             }
             b'\r' => self.col = 0,
             8 => self.col = self.col.saturating_sub(1),
-            b'\t' => self.print('\t'),
             _ => {}
         }
     }
@@ -585,12 +581,23 @@ fn tail(text: &str) -> (String, bool) {
     }
     let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
     let mut prefix = "";
-    if let Some(at) = text[line_start..start].rfind("\x1b[") {
-        let at = line_start + at;
-        if let Some(end) = text[at..].find('m').map(|end| at + end + 1) {
-            prefix = &text[at..end];
-            start = start.max(end);
+    let mut cursor = line_start;
+    while cursor < start {
+        let Some(at) = text[cursor..]
+            .find("\x1b[")
+            .map(|at| cursor + at)
+            .filter(|at| *at < start)
+        else {
+            break;
+        };
+        let Some(end) = text[at..].find('m').map(|end| at + end) else {
+            break;
+        };
+        prefix = &text[at..=end];
+        if end >= start {
+            return (format!("{prefix}{}", &text[end + 1..]), true);
         }
+        cursor = end + 1;
     }
     if prefix == "\x1b[0m" {
         prefix = "";

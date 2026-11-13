@@ -303,6 +303,7 @@ mod tests {
                 Context {
                     preparation: Some(&saved),
                     rewind_binding: None,
+                    imported_turns: &[],
                     external_busy: false,
                     now: 100,
                     seed: Uuid::from_u128(3),
@@ -414,6 +415,7 @@ mod tests {
             Context {
                 preparation: Some(&saved),
                 rewind_binding: None,
+                imported_turns: &[],
                 external_busy: false,
                 now: 100,
                 seed: Uuid::from_u128(11),

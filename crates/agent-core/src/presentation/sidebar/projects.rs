@@ -67,9 +67,7 @@ impl Snapshot {
                     .map(|thread| thread.project_id.clone())
             })
             .unwrap_or_default()
-        } else if matches!(&navigation.draft_key, DraftKey::Local { key } if key.is_empty())
-            || !self.sidebar_catalog_ready()
-        {
+        } else if self.is_welcome_draft(&navigation.draft_key) || !self.sidebar_catalog_ready() {
             ProjectMembership::Unknown {}
         } else if let Some(project) = self.directory_project(&navigation.cwd) {
             ProjectMembership::Assigned(project.id)
@@ -486,6 +484,35 @@ mod tests {
             ProjectMembership::Unknown {},
             "an initial empty composer does not discard restored scope"
         );
+        let edited = crate::state::reduce(
+            &snapshot,
+            "",
+            crate::state::Event::Intent(crate::state::Intent::SetDraftText {
+                thread_id: DraftKey::default(),
+                text: "welcome work".into(),
+            }),
+        )
+        .0;
+        assert!(!edited.panes.primary().navigation.draft_key.is_empty());
+        let returned = crate::state::reduce(
+            &edited,
+            "",
+            crate::state::Event::Intent(crate::state::Intent::ShowThreadList),
+        )
+        .0;
+        let restored =
+            crate::persistence::decode(&crate::persistence::encode(&edited).unwrap()).unwrap();
+        for welcome in [edited, returned, restored] {
+            let route = welcome.sidebar_route("host".into(), &welcome.panes.primary().navigation);
+            assert_eq!(route.project, ProjectMembership::Unknown {});
+            assert!(!widens_scope(
+                &[ProjectKey {
+                    host_id: "host".into(),
+                    project_id: "project".into()
+                }],
+                &route
+            ));
+        }
         let id = serde_json::from_value(json!({"provider":"codex", "id":"linked-thread"})).unwrap();
         let linked = Navigation {
             thread_id: Some(id),

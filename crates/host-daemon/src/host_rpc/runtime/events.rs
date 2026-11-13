@@ -584,6 +584,9 @@ impl Runtime {
                 _ => ItemStatus::Completed,
             };
             if let Some(Observation::Item { body, status, .. }) = pending {
+                if !matches!(*status, ItemStatus::Running | ItemStatus::Unknown) {
+                    continue;
+                }
                 if let ItemBody::CommandExecution {
                     output,
                     output_omitted,
@@ -593,12 +596,14 @@ impl Runtime {
                     *output = tail.text;
                     // Running rows omit their inline body while the live stream
                     // owns it. That placeholder isn't evidence of truncation.
-                    *output_omitted = tail.truncated
-                        || (!matches!(*status, ItemStatus::Running | ItemStatus::Unknown)
-                            && *output_omitted);
+                    *output_omitted = tail.truncated;
                     *status = item_status;
                 }
-            } else if let Some(mut item) = self.storage.item(target, &key.item)? {
+            } else if let Some(mut item) = self
+                .storage
+                .item(target, &key.item)?
+                .filter(|item| matches!(item.status, ItemStatus::Running | ItemStatus::Unknown))
+            {
                 if let ItemBody::CommandExecution {
                     output,
                     output_omitted,
@@ -607,13 +612,13 @@ impl Runtime {
                 {
                     *output = tail.text;
                     *output_omitted = tail.truncated;
+                    observations.push(Observation::Item {
+                        deferred: false,
+                        id: key.item,
+                        status: item_status,
+                        body: item.body,
+                    });
                 }
-                observations.push(Observation::Item {
-                    deferred: false,
-                    id: key.item,
-                    status: item_status,
-                    body: item.body,
-                });
             }
         }
         Ok(())

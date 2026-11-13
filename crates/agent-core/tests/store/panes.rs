@@ -280,6 +280,13 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
         })
         .await
         .unwrap();
+    let original = store
+        .snapshot()
+        .panes
+        .primary()
+        .navigation
+        .draft_key
+        .clone();
     let pane = store.open_pane("/fixture".into()).unwrap();
     let preparing = tokio::spawn({
         let pane = pane.clone();

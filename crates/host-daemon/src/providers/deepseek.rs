@@ -577,28 +577,20 @@ impl DeepSeek {
                 choices,
             },
         };
-        let execution = self.0.scopes.observe(&AgentChange::Session {
+        let change = AgentChange::Request {
             session: session(id),
-            change: SessionChange::Status {
-                status: SessionStatus::Running,
+            origin: RequestOrigin {
+                instance: rpc.instance,
+                native_id: value["id"].clone(),
+                provider: PROVIDER,
+                source: rpc.clone(),
             },
-        });
-        crate::providers::emit_for(
-            &self.0.events,
-            AgentChange::Request {
-                session: session(id),
-                origin: RequestOrigin {
-                    instance: rpc.instance,
-                    native_id: value["id"].clone(),
-                    provider: PROVIDER,
-                    source: rpc.clone(),
-                },
-                request,
-            },
-            execution,
-        )
-        .await
-        .map_err(failure)
+            request,
+        };
+        let execution = self.0.scopes.observe(&change);
+        crate::providers::emit_for(&self.0.events, change, execution)
+            .await
+            .map_err(failure)
     }
 }
 

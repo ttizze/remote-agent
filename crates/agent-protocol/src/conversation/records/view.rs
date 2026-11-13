@@ -148,7 +148,8 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
                 error: match &turn.state {
                     Execution::Failed(error) => Some(error.clone()),
                     _ => turn.error.clone(),
-                },
+                }
+                .filter(|error| !error.message.is_empty()),
             })
         })
         .collect();

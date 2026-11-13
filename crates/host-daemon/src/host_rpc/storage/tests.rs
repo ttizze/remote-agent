@@ -17,6 +17,7 @@ fn context(seed: u128) -> Context<'static> {
     Context {
         preparation: None,
         rewind_binding: None,
+        imported_turns: &[],
         external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),
@@ -2920,69 +2921,113 @@ fn external_reimport_finishes_text_that_was_first_seen_while_running() {
         ItemBody, ItemStatus, Thread as NativeThread, ThreadResponse, Turn as NativeTurn,
         TurnStatus,
     };
-    let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("state.sqlite"));
-    let target = address("external-continuation");
-    let response = |turn: &str, status, text: &str| ThreadResponse {
-        thread: NativeThread {
-            id: Some(target.clone()),
-            turns: Some(vec![Arc::new(NativeTurn {
-                id: turn.into(),
-                status,
-                items: Some(vec![Arc::new(agent_protocol::items::Item::new(
-                    format!("{turn}-answer").into(),
-                    if status == TurnStatus::Running {
-                        ItemStatus::Running
-                    } else {
-                        ItemStatus::Completed
-                    },
-                    ItemBody::AssistantText {
-                        text: text.into(),
-                        phase: Default::default(),
-                    },
-                ))]),
+    for updating in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let mut storage = Storage::open(&path);
+        let target = address("external-continuation");
+        let response = |turn: &str, status, text: &str| ThreadResponse {
+            thread: NativeThread {
+                id: Some(target.clone()),
+                turns: Some(vec![Arc::new(NativeTurn {
+                    id: turn.into(),
+                    status,
+                    items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                        format!("{turn}-answer").into(),
+                        if status == TurnStatus::Running {
+                            ItemStatus::Running
+                        } else {
+                            ItemStatus::Completed
+                        },
+                        ItemBody::AssistantText {
+                            text: text.into(),
+                            phase: Default::default(),
+                        },
+                    ))]),
+                    ..Default::default()
+                })]),
                 ..Default::default()
-            })]),
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    };
-    storage
-        .import(
-            &target,
-            &response("old", TurnStatus::Completed, "earlier answer"),
-            Some(&target),
-            1,
-        )
-        .unwrap();
-    for (at, status, text) in [
-        (2, TurnStatus::Running, "partial"),
-        (3, TurnStatus::Completed, "final answer"),
-    ] {
-        storage.queue_import(&target, &target, at).unwrap();
-        let claim = storage
-            .claim(at, 16)
-            .unwrap()
-            .into_iter()
-            .find(|claim| matches!(claim.work, jobs::Work::Import { .. }))
-            .unwrap();
+        };
         storage
-            .reimport(
+            .import(
                 &target,
-                &target,
-                claim.id,
-                claim.attempt,
-                &response("new", status, text),
-                at,
+                &response("old", TurnStatus::Completed, "earlier answer"),
+                Some(&target),
+                1,
             )
             .unwrap();
+        for (at, status, text) in [
+            (2, TurnStatus::Running, "partial"),
+            (3, TurnStatus::Completed, "final answer"),
+        ] {
+            storage.queue_import(&target, &target, at).unwrap();
+            let claim = storage
+                .claim(at, 16)
+                .unwrap()
+                .into_iter()
+                .find(|claim| matches!(claim.work, jobs::Work::Import { .. }))
+                .unwrap();
+            storage
+                .reimport(
+                    &target,
+                    &target,
+                    claim.id,
+                    claim.attempt,
+                    &response("new", status, text),
+                    at,
+                )
+                .unwrap();
+            if status == TurnStatus::Running {
+                drop(storage);
+                storage = Storage::open(&path);
+                let restarted = storage
+                    .decide(
+                        &target,
+                        Event::Restart {
+                            updating,
+                            continue_after_restart: true,
+                        },
+                        context(20),
+                        None,
+                    )
+                    .unwrap();
+                assert!(restarted.step.actions.is_empty());
+                assert!(restarted.step.continuations.is_empty());
+                assert!(matches!(
+                    storage
+                        .state(&target)
+                        .unwrap()
+                        .active_turn()
+                        .map(|turn| &turn.state),
+                    Some(TurnState::Running { .. })
+                ));
+                assert!(
+                    storage
+                        .claim(20, 16)
+                        .unwrap()
+                        .iter()
+                        .all(|claim| !matches!(claim.work, jobs::Work::Continue { .. }))
+                );
+                assert!(
+                    storage
+                        .decide(&target, submit(99), context(99), None)
+                        .unwrap()
+                        .step
+                        .actions
+                        .is_empty(),
+                    "external execution still owns the session"
+                );
+            }
+        }
+        let history = storage.history(&target, 0).unwrap();
+        let turn = history.thread.turns.as_ref().unwrap().last().unwrap();
+        assert_eq!(turn.status, TurnStatus::Completed);
+        let item = &turn.items.as_ref().unwrap()[0];
+        assert_eq!(item.status, ItemStatus::Completed);
+        assert!(matches!(item.body(),ItemBody::AssistantText {text,..} if text=="final answer"));
     }
-    let history = storage.history(&target, 0).unwrap();
-    let turn = history.thread.turns.as_ref().unwrap().last().unwrap();
-    assert_eq!(turn.status, TurnStatus::Completed);
-    let item = &turn.items.as_ref().unwrap()[0];
-    assert_eq!(item.status, ItemStatus::Completed);
-    assert!(matches!(item.body(),ItemBody::AssistantText {text,..} if text=="final answer"));
 }
 
 #[test]

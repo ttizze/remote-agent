@@ -817,6 +817,8 @@ impl Default for Step {
 pub struct Context<'a> {
     pub preparation: Option<&'a records::WorkspacePreparation>,
     pub rewind_binding: Option<&'a Binding>,
+    /// Native work imported from another process is not ours to interrupt or resume.
+    pub imported_turns: &'a [TurnId],
     /// Native work is active before its first turn can be materialized.
     pub external_busy: bool,
     pub now: i64,

@@ -2,6 +2,96 @@
   "reference": "T3 Code 4c361199f4 packages/shared/src/terminalOutput.ts and apps/server/src/orchestration-v2/CommandOutputHub.ts:87-104",
   "cases": [
     {
+      "name": "cut inside styled escape",
+      "steps": [
+        {
+          "text": "\u001b[31maaaaaaaaaa\u001b[32m",
+          "repeat": 1,
+          "expected": [
+            [
+              "\u001b[0;31maaaaaaaaaa\u001b[0m",
+              1
+            ]
+          ],
+          "truncated": false
+        },
+        {
+          "text": "b",
+          "repeat": 65526,
+          "expected": [
+            [
+              "\u001b[0;32m",
+              1
+            ],
+            [
+              "b",
+              65526
+            ],
+            [
+              "\u001b[0m",
+              1
+            ]
+          ],
+          "truncated": true
+        }
+      ],
+      "after": [
+        [
+          "\u001b[0;32m",
+          1
+        ],
+        [
+          "b",
+          65526
+        ],
+        [
+          "!\u001b[0m",
+          1
+        ]
+      ]
+    },
+    {
+      "name": "cut inside reset escape",
+      "steps": [
+        {
+          "text": "\u001b[31maaa\u001b[0m",
+          "repeat": 1,
+          "expected": [
+            [
+              "\u001b[0;31maaa\u001b[0m",
+              1
+            ]
+          ],
+          "truncated": false
+        },
+        {
+          "text": "b",
+          "repeat": 65533,
+          "expected": [
+            [
+              "\u001b[0m",
+              1
+            ],
+            [
+              "b",
+              65533
+            ]
+          ],
+          "truncated": true
+        }
+      ],
+      "after": [
+        [
+          "b",
+          65533
+        ],
+        [
+          "!",
+          1
+        ]
+      ]
+    },
+    {
       "name": "CJK tail",
       "steps": [
         {

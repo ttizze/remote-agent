@@ -195,7 +195,7 @@ extension LaunchUITests {
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "value == %@", "完了・未確認")).firstMatch.exists)
         startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:bex-task:")
+        let row = prefixedElement(app, prefix: "tasks.row.bex:")
         XCTAssertTrue(row.waitUntilExists(timeout: 10))
         let running = expectation(for: NSPredicate(format: "value == %@", "実行中"), evaluatedWith: row)
         wait(for: [running], timeout: 10)

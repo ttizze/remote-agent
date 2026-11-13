@@ -591,8 +591,13 @@ async fn closing_the_running_setup_terminal_reports_failure_without_starting_the
 #[cfg(unix)]
 #[tokio::test]
 async fn work_locally_cancels_setup_and_continues_the_same_input_at_the_project_root() {
-    for existing in [false, true] {
-        let fixture = Fixture::new(script("printf 'waiting\\n'; sleep 120", false)).await;
+    for (existing, failed) in [(false, false), (true, false), (false, true), (true, true)] {
+        let command = if failed {
+            "printf 'failed\\n'; exit 1"
+        } else {
+            "printf 'waiting\\n'; sleep 120"
+        };
+        let fixture = Fixture::new(script(command, false)).await;
         let client = fixture.host.open_session();
         let mut creation = fixture.request("main", false);
         if existing {
@@ -617,6 +622,9 @@ async fn work_locally_cancels_setup_and_continues_the_same_input_at_the_project_
         }
         let (opened, mut updates) = admit(&fixture.host, client.id(), &creation).await;
         let running = setup_until(&mut updates, |setup| {
+            if failed {
+                return setup.phase == SetupPhase::Failed;
+            }
             setup.stages[2]
                 .tail
                 .iter()
@@ -645,7 +653,8 @@ async fn work_locally_cancels_setup_and_continues_the_same_input_at_the_project_
         assert!(row.workspace_setup.is_none());
         assert_eq!(
             Path::new(running.worktree_path.as_ref().unwrap()).exists(),
-            existing
+            existing || failed,
+            "Work locally preserves a failed checkout, and only cancels a fresh running one"
         );
         assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
     }
@@ -1026,7 +1035,7 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
                         },
                     },
                 },
-                decision::Context {preparation:None,rewind_binding:None,external_busy:false,now:100,seed:Uuid::new_v4(),steers:false,steer_ready:true},
+                decision::Context {preparation:None,rewind_binding:None,imported_turns:&[],external_busy:false,now:100,seed:Uuid::new_v4(),steers:false,steer_ready:true},
                 None,
             )
             .unwrap();

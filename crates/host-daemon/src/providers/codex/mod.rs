@@ -537,24 +537,56 @@ fn notification_change(
 }
 
 /// Provider-specific notifications end at this adapter boundary.
-pub(crate) fn event_change(
+pub(crate) fn event_changes(
     instance: uuid::Uuid,
     message: &RpcMessage<'_>,
-) -> Result<Option<AgentChange>, String> {
+) -> Result<Vec<AgentChange>, String> {
     if matches!(
         message.method(),
         Some("process/outputDelta" | "process/exited")
     ) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     if message.kind() != RpcMessageKind::Notification {
         return Err("expected native notification".into());
     }
     let params: Value = message.params().map_err(|e| e.to_string())?;
+    let children: Vec<&str> = match (message.method(), params["item"]["type"].as_str()) {
+        (Some("item/started" | "item/completed"), Some("collabAgentToolCall"))
+            if params["item"]["tool"] == "spawnAgent" =>
+        {
+            params["item"]["receiverThreadIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect()
+        }
+        (Some("item/started" | "item/completed"), Some("subAgentActivity"))
+            if params["item"]["kind"] == "started" =>
+        {
+            params["item"]["agentThreadId"]
+                .as_str()
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut changes = Vec::new();
+    for child in children {
+        changes.push(AgentChange::TaskParent {
+            session: SessionRef::new(ProviderKind::Codex, child.into()).map_err(str::to_owned)?,
+            parent: SessionRef::new(
+                ProviderKind::Codex,
+                params["threadId"].as_str().unwrap_or_default().into(),
+            )
+            .map_err(str::to_owned)?,
+        });
+    }
     let change = if message.method() == Some("thread/started") {
         let thread = native::parse_thread(params["thread"].clone()).map_err(|e| e.to_string())?;
         let Some(parent) = thread.parent_id else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         AgentChange::TaskParent {
             session: thread.id.expect("native thread has an ID"),
@@ -587,9 +619,10 @@ pub(crate) fn event_change(
                 .map_err(|e| e.to_string())?,
         }
     } else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    Ok(Some(change))
+    changes.push(change);
+    Ok(changes)
 }
 
 #[derive(serde::Deserialize)]
@@ -1230,7 +1263,7 @@ impl Agent for Codex {
                                 refresh_auth_tokens(&accounts, &process, &line).await;
                             });
                         } else if request.kind() == RpcMessageKind::Request {
-                            let admission = admit_request(
+                            admit_request(
                                 instance,
                                 stopped.clone(),
                                 &process,
@@ -1239,42 +1272,41 @@ impl Agent for Codex {
                                 &line,
                             )
                             .await;
-                            if let Err(error) = &admission {
-                                tracing::warn!(target: "agent", operation = "host.codex.request_rejected", message = %error);
-                            }
-                            if let Err(error) = admission
-                                && let Ok(response) = request.error(-32000, &error)
-                            {
-                                let _ = process.send_raw(&response).await;
-                            }
                         } else {
-                            let result = match event_change(instance, &request) {
-                                Ok(Some(change)) => {
-                                    subscriptions.observe(&change);
-                                    let background = rosters.observe(
-                                        &change,
-                                        &request.params::<Value>().unwrap_or_default(),
-                                    );
-                                    wake(&process, &change, background.continuations);
-                                    let child =
-                                        if let AgentChange::TaskParent { session, .. } = &change {
-                                            Some(session.id.clone())
-                                        } else {
-                                            None
-                                        };
-                                    let execution = scopes.observe(&change);
-                                    let result = emit_all(
-                                        &output,
-                                        [Some(change), background.roster],
-                                        execution,
-                                    )
-                                    .await;
-                                    if let (Ok(()), Some(child)) = (&result, child) {
-                                        scopes.admit(&child);
+                            let result = match event_changes(instance, &request) {
+                                Ok(changes) => {
+                                    async {
+                                        for change in changes {
+                                            subscriptions.observe(&change);
+                                            let background = rosters.observe(
+                                                &change,
+                                                &request.params::<Value>().unwrap_or_default(),
+                                            );
+                                            wake(&process, &change, background.continuations);
+                                            let child =
+                                                if let AgentChange::TaskParent { session, .. } =
+                                                    &change
+                                                {
+                                                    Some(session.id.clone())
+                                                } else {
+                                                    None
+                                                };
+                                            let execution = scopes.observe(&change);
+                                            let result = emit_all(
+                                                &output,
+                                                [Some(change), background.roster],
+                                                execution,
+                                            )
+                                            .await;
+                                            result?;
+                                            if let Some(child) = child {
+                                                scopes.admit(&child);
+                                            }
+                                        }
+                                        Ok(())
                                     }
-                                    result
+                                    .await
                                 }
-                                Ok(None) => Ok(()),
                                 Err(error) => Err(error),
                             };
                             if let Err(error) = result {
@@ -1403,11 +1435,22 @@ async fn admit_request(
     output: &tokio::sync::mpsc::Sender<AgentEvent>,
     scopes: &super::scopes::Scopes,
     line: &str,
-) -> Result<(), String> {
-    let request = serde_json::from_str(line).map_err(|error| error.to_string())?;
-    let change = request_change(instance, stopped, request, process.clone())?;
-    let execution = scopes.observe(&change);
-    crate::providers::emit_for(output, change, execution).await
+) {
+    let result: Result<(), String> = async {
+        let request = serde_json::from_str(line).map_err(|error| error.to_string())?;
+        let change = request_change(instance, stopped, request, process.clone())?;
+        let execution = scopes.observe(&change);
+        crate::providers::emit_for(output, change, execution).await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(target: "agent", operation="host.codex.request_rejected", message=%error);
+        if let Ok(request) = RpcMessage::parse(line)
+            && let Ok(response) = request.error(-32000, &error)
+        {
+            let _ = process.send_raw(&response).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1473,6 +1516,88 @@ rl.on('line', line => {
             matches!(background.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "background")
         );
         agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_recorded_subagent_without_thread_started_can_ask_for_approval_and_finish() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let rows: Vec<Value> = include_str!("../fixtures/subagent_v2_approval/codex_transcript.ndjson")
+                .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            let root = rows.iter().find(|row| row["frame"]["method"] == "thread/started").unwrap()["frame"]["params"]["thread"]["id"].as_str().unwrap();
+            let approval = rows.iter().position(|row| row["frame"]["method"] == "item/commandExecution/requestApproval").unwrap();
+            let child = rows[approval]["frame"]["params"]["threadId"].as_str().unwrap();
+            let before: Vec<_> = rows[..=approval].iter().filter(|row| row["type"] == "emit_inbound").map(|row| &row["frame"]).filter(|frame| {
+                let item = &frame["params"]["item"];
+                frame["method"] == "thread/started" || frame["method"] == "turn/started"
+                    || item["type"] == "subAgentActivity" && item["kind"] == "started"
+                    || frame["method"] == "item/commandExecution/requestApproval"
+            }).collect();
+            assert!(before.iter().all(|frame| frame["method"] != "thread/started" || frame["params"]["thread"]["id"] != child));
+            let after: Vec<_> = rows[approval + 1..].iter().filter(|row| row["type"] == "emit_inbound")
+                .map(|row| &row["frame"]).filter(|frame| frame["params"]["threadId"] == child &&
+                    (frame["method"] == "turn/completed" || frame["method"] == "item/completed" && frame["params"]["item"]["type"] == "agentMessage")).collect();
+            let answer = &rows.iter().find(|row| row["type"] == "expect_outbound" && row["frame"]["result"]["decision"] == "accept").unwrap()["frame"];
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("frames.json"), serde_json::to_vec(&serde_json::json!({"before":before,"after":after,"answer":answer})).unwrap()).unwrap();
+            let program = directory.path().join("codex-fixture");
+            std::fs::write(&program, r##"#!/usr/bin/env node
+const fs = require('node:fs'), assert = require('node:assert/strict');
+const data = JSON.parse(fs.readFileSync(__dirname + '/frames.json'));
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+ const message = JSON.parse(line);
+ if (message.method === 'initialize') send({id:message.id,result:{userAgent:'subagent-fixture',codexHome:process.env.CODEX_HOME}});
+ else if (message.method === 'fixture/start') {data.before.forEach(send);send({id:message.id,result:{}});}
+ else if (!message.method && message.id !== undefined) {assert.deepEqual(message,data.answer);data.after.forEach(send);}
+});
+"##).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let server = Arc::new(CodexAppServer::spawn(Config {program,codex_home:Some(directory.path().join("codex")),..Default::default()}).await.unwrap());
+            let agent = Codex::new(Ok(server));
+            let mut events = agent.event_stream().unwrap();
+            let root_execution = uuid::Uuid::new_v4();
+            agent.scopes.reserve(root, root_execution);
+            let params = serde_json::json!({});
+            let request = agent.request::<_, Value>("fixture/start", &params);
+            let consume = async {
+                let mut linked = false;
+                let mut execution = None;
+                let mut written = false;
+                loop {
+                    let mut event = events.recv().await.unwrap();
+                    let mut write = None;
+                    let mut completed = false;
+                    match &event.change {
+                        AgentChange::TaskParent {session,parent} if session.id == child => {assert_eq!(parent.id,root);linked=true;}
+                        AgentChange::Session {session,change:SessionChange::Turn {completed:false,..}} if session.id == child => {
+                            assert!(linked);assert!(event.execution.is_some());assert_ne!(event.execution,Some(root_execution));execution=event.execution;
+                        }
+                        AgentChange::Request {session,origin,request} if session.id == child => {
+                            assert_eq!(event.execution,execution);assert!(execution.is_some());
+                            let agent_protocol::requests::RequestBody::Approval {choices,..} = &request.body else {panic!("child approval was lost")};
+                            let choice_id=choices.iter().find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Allow).unwrap().id.clone();
+                            write=Some(origin.source.prepare(&origin.native_id,&request.body,&agent_protocol::requests::Answer::Approval {choice_id}).await.unwrap());
+                        }
+                        AgentChange::Session {session,change:SessionChange::Item {item,..}} if session.id == child => {
+                            if let agent_protocol::items::ItemBody::AssistantText {text,..}=item.body() {assert_eq!(text.trim(),"Written.");written=true;}
+                        }
+                        AgentChange::Session {session,change:SessionChange::Turn {turn,completed:true}} if session.id == child => {
+                            assert!(written);assert_eq!(event.execution,execution);assert_eq!(turn.status,agent_protocol::execution::TurnStatus::Completed);completed=true;
+                        }
+                        _=>{}
+                    }
+                    event.applied.take().unwrap().send(Ok(())).unwrap();
+                    if let Some(write)=write {write.await.unwrap();}
+                    if completed {break;}
+                }
+            };
+            let (result,())=tokio::join!(request,consume);
+            result.unwrap();
+            agent.shutdown().await;
+        }).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1698,8 +1823,9 @@ rl.on('line', line => {
         for name in [Some("New name"), None] {
             let line = serde_json::json!({"method":"thread/name/updated","params":{"threadId":"task","threadName":name}}).to_string();
             let change =
-                super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+                super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                     .unwrap()
+                    .pop()
                     .unwrap();
             let super::AgentChange::Renamed {
                 session,
@@ -1717,8 +1843,9 @@ rl.on('line', line => {
     fn started_subagents_report_parent_for_subscription_retention() {
         let line = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"parent"}}}).to_string();
         let change =
-            super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+            super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                 .unwrap()
+                .pop()
                 .unwrap();
         let super::AgentChange::TaskParent { session, parent } = change else {
             panic!("parent was not published")
@@ -1728,9 +1855,9 @@ rl.on('line', line => {
         let root = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"root"}}})
             .to_string();
         assert!(
-            super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&root).unwrap())
+            super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&root).unwrap())
                 .unwrap()
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1789,9 +1916,9 @@ rl.on('line', line => {
         for method in ["process/outputDelta", "process/exited"] {
             let line = serde_json::json!({"method":method,"params":{"processHandle":"owned","deltaBase64":"aW5qZWN0ZWQ=","exitCode":0}}).to_string();
             assert!(
-                super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+                super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                     .unwrap()
-                    .is_none()
+                    .is_empty()
             );
         }
     }

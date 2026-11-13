@@ -356,8 +356,8 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
             }
             let line = frame.to_string();
             let message = RpcMessage::parse(&line).unwrap();
-            let change = match message.kind() {
-                RpcMessageKind::Notification => codex::event_change(Uuid::nil(), &message)
+            let changes = match message.kind() {
+                RpcMessageKind::Notification => codex::event_changes(Uuid::nil(), &message)
                     .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file)),
                 RpcMessageKind::Request => {
                     let adapted = crate::providers::requests::codex(
@@ -366,7 +366,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                         &frame["params"],
                     )
                     .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file));
-                    Some(AgentChange::Request {
+                    vec![AgentChange::Request {
                         session: SessionRef::new(
                             ProviderKind::Codex,
                             frame["params"]["threadId"].as_str().unwrap().into(),
@@ -379,49 +379,50 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                             source: Arc::new(native_fixture::AnswerResource),
                         },
                         request: adapted.request,
-                    })
+                    }]
                 }
-                _ => None,
+                _ => Vec::new(),
             };
-            let Some(change) = change else { continue };
-            let execution = match &change {
-                AgentChange::Session { session, change } => {
-                    ensure_session(&service, session);
-                    if matches!(
-                        change,
-                        SessionChange::Turn {
-                            completed: false,
-                            ..
+            for change in changes {
+                let execution = match &change {
+                    AgentChange::Session { session, change } => {
+                        ensure_session(&service, session);
+                        if matches!(
+                            change,
+                            SessionChange::Turn {
+                                completed: false,
+                                ..
+                            }
+                        ) {
+                            executions.insert(session.clone(), Uuid::new_v4());
                         }
-                    ) {
-                        executions.insert(session.clone(), Uuid::new_v4());
+                        executions.get(session).copied()
                     }
-                    executions.get(session).copied()
+                    AgentChange::Request { session, .. } => executions.get(session).copied(),
+                    AgentChange::TaskParent { parent, .. } => {
+                        ensure_session(&service, parent);
+                        None
+                    }
+                    _ => None,
+                };
+                Runtime::observe(&service, change, execution)
+                    .await
+                    .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file));
+                if frame["method"] == "turn/completed" {
+                    let session = SessionRef::new(
+                        ProviderKind::Codex,
+                        frame["params"]["threadId"].as_str().unwrap().into(),
+                    )
+                    .unwrap();
+                    assert_recorded_terminal(
+                        &service.inner.conversation.storage,
+                        &session,
+                        executions[&session],
+                        frame,
+                    );
                 }
-                AgentChange::Request { session, .. } => executions.get(session).copied(),
-                AgentChange::TaskParent { parent, .. } => {
-                    ensure_session(&service, parent);
-                    None
-                }
-                _ => None,
-            };
-            Runtime::observe(&service, change, execution)
-                .await
-                .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file));
-            if frame["method"] == "turn/completed" {
-                let session = SessionRef::new(
-                    ProviderKind::Codex,
-                    frame["params"]["threadId"].as_str().unwrap().into(),
-                )
-                .unwrap();
-                assert_recorded_terminal(
-                    &service.inner.conversation.storage,
-                    &session,
-                    executions[&session],
-                    frame,
-                );
+                observed += 1;
             }
-            observed += 1;
         }
         assert!(observed > 0, "{}", recording.file);
         if recording.scenario == "simple" {

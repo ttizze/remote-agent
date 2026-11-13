@@ -447,6 +447,10 @@ impl Storage {
             }
             let state = rows::load(&transaction, key, self.process)?;
             let mut state = rows::hydrate(&transaction, key, self.process, state, &event)?;
+            let imported_turns = if matches!(&event, Event::Restart { .. }) {
+                let mut statement = transaction.prepare("SELECT t.id FROM turns t WHERE t.thread=?1 AND t.state='running' AND EXISTS(SELECT 1 FROM executions e WHERE e.thread=t.thread AND e.turn_id=t.id AND e.process=?2) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.thread=t.thread AND e.turn_id=t.id AND e.process!=?2)").map_err(failure)?;
+                statement.query_map(params![key, Uuid::nil().to_string()], |row| row.get::<_, String>(0).map(TurnId::from)).map_err(failure)?.collect::<Result<Vec<_>, _>>().map_err(failure)?
+            } else { Vec::new() };
             let native_turn = match &event {
                 Event::Provider { attempt, native_turn: Some(turn), .. } => Some((*attempt, turn.clone())),
                 Event::Delivered { id, action, native_turn: Some(turn) } => state.inputs.get(id).and_then(|input| {
@@ -474,7 +478,7 @@ impl Storage {
                     transaction.query_row("SELECT native_id FROM sources WHERE id=?1", [source], |row| row.get(0)).map(|source| decision::Binding::Fork { source, through: through.into() }).map_err(failure)
                 }).transpose()?
             } else { None };
-            let context=Context {preparation: header.details.workspace.as_deref(), rewind_binding: rewind_binding.as_ref(), steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
+            let context=Context {preparation: header.details.workspace.as_deref(), rewind_binding: rewind_binding.as_ref(), imported_turns: &imported_turns, steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
             let mut step = decision::step(&state, event, context);
             let from = cursor(&transaction)?;
             let changed = status_changed || !step.changes.is_empty()

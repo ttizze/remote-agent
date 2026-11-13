@@ -614,6 +614,39 @@ fn storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer() {
 }
 
 #[test]
+fn a_future_previous_store_is_rejected_without_importing_or_rewriting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("bex-transcripts.sqlite");
+    previous(&source, false);
+    let connection = Connection::open(&source).unwrap();
+    connection.pragma_update(None, "user_version", 2).unwrap();
+    drop(connection);
+    let before = std::fs::read(&source).unwrap();
+    let destination = directory.path().join("bex-conversations.sqlite");
+    let storage = Storage::open(&destination);
+    assert!(storage.check_ready().is_err());
+    drop(storage);
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    let connection = Connection::open(&destination).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn recorded_native_fragments_without_metadata_are_imported_after_upgrade() {
     for managed in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -810,6 +843,7 @@ fn repeated_qualified_native_turns_keep_each_deferred_item_address() {
             Context {
                 preparation: None,
                 rewind_binding: None,
+                imported_turns: &[],
                 external_busy: false,
                 now: 500,
                 seed: Uuid::new_v4(),
@@ -928,6 +962,7 @@ async fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recov
             steers: true,
             preparation: None,
             rewind_binding: None,
+            imported_turns: &[],
             external_busy: false,
             steer_ready: true,
         };

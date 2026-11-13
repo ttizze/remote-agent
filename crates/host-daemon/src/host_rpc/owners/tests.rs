@@ -12,6 +12,7 @@ fn context(seed: u128) -> Context<'static> {
     Context {
         preparation: None,
         rewind_binding: None,
+        imported_turns: &[],
         external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),

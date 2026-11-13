@@ -5,6 +5,7 @@ fn context(seed: u128) -> Context<'static> {
     Context {
         preparation: None,
         rewind_binding: None,
+        imported_turns: &[],
         external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),
@@ -4541,4 +4542,133 @@ fn an_unacknowledged_regular_input_does_not_offer_compaction_promotion() {
     assert!(promotion.changes.is_empty());
     assert!(promotion.actions.is_empty());
     assert!(state.steer_target(true).is_none());
+}
+
+#[test]
+fn failure_projection_keeps_capacity_errors_for_compact_and_omits_empty_banners() {
+    use crate::session::SessionRef;
+    use crate::sync::{Content, Cursor, Key, Message, Position, Scope, Window};
+    use std::sync::Arc;
+    for trigger in ["message", "compact", "failure without notice"] {
+        let (mut state, attempt) = codex_running();
+        if trigger == "failure without notice" {
+            state = state.apply(&observe(&state, &attempt, Observation::Failed(None), 20).changes);
+        } else {
+            state = state.apply(
+                &observe(&state, &attempt, Observation::Failed(Some(overload())), 20).changes,
+            );
+            let admitted = command(
+                &state,
+                21,
+                Command::Submit {
+                    id: Uuid::from_u128(21).to_string().into(),
+                    content: InputContent {
+                        parts: vec![InputPart::Text {
+                            text: if trigger == "compact" {
+                                "/compact"
+                            } else {
+                                "continue here"
+                            }
+                            .into(),
+                        }],
+                        ..content(FollowUp::Queue)
+                    },
+                },
+            );
+            state = state.apply(&admitted.changes);
+        }
+        let turn = state.turns[&attempt.turn].clone();
+        assert!(matches!(turn.state, TurnState::Failed(_)));
+        let id = SessionRef::new(None, Uuid::from_u128(22).to_string()).unwrap();
+        let rows = vec![
+            records::Row {
+                key: Key::Thread(id.clone()),
+                version: 1,
+                position: Position::Unordered,
+                content: Content::Full(Arc::new(records::Record::Thread(records::Header {
+                    state: state.thread,
+                    details: Default::default(),
+                }))),
+            },
+            records::Row {
+                key: Key::Turn {
+                    thread: id.clone(),
+                    id: turn.id.clone(),
+                },
+                version: 1,
+                position: Position::Turn {
+                    ordinal: turn.ordinal,
+                },
+                content: Content::Full(Arc::new(records::Record::Turn(turn.into()))),
+            },
+        ];
+        let replica = records::Replica::new(Scope::Conversation(id), 1)
+            .apply(
+                1,
+                Message::Snapshot {
+                    cursor: Cursor {
+                        store: Uuid::from_u128(23),
+                        sequence: 1,
+                    },
+                    window: Some(Window { turn: 0, item: 0 }),
+                    rows,
+                },
+            )
+            .unwrap();
+        let projected = records::project(&replica)
+            .unwrap()
+            .thread
+            .turns
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            projected.error,
+            (trigger == "compact").then(overload),
+            "{trigger}"
+        );
+    }
+}
+
+#[test]
+fn messages_after_stopping_an_empty_compaction_queue_run_if_the_compaction_completes() {
+    for before_ack in [false, true] {
+        let (mut state, id, action, compact) = starting_compaction();
+        if !before_ack {
+            state = state.apply(
+                &step(
+                    &state,
+                    Event::Delivered {
+                        id: id.clone(),
+                        action,
+                        native_turn: None,
+                    },
+                    context(201),
+                )
+                .changes,
+            );
+        }
+        state = state.apply(&command(&state, 202, Command::Interrupt { turn: None }).changes);
+        assert!(!state.thread.queue_held);
+        let submitted = submit(&state, 203, FollowUp::Queue);
+        assert!(submitted.actions.is_empty());
+        state = state.apply(&submitted.changes);
+        if before_ack {
+            state = state.apply(
+                &step(
+                    &state,
+                    Event::Delivered {
+                        id,
+                        action,
+                        native_turn: None,
+                    },
+                    context(204),
+                )
+                .changes,
+            );
+        }
+        let completed = observe(&state, &compact, Observation::Completed, 205);
+        assert!(
+            matches!(&completed.actions[..], [Action::Deliver { id, .. }] if id.as_str() == Uuid::from_u128(203).to_string())
+        );
+    }
 }

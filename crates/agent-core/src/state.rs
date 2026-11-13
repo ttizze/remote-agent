@@ -537,15 +537,10 @@ macro_rules! snapshot {
             pub any: bool,
             $(pub $field: bool,)*
         }
-        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
         #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
         pub struct Snapshot {
             $($(#[$meta])* pub $field: $type,)*
-        }
-        impl Default for Snapshot {
-            fn default() -> Self {
-                Self { $($field: Default::default(),)* }
-            }
         }
         impl Changed {
             pub(crate) fn selected_pane(mut self, changed: bool) -> Self {
@@ -653,6 +648,15 @@ impl Snapshot {
             .iter()
             .find_map(|(session, thread)| thread.requests.get(id).map(|request| (session, request)))
     }
+
+    pub(crate) fn is_welcome_draft(&self, key: &DraftKey) -> bool {
+        key.is_empty()
+            || self
+                .input
+                .new_drafts
+                .get(WELCOME_DRAFT_SLOT)
+                .is_some_and(|id| &DraftKey::from(id) == key)
+    }
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -660,12 +664,7 @@ impl Snapshot {
     /// Only the empty welcome placeholder becomes a draft. Sending it and
     /// restoring a rejected input keep that draft's identity and panel scope.
     pub fn welcome_transition(&self, before: DraftKey, after: DraftKey) -> bool {
-        before.is_empty()
-            && self
-                .input
-                .new_drafts
-                .get(WELCOME_DRAFT_SLOT)
-                .is_some_and(|id| DraftKey::from(id) == after)
+        before.is_empty() && !after.is_empty() && self.is_welcome_draft(&after)
     }
 
     pub fn operation_phase(

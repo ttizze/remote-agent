@@ -202,6 +202,7 @@ impl Runtime {
         Context {
             preparation: None,
             rewind_binding: None,
+            imported_turns: &[],
             external_busy: false,
             now: now(),
             seed: Uuid::new_v4(),

@@ -347,6 +347,10 @@ async fn a_short_pretruncated_command_keeps_its_omission_notice_when_settled() {
 async fn a_complete_short_command_does_not_claim_earlier_output_was_omitted() {
     command_output_case("short").await;
 }
+#[tokio::test]
+async fn a_late_output_subscription_cannot_erase_a_completed_items_output() {
+    command_output_case("orphan").await;
+}
 
 async fn command_output_case(case: &str) {
     let stopped = case == "stopped";
@@ -504,6 +508,32 @@ async fn command_output_case(case: &str) {
     .unwrap();
     assert_eq!(late.initial, tail);
     let background = case.starts_with("background");
+    if case == "orphan" {
+        send(SessionChange::Item {
+            turn_id: "tools".into(),
+            item: Arc::new(Item::new(
+                "command".into(),
+                ItemStatus::Completed,
+                ItemBody::CommandExecution {
+                    command: "echo output".into(),
+                    cwd: None,
+                    output: tail.text.clone(),
+                    output_omitted: tail.truncated,
+                    exit_code: Some(0),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+        // A subscriber that read Running before the item committed can still
+        // seed this empty stream after native_item removed the previous tail.
+        let _late = service
+            .inner
+            .conversation
+            .outputs
+            .subscribe(&key, Some((execution, Default::default())))
+            .unwrap();
+    }
     if background || case == "foreground-stop" {
         send(SessionChange::Background {
             tasks: vec![agent_protocol::execution::BackgroundTask {
@@ -2421,6 +2451,7 @@ async fn a_delivery_admitted_before_update_cannot_write_after_the_update_gate_cl
             decision::Context {
                 preparation: None,
                 rewind_binding: None,
+                imported_turns: &[],
                 external_busy: false,
                 now: now(),
                 seed: Uuid::new_v4(),

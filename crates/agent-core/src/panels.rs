@@ -286,9 +286,8 @@ impl Panels {
         if before == after || before.host != after.host || before.storage != after.storage {
             return self;
         }
-        // The unaddressed welcome composer acquires its conversation UUID at
-        // first send. Move its tools with it, and back if that send is restored.
-        if welcome && (before.draft.is_empty() || after.draft.is_empty()) {
+        // The welcome placeholder's first edit moves its tools to the new draft.
+        if welcome {
             let mut next = self.as_ref().clone();
             if let Some(source) = next.threads.remove(&before) {
                 let target = next.threads.entry(after).or_default();

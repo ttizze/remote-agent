@@ -364,7 +364,13 @@ fn retry_input(state: &State, id: &ClientInputId, work_locally: bool, context: C
         return reject("input does not exist");
     };
     let cancel = match input.state {
-        InputState::Failed(_) => None,
+        InputState::Failed(_) => workspace::cancelled(context.preparation.filter(|saved| {
+            saved
+                .setup
+                .as_ref()
+                .is_some_and(|setup| setup.phase == crate::workspace::SetupPhase::Cancelled)
+        }))
+        .map(|(generation, _, _)| generation),
         InputState::Preparing {
             action,
             stage:
@@ -408,7 +414,17 @@ fn submit(
         let mut ended = execution::finish(
             state,
             turn,
-            TurnState::Failed(ExecutionError::default()),
+            TurnState::Failed(if InputPart::is_compaction(&content.parts) {
+                turn.error
+                    .clone()
+                    .map(|mut error| {
+                        error.retry = None;
+                        error
+                    })
+                    .unwrap_or_default()
+            } else {
+                ExecutionError::default()
+            }),
             context.now,
         );
         let next = state.apply(&ended.changes);
@@ -481,18 +497,7 @@ fn submit(
             ..state.counters.clone()
         }),
     ]);
-    if state.thread.queue_held
-        && !state.has_queued_inputs()
-        && !state.active_turn().is_some_and(|turn| {
-            turn.compaction && matches!(turn.state, TurnState::Running { interrupt: Some(_) })
-        })
-        && !state.inputs.values().any(|input| {
-            InputPart::is_compaction(&input.content.parts)
-                && input
-                    .live_delivery()
-                    .is_some_and(|delivery| delivery.interrupt.is_some())
-        })
-    {
+    if state.thread.queue_held && !state.has_queued_inputs() {
         result.changes.push(Change::Thread(Thread {
             queue_held: false,
             ..state.thread.clone()
@@ -571,7 +576,7 @@ fn interrupt_turn(
                         queue_held: if next_input.is_some() {
                             state.thread.queue_held
                         } else {
-                            turn.compaction || state.has_queued_inputs()
+                            state.has_queued_inputs()
                         },
                         ..state.thread.clone()
                     }),
@@ -650,7 +655,7 @@ fn interrupt_input(
             queue_held: if next_input.is_some() {
                 state.thread.queue_held
             } else {
-                InputPart::is_compaction(&input.content.parts) || state.has_queued_inputs()
+                state.has_queued_inputs()
             },
             workspace: cleanup.as_ref().map_or_else(
                 || state.thread.workspace.clone(),

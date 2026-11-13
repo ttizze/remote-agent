@@ -81,6 +81,9 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
         }
     }
     for turn in state.turns.values() {
+        if context.imported_turns.contains(&turn.id) {
+            continue;
+        }
         match &turn.state {
             TurnState::Running { interrupt } => {
                 let finished = execution::finish(state, turn, TurnState::Interrupted, context.now);
