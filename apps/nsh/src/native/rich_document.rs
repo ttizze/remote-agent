@@ -9,6 +9,7 @@ pub(crate) struct Document {
     pub text: String,
     pub links: Vec<Link>,
     pub active: Option<(usize, usize)>,
+    pub background: Option<u32>,
     decorations: Vec<(usize, usize)>,
 }
 
@@ -40,45 +41,27 @@ pub(crate) fn paragraphs(blocks: &[Value]) -> Document {
         }
         writer.paragraph(block, None);
     }
-    writer.finish()
+    let mut document = writer.finish();
+    document.background = blocks
+        .iter()
+        .any(|block| block["code"] == true)
+        .then_some(0x111111);
+    document
 }
 
 #[cfg(windows)]
 pub(crate) fn picture(data: &str, width: u32) -> Option<Document> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .ok()?;
-    let kind = if bytes.starts_with(b"\x89PNG") {
-        "pngblip"
-    } else if bytes.starts_with(b"\xff\xd8") {
-        "jpegblip"
-    } else {
-        return None;
-    };
-    let height = if kind == "pngblip" {
-        let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
-        let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
-        width.saturating_mul(h) / w.max(1)
-    } else {
-        width
-    };
     let mut writer = Writer::new();
-    let _ = write!(
-        writer.body,
-        "{{\\pict\\{kind}\\picwgoal{}\\pichgoal{} ",
-        width * 20,
-        height * 20
-    );
-    for byte in bytes {
-        let _ = write!(writer.body, "{byte:02x}");
-    }
-    writer.body.push('}');
-    writer.text.push('\u{fffc}');
-    Some(writer.finish())
+    writer.png(data, width).then(|| writer.finish())
 }
 
-pub(crate) fn table(rows: &[Value], width: u32) -> Document {
+pub(crate) fn table(
+    rows: &[Value],
+    width: u32,
+    media: &Value,
+    errors: &Value,
+    labels: &Value,
+) -> Document {
     let mut writer = Writer::new();
     let columns = rows
         .iter()
@@ -96,25 +79,27 @@ pub(crate) fn table(rows: &[Value], width: u32) -> Document {
         for column in 1..=cells.len() {
             let edge =
                 width.saturating_mul(20).saturating_mul(column as u32) / cells.len().max(1) as u32;
-            let _ = write!(writer.body, "\\clbrdrb\\brdrs\\brdrw10\\cellx{edge}");
+            for side in ["t", "r", "b", "l"] {
+                let _ = write!(writer.body, "\\clbrdr{side}\\brdrs\\brdrw10\\brdrcf3");
+            }
+            if index == 0 {
+                let shade = writer.color(0x141414);
+                let _ = write!(writer.body, "\\clcbpat{shade}");
+            }
+            let _ = write!(writer.body, "\\cellx{edge}");
         }
         writer.body.push('\n');
         for cell in cells {
             let parts = cell.as_array().map(Vec::as_slice).unwrap_or_default();
             writer.body.push_str("\\pard\\intbl ");
-            for part in parts {
-                if let Some(blocks) = part["Text"].as_array() {
-                    for block in blocks {
-                        writer.paragraph(block, Some(index == 0));
-                    }
-                } else if let Some(code) = part.get("Code")
-                    && let Some(blocks) = code["blocks"].as_array()
-                {
-                    for block in blocks {
-                        writer.paragraph(block, Some(index == 0));
-                    }
-                }
-            }
+            writer.cell(
+                parts,
+                index == 0,
+                width / columns.max(1),
+                media,
+                errors,
+                labels,
+            );
             writer.separator("\\cell ", '\u{7}');
         }
         writer.structure("\u{fffb}");
@@ -156,6 +141,7 @@ impl Writer {
             text: self.text,
             links: self.links,
             active: self.active,
+            background: None,
             decorations: self.decorations,
         }
     }
@@ -216,6 +202,10 @@ impl Writer {
             "{alignment}\\li{indent}\\sa{}\\f{font}\\fs{size} ",
             if in_table { 0 } else { 180 }
         );
+        if block["quoted"] == true {
+            self.body
+                .push_str("\\brdrl\\brdrs\\brdrw20\\brdrcf3\\brsp120 ");
+        }
         if let Some(marker) = block["marker"].as_str() {
             self.literal(&format!("{marker} "));
         }
@@ -246,6 +236,7 @@ impl Writer {
         let text = run["text"].as_str().unwrap_or_default();
         let link = run["link"].as_str();
         let file = &run["file"];
+        let size = run["size"].as_u64().map_or(size, |size| (size * 2) as u32);
         self.body.push('{');
         let font = if file.is_object() {
             3
@@ -272,13 +263,7 @@ impl Writer {
             u8::from(run["strikethrough"] == true)
         );
         if let Some(destination) = link {
-            self.body.push_str("{\\field{\\*\\fldinst HYPERLINK \"");
-            escape(destination, &mut self.body);
-            self.body.push_str(if file.is_object() || caption {
-                "\"}{\\fldrslt\\ul0 "
-            } else {
-                "\"}{\\fldrslt\\ul "
-            });
+            self.start_link(destination, !file.is_object() && !caption);
         }
         let start = self.units;
         if file.is_object() && after_caption {
@@ -307,34 +292,124 @@ impl Writer {
         self.body.push('}');
     }
     fn file_glyph(&mut self, file: &Value, size: u32) {
-        use base64::Engine;
         let start = self.units;
         if file["folder"] == true {
             self.body.push_str("{\\f2 ");
             self.literal("\u{e8b7}");
             self.body.push('}');
-        } else if let Some(bytes) = file["icon"]
+        } else if !file["icon"]
             .as_str()
-            .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
-            .filter(|bytes| bytes.starts_with(b"\x89PNG"))
+            .is_some_and(|data| self.png(data, size / 2))
         {
-            let _ = write!(
-                self.body,
-                "{{\\pict\\pngblip\\picwgoal{}\\pichgoal{} ",
-                size * 10,
-                size * 10
-            );
-            for byte in bytes {
-                let _ = write!(self.body, "{byte:02x}");
-            }
-            self.body.push('}');
-            self.text.push('\u{fffc}');
-            self.units += 1;
-        } else {
             return;
         }
         self.literal(" ");
         self.decorations.push((start, self.units));
+    }
+
+    fn png(&mut self, data: &str, width: u32) -> bool {
+        use base64::Engine;
+        let Some(bytes) = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()
+            .filter(|bytes| bytes.starts_with(b"\x89PNG"))
+        else {
+            return false;
+        };
+        let Some(dimensions) = bytes.get(16..24) else {
+            return false;
+        };
+        let original_width = u32::from_be_bytes(dimensions[..4].try_into().unwrap());
+        let original_height = u32::from_be_bytes(dimensions[4..].try_into().unwrap());
+        let height = width.saturating_mul(original_height) / original_width.max(1);
+        let _ = write!(
+            self.body,
+            "{{\\pict\\pngblip\\picwgoal{}\\pichgoal{} ",
+            width * 20,
+            height * 20
+        );
+        for byte in bytes {
+            let _ = write!(self.body, "{byte:02x}");
+        }
+        self.body.push('}');
+        self.text.push('\u{fffc}');
+        self.units += 1;
+        true
+    }
+
+    fn cell(
+        &mut self,
+        parts: &[Value],
+        header: bool,
+        width: u32,
+        media: &Value,
+        errors: &Value,
+        labels: &Value,
+    ) {
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                self.separator("\\par ", '\r');
+            }
+            if let Some(blocks) = part["Text"]
+                .as_array()
+                .or_else(|| part["Code"]["blocks"].as_array())
+            {
+                for (index, block) in blocks.iter().enumerate() {
+                    if index > 0 {
+                        self.separator("\\par ", '\r');
+                    }
+                    self.paragraph(block, Some(header));
+                }
+            } else if let Some(source) = part["Image"]["source"].as_str() {
+                self.cell_image(
+                    source,
+                    width,
+                    media[source].as_str(),
+                    errors[source].as_str(),
+                    labels,
+                );
+            } else if let Some(url) = part["Link"]["url"].as_str() {
+                self.paragraph(
+                    &serde_json::json!({"runs":[{"text":url,"link":url}]}),
+                    Some(header),
+                );
+            } else if part.get("Rule").is_some() {
+                self.body.push_str("\\brdrb\\brdrs\\brdrw10\\brdrcf3 ");
+            }
+        }
+    }
+
+    fn cell_image(
+        &mut self,
+        source: &str,
+        width: u32,
+        data: Option<&str>,
+        error: Option<&str>,
+        labels: &Value,
+    ) {
+        self.start_link(source, false);
+        let start = self.units;
+        if !data.is_some_and(|data| self.png(data, width.saturating_sub(24).max(1))) {
+            let label =
+                error.unwrap_or_else(|| labels["loadingImage"].as_str().unwrap_or_default());
+            self.literal(label);
+        } else {
+            self.decorations.push((start, self.units));
+        }
+        self.body.push_str("}}");
+        self.links.push(Link {start,end:self.units,destination:source.into(),tooltip:source.into(),
+            action:if error.is_some(){"retryImage"}else{"image"},
+            menu:serde_json::json!([{"id":"saveImage","title":labels["saveImage"],"enabled":data.is_some()}])});
+    }
+
+    fn start_link(&mut self, destination: &str, underline: bool) {
+        self.body.push_str("{\\field{\\*\\fldinst HYPERLINK \"");
+        escape(destination, &mut self.body);
+        self.body.push_str(if underline {
+            "\"}{\\fldrslt\\ul "
+        } else {
+            "\"}{\\fldrslt\\ul0 "
+        });
     }
 
     fn highlighted(&mut self, text: &str, run: &Value) {
@@ -458,9 +533,55 @@ mod tests {
         assert_eq!(doc.links[1].start, 4);
     }
     #[test]
+    fn table_cells_keep_images_links_and_text_after_the_image_loads() {
+        let file: Value = serde_json::from_str(include_str!(
+            "../../apple/Tests/BexNshNativeTests/Fixtures/file-chip.json"
+        ))
+        .unwrap();
+        let rows = json!([[[
+            {"Text":[{"runs":[{"text":"Before"}]}]},
+            {"Image":{"source":"chart.png"}},
+            {"Text":[{"runs":[{"text":"After","link":"https://example.test"}]}]}
+        ]]]);
+        let labels = json!({"loadingImage":"Loading image", "saveImage":"Save image"});
+        let pending = table(
+            rows.as_array().unwrap(),
+            320,
+            &Value::Null,
+            &Value::Null,
+            &labels,
+        );
+        assert!(pending.text.contains("Before\rLoading image\rAfter"));
+        let shown = table(
+            rows.as_array().unwrap(),
+            320,
+            &json!({"chart.png":file["runs"][0]["file"]["icon"]}),
+            &Value::Null,
+            &labels,
+        );
+        assert!(shown.text.contains("Before\r\u{fffc}\rAfter"));
+        assert_eq!(shown.links[0].action, "image");
+        assert_eq!(shown.links[0].destination, "chart.png");
+        assert_eq!(shown.links[0].menu[0]["id"], "saveImage");
+        let after = &shown.links[1];
+        assert_eq!(shown.selected(after.start, after.end), "After");
+        assert!(
+            !shown
+                .selected(0, shown.text.encode_utf16().count())
+                .contains('\u{fffc}')
+        );
+    }
+
+    #[test]
     fn native_tables_keep_cell_text_and_boundaries_without_markdown_separators() {
         let rows = serde_json::json!([[[{"Text":[{"runs":[{"text":"日本語"}]}]}],[{"Text":[{"runs":[{"text":"value"}]}]}]]]);
-        let doc = table(rows.as_array().unwrap(), 400);
+        let doc = table(
+            rows.as_array().unwrap(),
+            400,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        );
         assert_eq!(
             doc.selected(0, doc.text.encode_utf16().count()),
             "日本語\tvalue\t\n"

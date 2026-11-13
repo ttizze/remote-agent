@@ -375,7 +375,7 @@ private extension Optional {
 @MainActor final class NativeTableBlock: TranscriptBlock {
     private var table: TranscriptPart.Table
     private let scroll = TranscriptHorizontalScroll()
-    private let content = FlippedTranscriptCanvas()
+    private let content = NativeTableCanvas()
     private var cells: [[TranscriptBody]] = []
     private let copy = NSButton()
     init(_ table: TranscriptPart.Table) {
@@ -432,14 +432,17 @@ private extension Optional {
         let count = max(1, cells.map(\.count).max() ?? 1)
         let column = min(384, max(160, width / CGFloat(count)))
         var y: CGFloat = 0
+        var bands: [NSRect] = []
         for row in cells {
             let height = max(30, row.map { $0.measure(column - 24) + 16 }.max() ?? 30)
             for (c, cell) in row.enumerated() {
                 cell.frame = NSRect(x: CGFloat(c) * column + 12, y: y + 8, width: column - 24, height: height - 16)
             }
+            bands.append(NSRect(x: 0, y: y, width: column * CGFloat(count), height: height))
             y += height
         }
         content.frame = NSRect(x: 0, y: 0, width: column * CGFloat(count), height: y)
+        content.bands = bands; content.column = column; content.needsDisplay = true
         scroll.frame = NSRect(x: 0, y: 0, width: width, height: y + 16)
         copy.frame = NSRect(x: max(0, width - 24), y: scroll.frame.maxY + 2, width: 24, height: 24)
         return copy.frame.maxY
@@ -648,6 +651,26 @@ private extension Optional {
     }
 }
 
-@MainActor private final class FlippedTranscriptCanvas: NSView { override var isFlipped: Bool {
-    true
-} }
+@MainActor private final class NativeTableCanvas: NSView {
+    var bands: [NSRect] = []
+    var column: CGFloat = 160
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if let header = bands.first {
+            NSColor(white: 0.08, alpha: 1).setFill(); header.fill()
+        }
+        NSColor.separatorColor.setStroke()
+        let lines = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+        for band in bands.dropLast() {
+            lines.move(to: NSPoint(x: 0, y: band.maxY)); lines.line(to: NSPoint(x: bounds.width, y: band.maxY))
+        }
+        for x in stride(from: column, to: bounds.width, by: column) {
+            lines.move(to: NSPoint(x: x, y: 0)); lines.line(to: NSPoint(x: x, y: bounds.height))
+        }
+        lines.lineWidth = 1; lines.stroke()
+    }
+}

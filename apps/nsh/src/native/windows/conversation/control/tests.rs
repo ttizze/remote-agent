@@ -34,7 +34,13 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
     ]);
     for document in [
         rich_document::paragraphs(&[chip, text]),
-        rich_document::table(table.as_array().unwrap(), 400),
+        rich_document::table(
+            table.as_array().unwrap(),
+            400,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        ),
     ] {
         let mut input = std::io::Cursor::new(document.rtf.as_slice());
         let mut stream = EDITSTREAM {

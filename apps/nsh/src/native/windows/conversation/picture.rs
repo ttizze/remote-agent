@@ -2,6 +2,27 @@
 use base64::Engine;
 use windows::Win32::{Foundation::*, Graphics::Gdi::*, UI::Controls::DRAWITEMSTRUCT};
 
+/// Clip each tile against the collage's outer rounded rectangle. Internal
+/// joins stay square, as they do for a group of sent images on Apple platforms.
+pub(super) fn clip(window: HWND, tile: RECT, group: SIZE, radius: i32) {
+    unsafe {
+        let outline = CreateRoundRectRgn(
+            -tile.left,
+            -tile.top,
+            group.cx - tile.left,
+            group.cy - tile.top,
+            radius * 2,
+            radius * 2,
+        );
+        let visible = CreateRectRgn(0, 0, tile.right - tile.left, tile.bottom - tile.top);
+        CombineRgn(Some(visible), Some(visible), Some(outline), RGN_AND);
+        let _ = DeleteObject(outline.into());
+        if SetWindowRgn(window, Some(visible), true) == 0 {
+            let _ = DeleteObject(visible.into());
+        }
+    }
+}
+
 pub(super) struct Picture {
     pub width: i32,
     pub height: i32,

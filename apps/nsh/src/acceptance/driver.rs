@@ -1538,6 +1538,8 @@ fn describe_views(view: &NSView, content: &NSView, parent: Option<usize>, out: &
         "class": view.class().name().to_string_lossy(),
         "frame": [frame.origin.x, top, frame.size.width, frame.size.height],
         "hidden": view.isHiddenOrHasHiddenAncestor(),
+        "bounds": [view.bounds().origin.x,view.bounds().origin.y,view.bounds().size.width,view.bounds().size.height],
+        "visible": [view.visibleRect().origin.x,view.visibleRect().origin.y,view.visibleRect().size.width,view.visibleRect().size.height],
         "alpha": view.alphaValue(),
         "role": text(object, sel!(accessibilityRole)),
         "texts": texts,
@@ -1839,6 +1841,8 @@ impl Click {
             return;
         };
         let app = NSApplication::sharedApplication(MainThreadMarker::from(&*window));
+        app.activate();
+        window.makeKeyAndOrderFront(None);
         let (press, release, flags) = match self {
             Self::Primary(flags) => (
                 NSEventType::LeftMouseDown,

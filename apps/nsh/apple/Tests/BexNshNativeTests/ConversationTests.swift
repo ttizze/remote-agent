@@ -3,6 +3,73 @@ import AppKit
 import XCTest
 
 final class ConversationTests: XCTestCase {
+    @MainActor func testPreparationKeepsNativeStepStateTimingOutputDetailsAndFailure() throws {
+        let setup = try JSONDecoder().decode(
+            ConversationPreparation.self,
+            from: Data(#"{"steps":[{"id":"install","label":"Install dependencies","detail":"installing","tail":"npm install\nready","icon":"running","dim":false,"running":true,"time":"2 seconds"}],"details":[{"label":"Workspace","value":"/repo/worktree"}],"error":"Setup failed"}"#
+                .utf8)
+        )
+        let view = NativeConversationCell(frame: NSRect(x: 0, y: 0, width: 700, height: 400))
+        let row = NativeConversationRow(
+            id: "setup",
+            user: false,
+            gap: 16,
+            buttons: [],
+            document: .empty,
+            parts: [.text([.plain("Setting up worktree")])],
+            images: [],
+            media: [:],
+            time: "3 seconds",
+            queued: false,
+            steer: false,
+            timeAlways: true,
+            preparation: setup
+        )
+        view.update(row, width: 700, send: { _ in })
+        func fields(_ view: NSView) -> [String] {
+            (view as? NSTextField).map { [$0.stringValue] } ?? view.subviews.flatMap(fields)
+        }
+        let displayed = fields(view)
+        for value in ["Install dependencies", "installing", "2 seconds", "3 seconds", "Setup failed"] {
+            XCTAssertTrue(displayed.contains(value), value)
+        }
+        let native = texts(view).map(\.string)
+        XCTAssertTrue(native.contains("npm install\nready"))
+        XCTAssertTrue(native.contains("Workspace  /repo/worktree"))
+        XCTAssertGreaterThan(view.fittingSize.height, 100)
+    }
+
+    @MainActor func testResizingTheViewportKeepsVisibleNativeRowsAtTheEnd() async throws {
+        let view = NativeConversationView(frame: NSRect(x: 0, y: 0, width: 1360, height: 720))
+        let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = view
+        window.orderFront(nil)
+        defer { view.stop(); window.orderOut(nil) }
+        try view.update(update(
+            scope: "resize",
+            text: String(repeating: "visible native message ", count: 20),
+            count: 40
+        ))
+        await settle()
+        for size in [NSSize(width: 660, height: 530), NSSize(width: 1360, height: 720)] {
+            window.setContentSize(size)
+            view.needsLayout = true
+            view.layoutSubtreeIfNeeded()
+            await settle()
+            XCTAssertEqual(view.table.numberOfRows, 40)
+            let visible = view.table.rows(in: view.scroll.documentVisibleRect)
+            XCTAssertNotEqual(visible.location, NSNotFound)
+            XCTAssertGreaterThan(
+                visible.length,
+                0,
+                "\(size) table=\(view.table.frame) bounds=\(view.table.bounds) visible=\(view.scroll.documentVisibleRect) last=\(view.table.rect(ofRow: 39))"
+            )
+            for index in visible.location ..< NSMaxRange(visible) {
+                XCTAssertNotNil(view.table.view(atColumn: 0, row: index, makeIfNecessary: false), "row \(index)")
+            }
+        }
+    }
+
     @MainActor func testNativeCopyFeedbackResetsWhenItsCellChangesMessages() throws {
         let view = NativeConversationCell(frame: NSRect(x: 0, y: 0, width: 700, height: 200))
         var document = MessageDocument.empty; document.labels = ["copied": "Copied"]
@@ -137,7 +204,7 @@ final class ConversationTests: XCTestCase {
                                            code: false, link: nil, darkColor: nil, lightColor: nil)])
     }
 
-    private func update(scope: String, text: String) throws -> NativeConversationUpdate {
+    private func update(scope: String, text: String, count: Int = 1) throws -> NativeConversationUpdate {
         let row: [String: Any] = [
             "id": "same-row-id", "user": false, "gap": 16, "buttons": [], "images": [], "media": [:],
             "queued": false, "steer": false,
@@ -148,9 +215,19 @@ final class ConversationTests: XCTestCase {
             "document": ["secondary": false, "role": "assistant", "target": scope,
                          "sideChat": true, "menu": ["quote": "Quote", "sideChat": "Side chat"]]
         ]
-        let data = try JSONSerialization.data(withJSONObject: ["scope": scope, "reset": true, "order": ["same-row-id"],
-                                                               "changed": [row], "removed": [], "following": true,
-                                                               "inset": 0, "latest": "Latest"])
+        let rows = (0 ..< count).map { index in
+            var next = row; next["id"] = "same-row-id-\(index)"; return next
+        }
+        let data = try JSONSerialization.data(withJSONObject: [
+            "scope": scope,
+            "reset": true,
+            "order": rows.map { $0["id"]! },
+            "changed": rows,
+            "removed": [],
+            "following": true,
+            "inset": 0,
+            "latest": "Latest"
+        ])
         return try JSONDecoder().decode(NativeConversationUpdate.self, from: data)
     }
 

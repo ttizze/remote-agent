@@ -68,6 +68,7 @@ struct Row {
     width: i32,
     body: std::ops::Range<usize>,
     collapsed: bool,
+    decoration: Option<RECT>,
 }
 
 struct Conversation {
@@ -80,7 +81,7 @@ impl Conversation {
         // NativeComponent::window reparents this viewport into its NSH surface.
         let window = unsafe {
             CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
+                WS_EX_CONTROLPARENT,
                 w!("STATIC"),
                 w!(""),
                 WS_POPUP | WS_CLIPCHILDREN | WS_VSCROLL,
@@ -288,6 +289,7 @@ impl Viewport {
                     width: 0,
                     body: 0..0,
                     collapsed: false,
+                    decoration: None,
                 });
                 if row.value != *value || row.width != available {
                     let expanded =
@@ -381,6 +383,7 @@ impl Viewport {
         };
         unsafe {
             SetScrollInfo(self.window, SB_VERT, &mut info, true);
+            let _ = InvalidateRect(Some(self.window), None, true);
         }
     }
     fn hover(&mut self, id: Option<String>) {
@@ -470,95 +473,201 @@ impl Row {
         }
     }
     fn layout(&mut self, x: i32, y: i32, width: i32, scale: f32) -> i32 {
-        let mut index = 0;
-        let mut offset = 0;
-        let mut body_start = 0;
-        let mut leading = 0;
-        while index < self.items.len() {
-            if index == self.body.start {
-                body_start = offset;
-            }
-            if self.items[index].is_icon() {
-                self.items[index].place(x + 4, y + offset + 4, (16.0 * scale) as i32, scale, None);
-                leading = (28.0 * scale) as i32;
-                index += 1;
+        let user = self.value["user"] == true;
+        let plan = self.value["plan"] == true;
+        let padding = if user || plan {
+            (12.0 * scale) as i32
+        } else {
+            0
+        };
+        let (header, leading) = layout_items(
+            &mut self.items[..self.body.start],
+            POINT { x, y },
+            width,
+            scale,
+            None,
+            user || plan,
+            user,
+        );
+        let body_width = if user { width * 4 / 5 } else { width };
+        let body_x = x + width - body_width;
+        let (body, _) = layout_items(
+            &mut self.items[self.body.clone()],
+            POINT {
+                x: body_x + padding + leading,
+                y: y + header + padding,
+            },
+            body_width - padding * 2 - leading,
+            scale,
+            self.collapsed.then_some((176.0 * scale) as i32),
+            false,
+            false,
+        );
+        let bottom = header + body + if self.body.is_empty() { 0 } else { padding * 2 };
+        let (footer, _) = layout_items(
+            &mut self.items[self.body.end..],
+            POINT { x, y: y + bottom },
+            width,
+            scale,
+            None,
+            user,
+            false,
+        );
+        let height = bottom + footer;
+        self.decoration = if plan {
+            Some(RECT {
+                left: x,
+                top: y,
+                right: x + width,
+                bottom: y + height,
+            })
+        } else if user && !self.body.is_empty() {
+            Some(RECT {
+                left: body_x,
+                top: y + header,
+                right: x + width,
+                bottom: y + bottom,
+            })
+        } else {
+            None
+        };
+        height + (self.value["gap"].as_f64().unwrap_or(8.0) as f32 * scale) as i32
+    }
+
+    fn draw_decoration(&self, dc: HDC, scale: f32) {
+        let Some(rect) = self.decoration else { return };
+        unsafe {
+            let brush = CreateSolidBrush(COLORREF(0x141414));
+            let pen = CreatePen(
+                PS_SOLID,
+                1,
+                COLORREF(if self.value["plan"] == true {
+                    0x313131
+                } else {
+                    0x141414
+                }),
+            );
+            let old_brush = SelectObject(dc, brush.into());
+            let old_pen = SelectObject(dc, pen.into());
+            let radius = (if self.value["plan"] == true {
+                24.0
+            } else {
+                36.0
+            } * scale) as i32;
+            RoundRect(
+                dc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                radius,
+                radius,
+            );
+            SelectObject(dc, old_brush);
+            SelectObject(dc, old_pen);
+            let _ = DeleteObject(brush.into());
+            let _ = DeleteObject(pen.into());
+        }
+    }
+}
+
+/// Native controls supply their intrinsic sizes. A section lays out inline
+/// actions, selectable blocks and the optional sent-image collage in order.
+fn layout_items(
+    items: &mut [Item],
+    origin: POINT,
+    width: i32,
+    scale: f32,
+    maximum: Option<i32>,
+    right: bool,
+    collage: bool,
+) -> (i32, i32) {
+    let mut index = 0;
+    let mut offset = 0;
+    let mut leading = 0;
+    while index < items.len() {
+        let remaining = maximum.map(|maximum| (maximum - offset).max(0));
+        if items[index].is_icon() {
+            items[index].place(
+                origin.x + 4,
+                origin.y + offset + 4,
+                (16.0 * scale) as i32,
+                scale,
+                remaining,
+            );
+            leading = (28.0 * scale) as i32;
+            index += 1;
+            continue;
+        }
+        if collage && items[index].is_picture() {
+            let end = (index..items.len())
+                .find(|at| !items[*at].is_picture())
+                .unwrap_or(items.len());
+            if end - index > 1 {
+                let image_width = ((320.0 * scale) as i32).min(width * 4 / 5);
+                offset += layout_pictures(
+                    &items[index..end],
+                    origin.x + width - image_width,
+                    origin.y + offset,
+                    image_width,
+                    scale,
+                ) + 4;
+                index = end;
                 continue;
             }
-            let maximum = (self.collapsed && self.body.contains(&index))
-                .then_some(((176.0 * scale) as i32 - (offset - body_start)).max(0));
-            if self.value["user"] == true
-                && index < self.body.start
-                && self.items[index].is_picture()
-            {
-                let end = (index..self.body.start)
-                    .find(|at| !self.items[*at].is_picture())
-                    .unwrap_or(self.body.start);
-                if end - index > 1 {
-                    let image_width = ((320.0 * scale) as i32).min(width * 4 / 5);
-                    offset += layout_pictures(
-                        &self.items[index..end],
-                        x + width - image_width,
-                        y + offset,
-                        image_width,
-                        scale,
-                    ) + 4;
-                    index = end;
-                    continue;
-                }
-            }
-            if self.items[index].inline_width(scale).is_some() {
-                let end = (index..self.items.len())
-                    .find(|at| self.items[*at].inline_width(scale).is_none())
-                    .unwrap_or(self.items.len());
-                let total: i32 = self.items[index..end]
-                    .iter()
-                    .map(|item| item.inline_width(scale).unwrap() + (4.0 * scale) as i32)
-                    .sum();
-                let mut left = if self.value["user"] == true {
-                    (width - total).max(0)
-                } else {
-                    0
-                };
-                for item in &mut self.items[index..end] {
-                    let size = item.inline_width(scale).unwrap();
-                    item.place(x + left, y + offset, size, scale, maximum);
-                    left += size + (4.0 * scale) as i32;
-                }
-                offset += maximum.map_or((30.0 * scale) as i32, |maximum| {
-                    ((30.0 * scale) as i32).min(maximum)
-                });
-                index = end;
-            } else {
-                let user = self.value["user"] == true && self.body.contains(&index);
-                let drawn_width = if self.value["user"] == true
-                    && self.items[index].is_picture()
-                    && index < self.body.start
-                {
-                    self.items[index].picture_width(width * 4 / 5, scale)
-                } else if user {
-                    width * 4 / 5
-                } else {
-                    width
-                };
-                let height = self.items[index].place(
-                    x + width - drawn_width + leading,
-                    y + offset,
-                    drawn_width - leading,
-                    scale,
-                    maximum,
-                );
-                offset += height + if height > 0 { 6 } else { 0 };
-                index += 1;
-            }
-            leading = 0;
         }
-        offset + (self.value["gap"].as_f64().unwrap_or(8.0) as f32 * scale) as i32
+        if items[index].inline_width(scale).is_some() {
+            let end = (index..items.len())
+                .find(|at| items[*at].inline_width(scale).is_none())
+                .unwrap_or(items.len());
+            let total: i32 = items[index..end]
+                .iter()
+                .map(|item| item.inline_width(scale).unwrap() + (4.0 * scale) as i32)
+                .sum();
+            let mut left = if right {
+                (width - total).max(0)
+            } else {
+                leading
+            };
+            for item in &mut items[index..end] {
+                let size = item.inline_width(scale).unwrap();
+                item.place(origin.x + left, origin.y + offset, size, scale, remaining);
+                left += size + (4.0 * scale) as i32;
+            }
+            offset += remaining.map_or((30.0 * scale) as i32, |maximum| {
+                ((30.0 * scale) as i32).min(maximum)
+            });
+            index = end;
+        } else {
+            let drawn_width = if collage && items[index].is_picture() {
+                items[index].picture_width(width * 4 / 5, scale)
+            } else {
+                width
+            };
+            let left = if right { width - drawn_width } else { 0 };
+            let height = items[index].place(
+                origin.x + left + leading,
+                origin.y + offset,
+                drawn_width - leading,
+                scale,
+                remaining,
+            );
+            offset += height + if height > 0 { 6 } else { 0 };
+            index += 1;
+        }
+        leading = 0;
     }
+    (offset, leading)
 }
 
 fn layout_pictures(pictures: &[Item], x: i32, y: i32, width: i32, scale: f32) -> i32 {
     let count = pictures.len();
     let gap = scale.ceil() as i32;
+    let height = if count <= 3 {
+        (192.0 * scale) as i32
+    } else {
+        count.div_ceil(2) as i32 * ((96.0 * scale) as i32 + gap) - gap
+    };
     for (index, picture) in pictures.iter().enumerate() {
         let (left, top, w, h) = if count == 3 {
             let first = width * 3 / 5;
@@ -583,12 +692,21 @@ fn layout_pictures(pictures: &[Item], x: i32, y: i32, width: i32, scale: f32) ->
             )
         };
         picture.cell(x + left, y + top, w, h);
+        picture.picture_clip(
+            RECT {
+                left,
+                top,
+                right: left + w,
+                bottom: top + h,
+            },
+            SIZE {
+                cx: width,
+                cy: height,
+            },
+            (16.0 * scale) as i32,
+        );
     }
-    if count <= 3 {
-        (192.0 * scale) as i32
-    } else {
-        count.div_ceil(2) as i32 * ((96.0 * scale) as i32 + gap) - gap
-    }
+    height
 }
 
 unsafe extern "system" fn procedure(
@@ -651,6 +769,12 @@ unsafe extern "system" fn procedure(
             let brush = CreateSolidBrush(COLORREF(0x080808));
             FillRect(HDC(w.0 as *mut _), &rect, brush);
             let _ = DeleteObject(brush.into());
+            if let Ok(state) = context.state.try_borrow() {
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                for row in state.controls.values() {
+                    row.draw_decoration(HDC(w.0 as *mut _), scale);
+                }
+            }
         }
         return LRESULT(1);
     }

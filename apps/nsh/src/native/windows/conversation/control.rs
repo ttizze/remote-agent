@@ -163,6 +163,9 @@ pub(super) fn items(
             &row["document"],
         );
     }
+    if row["preparation"].is_object() {
+        preparation_parts(&mut result, &row["preparation"]);
+    }
     let body_end = result.len();
     if row["user"] != true {
         for image in row["images"]
@@ -187,7 +190,7 @@ pub(super) fn items(
     if row["user"] == true
         && let Some(time) = time
     {
-        result.push(Descriptor::Caption(time.into(), true));
+        result.push(Descriptor::Caption(time.into(), row["timeAlways"] != true));
     }
     for button in row["buttons"]
         .as_array()
@@ -203,10 +206,52 @@ pub(super) fn items(
     if row["user"] != true
         && let Some(time) = time
     {
-        result.push(Descriptor::Caption(time.into(), true));
+        result.push(Descriptor::Caption(time.into(), row["timeAlways"] != true));
+    }
+
+    for detail in row["preparation"]["details"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        result.push(Descriptor::Text(rich_document::paragraphs(&[json!({"size":12,"depth":2,"runs":[{"text":format!("{}  {}", detail["label"].as_str().unwrap_or_default(),detail["value"].as_str().unwrap_or_default())}]})]),true));
     }
 
     (result, body_start..body_end)
+}
+
+fn preparation_parts(output: &mut Vec<Descriptor>, preparation: &Value) {
+    output.push(Descriptor::Rule);
+    for step in preparation["steps"].as_array().into_iter().flatten() {
+        output.push(Descriptor::Icon(
+            step["icon"].as_str().unwrap_or("pending").into(),
+        ));
+        let color = if step["dim"] == true {
+            0x666666
+        } else {
+            0xaaaaaa
+        };
+        output.push(Descriptor::Text(rich_document::paragraphs(&[json!({"runs":[
+            {"text":step["label"],"darkColor":color},
+            {"text":format!("  {}  {}",step["detail"].as_str().unwrap_or_default(),step["time"].as_str().unwrap_or_default()),"size":12,"darkColor":color}
+        ]})]),true));
+        if let Some(tail) = step["tail"].as_str().filter(|tail| !tail.is_empty()) {
+            output.push(Descriptor::Text(
+                rich_document::paragraphs(&[
+                    json!({"code":true,"depth":2,"size":11,"runs":[{"text":tail}]}),
+                ]),
+                true,
+            ));
+        }
+    }
+    if let Some(error) = preparation["error"].as_str() {
+        output.push(Descriptor::Text(
+            rich_document::paragraphs(&[
+                json!({"size":12,"runs":[{"text":error,"darkColor":0xff8e86u32}]}),
+            ]),
+            true,
+        ));
+    }
 }
 
 fn append_part(
@@ -229,7 +274,13 @@ fn append_part(
             .map(Vec::as_slice)
             .unwrap_or_default();
         output.push(Descriptor::Text(
-            rich_document::table(rows, width.max(160) as u32),
+            rich_document::table(
+                rows,
+                width.max(160) as u32,
+                media,
+                &document["mediaErrors"],
+                labels,
+            ),
             false,
         ));
         output.push(Descriptor::Button(
@@ -379,6 +430,9 @@ impl Item {
             );
         }
     }
+    pub fn picture_clip(&self, tile: RECT, group: SIZE, radius: i32) {
+        super::picture::clip(self.edit.window, tile, group, radius);
+    }
     pub fn new(
         descriptor: Descriptor,
         parent: HWND,
@@ -424,13 +478,13 @@ impl Item {
             | WS_VISIBLE
             | WS_CLIPSIBLINGS
             | if button {
-                WINDOW_STYLE(0)
+                WS_TABSTOP
             } else if matches!(descriptor, Descriptor::Icon(_)) {
                 WINDOW_STYLE(0x0D)
             } else if matches!(descriptor, Descriptor::Rule) {
                 WINDOW_STYLE(0x10)
             } else {
-                WINDOW_STYLE(0x4 | 0x800 | 0x100) | WS_HSCROLL
+                WINDOW_STYLE(0x4 | 0x800 | 0x100) | WS_HSCROLL | WS_TABSTOP
             };
         let window = unsafe {
             CreateWindowExW(
@@ -461,16 +515,6 @@ impl Item {
             message(window, EM_EXLIMITTEXT, 0, i32::MAX as isize);
             message(
                 window,
-                EM_SETBKGNDCOLOR,
-                0,
-                if row["user"] == true {
-                    0x141414
-                } else {
-                    0x080808
-                },
-            );
-            message(
-                window,
                 EM_SETEVENTMASK,
                 0,
                 (ENM_REQUESTRESIZE | ENM_LINK) as isize,
@@ -499,7 +543,7 @@ impl Item {
         {
             return false;
         }
-        let base = json!({"scope":scope,"row":row["id"],"target":row["document"]["target"],"menu":row["document"]["menu"],"sideChat":row["document"]["sideChat"],"findKey":row["document"]["findKey"],"agentStatus":row["agentStatus"],"copiedLabel":row["document"]["labels"]["copied"],"saveImageLabel":row["document"]["labels"]["saveImage"]});
+        let base = json!({"bubble":row["user"] == true || row["plan"] == true,"scope":scope,"row":row["id"],"target":row["document"]["target"],"menu":row["document"]["menu"],"sideChat":row["document"]["sideChat"],"findKey":row["document"]["findKey"],"agentStatus":row["agentStatus"],"copiedLabel":row["document"]["labels"]["copied"],"saveImageLabel":row["document"]["labels"]["saveImage"]});
         if self.edit.context.payload.borrow()["row"] != row["id"] {
             self.edit.context.copied.set(false);
         }
@@ -590,6 +634,14 @@ impl Item {
         true
     }
     fn text(&self, document: &Document, wrap: bool) {
+        let background = document.background.unwrap_or(
+            if self.edit.context.payload.borrow()["bubble"] == true {
+                0x141414
+            } else {
+                0x080808
+            },
+        );
+        message(self.edit.window, EM_SETBKGNDCOLOR, 0, background as isize);
         if self.edit.context.wrap.replace(wrap) != wrap {
             self.edit.context.width.set(0);
         }
@@ -656,6 +708,21 @@ impl Item {
                 }
         };
         let height = maximum.map_or(height, |maximum| height.min(maximum.max(0)));
+        if context.picture_kind && context.payload.borrow()["sent"] == true {
+            self.picture_clip(
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                },
+                SIZE {
+                    cx: width,
+                    cy: height,
+                },
+                (16.0 * scale) as i32,
+            );
+        }
         if maximum.is_some() {
             unsafe {
                 let _ = ShowWindow(
@@ -744,6 +811,10 @@ impl Edit {
             Some("chevronDown") => Some(0xe70d),
             Some("chevronRight") => Some(0xe76c),
             Some("check") => Some(0xe8fb),
+            Some("close") => Some(0xe711),
+            Some("minus") => Some(0xe738),
+            Some("pending") => Some(0xea3a),
+            Some("running") => Some(0xe895),
             Some("wrap") => Some(0xe751),
             _ => None,
         });
@@ -1035,10 +1106,14 @@ impl Edit {
                 link.start <= range.cpMin.max(0) as usize
                     && (range.cpMin.max(0) as usize) < link.end
             })
-            .map(|link| link.destination.clone());
-        if let Some(destination) = destination {
+            .map(|link| (link.destination.clone(), link.action));
+        if let Some((destination, kind)) = destination {
             let mut action = context.payload.borrow().clone();
-            action["action"] = json!("link");
+            action["action"] = json!(if matches!(kind, "image" | "retryImage") {
+                kind
+            } else {
+                "link"
+            });
             action["text"] = json!(destination);
             action["command"] = json!(unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0);
             context.owner.emit("action", action);
@@ -1292,7 +1367,11 @@ fn file_menu(window: HWND, context: &EditContext) -> bool {
     let payload = context.payload.borrow().clone();
     if let Some(chosen) = choose_menu(window, link.menu.as_array().unwrap()) {
         let mut value = payload;
-        value["action"] = json!(link.action);
+        value["action"] = if matches!(link.action, "image" | "retryImage") {
+            chosen["id"].clone()
+        } else {
+            json!(link.action)
+        };
         value["id"] = chosen["id"].clone();
         value["text"] = json!(link.destination);
         context.owner.emit("action", value);

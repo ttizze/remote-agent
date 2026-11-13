@@ -9,9 +9,9 @@ press 検証プロジェクト
 press "Long conversation" 20000
 expect "Review section 14, input 0." 20000
 window 660 760
+capture narrow
 expect "この発言へ移動: Review section 14, input 0."
 expect_apart "この発言へ移動:*" "message.*"
-screenshot narrow
 press "この発言へ移動: Review section 5, input 0."
 expect "Review section 5, input 0."
 expect_apart "この発言へ移動:*" "message.*"

@@ -61,6 +61,7 @@ extension NSAttributedString.Key {
     static let messageFindActive = NSAttributedString.Key("BexMessageFindActive")
     /// The plain text replacing a chip's decorative icon and spacing when selected.
     static let messageDecoration = NSAttributedString.Key("BexMessageDecoration")
+    static let messageQuote = NSAttributedString.Key("BexMessageQuote")
 }
 
 /// What a chip's text carries: its link and the chip, for its menu.
@@ -93,6 +94,12 @@ struct MessageParagraph: Decodable, Equatable, Sendable {
     let alignment: String
     let runs: [MessageRun]
     var markerHighlights: [MessageHighlight]? = nil
+
+    static func plain(_ text: String, code: Bool = false) -> Self {
+        .init(header: nil, marker: nil, code: code, quoted: false, depth: 0, alignment: "left",
+              runs: [.init(text: text, strong: false, emphasis: false, strikethrough: false,
+                           code: code, link: nil, darkColor: nil, lightColor: nil)])
+    }
 }
 
 struct MessageDocument: Decodable, Equatable, Sendable {
@@ -150,6 +157,9 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
         case "sideChat": symbol = "bubble.left.and.bubble.right"
         case "wrap": symbol = "arrow.turn.down.left"
         case "check": symbol = "checkmark"
+        case "close": symbol = "xmark"
+        case "pending": symbol = "circle"
+        case "minus": symbol = "minus"
         default: return nil
         }
         return NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(
@@ -222,6 +232,9 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
             }
             let range = NSRange(location: start, length: result.length - start)
             result.addAttribute(.paragraphStyle, value: paragraph, range: range)
+            if block.quoted {
+                result.addAttribute(.messageQuote, value: true, range: range)
+            }
         }
         return result
     }

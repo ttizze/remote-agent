@@ -32,6 +32,9 @@ struct NativeConversationRow: Decodable, Equatable {
     var agentStatus: String? = nil
     var icon: String? = nil
     var separator: Bool? = nil
+    var plan: Bool? = nil
+    var timeAlways: Bool? = nil
+    var preparation: ConversationPreparation? = nil
 }
 
 struct NativeConversationUpdate: Decodable {
@@ -69,6 +72,17 @@ struct NativeConversationUpdate: Decodable {
 
 /// A transcript exposes its message views rather than virtual table cells.
 @MainActor final class ConversationTableView: NSTableView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        guard hit === self else { return hit }
+        let local = convert(point, from: superview)
+        let index = row(at: local)
+        guard index >= 0, let cell = view(atColumn: 0, row: index, makeIfNecessary: false) else { return hit }
+        // Rows are not selectable: their text and controls receive the pointer
+        // directly instead of NSTableView's row-selection tracking loop.
+        return cell.hitTest(convert(local, to: cell.superview)) ?? hit
+    }
+
     override func accessibilityRole() -> NSAccessibility.Role? {
         .list
     }
@@ -364,6 +378,7 @@ struct NativeConversationUpdate: Decodable {
         }
         if !resized.isEmpty {
             table.noteHeightOfRows(withIndexesChanged: resized)
+            table.tile()
         }
     }
 
@@ -397,6 +412,7 @@ struct NativeConversationUpdate: Decodable {
             heights.removeAll()
             refreshVisible()
             table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0 ..< table.numberOfRows))
+            table.tile()
             table.layoutSubtreeIfNeeded()
             restore(anchor)
         }
@@ -442,6 +458,7 @@ struct NativeConversationUpdate: Decodable {
             cell.update(row, width: laneWidth, scope: scope, send: actionHandler)
         }
         table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+        table.tile()
         table.layoutSubtreeIfNeeded(); restore(anchor)
     }
 
@@ -540,6 +557,8 @@ struct NativeConversationUpdate: Decodable {
     private let rule = NSView()
     private let agentBadge = NSView()
     private let rowIcon = NSImageView()
+    private let preparation = NativePreparationView(frame: .zero)
+    private let preparationDetails = TranscriptBody()
     private let expand = NSButton()
     private var buttons: [NSButton] = []
     private var row: NativeConversationRow?
@@ -561,7 +580,20 @@ struct NativeConversationUpdate: Decodable {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        for child in [bubble, body, sentImages, metadata, marker, progress, rule, expand, agentBadge, rowIcon] {
+        for child in [
+            bubble,
+            body,
+            sentImages,
+            metadata,
+            marker,
+            progress,
+            rule,
+            expand,
+            agentBadge,
+            rowIcon,
+            preparation,
+            preparationDetails
+        ] {
             addSubview(child)
         }
         bubble.wantsLayer = true; bubble.layer?.cornerRadius = 18
@@ -588,7 +620,8 @@ struct NativeConversationUpdate: Decodable {
         let footer: [Any] = buttons.enumerated().filter { row?.buttons[$0.offset].header != true }.map(\.element)
         let actions: [Any] = row?.user == true ? time + footer : footer + time
         return (marker.isHidden ? [] : [marker]) + (sentImages.isHidden ? [] : [sentImages]) + headers + [body] +
-            actions + (expand.isHidden ? [] : [expand])
+            (preparation.isHidden ? [] : [preparation]) + actions +
+            (preparationDetails.isHidden ? [] : [preparationDetails]) + (expand.isHidden ? [] : [expand])
     }
 
     override func updateTrackingAreas() {
@@ -616,7 +649,7 @@ struct NativeConversationUpdate: Decodable {
     private func updateHover() {
         guard let row else { return }
         let alpha: CGFloat = hovered || row.trailing == true ? 1 : 0
-        metadata.alphaValue = row.agentStatus == nil ? alpha : 1
+        metadata.alphaValue = row.timeAlways == true || row.agentStatus != nil ? 1 : alpha
         for (index, button) in buttons
             .enumerated() {
             button.alphaValue = row.buttons[index].iconOnly == true ? alpha : 1
@@ -634,6 +667,7 @@ struct NativeConversationUpdate: Decodable {
             unfolded = false; hovered = false
             buttons.compactMap { $0 as? CopyActionButton }.forEach { $0.reset() }
             body.clear()
+            preparationDetails.clear()
         }
         self.send = send; self.scope = scope
         guard changed else { return false }
@@ -645,6 +679,14 @@ struct NativeConversationUpdate: Decodable {
         sentImages.update(row.user ? row.images : [], document: row.document, media: row.media)
         let parts = row.parts + (row.user ? [] : row.images.map { TranscriptPart.image(.init(source: $0)) })
         body.update(parts, document: row.document, media: row.media)
+        preparation.update(row.preparation, document: row.document)
+        preparationDetails.isHidden = row.preparation?.details.isEmpty != false
+        preparationDetails.update(
+            (row.preparation?.details ?? []).map { .text([.plain("\($0.label)  \($0.value)")]) },
+            document: row.document,
+            media: [:]
+        )
+        preparationDetails.send = body.send
         metadata.stringValue = row.time ?? ""
         marker.stringValue = [
             row.queued ? row.document.labels?["queued"] : nil,
@@ -700,31 +742,17 @@ struct NativeConversationUpdate: Decodable {
     private func measure() {
         guard let row else { return }
         let outer = max(0, (bounds.width - lane) / 2)
-        let inset: CGFloat = row.user ? 12 : 4
+        let inset: CGFloat = row.user || row.plan == true ? 12 : 4
         let width = row.user ? min(lane * 0.8, max(24, ceil(body.preferredWidth(max(1, lane * 0.8 - 24))) + 24)) : lane
         let x = outer + (row.user ? lane - width : 0)
         var y = CGFloat(row.top ?? 0)
-        if !marker.isHidden {
-            marker.sizeToFit(); marker.frame.origin = NSPoint(x: x, y: y); y += 20
+        let cardTop = y
+        if row.plan == true {
+            y += 12
         }
-        if !sentImages.isHidden {
-            let size = sentImages.measure(lane * 0.8)
-            sentImages.frame = NSRect(x: outer + lane - size.width, y: y, width: size.width, height: size.height)
-            y += size.height + (row.parts.isEmpty ? 0 : 4)
-        }
+        y = placeUserHeader(x: x, y: y, laneX: outer, laneWidth: lane, hasText: !row.parts.isEmpty)
         if row.agentStatus != nil {
-            metadata.sizeToFit()
-            for button in buttons {
-                button.frame = NSRect(x: x, y: y, width: max(0, width - metadata.frame.width - 12), height: 28)
-                button.alignment = .left
-            }
-            metadata.frame.origin = NSPoint(x: x + width - metadata.frame.width, y: y + 6)
-            agentBadge.frame = NSRect(x: x + 13, y: y + 18, width: 8, height: 8)
-            y += 30
-            let height = body.measure(max(1, width - 34))
-            body.frame = NSRect(x: x + 34, y: y, width: width - 34, height: height)
-            bubble.isHidden = true; rule.isHidden = true; expand.isHidden = true
-            measured = NSSize(width: lane, height: ceil(max(1, y + height + row.gap)))
+            measured = NSSize(width: lane, height: ceil(max(1, placeAgent(x: x, y: y, width: width) + row.gap)))
             return
         }
         let headers = row.buttons.indices.filter { row.buttons[$0].header == true }
@@ -732,19 +760,31 @@ struct NativeConversationUpdate: Decodable {
         rowIcon.frame = NSRect(x: x + 4, y: y + 5, width: 16, height: 16)
         y += placeHeaders(headers, x: x + iconInset, y: y, width: width - iconInset)
         let bodyIcon: CGFloat = headers.isEmpty ? iconInset : 0
-        let height = body.measure(max(1, width - inset * 2 - bodyIcon))
+        metadata.sizeToFit()
+        let headerTime: CGFloat = row.preparation == nil ? 0 : metadata.frame.width + 12
+        let height = body.measure(max(1, width - inset * 2 - bodyIcon - headerTime))
         let collapsed = row.collapsible == true && !unfolded && row.document.searching != true
         let drawn = collapsed ? min(176, height) : height
         body.frame = NSRect(
             x: x + inset + bodyIcon,
             y: y + (row.user ? 12 : 0),
-            width: width - inset * 2 - bodyIcon,
+            width: width - inset * 2 - bodyIcon - headerTime,
             height: drawn
         )
         body.wantsLayer = true; body.layer?.masksToBounds = collapsed
-        bubble.isHidden = !row.user || row.parts.isEmpty
+        bubble.isHidden = !row.user && row.plan != true || row.parts.isEmpty
+        bubble.layer?.borderWidth = row.plan == true ? 1 : 0
+        bubble.layer?.borderColor = NSColor.separatorColor.cgColor
+        bubble.layer?.cornerRadius = row.plan == true ? 12 : 18
         bubble.frame = NSRect(x: x, y: y, width: width, height: drawn + (row.user ? 24 : 0))
         y = max(body.frame.maxY, bubble.isHidden ? 0 : bubble.frame.maxY)
+        if row.preparation != nil {
+            metadata.frame.origin = NSPoint(x: x + width - metadata.frame.width, y: body.frame.minY + 2)
+            rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
+            y += 12
+            let stepsHeight = preparation.measure(width)
+            preparation.frame = NSRect(x: x, y: y, width: width, height: stepsHeight); y += stepsHeight
+        }
         progress.frame = NSRect(x: max(0, x - 20), y: body.frame.minY, width: 16, height: 16)
         expand.isHidden = row.collapsible != true
         if !expand.isHidden {
@@ -753,34 +793,82 @@ struct NativeConversationUpdate: Decodable {
                 .frame.maxY
         }
         y += row.fold == true ? 4 : row.user ? 4 : row.parts.isEmpty ? 2 : 6
+        y += placeFooter(row.buttons, user: row.user, headerTime: row.preparation != nil, x: x, y: y, width: width)
+        if !preparationDetails.isHidden {
+            let height = preparationDetails.measure(max(1, width - 30))
+            preparationDetails
+                .frame = NSRect(x: x + 30, y: y + 8, width: width - 30, height: height); y = preparationDetails.frame
+                .maxY
+        }
+        rule.isHidden = row.fold != true && row.separator != true && row.preparation == nil
+        if row.preparation == nil {
+            rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
+        }
+        if row.plan == true {
+            y += 12; bubble.frame = NSRect(x: x, y: cardTop, width: width, height: y - cardTop)
+        }
+        measured = NSSize(width: lane, height: ceil(max(1, y + row.gap + (row.fold == true ? 8 : 0))))
+    }
+
+    private func placeUserHeader(x: CGFloat, y: CGFloat, laneX: CGFloat, laneWidth: CGFloat, hasText: Bool) -> CGFloat {
+        var y = y
+        if !marker.isHidden {
+            marker.sizeToFit(); marker.frame.origin = NSPoint(x: x, y: y); y += 20
+        }
+        if !sentImages.isHidden {
+            let size = sentImages.measure(laneWidth * 0.8)
+            sentImages.frame = NSRect(x: laneX + laneWidth - size.width, y: y, width: size.width, height: size.height)
+            y += size.height + (!hasText ? 0 : 4)
+        }
+        return y
+    }
+
+    private func placeAgent(x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
         metadata.sizeToFit()
-        let footer = row.buttons.indices.filter { row.buttons[$0].header != true }
+        for button in buttons {
+            button.frame = NSRect(x: x, y: y, width: max(0, width - metadata.frame.width - 12), height: 28)
+            button.alignment = .left
+        }
+        metadata.frame.origin = NSPoint(x: x + width - metadata.frame.width, y: y + 6)
+        agentBadge.frame = NSRect(x: x + 13, y: y + 18, width: 8, height: 8)
+        let top = y + 30
+        let height = body.measure(max(1, width - 34))
+        body.frame = NSRect(x: x + 34, y: top, width: width - 34, height: height)
+        bubble.isHidden = true; rule.isHidden = true; expand.isHidden = true
+        return top + height
+    }
+
+    private func placeFooter(
+        _ actions: [ConversationButton],
+        user: Bool,
+        headerTime: Bool,
+        x: CGFloat,
+        y: CGFloat,
+        width: CGFloat
+    ) -> CGFloat {
+        metadata.sizeToFit()
+        let footer = actions.indices.filter { actions[$0].header != true }
         let widths = footer.map { index -> CGFloat in
-            let action = row.buttons[index]
+            let action = actions[index]
             if action.iconOnly == true {
                 return 24
             }
             buttons[index].sizeToFit(); return buttons[index].frame.width + 8
         }
-        let gap: CGFloat = row.user ? 2 : 8
+        let gap: CGFloat = user ? 2 : 8
         let total = widths.reduce(0,+) + CGFloat(max(0, widths.count - 1)) * gap
-        var bx = row.user ? x + width - total - 4 : x + 4
-        if row.user {
+        var bx = user ? x + width - total - 4 : x + 4
+        if user {
             metadata.frame.origin = NSPoint(x: max(x, bx - metadata.frame.width - 8), y: y + 4)
         }
         for (at, index) in footer.enumerated() {
             buttons[index].frame = NSRect(x: bx, y: y, width: widths[at], height: 24); bx += widths[at] + gap
         }
-        if !row.user {
+        if !user && !headerTime {
             metadata.frame.origin = NSPoint(x: bx, y: y + 4)
         }
-        let meta = !footer.isEmpty || !metadata.stringValue.isEmpty
-        if meta {
-            y += 24
-        }
-        rule.isHidden = row.fold != true && row.separator != true
-        rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
-        measured = NSSize(width: lane, height: ceil(max(1, y + row.gap + (row.fold == true ? 8 : 0))))
+        let meta = !footer.isEmpty || !headerTime && !metadata.stringValue.isEmpty
+        return meta ? 24 : 0
     }
 
     private func placeHeaders(_ indices: [Int], x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {

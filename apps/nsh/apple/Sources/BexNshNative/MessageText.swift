@@ -5,7 +5,6 @@ typealias MessageCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePoin
 final class MessageTextView: NSTextView, NSTextViewDelegate {
     var action: (([String: Any]) -> Void)?
     var document = MessageDocument.empty
-    private var clickModifiers: NSEvent.ModifierFlags = []
     private var selecting = false
     private var reported = false
     init() {
@@ -44,11 +43,29 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
         fatalError("init(coder:) is unavailable")
     }
 
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let storage = textStorage, let manager = layoutManager, let container = textContainer else { return }
+        storage.enumerateAttribute(.messageQuote, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard value as? Bool == true else { return }
+            let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let box = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            NSColor.separatorColor.setFill()
+            NSRect(x: textContainerOrigin.x + max(0, box.minX - 12),
+                   y: textContainerOrigin.y + box.minY, width: 2, height: box.height).fill()
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
-        clickModifiers = event.modifierFlags
+        // TextKit uses Command-click for text-system navigation. Resolve the
+        // app's explicit destination before entering that tracking loop.
+        let point = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.contains(.command), let link = attribute(.link, at: point) {
+            openLink(chip(at: point)?.link ?? Self.url(link), command: true)
+            return
+        }
         selecting = true
         defer {
-            clickModifiers = []
             selecting = false
             reportSelection()
         }
@@ -169,8 +186,10 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
     /// A chip's menu as Core lists it; an item reports its id with the chip's link.
     func fileMenu(_ items: [MessageMenuItem], link: String, action: String = "file") -> NSMenu {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         for item in items {
             let entry = NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
+            entry.isEnabled = item.enabled != false
             if let children = item.children {
                 entry.submenu = fileMenu(children, link: link, action: action)
             } else if let id = item.id {
@@ -187,11 +206,18 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
         // A chip opens its authored link, which Core resolves again.
         let chip = index < (textStorage?.length ?? 0)
             ? textStorage?.attribute(.messageFile, at: index, effectiveRange: nil) as? MessageFileLink : nil
-        let url = chip?.link ?? (link as? URL)?.absoluteString ?? (link as? String) ?? ""
+        openLink(chip?.link ?? Self.url(link), command: false)
+        return true
+    }
+
+    private static func url(_ link: Any) -> String {
+        (link as? URL)?.absoluteString ?? (link as? String) ?? ""
+    }
+
+    private func openLink(_ url: String, command: Bool) {
         // Core applies the web preference and Command's external override;
         // files retain their separate editor shortcut.
         action?(["action": "link", "text": url, "target": document.target,
-                 "command": clickModifiers.contains(.command)])
-        return true
+                 "command": command])
     }
 }
