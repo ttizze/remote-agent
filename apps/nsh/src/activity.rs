@@ -61,26 +61,47 @@ pub(crate) fn details(
             item_id: item.source.data.native_id.clone()?,
         })
     });
-    let running = move || {
-        request.with(|read| {
-            read.as_ref().is_some_and(|read| {
-                connection.publication.with(|p| {
-                    p.snapshot
-                        .operation_running(op::OperationKey::Item { item: read.clone() })
-                })
+    let output = computed(move || {
+        if !open()
+            || item.with(|item| {
+                item.as_ref()
+                    .is_none_or(|item| item.source.data.kind != "command")
             })
-        })
-    };
-    let error = move || {
-        request.with(|read| {
-            read.as_ref().and_then(|read| {
-                connection.publication.with(|p| {
-                    p.snapshot
-                        .operation_error(op::OperationKey::Item { item: read.clone() })
+        {
+            return None;
+        }
+        let read = request.get()?;
+        Some((read.thread_id, read.item_id))
+    });
+    effect(move || {
+        if let Some((thread_id, item_id)) = output.get() {
+            connection.dispatch(Intent::WatchCommandOutput {
+                thread_id: thread_id.clone(),
+                item_id: item_id.clone(),
+                watching: true,
+            });
+            cleanup(move || {
+                connection.dispatch(Intent::WatchCommandOutput {
+                    thread_id,
+                    item_id,
+                    watching: false,
                 })
-            })
+            });
+        }
+    });
+    let detail = computed(move || {
+        request.with(|read| {
+            read.as_ref()
+                .map(|read| {
+                    connection
+                        .context
+                        .with(|context| context.item_detail(read.clone()))
+                })
+                .unwrap_or_default()
         })
-    };
+    });
+    let running = move || detail.with(|detail| detail.loading);
+    let error = move || detail.with(|detail| detail.error.clone());
     let load = move || {
         if let Some(read) = request.get_untracked() {
             connection.dispatch(Intent::ReadItem(read));
@@ -237,7 +258,8 @@ pub(crate) fn details(
                     move || {
                         item.with(|item| {
                             item.as_ref().is_some_and(|item| item.source.data.deferred)
-                        })
+                        }) || running()
+                            || error().is_some()
                     },
                     move || {
                         view()

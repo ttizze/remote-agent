@@ -1310,7 +1310,7 @@ mod tests {
             assert!(
                 snapshot
                     .operation_error(agent_core::state::operations::OperationKey::Attachment {
-                        draft_key
+                        draft_key: snapshot.panes.primary().navigation.draft_key.clone()
                     })
                     .is_some()
             );
@@ -1338,12 +1338,14 @@ mod tests {
                 text: "終了直前の日本語 👋".into(),
             },
         );
-        runtime.block_on(async {
-            publication(&incoming, "終了直前の日本語 👋").await;
+        let key = runtime.block_on(async {
+            let accepted = publication(&incoming, "終了直前の日本語 👋").await;
+            let key = accepted.pane().navigation.draft_key.clone();
             tokio::time::timeout(Duration::from_secs(10), client.shutdown())
                 .await
                 .unwrap()
                 .unwrap();
+            key
         });
         drop(client);
         drop(runtime);

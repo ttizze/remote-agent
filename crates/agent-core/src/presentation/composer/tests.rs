@@ -32,6 +32,31 @@ fn presentation(snapshot: &Snapshot) -> Arc<ComposerPresentation> {
 }
 
 #[test]
+fn a_new_claude_conversation_with_no_explicit_model_uses_its_catalog_default() {
+    let mut snapshot = snapshot();
+    Arc::make_mut(
+        Arc::make_mut(&mut snapshot.sessions.conversations)
+            .get_mut(&session())
+            .unwrap(),
+    )
+    .active_provider = Some(ProviderKind::Claude);
+    snapshot.catalog.models = Arc::new(vec![
+        serde_json::from_value(serde_json::json!({
+            "id":"default","model":{"provider":"claude","id":"default"},
+            "displayName":"Claude","isDefault":true
+        }))
+        .unwrap(),
+    ]);
+    assert_eq!(
+        presentation(&snapshot).controls.selected_model,
+        Some(ModelRef {
+            provider: ProviderKind::Claude,
+            id: "default".into()
+        })
+    );
+}
+
+#[test]
 fn a_conversation_still_opening_or_failed_to_open_keeps_its_draft_but_sends_nothing() {
     let mut snapshot = snapshot();
     crate::state::set_draft_text(&mut snapshot, session().into(), "下書き".into());
@@ -331,6 +356,7 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
             session(),
             Arc::new(Thread {
                 id: Some(session()),
+                steerable: running && steer,
                 capabilities: Some(crate::session::Capabilities {
                     steer,
                     ..Default::default()
@@ -450,4 +476,45 @@ fn an_interrupted_turn_or_a_usage_limit_can_be_resumed() {
         assert_eq!(super::resumable(&thread), expected, "{status:?}");
     }
     assert!(!super::resumable(&Thread::default()));
+}
+
+#[test]
+fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
+    let mut snapshot = snapshot();
+    snapshot.input.composer_preferences.follow_up = FollowUp::Steer;
+    for (name, capability, allowed, skips_compaction) in [
+        ("stopping or retrying", true, false, false),
+        ("compaction", false, false, true),
+        ("ordinary turn", true, true, false),
+    ] {
+        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+            session(),
+            Arc::new(Thread {
+                id: Some(session()),
+                steerable: allowed,
+                skips_compaction,
+                capabilities: Some(agent_protocol::session::Capabilities {
+                    steer: capability,
+                    ..Default::default()
+                }),
+                turns: Some(vec![Arc::new(Turn {
+                    id: "turn".into(),
+                    status: TurnStatus::Running,
+                    ..Default::default()
+                })]),
+                ..Default::default()
+            }),
+        );
+        let controls = &presentation(&snapshot).controls.follow_up;
+        assert_eq!(controls.can_steer, allowed || skips_compaction, "{name}");
+        assert_eq!(
+            controls.default_action,
+            if allowed {
+                FollowUp::Steer
+            } else {
+                FollowUp::Queue
+            },
+            "{name}"
+        );
+    }
 }

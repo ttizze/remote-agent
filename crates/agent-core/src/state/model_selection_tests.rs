@@ -81,7 +81,7 @@ fn explicit_codex_model_survives_selection_and_catalog_refresh() {
         },
         ..Default::default()
     };
-    let key = snapshot.panes.primary().navigation.draft_key.clone();
+    let (snapshot, key) = welcome_draft(snapshot);
     let model = ModelRef {
         provider: ProviderKind::Codex,
         id: "gpt-6.1-sol".into(),
@@ -172,7 +172,7 @@ fn chatgpt_catalog_repairs_unavailable_saved_model_but_api_keeps_explicit_ids() 
         }))
         .unwrap();
         Arc::make_mut(&mut snapshot.catalog.account).accounts = Some(Arc::new(accounts));
-        let key = snapshot.panes.primary().navigation.draft_key.clone();
+        let (mut snapshot, key) = welcome_draft(snapshot);
         let unsupported = ModelRef {
             provider: ProviderKind::Codex,
             id: "gpt-6.1-sol".into(),
@@ -293,6 +293,20 @@ fn catalog_failures_only_preserve_the_affected_providers_saved_model(
     );
 }
 
+fn welcome_draft(snapshot: Snapshot) -> (Snapshot, DraftKey) {
+    let snapshot = crate::state::reduce(
+        &snapshot,
+        "",
+        crate::state::Event::Intent(Intent::SetDraft {
+            thread_id: DraftKey::default(),
+            draft: Draft::default(),
+        }),
+    )
+    .0;
+    let key = snapshot.panes.primary().navigation.draft_key.clone();
+    (snapshot, key)
+}
+
 fn apply(snapshot: &Snapshot, intent: Intent) -> Snapshot {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -311,7 +325,7 @@ fn apply(snapshot: &Snapshot, intent: Intent) -> Snapshot {
 #[test]
 fn existing_conversation_can_choose_another_provider_without_losing_its_draft() {
     let id = agent_protocol::session::SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "existing".into(),
     };
     let key = DraftKey::from(id.clone());
@@ -368,7 +382,7 @@ fn existing_conversation_can_choose_another_provider_without_losing_its_draft() 
 }
 
 fn fixture() -> Snapshot {
-    Snapshot {
+    let snapshot = Snapshot {
         catalog: crate::state::Catalog {
             models: Arc::new(catalog()),
             account: Arc::new(agent_core::state::AccountState {
@@ -384,7 +398,8 @@ fn fixture() -> Snapshot {
             ..Default::default()
         },
         ..Default::default()
-    }
+    };
+    welcome_draft(snapshot).0
 }
 
 fn select(
@@ -550,21 +565,18 @@ fn reading_a_conversation_and_refreshing_catalogs_do_not_remember_its_model() {
     );
     let remembered = snapshot.catalog.model_preferences.clone();
     let session = agent_protocol::session::SessionRef {
-        provider: ProviderKind::Claude,
+        provider: Some(ProviderKind::Claude),
         id: "old".into(),
     };
     let mut snapshot = snapshot;
     ReadThread::open(session.clone())
         .prepare(&mut snapshot, "")
         .unwrap();
-    ReadThread::open(session.clone()).apply(
+    crate::test_conversations::open(
         &mut snapshot,
-        "",
         serde_json::from_value(json!({
-            "session":session, "response":{
-                "thread":{"id":session,"cwd":"/old"},
-                "model":{"provider":"claude","id":"shared"}, "effort":"medium", "serviceTier":"fast"
-            }
+            "thread":{"id":session,"cwd":"/old"},
+            "model":{"provider":"claude","id":"shared"}, "effort":"medium", "serviceTier":"fast"
         }))
         .unwrap(),
     );
@@ -613,7 +625,7 @@ fn explicit_changes_in_existing_chats_are_remembered_without_touching_other_chat
         "default",
     );
     let session = agent_protocol::session::SessionRef {
-        provider: ProviderKind::Claude,
+        provider: Some(ProviderKind::Claude),
         id: "existing".into(),
     };
     let snapshot = select(
@@ -777,6 +789,34 @@ async fn selecting_the_already_visible_model_publishes_the_remembered_choice() {
     store.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn the_first_welcome_model_choice_is_remembered_under_the_created_draft_id() {
+    let mut snapshot = Snapshot::default();
+    snapshot.catalog.models = Arc::new(catalog());
+    let store = crate::store::Store::offline(snapshot, None);
+    let model = catalog()[0].model.clone();
+    store
+        .dispatch(Intent::SelectModel {
+            thread_id: DraftKey::default(),
+            model: model.clone(),
+        })
+        .await
+        .unwrap();
+    let accepted = store.snapshot();
+    let key = &accepted.panes.primary().navigation.draft_key;
+    assert!(matches!(key, DraftKey::Session { .. }));
+    assert_eq!(accepted.input.drafts[key].model.as_ref(), Some(&model));
+    assert_eq!(
+        accepted.catalog.model_preferences.provider,
+        Some(ProviderKind::Codex)
+    );
+    assert_eq!(
+        accepted.catalog.model_preferences.selections[&ProviderKind::Codex].model,
+        model
+    );
+    store.close().await.unwrap();
+}
+
 #[test]
 fn selecting_another_providers_account_restores_its_settings_and_keeps_input() {
     use agent_core::state::operations::SelectAccountForDraft;
@@ -882,7 +922,7 @@ fn starting_a_new_chat_does_not_repair_other_conversations_from_the_catalog() {
         "default",
     );
     let key = DraftKey::from(agent_protocol::session::SessionRef {
-        provider: ProviderKind::Claude,
+        provider: Some(ProviderKind::Claude),
         id: "old-model".into(),
     });
     let previous = Arc::new(Draft {

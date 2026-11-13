@@ -1,6 +1,22 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "会話の下書きを開いてから送信してください。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話の下書きを開いてから送信してください。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open a conversation draft before sending."
+          }
+        }
+      }
+    },
     "検索をクリア": {
       "localizations": {
         "ja": {
@@ -113,77 +129,212 @@
         }
       }
     },
-    "ワークスペースが変わりました。更新して再試行してください。": {"localizations":{"en":{"stringUnit":{"state":"translated","value":"The workspace changed. Refresh and try again."}},"ja":{"stringUnit":{"state":"translated","value":"ワークスペースが変わりました。更新して再試行してください。"}}}},
+    "ワークスペースが変わりました。更新して再試行してください。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The workspace changed. Refresh and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースが変わりました。更新して再試行してください。"
+          }
+        }
+      }
+    },
     "比較先を変更": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Change comparison" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "比較先を変更" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change comparison"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "比較先を変更"
+          }
+        }
       }
     },
     "自動（既定の比較先）": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Automatic (default base)" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "自動（既定の比較先）" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic (default base)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自動（既定の比較先）"
+          }
+        }
       }
     },
     "プロジェクトスクリプトを追加": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Add project script" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "プロジェクトスクリプトを追加" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add project script"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトスクリプトを追加"
+          }
+        }
       }
     },
     "ワークスペースの操作": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Workspace actions" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの操作" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace actions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースの操作"
+          }
+        }
       }
     },
     "ブランチを作成…": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Create branch…" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "ブランチを作成…" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create branch…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブランチを作成…"
+          }
+        }
       }
     },
     "プロジェクトスクリプト": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Project script" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "プロジェクトスクリプト" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Project script"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロジェクトスクリプト"
+          }
+        }
       }
     },
     "ブランチ名": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Branch name" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "ブランチ名" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Branch name"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブランチ名"
+          }
+        }
       }
     },
     "スクリプト名": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Script name" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "スクリプト名" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Script name"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スクリプト名"
+          }
+        }
       }
     },
     "スクリプトの操作": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Script actions" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "スクリプトの操作" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Script actions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スクリプトの操作"
+          }
+        }
       }
     },
     "プッシュ": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Push" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "プッシュ" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Push"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プッシュ"
+          }
+        }
       }
     },
     "ワークスペースの操作に失敗しました": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Workspace operation failed" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの操作に失敗しました" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace operation failed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースの操作に失敗しました"
+          }
+        }
       }
     },
     "作成": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Create" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "作成" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "作成"
+          }
+        }
       }
     },
     "Webリンクを開く場所を選択します。Ctrl／⌘＋クリックでは既定のブラウザで開きます。": {
@@ -220,8 +371,18 @@
     },
     "リンクの開き先": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Open links in" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "リンクの開き先" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open links in"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リンクの開き先"
+          }
+        }
       }
     },
     "Bexで開く": {
@@ -242,26 +403,66 @@
     },
     "Fast：オン": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Fast: on" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "Fast：オン" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast: on"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast：オン"
+          }
+        }
       }
     },
     "Fast：オフ": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Fast: off" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "Fast：オフ" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast: off"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast：オフ"
+          }
+        }
       }
     },
     "貼り付け": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Paste" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "貼り付け" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paste"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "貼り付け"
+          }
+        }
       }
     },
     "最新の出力に移動": {
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Jump to latest" } },
-        "ja": { "stringUnit": { "state": "translated", "value": "最新の出力に移動" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jump to latest"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最新の出力に移動"
+          }
+        }
       }
     },
     "Claude Code のアカウント確認": {
@@ -8883,7 +9084,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Collapse"
+            "value": "Show less"
           }
         }
       }
@@ -10740,22 +10941,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Show full message"
-          }
-        }
-      }
-    },
-    "折りたたむ": {
-      "localizations": {
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "折りたたむ"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Show less"
           }
         }
       }
@@ -19576,22 +19761,6 @@
         }
       }
     },
-    "スクリプト名": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Script name"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "スクリプト名"
-          }
-        }
-      }
-    },
     "実行するコマンド": {
       "localizations": {
         "en": {
@@ -19684,6 +19853,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "スキップ済み"
+          }
+        }
+      }
+    },
+    "履歴を読み込んでいます。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading history."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "履歴を読み込んでいます。"
+          }
+        }
+      }
+    },
+    "入力を復元できませんでした": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not restore the input"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "入力を復元できませんでした"
+          }
+        }
+      }
+    },
+    "以前の出力は表示されていません": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "以前の出力は表示されていません"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Earlier output not shown"
           }
         }
       }

@@ -205,6 +205,15 @@ mod tests {
             id: "other-route".into(),
         };
         let mut snapshot = Snapshot::default();
+        snapshot = reduce_intent(
+            &snapshot,
+            "",
+            Intent::SetDraft {
+                thread_id: DraftKey::default(),
+                draft: Draft::default(),
+            },
+        )
+        .0;
         let key = snapshot.panes.primary().navigation.draft_key.clone();
         let other_key = DraftKey::from("other");
         Arc::make_mut(&mut snapshot.input.drafts).insert(

@@ -174,6 +174,7 @@ extension ThreadScreen {
                 media: mediaAccess,
                 selection: selectionActions,
                 isExpanded: expandedItemIds.contains(item.data.id),
+                detail: conversation?.id.map { model.conversationContext.itemDetail(item: ReadItem(threadId: $0, turnId: turnId, itemId: item.data.nativeId ?? item.data.id)) } ?? ItemDetail(loading: false, error: nil),
                 toggleExpanded: {
                     scroll.following = false
                     if expandedItemIds.contains(item.data.id) {
@@ -188,6 +189,11 @@ extension ThreadScreen {
                         threadId: threadId, turnId: turnId,
                         itemId: item.data.nativeId ?? item.data.id
                     )
+                },
+                watchOutput: { watching in
+                    guard item.data.kind == "command", let threadId = conversation?.id,
+                          let itemId = item.data.nativeId else { return }
+                    model.perform(.watchCommandOutput(threadId: threadId, itemId: itemId, watching: watching))
                 }
             ).equatable()
         }

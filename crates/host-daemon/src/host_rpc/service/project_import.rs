@@ -1,5 +1,6 @@
 use super::*;
 use agent_protocol::project_import::{ProjectCandidate, ProjectImportResult, ProjectScan};
+use std::collections::HashMap;
 use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
@@ -10,7 +11,12 @@ const MAX_SESSIONS_PER_PROVIDER: usize = 5_000;
 impl HostRpcService {
     pub(super) async fn scan_projects(&self) -> Result<ProjectScan, Failure> {
         let projects = self.project_snapshot().await?;
-        let owned = self.inner.conversations.active_sessions("")?;
+        let owned = self
+            .inner
+            .conversation
+            .storage
+            .active_sources()
+            .map_err(super::super::runtime::storage_failure)?;
         let scope = SessionListScope::Roots(&owned);
         let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
         let sources = futures_util::future::join_all(
@@ -105,9 +111,12 @@ impl HostRpcService {
             .collect();
         let conversations = self
             .inner
-            .store
-            .imported()
-            .map_err(transcripts::storage_failure)?;
+            .conversation
+            .storage
+            .summaries("", true)
+            .map_err(super::super::runtime::storage_failure)?
+            .into_iter()
+            .filter_map(|thread| Some((thread.id?, thread.cwd)));
         for (conversation, cwd) in conversations {
             // Registered roots are canonical; a recorded cwd may not be.
             let cwd = cwd.map(|cwd| {
@@ -120,9 +129,18 @@ impl HostRpcService {
                 .as_deref()
                 .and_then(|cwd| projects.project_for_workspace(cwd))
                 .is_some_and(|project| imported.contains(project))
+                && let Some(source) = self
+                    .inner
+                    .conversation
+                    .storage
+                    .active_source(&conversation)
+                    .map_err(super::super::runtime::storage_failure)?
             {
-                // Re-imports run in the background.
-                drop(self.import_transcript(conversation, true));
+                self.inner
+                    .conversation
+                    .storage
+                    .queue_import(&conversation, &source, super::super::runtime::now())
+                    .map_err(super::super::runtime::storage_failure)?;
             }
         }
         Ok(())
@@ -191,8 +209,10 @@ fn candidates(threads: Vec<Thread>, chat_directory: &Path) -> Vec<ProjectCandida
                 registered: false,
             });
         candidate.conversation_count += 1;
-        if !candidate.providers.contains(&id.provider) {
-            candidate.providers.push(id.provider);
+        if let Some(provider) = thread.active_provider.or(id.provider)
+            && !candidate.providers.contains(&provider)
+        {
+            candidate.providers.push(provider);
             candidate.providers.sort();
         }
         if let Some(time) = thread.updated_at.filter(|time| time.is_finite()) {
@@ -311,7 +331,7 @@ mod tests {
                 agent.into(),
                 Backend::unavailable(ProviderKind::Codex, "offline"),
             ],
-            ProjectStore::new(&store_path),
+            &store_path,
         );
         let scan = service.scan_projects().await.unwrap();
         assert_eq!(scan.projects.len(), 2);
@@ -322,7 +342,9 @@ mod tests {
         assert_eq!(candidate.conversation_count, 3);
         assert_eq!(candidate.providers, [ProviderKind::Claude]);
         assert!(
-            ProjectStore::new(&store_path)
+            &service
+                .inner
+                .projects
                 .load()
                 .await
                 .unwrap()
@@ -341,16 +363,22 @@ mod tests {
             .import_projects(&[path.clone(), path.clone()])
             .await
             .unwrap();
-        let registered = ProjectStore::new(&store_path).load().await.unwrap();
+        let registered = ProjectStore::fixture(&store_path).load().await.unwrap();
         assert_eq!(registered.projects.len(), 1);
         assert_eq!(registered.projects[0].roots[0].path, path);
         let scan = service.scan_projects().await.unwrap();
         assert!(scan.projects[0].registered);
         // Import only registers folders. Native titles and IDs remain readable without a CLI.
         let agent = &service.inner.providers.all()[0].1;
-        let page = Agent::list(agent.as_ref(), "", None, SessionListScope::Roots(&[]), 100)
-            .await
-            .unwrap();
+        let page = crate::providers::Discovery::list(
+            agent.as_ref(),
+            "",
+            None,
+            SessionListScope::Roots(&[]),
+            100,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             page.data
                 .into_iter()

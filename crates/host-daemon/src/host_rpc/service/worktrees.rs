@@ -32,7 +32,7 @@ impl WorktreeBlockers {
 
 impl HostRpcService {
     // Callers hold worktree_access so removal cannot race restoration.
-    pub(super) async fn restore_workspace(&self, cwd: &str) -> Result<bool, Failure> {
+    pub(in crate::host_rpc) async fn restore_workspace(&self, cwd: &str) -> Result<bool, Failure> {
         let Some(directory) = self
             .inner
             .worktrees
@@ -49,13 +49,6 @@ impl HostRpcService {
         Ok(true)
     }
 
-    /// Roll back a checkout that no conversation refers to after its start failed.
-    pub(super) async fn discard_worktree(&self, cwd: &str) {
-        if let Err(error) = self.inner.worktrees.discard(cwd.to_owned()).await {
-            tracing::warn!(target: "agent", operation = "host.worktree.discard", message = %format!("{error:#}"));
-        }
-    }
-
     pub(super) async fn worktree_list(
         &self,
     ) -> Result<Vec<agent_protocol::models::Worktree>, Failure> {
@@ -69,9 +62,17 @@ impl HostRpcService {
             return Ok(worktrees);
         }
         let saved = self
-            .saved_conversation_titles("")?
+            .inner
+            .conversation
+            .storage
+            .headers(true)
+            .map_err(super::super::runtime::storage_failure)?
             .into_iter()
-            .filter_map(|thread| Some((thread.id.clone()?, thread)))
+            .map(|(id, header)| {
+                let waiting = header.details.activity.facts().waiting;
+                let thread = agent_protocol::conversation::records::summary(&id, &header);
+                (id, (thread, waiting))
+            })
             .collect::<std::collections::BTreeMap<_, _>>();
         let (threads, warning) = self.worktree_threads(&saved).await?;
         let mut worktrees = worktrees
@@ -87,16 +88,12 @@ impl HostRpcService {
             })
             .collect::<Vec<_>>();
         for (thread, from_provider) in threads {
-            let thread = match thread.id.clone() {
-                Some(id) => self.inner.router.overlay_execution(&id, thread),
-                None => thread,
-            };
-            let active = worktree_active(
-                thread.status,
-                thread.turns.as_deref().unwrap_or_default(),
-                !thread.requests.is_empty(),
-                thread.submissions.values(),
-            );
+            let active = agent_protocol::models::task_active(None, thread.status)
+                || thread
+                    .id
+                    .as_ref()
+                    .and_then(|id| saved.get(id))
+                    .is_some_and(|(_, waiting)| *waiting);
             let Some(cwd) = thread.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) else {
                 if active {
                     return Err(Failure::new(
@@ -123,17 +120,18 @@ impl HostRpcService {
             let idle_warning = if !active && let Some(id) = &thread.id {
                 // Keep native IDs for conservative occupancy checks, including
                 // released sessions. Public snapshots need their active binding.
-                let row = if from_provider {
-                    None
+                let native = if from_provider {
+                    Some(id.clone())
                 } else {
-                    self.inner.conversations.get(id)?
-                };
-                let native = match row {
-                    Some(row) => (!row.bindings.is_empty()).then_some(row.active),
-                    None => Some(id.clone()),
+                    self.inner
+                        .conversation
+                        .storage
+                        .active_source(id)
+                        .map_err(super::super::runtime::storage_failure)?
                 };
                 if let Some(native) = native
-                    && let Ok(agent) = self.inner.providers.get(native.provider)
+                    && let Some(provider) = native.provider
+                    && let Ok(agent) = self.inner.providers.get(provider)
                 {
                     agent.workspace_idle_warning(&native.id).await
                 } else {
@@ -143,7 +141,11 @@ impl HostRpcService {
                 None
             };
             let display = if from_provider {
-                self.inner.conversations.summary(thread)?
+                self.inner
+                    .conversation
+                    .storage
+                    .native_summary(thread)
+                    .map_err(super::super::runtime::storage_failure)?
             } else {
                 Some(thread)
             };
@@ -196,7 +198,7 @@ impl HostRpcService {
     }
     async fn worktree_threads(
         &self,
-        saved: &std::collections::BTreeMap<agent_protocol::session::SessionRef, Thread>,
+        saved: &std::collections::BTreeMap<agent_protocol::session::SessionRef, (Thread, bool)>,
     ) -> Result<(Vec<(Thread, bool)>, Option<String>), Failure> {
         let mut warnings = std::collections::BTreeMap::new();
         let mut threads = Vec::new();
@@ -224,55 +226,16 @@ impl HostRpcService {
                 }
             }
         }
-        // Providers can omit a first, still-running turn from their history list.
-        // Resolve every retained execution before allowing any checkout removal.
-        for target in self.inner.router.execution_targets() {
-            if threads
-                .iter()
-                .any(|(thread, _)| thread.id.as_ref() == Some(&target))
-            {
-                continue;
-            }
-            let row = self.inner.conversations.get(&target)?;
-            if let Some(row) = &row
-                && row.startup.is_some()
-            {
-                threads.push((self.preparation_history(row).await?.thread, false));
-                continue;
-            }
-            let native = row.as_ref().map_or(&target, |row| &row.active);
-            let agent = match self.inner.providers.get(native.provider) {
-                Ok(agent) => agent,
-                Err(error) => {
-                    warnings.insert(native.provider, error.to_string());
-                    continue;
-                }
-            };
-            // Occupancy depends on the active provider's state, not on readable
-            // historical segments or a successful full transcript import.
-            let mut thread = agent.state(&native.id).await?.response.thread;
-            if thread.id.as_ref() != Some(native) {
-                return Err(Failure::new(
-                    "invalid_thread",
-                    "native session identity changed",
-                ));
-            }
-            if let Some(row) = &row {
-                for turn in thread.turns.iter_mut().flatten() {
-                    Arc::make_mut(turn).id = row.identity(native, &turn.id).into();
-                }
-                row.describe(&mut thread);
-            }
-            threads.push((thread, false));
-        }
-        for thread in saved.values() {
+        // Committed preparation and execution headers also cover work the
+        // provider has not listed yet.
+        for (thread, _) in saved.values() {
             if let Some(provider) = thread.active_provider
                 && let Err(error) = self.inner.providers.get(provider)
             {
                 warnings.insert(provider, error.to_string());
             }
         }
-        threads.extend(saved.values().cloned().map(|thread| (thread, false)));
+        threads.extend(saved.values().map(|(thread, _)| (thread.clone(), false)));
         Ok((threads, self.inner.providers.error_summary(warnings)))
     }
     pub(super) async fn remove_worktree(&self, path: String) -> Result<(), Failure> {
@@ -385,33 +348,6 @@ impl HostRpcService {
     }
 }
 
-pub(super) fn worktree_active<'a>(
-    status: agent_protocol::models::SessionStatus,
-    turns: &[Arc<agent_protocol::models::Turn>],
-    has_requests: bool,
-    mut submissions: impl Iterator<Item = &'a agent_protocol::session::SubmissionDelivery>,
-) -> bool {
-    use agent_protocol::{execution::TurnStatus, session::SubmissionDelivery};
-    agent_protocol::models::task_active(None, status)
-        || has_requests
-        || turns.iter().any(|turn| turn.status == TurnStatus::Running)
-        || submissions.any(|delivery| match delivery {
-            SubmissionDelivery::Rejected | SubmissionDelivery::Withdrawn => false,
-            SubmissionDelivery::Accepted { turn_id: Some(id) } => {
-                // Completed receipts can remain for replay after interruption.
-                // Only a known finished turn proves that input no longer owns work.
-                !turns.iter().any(|turn| {
-                    &turn.id == id
-                        && matches!(
-                            turn.status,
-                            TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
-                        )
-                })
-            }
-            _ => true,
-        })
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     pub(in crate::host_rpc::service) fn repository(
@@ -443,18 +379,14 @@ pub(super) mod tests {
     #[tokio::test]
     async fn worktree_resolves_public_tasks_and_preserves_native_idle_warnings() {
         use super::*;
-        use crate::host_rpc::{
-            conversations::Conversation, service::conversations::tests::NativeAgent,
-        };
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
         for warning in [None, Some("native idle warning")] {
             let directory = tempfile::tempdir().unwrap();
             let repository = repository(directory.path());
             let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
             Arc::get_mut(&mut agent).unwrap().idle_warning = warning;
-            let host = HostRpcService::new(
-                [agent.backend()],
-                ProjectStore::new(directory.path().join("worktrees.json")),
-            );
+            let host =
+                HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
             host.inner
                 .worktrees
                 .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -466,25 +398,24 @@ pub(super) mod tests {
             let checkout = host
                 .inner
                 .worktrees
-                .prepare(repository.to_str(), || async { Ok(()) })
+                .prepare_selected(
+                    repository.to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             let response = agent
                 .create(checkout.to_str().unwrap(), None, None)
                 .await
                 .unwrap();
-            let mut conversation = Conversation::new(&response.thread).unwrap();
-            conversation.id = agent_protocol::session::SessionRef::new(
+            let public = agent_protocol::session::SessionRef::new(
                 ProviderKind::Codex,
                 "bex-task:managed".into(),
             )
             .unwrap();
-            let public = conversation.id.clone();
-            host.inner.conversations.save(conversation).unwrap();
-            // Also exercise the public execution snapshot alongside its native
-            // listing, as happens while clients retain an admitted task.
-            let _execution = host.inner.router.retain_execution(public.clone()).unwrap();
+            own(&host, &public, &response);
             let entries = host.worktree_list().await.unwrap();
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].threads.len(), 1);
@@ -503,31 +434,33 @@ pub(super) mod tests {
             } else {
                 host.remove_worktree(entries[0].path.clone()).await.unwrap();
                 assert!(!checkout.exists());
-                assert!(host.inner.conversations.get(&public).unwrap().is_some());
+                assert!(
+                    host.inner
+                        .conversation
+                        .storage
+                        .lookup(&public)
+                        .unwrap()
+                        .is_some()
+                );
             }
         }
     }
 
     #[tokio::test]
-    async fn worktree_occupancy_uses_live_state_when_source_history_is_incomplete() {
+    async fn worktree_occupancy_uses_the_imported_status_when_source_history_is_incomplete() {
         use super::*;
-        use crate::host_rpc::{
-            conversations::{Binding, Conversation},
-            service::conversations::tests::NativeAgent,
-        };
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
         use agent_protocol::{
             execution::TurnStatus,
-            session::{HistoryReadKind, HistoryReadState, SessionRef, SubmissionDelivery},
+            session::{HistoryReadKind, HistoryReadState, SessionRef},
         };
         for history in [HistoryReadKind::Incomplete, HistoryReadKind::Unavailable] {
             for status in [TurnStatus::Completed, TurnStatus::Running] {
                 let directory = tempfile::tempdir().unwrap();
                 let repository = repository(directory.path());
                 let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-                let host = HostRpcService::new(
-                    [agent.backend()],
-                    ProjectStore::new(directory.path().join("worktrees.json")),
-                );
+                let host =
+                    HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
                 host.inner
                     .worktrees
                     .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -539,9 +472,13 @@ pub(super) mod tests {
                 let checkout = host
                     .inner
                     .worktrees
-                    .prepare(repository.to_str(), || async { Ok(()) })
+                    .prepare_selected(
+                        repository.to_str().unwrap(),
+                        String::new(),
+                        true,
+                        crate::worktrees::Observer::default(),
+                    )
                     .await
-                    .unwrap()
                     .unwrap();
                 let mut response = agent
                     .create(checkout.to_str().unwrap(), None, None)
@@ -560,31 +497,9 @@ pub(super) mod tests {
                     .lock()
                     .unwrap()
                     .insert(native.id.clone(), response.clone());
-                let mut previous = response.thread.clone();
-                previous.id = Some(SessionRef::new(ProviderKind::Claude, "past".into()).unwrap());
-                let mut row = Conversation::new(&previous).unwrap();
-                row.id = SessionRef::new(ProviderKind::Claude, "bex-task:managed".into()).unwrap();
-                row.bindings.push(Binding {
-                    session: native.clone(),
-                    covered: None,
-                });
-                row.activate(native.clone(), 0);
-                let public = row.id.clone();
-                let turn = row.identity(&native, "turn").into();
-                host.inner.conversations.save(row).unwrap();
-                let _execution = host.inner.router.retain_execution(public.clone()).unwrap();
-                host.inner
-                    .router
-                    .begin_submission(&public, "message")
-                    .unwrap();
-                host.inner.router.finish_submission(
-                    &public,
-                    "message",
-                    SubmissionDelivery::Accepted {
-                        turn_id: Some(turn),
-                    },
-                );
-
+                let public =
+                    SessionRef::new(ProviderKind::Claude, "bex-task:managed".into()).unwrap();
+                own(&host, &public, &response);
                 let entries = host.worktree_list().await.unwrap();
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].threads.len(), 1);
@@ -606,7 +521,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn worktree_keeps_idle_uncertainty_and_provider_failures_alongside_running_work() {
         use super::*;
-        use crate::host_rpc::service::conversations::tests::{NativeAgent, call};
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
         let directory = tempfile::tempdir().unwrap();
         let repository = repository(directory.path());
         let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -616,7 +531,7 @@ pub(super) mod tests {
                 agent.backend(),
                 Backend::unavailable(ProviderKind::Claude, "claude startup failed"),
             ],
-            ProjectStore::new(directory.path().join("worktrees.json")),
+            directory.path().join("worktrees.json"),
         );
         host.inner
             .worktrees
@@ -629,9 +544,13 @@ pub(super) mod tests {
         let checkout = host
             .inner
             .worktrees
-            .prepare(repository.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         agent
             .create(checkout.to_str().unwrap(), None, None)
@@ -676,7 +595,7 @@ pub(super) mod tests {
     async fn worktree_block_reasons_keep_every_provider_failure_in_provider_order() {
         for listing_fails in [false, true] {
             use super::*;
-            use crate::host_rpc::service::conversations::tests::NativeAgent;
+            use crate::host_rpc::runtime::native_fixture::NativeAgent;
             use std::sync::atomic::Ordering;
             let directory = tempfile::tempdir().unwrap();
             let repository = repository(directory.path());
@@ -709,7 +628,7 @@ pub(super) mod tests {
                             )
                         }
                     }),
-                    ProjectStore::new(directory.path().join("worktrees.json")),
+                    directory.path().join("worktrees.json"),
                 );
                 host.inner
                     .worktrees
@@ -721,9 +640,13 @@ pub(super) mod tests {
                     .unwrap();
                 host.inner
                     .worktrees
-                    .prepare(repository.to_str(), || async { Ok(()) })
+                    .prepare_selected(
+                        repository.to_str().unwrap(),
+                        String::new(),
+                        true,
+                        crate::worktrees::Observer::default(),
+                    )
                     .await
-                    .unwrap()
                     .unwrap();
                 let expected = if listing_fails {
                     "稼働状況を確認できないため削除できません: codex list failed\nclaude startup failed\ndeepseek startup failed"
@@ -764,69 +687,6 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn worktree_activity_requires_finished_delivery_and_no_other_live_work() {
-        use super::worktree_active;
-        use agent_protocol::{
-            execution::TurnStatus, models::SessionStatus, session::SubmissionDelivery,
-        };
-        let receipt = SubmissionDelivery::Accepted {
-            turn_id: Some("accepted".into()),
-        };
-        for status in [
-            TurnStatus::Running,
-            TurnStatus::Unknown,
-            TurnStatus::Completed,
-            TurnStatus::Failed,
-            TurnStatus::Interrupted,
-        ] {
-            let turns = [std::sync::Arc::new(agent_protocol::models::Turn {
-                id: "accepted".into(),
-                status,
-                ..Default::default()
-            })];
-            let busy = |session, requests, deliveries: &[SubmissionDelivery]| {
-                worktree_active(session, &turns, requests, deliveries.iter())
-            };
-            assert_eq!(
-                busy(SessionStatus::Idle, false, &[]),
-                status == TurnStatus::Running
-            );
-            assert_eq!(
-                busy(SessionStatus::Idle, false, std::slice::from_ref(&receipt)),
-                matches!(status, TurnStatus::Running | TurnStatus::Unknown)
-            );
-            assert!(busy(SessionStatus::Running, false, &[]));
-            assert!(busy(SessionStatus::Idle, true, &[]));
-            for unresolved in [
-                SubmissionDelivery::Sending,
-                SubmissionDelivery::Unknown,
-                SubmissionDelivery::Accepted { turn_id: None },
-                SubmissionDelivery::Accepted {
-                    turn_id: Some("other".into()),
-                },
-            ] {
-                assert!(busy(
-                    SessionStatus::Idle,
-                    false,
-                    &[receipt.clone(), unresolved]
-                ));
-            }
-        }
-        assert!(!worktree_active(
-            SessionStatus::Idle,
-            &[],
-            false,
-            [SubmissionDelivery::Rejected].iter()
-        ));
-        assert!(worktree_active(
-            SessionStatus::Idle,
-            &[],
-            false,
-            [receipt].iter()
-        ));
-    }
-
     #[tokio::test]
     async fn worktree_listing_blocks_only_checkouts_with_unverified_claude_activity() {
         use super::*;
@@ -861,10 +721,7 @@ pub(super) mod tests {
         )
         .await
         .unwrap();
-        let service = HostRpcService::new(
-            [claude.into()],
-            ProjectStore::new(root.path().join("projects.json")),
-        );
+        let service = HostRpcService::new([claude.into()], root.path().join("projects.json"));
         service
             .inner
             .worktrees
@@ -877,16 +734,24 @@ pub(super) mod tests {
         let first = service
             .inner
             .worktrees
-            .prepare(repository.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let other = service
             .inner
             .worktrees
-            .prepare(repository.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let id = "12345678-1234-4234-8234-123456789abc";
         let transcript = project.join(format!("{id}.jsonl"));
@@ -941,17 +806,15 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn failed_session_start_rolls_back_its_new_checkout_and_branch() {
+    async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
         use super::*;
-        use crate::host_rpc::service::conversations::tests::{NativeAgent, call};
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
+        use agent_protocol::conversation::{InputContent, InputState, records};
         let directory = tempfile::tempdir().unwrap();
         let repository = repository(directory.path());
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
         agent.create_gate.close();
-        let host = HostRpcService::new(
-            [agent.backend()],
-            ProjectStore::new(directory.path().join("worktrees.json")),
-        );
+        let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         host.inner
             .worktrees
             .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -961,41 +824,77 @@ pub(super) mod tests {
             .await
             .unwrap();
         let client = host.open_session();
-        call::<agent_protocol::session::OpenedSession>(
+        let target =
+            agent_protocol::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string())
+                .unwrap();
+        let input = uuid::Uuid::new_v4();
+        let _: records::Opened = call(
             &host,
             client.id(),
-            Call::CreateSession(op::CreateSession {
-                initial_input: None,
-                provider: ProviderKind::Codex,
-                cwd: Some(repository.to_str().unwrap().into()),
-                model: None,
+            Call::CreateConversation(records::Create {
+                workspace: None,
+                provider: agent_protocol::session::ProviderKind::Codex,
+                session: target.clone(),
+                subscription: uuid::Uuid::new_v4(),
+                cwd: Some(repository.to_string_lossy().into_owned()),
+                selection: Default::default(),
+                initial: Some((
+                    input.to_string().into(),
+                    InputContent {
+                        parts: vec![op::Input::Text {
+                            text: "keep this input".into(),
+                        }],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                )),
             }),
         )
         .await
-        .unwrap_err();
-        assert!(host.inner.worktrees.list().await.unwrap().is_empty());
-        assert!(
-            crate::git::text(&repository, &["branch", "--list", "bex/*"])
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            std::fs::read_dir(repository.join(".worktree"))
-                .unwrap()
-                .count(),
-            0
-        );
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if host
+                    .inner
+                    .conversation
+                    .storage
+                    .state(&target)
+                    .unwrap()
+                    .inputs
+                    .values()
+                    .any(|input| matches!(input.state, InputState::Failed { .. }))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let saved = host.inner.conversation.storage.header(&target).unwrap();
+        let checkout = saved.state.workspace.cwd().unwrap();
+        assert_ne!(checkout, repository.to_str().unwrap());
+        assert!(std::path::Path::new(checkout).is_dir());
+        let entries = host.worktree_list().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].threads[0].id, target);
+        assert!(!entries[0].threads[0].active);
+        assert!(entries[0].blocked_reason.is_none());
     }
 
     #[tokio::test]
     async fn unchanged_cleanup_follows_each_projects_override() {
         use super::*;
+        use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
+        use agent_protocol::conversation::{Context, Event, Observation};
+        use agent_protocol::session::SessionRef;
+        use uuid::Uuid;
         let directory = tempfile::tempdir().unwrap();
         let repository = repository(directory.path());
-        let host = HostRpcService::new(
-            [],
-            ProjectStore::new(directory.path().join("worktrees.json")),
-        );
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
         host.inner.projects.register(&repository).await.unwrap();
         let project = host.project_snapshot().await.unwrap().projects[0]
             .id
@@ -1012,9 +911,13 @@ pub(super) mod tests {
         let kept = host
             .inner
             .worktrees
-            .prepare(repository.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         host.cleanup_unchanged_worktrees().await.unwrap();
         assert!(
@@ -1030,6 +933,115 @@ pub(super) mod tests {
         )
         .await
         .expect("changed cleanup rules request a sweep");
+        let response = agent
+            .create(kept.to_str().unwrap(), None, None)
+            .await
+            .unwrap();
+        let source = response.thread.id.clone().unwrap();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        own(&host, &target, &response);
+        let storage = &host.inner.conversation.storage;
+        let context = Context {
+            preparation: None,
+            rewind_binding: None,
+            imported_turns: &[],
+            external_busy: false,
+            now: 100,
+            seed: Uuid::new_v4(),
+            steers: true,
+            steer_ready: true,
+        };
+        let attempt = Uuid::new_v4();
+        storage
+            .decide(
+                &target,
+                Event::ObservedStart {
+                    execution: attempt,
+                    provider: ProviderKind::Codex,
+                    source: source.id,
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        for observation in [
+            Observation::Background {
+                tasks: vec![agent_protocol::execution::BackgroundTask {
+                    id: "background-command".into(),
+                    kind: agent_protocol::execution::BackgroundTaskKind::Command,
+                    description: None,
+                }],
+            },
+            Observation::Request {
+                id: "permission".into(),
+                body: agent_protocol::requests::RequestBody::Permission {
+                    description: "background command".into(),
+                    details: String::new(),
+                    choices: vec![],
+                },
+            },
+        ] {
+            storage
+                .decide(
+                    &target,
+                    Event::Provider {
+                        attempt,
+                        native_turn: None,
+                        native_items: vec![],
+                        observation,
+                    },
+                    context,
+                    None,
+                )
+                .unwrap();
+        }
+        let header = storage.header(&target).unwrap();
+        assert_eq!(
+            header.details.activity.status,
+            agent_protocol::models::SessionStatus::Idle
+        );
+        assert!(header.details.activity.waiting);
+        assert!(matches!(
+            storage
+                .state(&target)
+                .unwrap()
+                .turns
+                .values()
+                .last()
+                .unwrap()
+                .state,
+            agent_protocol::conversation::TurnState::Waiting(
+                agent_protocol::conversation::Wait::Background { .. }
+            )
+        ));
+        let listed = host.worktree_list().await.unwrap();
+        assert!(
+            listed[0]
+                .threads
+                .iter()
+                .any(|thread| thread.id == target && thread.active)
+        );
+        assert!(listed[0].blocked_reason.is_some());
+        assert!(
+            host.remove_worktree(kept.to_string_lossy().into_owned())
+                .await
+                .is_err()
+        );
+        host.cleanup_unchanged_worktrees().await.unwrap();
+        assert!(kept.is_dir(), "a background permission keeps its checkout");
+        storage
+            .decide(
+                &target,
+                Event::Provider {
+                    attempt,
+                    native_turn: None,
+                    native_items: vec![],
+                    observation: Observation::Completed,
+                },
+                context,
+                None,
+            )
+            .unwrap();
         host.cleanup_unchanged_worktrees().await.unwrap();
         assert!(!kept.exists(), "the project's override enables cleanup");
     }

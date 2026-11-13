@@ -1,0 +1,392 @@
+//! Snapshots and ordered replay of committed events. Current projections serve
+//! display and paging; the event sequence alone orders live and replayed changes.
+//! Payload types belong to the domain, with no transport or database dependency.
+use crate::ids::{ClientInputId, ItemId, RequestId, TurnId};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+mod output;
+pub use output::{Output, OutputStream, OutputUpdate, TAIL_CHARS};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cursor {
+    pub store: uuid::Uuid,
+    pub sequence: u64,
+}
+
+impl Cursor {
+    /// Sequences are comparable only within one store.
+    pub fn precedes(self, other: Self) -> bool {
+        self.store == other.store && self.sequence < other.sequence
+    }
+}
+
+/// Boundary values survive deletion of the item originally at the floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Window {
+    pub item: u64,
+    pub turn: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scope<C> {
+    Conversation(C),
+    List,
+}
+
+/// Existing IDs need only be unique within a conversation, even when newly
+/// allocated UUIDs happen to be globally unique.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Key<C> {
+    Thread(C),
+    Input { thread: C, id: ClientInputId },
+    Turn { thread: C, id: TurnId },
+    Item { thread: C, id: ItemId },
+    Request { thread: C, id: RequestId },
+    Project(String),
+    Catalog(crate::session::ProviderKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Position {
+    Unordered,
+    Project {
+        position: u64,
+    },
+    Turn {
+        ordinal: u64,
+    },
+    Item {
+        turn: TurnId,
+        ordinal: u64,
+        position: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Content<T> {
+    Full(T),
+    Summary(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Row<C, T> {
+    pub key: Key<C>,
+    /// Revision of separately fetched item bytes; never used to order events.
+    pub version: u64,
+    pub position: Position,
+    pub content: Content<T>,
+}
+
+/// One committed transaction, replayed without merging it with later events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event<C, T> {
+    pub sequence: u64,
+    pub rows: Vec<Row<C, T>>,
+    pub removed: Vec<Key<C>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Message<C, T> {
+    Snapshot {
+        cursor: Cursor,
+        window: Option<Window>,
+        rows: Vec<Row<C, T>>,
+    },
+    /// The read high-water is a completion marker, not a continuity contract.
+    Events {
+        through: Cursor,
+        events: Vec<Event<C, T>>,
+    },
+    Extend {
+        cursor: Cursor,
+        window: Window,
+        rows: Vec<Row<C, T>>,
+    },
+    Hydrate {
+        cursor: Cursor,
+        row: Row<C, T>,
+    },
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ApplyError {
+    #[error("a new subscription requires a strictly newer local generation")]
+    Generation,
+    #[error("the database identity changed; request a snapshot")]
+    Store,
+    #[error("the previous scope cursor does not match; subscribe again")]
+    Discontinuity,
+    #[error("the window does not match this scope")]
+    Window,
+    #[error("events are not ordered within their read high-water")]
+    Version,
+    #[error("a change contains a duplicate entity")]
+    Duplicate,
+    #[error("row position does not match its entity kind")]
+    Position,
+    #[error("an item has no matching turn in the scope")]
+    Parent,
+    #[error("row identity does not match its content")]
+    Identity,
+}
+
+/// The cache owner allocates a fresh subscription generation whenever it opens
+/// a stream, including reconnects to a different Host. Generations are local
+/// routing facts, not values trusted from a remote message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replica<C: Ord, T> {
+    scope: Scope<C>,
+    window: Option<Window>,
+    expanded: bool,
+    cursor: Option<Cursor>,
+    rows: BTreeMap<Key<C>, Row<C, T>>,
+    subscription: u64,
+}
+
+pub fn can_resume(cached: Option<Cursor>, current: Cursor, pruned: u64) -> bool {
+    cached.is_some_and(|cached| {
+        cached.store == current.store
+            && cached.sequence <= current.sequence
+            && cached.sequence >= pruned
+    })
+}
+
+impl<C: Ord + Clone, T: Clone> Replica<C, T> {
+    pub fn new(scope: Scope<C>, subscription: u64) -> Self {
+        Self {
+            scope,
+            window: None,
+            expanded: false,
+            cursor: None,
+            rows: BTreeMap::new(),
+            subscription,
+        }
+    }
+
+    pub fn scope(&self) -> &Scope<C> {
+        &self.scope
+    }
+    pub fn subscription(&self) -> u64 {
+        self.subscription
+    }
+    pub fn snapshot(&self) -> Option<Message<C, T>> {
+        Some(Message::Snapshot {
+            cursor: self.cursor?,
+            window: self.window,
+            rows: self.rows.values().cloned().collect(),
+        })
+    }
+    pub fn window(&self) -> Option<Window> {
+        self.window
+    }
+    pub fn expanded(&self) -> bool {
+        self.expanded
+    }
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.cursor
+    }
+    pub fn rows(&self) -> &BTreeMap<Key<C>, Row<C, T>> {
+        &self.rows
+    }
+
+    /// The connection owner supplies its routing generation. Keeping allocation
+    /// there also fences messages when switching Hosts, not just this replica.
+    pub fn resubscribe(&self, subscription: u64) -> Result<Self, ApplyError> {
+        if subscription <= self.subscription {
+            return Err(ApplyError::Generation);
+        }
+        Ok(Self {
+            subscription,
+            ..self.clone()
+        })
+    }
+
+    /// Returns a whole new state, so a malformed frame never partially changes
+    /// its caller's rows or advances the caller's resumable cursor.
+    pub fn apply(&self, subscription: u64, message: Message<C, T>) -> Result<Self, ApplyError> {
+        if subscription != self.subscription {
+            return Ok(self.clone());
+        }
+        let mut next = self.clone();
+        match message {
+            Message::Snapshot {
+                cursor,
+                window,
+                rows,
+            } => {
+                if matches!(
+                    (&self.scope, window),
+                    (Scope::List, Some(_)) | (Scope::Conversation(_), None)
+                ) {
+                    return Err(ApplyError::Window);
+                }
+                next.rows.clear();
+                next.window = window;
+                next.expanded = false;
+                next.insert(rows)?;
+                next.cursor = Some(cursor);
+            }
+            Message::Events { through, events } => {
+                let current = self.cursor.ok_or(ApplyError::Discontinuity)?;
+                if current.store != through.store {
+                    return Err(ApplyError::Store);
+                }
+                if through.sequence <= current.sequence {
+                    return Ok(next);
+                }
+                let mut previous = 0;
+                for event in events {
+                    if event.sequence <= previous || event.sequence > through.sequence {
+                        return Err(ApplyError::Version);
+                    }
+                    previous = event.sequence;
+                    if event.sequence <= current.sequence {
+                        continue;
+                    }
+                    let mut seen = next.insert(event.rows)?;
+                    for key in event.removed {
+                        if !seen.insert(key.clone()) {
+                            return Err(ApplyError::Duplicate);
+                        }
+                        next.remove(key);
+                    }
+                    next.check_parents()?;
+                }
+                next.cursor = Some(through);
+            }
+            Message::Extend {
+                cursor,
+                window,
+                rows,
+            } => {
+                if self.cursor != Some(cursor) {
+                    return Err(ApplyError::Discontinuity);
+                }
+                let old = self.window.ok_or(ApplyError::Window)?;
+                if (window.turn, window.item) > (old.turn, old.item) {
+                    return Err(ApplyError::Window);
+                }
+                next.window = Some(window);
+                next.expanded |= window != old;
+                next.insert(rows)?;
+            }
+            Message::Hydrate { cursor, row } => {
+                if !self.cursor.is_some_and(|current| {
+                    current.store == cursor.store && cursor.sequence <= current.sequence
+                }) {
+                    return Err(ApplyError::Discontinuity);
+                }
+                // A resend cannot introduce a new row to an already-complete
+                // range, nor can it change row metadata or the scope cursor.
+                if next
+                    .rows
+                    .get(&row.key)
+                    .is_some_and(|old| old.version == row.version && old.position != row.position)
+                {
+                    return Err(ApplyError::Position);
+                }
+                if next
+                    .rows
+                    .get(&row.key)
+                    .is_some_and(|old| old.version == row.version)
+                {
+                    next.insert(vec![row])?;
+                }
+            }
+            Message::Missing => {
+                next.rows.clear();
+                next.cursor = None;
+                next.window = None;
+            }
+        }
+        next.check_parents()?;
+        Ok(next)
+    }
+
+    fn insert(&mut self, rows: Vec<Row<C, T>>) -> Result<BTreeSet<Key<C>>, ApplyError> {
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            if !seen.insert(row.key.clone()) {
+                return Err(ApplyError::Duplicate);
+            }
+            check_position(&row.key, &row.position)?;
+            if !contains(&self.scope, self.window, &row.key, &row.position) {
+                continue;
+            }
+            // A fetched body at the same item revision survives a thin page
+            // or event. No row version participates in causal ordering.
+            let keep_body = matches!(row.key, Key::Item { .. })
+                && self.rows.get(&row.key).is_some_and(|old| {
+                    old.version == row.version
+                        && matches!(
+                            (&old.content, &row.content),
+                            (Content::Full(_), Content::Summary(_))
+                        )
+                });
+            if !keep_body {
+                self.rows.insert(row.key.clone(), row);
+            }
+        }
+        Ok(seen)
+    }
+
+    fn remove(&mut self, key: Key<C>) {
+        self.rows.remove(&key);
+        if let Key::Turn { thread, id } = key {
+            self.rows.retain(|key, row| !matches!((key, &row.position),
+                (Key::Item { thread: owner, .. }, Position::Item { turn, .. }) if owner == &thread && turn == &id));
+        }
+    }
+
+    fn check_parents(&self) -> Result<(), ApplyError> {
+        for row in self.rows.values() {
+            if let (Key::Item { thread, .. }, Position::Item { turn, ordinal, .. }) =
+                (&row.key, &row.position)
+            {
+                let parent = self.rows.get(&Key::Turn {
+                    thread: thread.clone(),
+                    id: turn.clone(),
+                });
+                if !parent.is_some_and(|row| row.position == (Position::Turn { ordinal: *ordinal }))
+                {
+                    return Err(ApplyError::Parent);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn check_position<C>(key: &Key<C>, position: &Position) -> Result<(), ApplyError> {
+    match (key, position) {
+        (Key::Project(_), Position::Project { .. }) => Ok(()),
+        (Key::Turn { .. }, Position::Turn { .. }) | (Key::Item { .. }, Position::Item { .. }) => {
+            Ok(())
+        }
+        (
+            Key::Thread(_) | Key::Catalog(_) | Key::Input { .. } | Key::Request { .. },
+            Position::Unordered,
+        ) => Ok(()),
+        _ => Err(ApplyError::Position),
+    }
+}
+
+pub fn contains<C: Eq>(
+    scope: &Scope<C>,
+    window: Option<Window>,
+    key: &Key<C>,
+    position: &Position,
+) -> bool {
+    match (scope, key) {
+        (Scope::List, Key::Thread(_) | Key::Project(_) | Key::Catalog(_)) => true,
+        (Scope::Conversation(owner), Key::Thread(thread) | Key::Input { thread, .. } | Key::Request { thread, .. }) => owner == thread,
+        (Scope::Conversation(owner), Key::Turn { thread, .. }) => owner == thread && window.is_some_and(|floor| matches!(position, Position::Turn { ordinal } if *ordinal >= floor.turn)),
+        (Scope::Conversation(owner), Key::Item { thread, .. }) => owner == thread && window.is_some_and(|floor| matches!(position, Position::Item { position, ordinal, .. } if *ordinal > floor.turn || (*ordinal == floor.turn && *position >= floor.item))),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests;

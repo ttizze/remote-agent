@@ -130,6 +130,11 @@ pub enum Input {
     Mention { path: String, name: String },
 }
 impl Input {
+    /// T3's isCompactionCommandMessage: a standalone command without attachments.
+    pub fn is_compaction(input: &[Self]) -> bool {
+        matches!(input, [Self::Text { text }] if text.trim().eq_ignore_ascii_case("/compact"))
+    }
+
     pub fn message_parts(input: &[Self]) -> Vec<crate::items::MessagePart> {
         use crate::items::MessagePart;
         input
@@ -143,9 +148,7 @@ impl Input {
                     name: name.clone(),
                     path: path.clone(),
                 },
-                Self::Mention { name, path }
-                    if path.starts_with("plugin://") || path.starts_with("app://") =>
-                {
+                Self::Mention { name, path } if crate::composer::is_plugin_path(path) => {
                     MessagePart::Invocation {
                         name: name.clone(),
                         path: path.clone(),
@@ -175,18 +178,6 @@ pub fn validate_thread(
     } else {
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ItemResponse {
-    pub item: crate::models::Item,
-    pub transfer: Option<crate::models::TransferGrant>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameSession {
-    pub thread_id: crate::session::SessionRef,
-    pub name: String,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -364,8 +355,6 @@ pub struct AccountLoginStatus {
     pub account_id: Option<String>,
 }
 
-use crate::requests::Answer;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
     pub cols: u16,
@@ -378,33 +367,12 @@ pub struct AddProject {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ListSessions {
-    pub query: crate::models::ListQuery,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListProjectSessions {
-    pub project_id: String,
-    pub limit: u32,
-    pub search_term: String,
-}
-
 /// Values already obtained by the title read; decorating them must not list
 /// provider sessions or read conversation bodies again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ListDecorationScope {
-    Root {
-        part: Option<crate::models::ListPart>,
-    },
-    Project {
-        project_id: String,
-    },
-    Task {
-        session: crate::session::SessionRef,
-    },
+    Root,
+    Project { project_id: String },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadListDecorations {
@@ -550,13 +518,6 @@ pub struct TerminalWrite {
 pub struct TerminalKill {
     pub process_handle: String,
 }
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionAnswer {
-    pub request_id: crate::ids::RequestId,
-    pub answer: Answer,
-}
-
 /// Shared xterm palette, also used for Host-owned terminal-query replies.
 pub fn terminal_color(index: u16) -> u32 {
     const PALETTE: [u32; 16] = [
@@ -605,12 +566,6 @@ impl ForkSession {
             last_turn_id,
         }
     }
-    pub(crate) fn validate(
-        &self,
-        output: &crate::models::ThreadResponse,
-    ) -> Result<(), &'static str> {
-        validate_thread(output, None)
-    }
 }
 
 /// Returns a conversation to just before `turn_id`, which is removed with
@@ -626,55 +581,15 @@ impl RewindSession {
     pub fn new(thread_id: crate::session::SessionRef, turn_id: crate::ids::TurnId) -> Self {
         Self { thread_id, turn_id }
     }
-    pub(crate) fn validate(
-        &self,
-        output: &crate::models::ThreadResponse,
-    ) -> Result<(), &'static str> {
-        validate_thread(output, Some(&self.thread_id))
-    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateSession {
-    pub provider: crate::session::ProviderKind,
-    pub cwd: Option<String>,
-    pub model: Option<crate::models::ModelRef>,
-    pub initial_input: Option<InitialInput>,
-}
-
-/// Creating a task admits its first input before workspace/provider preparation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InitialInput {
-    pub workspace: Option<crate::workspace::WorkspaceStrategy>,
-    pub client_user_message_id: crate::ids::ClientInputId,
-    pub input: Vec<Input>,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
-}
-
+/// Retry a failed input; `work_locally` selects the project folder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryPreparation {
+    pub input_id: crate::ids::ClientInputId,
     pub thread_id: crate::session::SessionRef,
     pub work_locally: bool,
-}
-
-impl RpcMethod for CreateSession {
-    rpc_contract!(CreateSession);
-    fn params(&self) -> Result<Self, PeerError> {
-        Ok(self.clone())
-    }
-    fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
-        output.subscription_id = id;
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.session.provider != self.provider {
-            return Err("created session provider does not match");
-        }
-        validate_thread(&output.response, Some(&output.session))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -730,22 +645,6 @@ pub struct ReadAccountUsage {
     pub provider: crate::session::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
-}
-
-impl ListSessions {
-    pub fn new(query: crate::models::ListQuery) -> Self {
-        Self { query }
-    }
-}
-
-impl ReadItem {
-    pub(crate) fn validate(&self, output: &ItemResponse) -> Result<(), &'static str> {
-        if output.item.id == self.item_id {
-            Ok(())
-        } else {
-            Err("item ID does not match")
-        }
-    }
 }
 
 /// Input intent. The Host starts a turn or, while one runs, steers it or queues

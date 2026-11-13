@@ -133,10 +133,7 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
-    #[allow(dead_code)]
-    mod host_fixture {
-        include!("../../../tests/support/host.rs");
-    }
+    use crate::test_host as host_fixture;
 
     #[test]
     fn explicit_reference_actions_require_absolute_or_home_paths_without_nul() {
@@ -184,14 +181,11 @@ mod tests {
         };
         let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
         let store = Store::new(peer, initial, None);
-        for _ in 0..4 {
+        for _ in 0..3 {
             let request = reader.read_request().await.unwrap().unwrap();
             let result = match request["method"].as_str().unwrap() {
-                "host/taskActivity/read" => {
-                    json!({"revision":0,"statuses":[],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
-                }
-                "host/session/list" => {
-                    json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5})
+                "host/list/subscribe" => {
+                    json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5})
                 }
                 "host/model/list" => json!({"data":[],"nextCursor":null}),
                 "host/account/list" => json!({"accounts":[],"selected":{}}),

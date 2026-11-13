@@ -69,13 +69,12 @@ resvg = { version = "=0.46.0", default-features = false }
 [dev-dependencies]
 alacritty_terminal = "=0.26.0"
 
-# Desktop update flow; the iPhone app is updated by its store. The desktop
-# shows its Host's invitation as a QR code for phones.
+# Desktop update flow; the iPhone app is updated by its store.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 agent-core = { path = "../../crates/agent-core", features = ["app-updates"] }
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
-# The desktop's diagnostic log.
+# The desktop's diagnostic log and invitation QR code.
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 agent-transport = { path = "../../crates/agent-transport" }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tracing.workspace = true

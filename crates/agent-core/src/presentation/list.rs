@@ -36,7 +36,6 @@ pub struct ProjectSummary {
     pub section: Option<String>,
     pub chats_archived: bool,
     pub expanded: bool,
-    pub loading: bool,
     pub error: Option<super::error::ErrorText>,
     pub threads: Vec<ThreadSummary>,
     pub has_more: bool,
@@ -159,7 +158,6 @@ fn project_summary(project: &Project, display_name: &str) -> ProjectSummary {
         section: None,
         chats_archived: false,
         expanded: false,
-        loading: false,
         error: None,
         threads: Vec::new(),
         has_more: false,
@@ -303,6 +301,10 @@ impl<'a> ListSource<'a> {
                 .lists
                 .expanded_projects
                 .same(&other.lists.expanded_projects)
+            && self
+                .lists
+                .search_expanded_projects
+                .same(&other.lists.search_expanded_projects)
             && self.lists.list_query.same(&other.lists.list_query)
             && self.lists.activity.same(&other.lists.activity)
             && self
@@ -323,31 +325,11 @@ impl<'a> ListSource<'a> {
             && self.same_shortcuts(other)
     }
     fn same_phases(&self, other: &Self) -> bool {
-        use crate::models::ListPart;
         use crate::state::operations::OperationKey as K;
         if crate::state::Same::same(self.operations, other.operations) {
             return true;
         }
-        [
-            K::SessionList,
-            K::SessionPage {
-                part: ListPart::Projects,
-            },
-            K::SessionPage {
-                part: ListPart::Chats,
-            },
-        ]
-        .into_iter()
-        .chain(
-            self.lists
-                .threads
-                .iter()
-                .flat_map(|page| &page.projects)
-                .map(|project| K::ProjectList {
-                    project_id: project.id.clone(),
-                }),
-        )
-        .all(|key| {
+        [K::SessionList, K::ListSearch].into_iter().all(|key| {
             self.operations.get(&key).map(|state| &state.phase)
                 == other.operations.get(&key).map(|state| &state.phase)
         })
@@ -500,6 +482,12 @@ impl ListSource<'_> {
         let preferences = self.lists.project_preferences.get(self.storage_scope);
         let mut projects = Vec::new();
         let mut hidden_projects = Vec::new();
+        let searching = !self.lists.list_query.search_term.trim().is_empty();
+        let expanded = if !searching {
+            &self.lists.expanded_projects
+        } else {
+            &self.lists.search_expanded_projects
+        };
         for project in &list.projects {
             let prefs = preferences.and_then(|prefs| prefs.get(&project.id));
             if prefs.is_some_and(|prefs| prefs.hidden) {
@@ -514,7 +502,9 @@ impl ListSource<'_> {
                     project,
                     prefs,
                     self.lists.project_threads.get(&project.id),
-                    self.lists.expanded_projects.contains_key(&project.id),
+                    expanded
+                        .get(&project.id)
+                        .map_or(searching, |limit| *limit > 0),
                 ));
             }
         }
@@ -562,16 +552,10 @@ impl ListSource<'_> {
             ThreadList {
                 notice,
                 threads: summaries,
-                loading_projects: self.operation_running(
-                    crate::state::operations::OperationKey::SessionPage {
-                        part: crate::models::ListPart::Projects,
-                    },
-                ),
-                loading_chats: self.operation_running(
-                    crate::state::operations::OperationKey::SessionPage {
-                        part: crate::models::ListPart::Chats,
-                    },
-                ),
+                loading_projects: self
+                    .operation_running(crate::state::operations::OperationKey::SessionList),
+                loading_chats: self
+                    .operation_running(crate::state::operations::OperationKey::ListSearch),
                 hidden_projects,
                 projects: projects
                     .into_iter()
@@ -603,21 +587,6 @@ impl ListSource<'_> {
                                     .into(),
                                 details: None,
                             });
-                        }
-                        if let Some(operation) = self.operations.get(
-                            &crate::state::operations::OperationKey::ProjectList {
-                                project_id: project.id.clone(),
-                            },
-                        ) {
-                            match &operation.phase {
-                                crate::state::operations::OperationPhase::Running => {
-                                    summary.loading = true
-                                }
-                                crate::state::operations::OperationPhase::Failed { message } => {
-                                    summary.error =
-                                        Some(super::error::error_text(self.language, message))
-                                }
-                            }
                         }
                         if let Some(page) = page {
                             let data = page.data.iter().filter(|thread| {
@@ -787,12 +756,7 @@ impl ListSource<'_> {
             {
                 continue;
             }
-            if rows
-                .get(id)
-                .is_none_or(|old| old.list_revision <= thread.list_revision)
-            {
-                rows.insert(id, thread);
-            }
+            rows.insert(id, thread);
         }
         let mut rows: Vec<_> = rows
             .into_values()
@@ -822,12 +786,6 @@ impl ListSource<'_> {
                     .get(project)
                     .map(|project| (*project).to_owned());
             }
-        }
-        for project in &source.projects {
-            let key = crate::state::operations::OperationKey::ProjectList {
-                project_id: project.id.clone(),
-            };
-            list.loading_chats |= self.operation_running(key);
         }
         Some(list)
     }
@@ -917,7 +875,6 @@ mod waiting_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::operations::ListSessions;
     use crate::state::operations::Operation;
     use agent_protocol::models;
     use serde_json::json;
@@ -1011,7 +968,7 @@ mod tests {
                 threads: Some(std::sync::Arc::new(
                     serde_json::from_value(json!({
                         "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
-                        "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}))
+                        "hasMore":false,"hasMoreProjects":false,"limit":5,}))
                     .unwrap(),
                 )),
                 ..Default::default()
@@ -1022,9 +979,9 @@ mod tests {
 
     #[test]
     fn waiting_updates_all_list_scopes_without_opening_conversations() {
-        use crate::state::{Event, Intent, reduce};
+        use crate::state::{Event, Intent, list_sync, reduce};
         use agent_protocol::{
-            live_activity::{TaskActivityState, TaskActivitySummary},
+            conversation::records,
             session::{ProviderKind, SessionRef},
         };
         let id = |provider, name: &str| SessionRef::new(provider, name.into()).unwrap();
@@ -1032,10 +989,8 @@ mod tests {
         let other = id(ProviderKind::Claude, "same");
         let project = id(ProviderKind::Codex, "project");
         let placed = id(ProviderKind::Claude, "placed");
-        let affected = vec![root.clone(), project.clone(), placed.clone()];
-        let mut state = snapshot_list(json!([
-            {"id":root}, {"id":other}, {"id":placed}
-        ]));
+        let affected = [root.clone(), project.clone(), placed.clone()];
+        let mut state = snapshot_list(json!([{"id":root},{"id":other},{"id":placed}]));
         let page = snapshot_list(json!([{"id":project,"projectId":"project"}]))
             .lists
             .threads
@@ -1050,36 +1005,34 @@ mod tests {
             }),
         )
         .0;
-        let update = |revision, waiting: bool| TaskActivityState {
-            attention: Vec::new(),
-            revision,
-            display: TaskActivitySummary {
-                waiting: if waiting { 3 } else { 0 },
-                running: if waiting { 0 } else { 3 },
-                ..Default::default()
-            }
-            .display(),
-            statuses: affected
+        let facts = |waiting| {
+            affected
                 .iter()
                 .cloned()
-                .map(|id| (id, models::SessionStatus::Running))
-                .collect(),
-            waiting: if waiting {
-                affected.clone()
-            } else {
-                Vec::new()
-            },
-            background: Vec::new(),
-            unread: Vec::new(),
+                .map(|id| {
+                    (
+                        id,
+                        records::Activity {
+                            status: agent_protocol::execution::SessionStatus::Running,
+                            waiting,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect()
         };
-        for (revision, requested, expected) in
-            [(1, true, true), (2, false, false), (1, true, false)]
-        {
-            // Exercise the wire contract as well as revision ordering.
-            let received =
-                serde_json::from_value(serde_json::to_value(update(revision, requested)).unwrap())
-                    .unwrap();
-            let _ = state.accept_task_activity(received);
+        let first = list_sync::set_activity(&mut state, facts(true));
+        for (waiting, stale, expected) in [
+            (true, false, true),
+            (false, false, false),
+            (true, true, false),
+        ] {
+            if stale {
+                state =
+                    list_sync::received(&state, state.lists.subscription.unwrap(), first.clone()).0;
+            } else {
+                list_sync::set_activity(&mut state, facts(waiting));
+            }
             let list = state.thread_list().unwrap();
             assert_eq!(list.threads.len(), 2);
             assert_eq!(list.projects[0].threads.len(), 2);
@@ -1104,24 +1057,48 @@ mod tests {
     #[test]
     fn work_left_running_after_an_answer_reads_waiting_only_when_it_wakes_the_agent() {
         use agent_protocol::{
-            live_activity::{TaskActivityState, TaskActivitySummary},
+            conversation::records,
+            execution::{BackgroundTask, BackgroundTaskKind},
             session::{ProviderKind, SessionRef},
         };
         let id = |name: &str| SessionRef::new(ProviderKind::Claude, name.into()).unwrap();
         let (agents, server, working) = (id("agents"), id("server"), id("working"));
-        let mut state = snapshot_list(json!([{"id":agents}, {"id":server}, {"id":working}]));
-        let _ = state.accept_task_activity(TaskActivityState {
-            attention: Vec::new(),
-            revision: 1,
-            display: TaskActivitySummary::default().display(),
-            statuses: [&agents, &server, &working]
-                .into_iter()
-                .map(|id| (id.clone(), models::SessionStatus::Running))
-                .collect(),
-            waiting: Vec::new(),
-            background: vec![(agents.clone(), true), (server.clone(), false)],
-            unread: Vec::new(),
-        });
+        let mut state = snapshot_list(json!([{"id":agents},{"id":server},{"id":working}]));
+        let background = |kind| {
+            vec![BackgroundTask {
+                id: "task".into(),
+                kind,
+                description: None,
+            }]
+        };
+        crate::state::list_sync::set_activity(
+            &mut state,
+            vec![
+                (
+                    agents.clone(),
+                    records::Activity {
+                        status: agent_protocol::execution::SessionStatus::Running,
+                        background: background(BackgroundTaskKind::Subagent),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    server.clone(),
+                    records::Activity {
+                        status: agent_protocol::execution::SessionStatus::Running,
+                        background: background(BackgroundTaskKind::Command),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    working.clone(),
+                    records::Activity {
+                        status: agent_protocol::execution::SessionStatus::Running,
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
         let list = state.thread_list().unwrap();
         let row = |id: &SessionRef| {
             let row = list.threads.iter().find(|row| &row.id == id).unwrap();
@@ -1145,10 +1122,10 @@ mod tests {
         let page = serde_json::from_value(json!({
             "data":[
                 {"id":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":30},
-                {"id":{"provider":"codex","id":"duplicate"},"projectId":"project","updatedAt":20,"listRevision":2},
+                {"id":{"provider":"codex","id":"duplicate"},"projectId":"project","updatedAt":20},
                 {"id":{"provider":"claude","id":"duplicate"},"projectId":"project","updatedAt":15},
                 {"id":{"provider":"codex","id":"agent"},"parentId":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":40}
-            ],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false,"projectPages":{}
+            ],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false
         })).unwrap();
         Arc::make_mut(&mut snapshot.lists.project_threads).insert("project".into(), Arc::new(page));
         Arc::make_mut(&mut snapshot.lists.list_query).limit = 2;
@@ -1190,24 +1167,23 @@ mod tests {
             .map(|thread| (thread.id.provider, thread.id.id.as_str()))
             .collect();
         use crate::session::ProviderKind::{Claude, Codex};
-        assert_eq!(rows, [(Claude, "child"), (Codex, "fork")]);
+        assert_eq!(rows, [(Some(Claude), "child"), (Some(Codex), "fork")]);
     }
 
     #[test]
     fn list_keeps_only_standalone_chats_at_root_and_exposes_known_membership() {
         let mut snapshot = Snapshot::default();
-        ListSessions::new(Default::default()).apply(
+        crate::state::list_sync::seed(
             &mut snapshot,
-            "",
             serde_json::from_value(json!({
                 "data": [
-                    {"id":{"provider":"codex","id":"assigned"}, "projectId":"known"},
-                    {"id":{"provider":"codex","id":"missing"}, "projectId":"absent"},
-                    {"id":{"provider":"codex","id":"chat"}, "projectId":null},
-                    {"id":{"provider":"codex","id":"unknown"}}
+                    {"id":{"provider":"codex","id":"assigned"}, "updatedAt":4,"projectId":"known"},
+                    {"id":{"provider":"codex","id":"missing"}, "updatedAt":3,"projectId":"absent"},
+                    {"id":{"provider":"codex","id":"chat"}, "updatedAt":2,"projectId":null},
+                    {"id":{"provider":"codex","id":"unknown"},"updatedAt":1}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
-                 "hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
+                 "hasMore":true,"hasMoreProjects":false,"limit":5, }))
             .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
@@ -1221,7 +1197,10 @@ mod tests {
             vec![("missing", None), ("chat", None), ("unknown", None)]
         );
         assert_eq!(list.projects[0].id, "known");
-        assert!(list.has_more);
+        assert!(
+            !list.has_more,
+            "the complete catalog contains only three standalone rows"
+        );
         assert!(!list.has_more_projects);
     }
 
@@ -1229,20 +1208,50 @@ mod tests {
     fn returned_project_header_replaces_branding_while_preserving_loaded_tasks() {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.lists.expanded_projects).insert("project".into(), 5);
-        ListSessions::new(Default::default()).apply(&mut snapshot, "", serde_json::from_value(json!({
+        crate::state::list_sync::seed(&mut snapshot, serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"task"},"projectId":"project"}],
                 "projects":[{"id":"project","name":"Old project","roots":[],"icon":{"lightPng":"BAUG","darkPng":"BAUG"}}],
-                "hasMore":false,"hasMoreProjects":false,"projectPages":{"project":{"limit":5,"hasMore":false}},"limit":5
+                "hasMore":false,"hasMoreProjects":false,"limit":5
             }))
             .unwrap());
         for icon in [Some("AQID"), None] {
-            ListSessions::new(Default::default()).apply(&mut snapshot, "", serde_json::from_value(json!({
-                "data":[],
-                "projects":[{"id":"project","name":"Renamed project","roots":[],"icon":icon.map(|png| json!({"lightPng":png,"darkPng":"BAUG"}))}],
-                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
-            })).unwrap());
+            use agent_protocol::{
+                conversation::records,
+                sync::{Content, Cursor, Key, Position},
+            };
+            let project: crate::models::Project = serde_json::from_value(
+                json!({"id":"project","name":"Renamed project","roots":[],"icon":null}),
+            )
+            .unwrap();
+            let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
+            let message = records::Message::Events {
+                through: Cursor {
+                    sequence: from.sequence + 1,
+                    ..from
+                },
+                events: vec![agent_protocol::sync::Event {
+                    sequence: (Cursor {
+                        sequence: from.sequence + 1,
+                        ..from
+                    })
+                    .sequence,
+                    rows: vec![records::Row {
+                        key: Key::Project(project.id.clone()),
+                        version: from.sequence + 1,
+                        position: Position::Project { position: 100 },
+                        content: Content::Full(Arc::new(records::Record::Project(project))),
+                    }],
+                    removed: Vec::new(),
+                }],
+            };
+            snapshot = crate::state::list_sync::received(
+                &snapshot,
+                snapshot.lists.subscription.unwrap(),
+                message,
+            )
+            .0;
             crate::state::operations::ReadListDecorations {
-                scope: agent_protocol::operations::ListDecorationScope::Root { part: None },
+                scope: agent_protocol::operations::ListDecorationScope::Root,
                 projects: vec![],
                 threads: vec![],
             }
@@ -1368,24 +1377,15 @@ mod tests {
     #[test]
     fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
         let mut snapshot = Snapshot::default();
-        let page = |data, errors| {
-            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,"providerErrors":errors})).unwrap()
-        };
-        ListSessions::new(Default::default()).apply(
+        crate::state::list_sync::seed(
             &mut snapshot,
-            "",
-            page(
-                serde_json::json!([{"id":{"provider":"codex","id":"native"},"name":"Cached"}]),
-                serde_json::json!({}),
-            ),
-        );
-        ListSessions::new(Default::default()).apply(
-            &mut snapshot,
-            "",
-            page(
-                serde_json::json!([{"id":{"provider":"claude","id":"uuid"},"name":"Available"}]),
-                serde_json::json!({"codex":{"message":"offline"}}),
-            ),
+            serde_json::from_value(json!({
+                "data":[
+                    {"id":{"provider":"codex","id":"native"},"name":"Cached","listStale":true},
+                    {"id":{"provider":"claude","id":"uuid"},"name":"Available"}
+                ],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5
+            }))
+            .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
         assert_eq!(list.threads.len(), 2);
@@ -1395,7 +1395,7 @@ mod tests {
                 .iter()
                 .find(|thread| thread.id
                     == agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: "native".into()
                     })
                 .unwrap()
@@ -1415,7 +1415,7 @@ mod tests {
             .active
             .insert(
                 agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "task".into(),
                 },
                 active,
@@ -1424,7 +1424,7 @@ mod tests {
             std::sync::Arc::make_mut(&mut snapshot.lists.activity)
                 .unread
                 .insert(agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "task".into(),
                 });
         }
@@ -1435,9 +1435,9 @@ mod tests {
         }
         let page: models::ThreadList = serde_json::from_value(json!({
             "data":[thread], "projects":[],
-            "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
+            "hasMore":false,"hasMoreProjects":false,"limit":5, }))
         .unwrap();
-        ListSessions::new(Default::default()).apply(&mut snapshot, "", page);
+        snapshot.lists.threads = Some(Arc::new(page));
         let restored: Snapshot =
             serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
         let rows = restored.thread_list().unwrap();

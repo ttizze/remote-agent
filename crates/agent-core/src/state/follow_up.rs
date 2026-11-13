@@ -60,9 +60,8 @@ pub fn requested(preference: FollowUp, alternate: bool) -> FollowUp {
 /// routes it: a running turn takes only a steer it can accept, and nothing
 /// overtakes input already waiting unless a stop holds that input.
 pub fn waits(thread: &Thread, follow_up: FollowUp) -> bool {
-    let running = thread.active_turn_id().is_some();
     if working(thread) {
-        !(running && follow_up == FollowUp::Steer && steers(thread))
+        !(follow_up == FollowUp::Steer && thread.steerable)
     } else {
         !thread.queue.held && !thread.queue.inputs.is_empty()
     }
@@ -82,11 +81,6 @@ pub fn working(thread: &Thread) -> bool {
     !waiting
         && (thread.active_turn_id().is_some()
             || thread.status == crate::models::SessionStatus::Running)
-}
-
-/// The conversation's provider can take input into its running turn.
-pub fn steers(thread: &Thread) -> bool {
-    thread.capabilities.unwrap_or_default().steer
 }
 
 /// A queued message loaded into its conversation's composer. The composer's own

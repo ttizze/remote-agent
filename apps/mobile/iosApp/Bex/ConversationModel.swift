@@ -122,7 +122,7 @@ final class ConversationModel {
         let changes = value.changes(previous: publication)
         let next = value.snapshot()
         guard changes.changed, let nextFiles = next.files(paneId: value.paneId()) else { return }
-        migrateWorkbench(to: next, draft: value.conversationContext().navigation().draftKey)
+        migrateWorkbench(to: next, navigation: value.conversationContext().navigation())
         publication = value
         if changes.settings {
             settings = value.settings()
@@ -327,11 +327,8 @@ extension ConversationModel {
                   conversation.scope == snapshot.panelScope(host: host, draft: coreDraftKey),
                   let change = conversation.projection.toggleActivity(id: id, expansion: activityExpansionOverrides)
             else { return }
-            activityExpansionOverrides = change.expansion
+            activityExpansionOverrides = change
             projectConversation(publication.conversation())
-            if let params = change.loadItems {
-                perform(.loadTurnItems(params))
-            }
         }
 
         private func projectConversation(_ rendered: RenderedConversation?) {

@@ -458,7 +458,7 @@
     "result": null
   },
   {
-    "name": "fork retains unknown Codex thread metadata",
+    "name": "fork returns the preallocated conversation identity",
     "command": {
       "type": "forkThread",
       "threadId": {
@@ -469,41 +469,26 @@
     },
     "exchanges": [
       {
-        "method": "host/session/fork",
+        "method": "host/conversation/fork",
         "params": {
-          "threadId": {
+          "source": {
             "provider": "codex",
             "id": "thread"
           },
-          "lastTurnId": "last"
+          "target": {
+            "id": "00000000-0000-0000-0000-000000000003"
+          },
+          "through": "last"
         },
         "response": {
           "result": {
-            "thread": {
-              "id": {
-                "provider": "codex",
-                "id": "fork"
-              },
-              "turns": [],
-              "future": {
-                "retained": true
-              }
-            }
+            "id": "00000000-0000-0000-0000-000000000003"
           }
         }
       }
     ],
     "result": {
-      "thread": {
-        "id": {
-          "provider": "codex",
-          "id": "fork"
-        },
-        "turns": [],
-        "future": {
-          "retained": true
-        }
-      }
+      "id": "00000000-0000-0000-0000-000000000003"
     }
   },
   {

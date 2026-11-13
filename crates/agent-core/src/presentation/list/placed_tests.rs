@@ -20,7 +20,7 @@ fn fixture() -> Snapshot {
         lists: crate::state::Lists {
             threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
                 "data":[],"projects":[{"id":"destination","name":"Destination","roots":[]},{"id":"source","name":"Source","roots":[]}],
-                "limit":5,"hasMore":false,"hasMoreProjects":false,"projectPages":{}
+                "limit":5,"hasMore":false,"hasMoreProjects":false
             })).unwrap())),
             ..Default::default()
         },
@@ -107,7 +107,6 @@ fn fixture() -> Snapshot {
     snapshot.lists.task_activity =
         Some(Arc::new(agent_protocol::live_activity::TaskActivityState {
             attention: Vec::new(),
-            revision: 1,
             statuses: vec![],
             waiting: vec![session("live")],
             background: Vec::new(),
@@ -209,13 +208,11 @@ fn project_preferences_keep_pinned_section_order_ties_and_hidden_labels() {
     })
     .into();
     let input = crate::models::ThreadList {
-        revision: 1,
         limit: 5,
         data: vec![],
         projects,
         has_more: false,
         has_more_projects: false,
-        project_pages: Default::default(),
         provider_errors: None,
     };
     let mut snapshot = Snapshot {
@@ -713,7 +710,7 @@ fn archive_filters_apply_with_only_a_timestamp_or_only_explicit_ids() {
 }
 
 #[test]
-fn expanded_projects_keep_connection_and_operation_errors_without_affecting_collapsed_headers() {
+fn project_decorations_preserve_the_loaded_rows_and_connection_notice() {
     use crate::state::operations::{OperationKey, OperationPhase, OperationState};
     for connected in [false, true] {
         for cached in [false, true] {
@@ -747,9 +744,10 @@ fn expanded_projects_keep_connection_and_operation_errors_without_affecting_coll
                     project.error.as_ref().map(|error| error.message.as_str()),
                     expected
                 );
-                assert!(!project.loading);
-                let key = OperationKey::ProjectList {
-                    project_id: "destination".into(),
+                let key = OperationKey::ListDecorations {
+                    scope: agent_protocol::operations::ListDecorationScope::Project {
+                        project_id: "destination".into(),
+                    },
                 };
                 Arc::make_mut(&mut snapshot.operations).insert(
                     key.clone(),
@@ -765,7 +763,6 @@ fn expanded_projects_keep_connection_and_operation_errors_without_affecting_coll
                     .into_iter()
                     .find(|project| project.id == "destination")
                     .unwrap();
-                assert_eq!(project.loading, expanded);
                 assert_eq!(
                     project.error.as_ref().map(|error| error.message.as_str()),
                     expected
@@ -783,13 +780,9 @@ fn expanded_projects_keep_connection_and_operation_errors_without_affecting_coll
                     .into_iter()
                     .find(|project| project.id == "destination")
                     .unwrap();
-                assert!(!project.loading);
-                assert!(
-                    project.error
-                        == expanded.then(|| crate::presentation::error::error_text(
-                            crate::localization::UiLanguage::Japanese,
-                            "read failed"
-                        ))
+                assert_eq!(
+                    project.error.as_ref().map(|error| error.message.as_str()),
+                    expected
                 );
             }
         }
@@ -805,7 +798,7 @@ fn translated_list_copy_preserves_titles_paths_and_provider_names() {
             {"id":{"provider":"codex","id":"named"},"name":"設定\n{0}","cwd":"/設定/{0}","listStale":true},
             {"id":{"provider":"codex","id":"unnamed"}},
             {"id":{"provider":"codex","id":"literal"},"name":"無題のタスク"}
-        ],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,
+        ],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,
         "providerErrors":{"設定":"provider failure"}
     })).unwrap()));
     let japanese = Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap();

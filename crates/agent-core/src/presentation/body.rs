@@ -265,6 +265,7 @@ pub(super) fn detail_blocks(
             cwd,
             output,
             exit_code,
+            output_omitted,
         } => {
             let mut blocks = vec![code(command, Some("sh"), "コマンド")];
             if let Some(cwd) = cwd {
@@ -275,6 +276,11 @@ pub(super) fn detail_blocks(
                 )));
             }
             if !output.is_empty() {
+                if *output_omitted {
+                    blocks.extend(markdown_blocks(
+                        language.text("以前の出力は表示されていません").into(),
+                    ));
+                }
                 blocks.push(code(output, None, "出力"));
             }
             if let Some(exit_code) = exit_code {
@@ -415,6 +421,7 @@ mod tests {
             "command".into(),
             ItemStatus::Completed,
             WireBody::CommandExecution {
+                output_omitted: false,
                 command: "設定\n{0}".into(),
                 cwd: Some("/設定/{0}".into()),
                 output: "詳細を表示\n{0}".into(),
@@ -555,5 +562,44 @@ mod tests {
             item_body(UiLanguage::Japanese, &generated).images,
             ["/saved.png"]
         );
+    }
+    #[test]
+    fn omitted_output_has_a_separate_localized_notice_and_literal_body() {
+        let item = Item::new(
+            "cmd".into(),
+            ItemStatus::Completed,
+            WireBody::CommandExecution {
+                command: "echo tail".into(),
+                cwd: None,
+                output: "**tail**".into(),
+                output_omitted: true,
+                exit_code: None,
+            },
+        );
+        for (language, label) in [
+            (UiLanguage::English, "Earlier output not shown"),
+            (UiLanguage::Japanese, "以前の出力は表示されていません"),
+        ] {
+            let blocks = detail_blocks(language, &item);
+            let texts: Vec<_> = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    super::super::markdown::MarkdownBlock::Paragraph { runs, style } => Some((
+                        runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+                        style.filename.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            let notice = texts
+                .iter()
+                .position(|(text, file)| text == label && file.is_none())
+                .unwrap();
+            let output = texts
+                .iter()
+                .position(|(text, file)| text == "**tail**" && file.is_some())
+                .unwrap();
+            assert!(notice < output);
+        }
     }
 }

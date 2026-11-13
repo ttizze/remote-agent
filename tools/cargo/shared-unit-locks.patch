@@ -341,7 +341,7 @@ diff --git a/src/compiler/locking.rs b/src/compiler/locking.rs
  #[derive(Debug, Clone, Hash, Eq, PartialEq)]
  pub struct LockKey(PathBuf);
 
-@@ -135,3 +171,101 @@
+@@ -135,3 +171,104 @@
          write!(f, "{}", self.0.display())
      }
  }
@@ -432,9 +432,12 @@ diff --git a/src/compiler/locking.rs b/src/compiler/locking.rs
 +    #[test]
 +    fn cargos_that_built_what_the_other_wants_do_not_deadlock() {
 +        let dir = tempfile::tempdir().unwrap();
-+        let waiters = [("a", "b"), ("b", "a")].map(|(held, wanted)| {
++        let units = [("a", "b"), ("b", "a")].map(|(held, wanted)| {
 +            let (held, wanted) = (unit_lock(&dir, held), unit_lock(&dir, wanted));
 +            flock::lock_shared(&held).unwrap();
++            (held, wanted)
++        });
++        let waiters = units.map(|(held, wanted)| {
 +            thread::spawn(move || {
 +                lock_exclusive_unless_built(&wanted, || true).unwrap();
 +                (held, wanted)

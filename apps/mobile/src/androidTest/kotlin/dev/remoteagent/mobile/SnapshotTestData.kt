@@ -31,11 +31,12 @@ internal fun Snapshot.threadJson(session: SessionRef): JSONObject {
             ProviderKind.CODEX -> "codex"
             ProviderKind.CLAUDE -> "claude"
             ProviderKind.DEEP_SEEK -> "deepseek"
+            null -> null
         }
     return (0 until entries.length()).firstNotNullOf { index ->
         val entry = entries.getJSONArray(index)
         val identity = entry.getJSONObject(0)
-        if (identity.getString("provider") == provider && identity.getString("id") == session.id) {
+        if (identity.optString("provider", null) == provider && identity.getString("id") == session.id) {
             entry.getJSONObject(1)
         } else null
     }

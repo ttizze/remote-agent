@@ -24,20 +24,18 @@ fn row(provider: ProviderKind, id: &str, cwd: Option<&str>, branch: Option<&str>
 
 fn list(data: Vec<Thread>, projects: Vec<Project>) -> Arc<ThreadList> {
     Arc::new(ThreadList {
-        revision: 0,
         limit: 5,
         data,
         projects,
         has_more: false,
         has_more_projects: false,
-        project_pages: Default::default(),
         provider_errors: None,
     })
 }
 
 fn read(threads: &[Thread]) -> ReadListDecorations {
     ReadListDecorations {
-        scope: ListDecorationScope::Root { part: None },
+        scope: ListDecorationScope::Root,
         projects: Vec::new(),
         threads: threads
             .iter()

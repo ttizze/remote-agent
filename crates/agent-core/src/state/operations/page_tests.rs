@@ -11,7 +11,6 @@ fn assert_page(timestamps: Vec<Option<f64>>, limit: u32) {
             preview: Some(format!("Preview {index}")),
             cwd: Some(format!("/work/{index}")),
             updated_at,
-            list_revision: index as u64,
             ..Default::default()
         })
         .collect();

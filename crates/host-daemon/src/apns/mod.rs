@@ -7,10 +7,7 @@ use futures_util::{StreamExt, stream};
 use registry::Registry;
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
@@ -22,7 +19,6 @@ pub(crate) struct Apns {
     host_name: String,
     registry: Mutex<Registry>,
     path: Option<PathBuf>,
-    ready: AtomicBool,
     wake: Arc<Notify>,
     stop: CancellationToken,
 }
@@ -40,24 +36,27 @@ pub(crate) fn now() -> u64 {
 impl Apns {
     #[cfg(test)]
     pub(crate) fn testing() -> Arc<Self> {
+        let mut registry = Registry::default();
+        registry.update(
+            agent_protocol::live_activity::TaskActivitySummary::default().display(),
+            now(),
+        );
         Arc::new(Self {
             client: Client::testing(),
             host_name: "PC".into(),
-            registry: Mutex::default(),
+            registry: Mutex::new(registry),
             path: None,
-            ready: AtomicBool::new(true),
             wake: Arc::new(Notify::new()),
             stop: CancellationToken::new(),
         })
     }
     #[cfg(test)]
     pub(crate) fn test_payloads(&self, timestamp: u64) -> Vec<serde_json::Value> {
-        if !self.is_ready() {
+        let mut registry = self.registry.lock().unwrap();
+        if !registry.is_ready() {
             return Vec::new();
         }
-        self.registry
-            .lock()
-            .unwrap()
+        registry
             .deliveries(timestamp)
             .into_iter()
             .map(|delivery| serde_json::from_slice(&delivery.payload).unwrap())
@@ -86,7 +85,6 @@ impl Apns {
             host_name: agent_protocol::models::compact_title(host_name),
             registry: Mutex::new(registry),
             path: Some(registry_path),
-            ready: AtomicBool::new(false),
             wake: Arc::new(Notify::new()),
             stop: CancellationToken::new(),
         });
@@ -101,14 +99,14 @@ impl Apns {
                 let Some(service) = weak.upgrade() else {
                     break;
                 };
-                if !service.is_ready() {
-                    continue;
-                }
                 let deliveries = {
                     let mut registry = service
                         .registry
                         .lock()
                         .unwrap_or_else(|error| error.into_inner());
+                    if !registry.is_ready() {
+                        continue;
+                    }
                     let deliveries = registry.deliveries(now());
                     if !deliveries.is_empty() {
                         service.persist(&registry);
@@ -163,30 +161,19 @@ impl Apns {
             tracing::error!(target: "agent", operation = "host.live_activity.persist", message = "cannot persist Live Activity registrations");
         }
     }
-    pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
-    }
     pub fn activate(&self, display: TaskActivityDisplay) {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let was_ready = registry.is_ready();
         let changed = registry.update(display, now());
-        if changed || !self.is_ready() {
+        if changed || !was_ready {
             self.persist(&registry);
             self.wake.notify_one();
         }
-        self.ready.store(true, Ordering::Release);
     }
-    pub fn register(
-        &self,
-        owner: &str,
-        params: &RegisterLiveActivity,
-        display: TaskActivityDisplay,
-    ) -> Result<(), String> {
-        if !self.is_ready() {
-            return Err("Host task state is still initializing".into());
-        }
+    pub fn register(&self, owner: &str, params: &RegisterLiveActivity) -> Result<(), String> {
         if !self.client.credential_available(params.environment) {
             return Err(format!(
                 "APNs {:?} credentials are not configured",
@@ -198,7 +185,7 @@ impl Apns {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         registry
-            .register(owner, params, &self.host_name, display, now())
+            .register(owner, params, &self.host_name, now())
             .map_err(str::to_owned)?;
         self.save(&registry)
             .map_err(|_| "cannot persist Live Activity registration".to_owned())?;
@@ -206,13 +193,13 @@ impl Apns {
         Ok(())
     }
     pub fn update(&self, display: TaskActivityDisplay) {
-        if !self.is_ready() {
-            return;
-        }
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if !registry.is_ready() {
+            return;
+        }
         if registry.update(display, now()) {
             self.persist(&registry);
             self.wake.notify_one();
@@ -273,13 +260,12 @@ mod tests {
             ..Default::default()
         }
         .display();
-        let error = service
-            .register("phone", &params, display.clone())
-            .unwrap_err();
+        service.activate(display);
+        let error = service.register("phone", &params).unwrap_err();
         assert!(error.contains("Production"));
         assert!(service.test_payloads(now()).is_empty());
         params.environment = PushEnvironment::Sandbox;
-        service.register("phone", &params, display).unwrap();
+        service.register("phone", &params).unwrap();
         assert_eq!(service.test_payloads(now()).len(), 1);
     }
 
@@ -294,6 +280,7 @@ mod tests {
         .display();
         let mut service = Apns::testing();
         Arc::get_mut(&mut service).unwrap().path = Some(path.clone());
+        service.activate(running);
         service
             .register(
                 "phone",
@@ -303,7 +290,6 @@ mod tests {
                     token: vec![1; 32],
                     environment: PushEnvironment::Sandbox,
                 },
-                running.clone(),
             )
             .unwrap();
         #[cfg(unix)]
@@ -320,7 +306,6 @@ mod tests {
         restarted_owner.registry = Mutex::new(
             serde_json::from_slice(&Zeroizing::new(std::fs::read(&path).unwrap())).unwrap(),
         );
-        restarted_owner.ready.store(false, Ordering::Release);
         assert!(restarted.test_payloads(now()).is_empty());
         restarted.activate(
             TaskActivitySummary {
@@ -340,5 +325,42 @@ mod tests {
         let mut restored: Registry =
             serde_json::from_slice(&Zeroizing::new(std::fs::read(&path).unwrap())).unwrap();
         assert!(restored.deliveries(now() + 100).is_empty());
+    }
+    #[test]
+    fn registering_after_a_display_update_uses_the_latest_state_even_without_existing_entries() {
+        for summary in [
+            TaskActivitySummary {
+                waiting: 1,
+                ..Default::default()
+            },
+            TaskActivitySummary::default(),
+        ] {
+            let service = Apns::testing();
+            service.activate(
+                TaskActivitySummary {
+                    running: 1,
+                    ..Default::default()
+                }
+                .display(),
+            );
+            let latest = summary.display();
+            service.update(latest.clone());
+            service
+                .register(
+                    "phone",
+                    &RegisterLiveActivity {
+                        activity_id: Some("late".into()),
+                        allow_start: false,
+                        token: vec![1; 32],
+                        environment: PushEnvironment::Sandbox,
+                    },
+                )
+                .unwrap();
+            let payload = service.test_payloads(now()).pop().unwrap();
+            assert_eq!(
+                payload["aps"]["content-state"]["display"],
+                serde_json::to_value(latest).unwrap()
+            );
+        }
     }
 }

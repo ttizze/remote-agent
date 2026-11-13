@@ -70,7 +70,7 @@ mod tests {
             attention: None,
             host_id: String::new(),
             id: crate::session::SessionRef {
-                provider: crate::session::ProviderKind::Codex,
+                provider: Some(crate::session::ProviderKind::Codex),
                 id: "same-session".into(),
             },
             title: "Task".into(),
@@ -102,7 +102,6 @@ mod tests {
                 section: None,
                 chats_archived: false,
                 expanded: true,
-                loading: false,
                 error: None,
                 threads: vec![thread()],
                 has_more: false,

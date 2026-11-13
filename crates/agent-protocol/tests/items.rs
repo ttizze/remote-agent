@@ -42,6 +42,7 @@ fn provider_error_payload_survives_the_host_binary_contract() {
 #[test]
 fn turn_completion_keeps_independent_items_for_late_output() {
     let original = conversation(ItemBody::CommandExecution {
+        output_omitted: false,
         command: "fixture command".into(),
         output: "before".into(),
         cwd: None,

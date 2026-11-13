@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn command_results_replace_output_and_preserve_exit_codes_without_valid_new_evidence() {
     let body = ItemBody::CommandExecution {
+        output_omitted: false,
         command: "printf hi".into(),
         cwd: Some("/work".into()),
         output: "old output".into(),
@@ -24,6 +25,7 @@ fn command_results_replace_output_and_preserve_exit_codes_without_valid_new_evid
             cwd,
             output,
             exit_code,
+            ..
         } = tool_result_body(&body, &json!("updated"), &metadata)
         else {
             panic!("command changed kind")

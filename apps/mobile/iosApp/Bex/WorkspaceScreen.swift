@@ -66,14 +66,11 @@ extension PanelKind {
 }
 
 extension ConversationModel {
-    func migrateWorkbench(to next: AgentCore.Snapshot, draft: DraftKey) {
-        var before = snapshot.panelScope(host: host, draft: coreDraftKey)
-        if let session = next.submittedSession(draft: coreDraftKey) {
-            let submitted = next.panelScope(host: host, draft: .session(session: session))
-            panels = panels.rekey(before: before, after: submitted)
-            before = submitted
-        }
-        panels = panels.inheritVisibility(before: before, after: next.panelScope(host: host, draft: draft))
+    func migrateWorkbench(to next: AgentCore.Snapshot, navigation: AgentCore.Navigation) {
+        let before = snapshot.panelScope(host: host, draft: coreDraftKey)
+        let after = next.panelScope(host: host, draft: navigation.draftKey)
+        let welcome = next.welcomeTransition(before: coreDraftKey, after: navigation.draftKey)
+        panels = panels.inheritVisibility(before: before, after: after, newDraft: navigation.threadId == nil, welcome: welcome)
     }
 
     func openWorkbench(_ kind: PanelKind, scope: PanelScope, directory: String) {

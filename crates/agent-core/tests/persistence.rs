@@ -10,7 +10,7 @@ fn runtime_fields_cannot_override_restored_user_work() {
     let mut snapshot = Snapshot::default();
     Arc::make_mut(&mut snapshot.input.drafts).insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            provider: Some(agent_protocol::session::ProviderKind::Codex),
             id: "thread".into(),
         }
         .into(),
@@ -39,6 +39,7 @@ fn missing_or_invalid_user_work_is_not_silently_discarded() {
         "storage_scope",
         "archived_scopes",
         "drafts",
+        "new_drafts",
         "pending_submissions",
         "file_drafts",
         "navigation",

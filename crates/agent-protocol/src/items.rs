@@ -81,6 +81,8 @@ pub enum ItemBody {
         duration_ms: Option<u64>,
     },
     CommandExecution {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        output_omitted: bool,
         command: String,
         cwd: Option<String>,
         output: String,
@@ -228,6 +230,12 @@ pub enum AttachmentKind {
 }
 
 impl Item {
+    pub fn is_history_message(&self) -> bool {
+        matches!(
+            self.body(),
+            ItemBody::UserMessage { .. } | ItemBody::AssistantText { .. }
+        ) || self.is_image_output()
+    }
     /// Keep image-producing items in history. Deferred tools must be retained
     /// until their result can be read and its image content is known.
     pub fn is_image_output(&self) -> bool {

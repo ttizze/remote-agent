@@ -62,10 +62,12 @@ fn commit(
                     labels.remove(&id);
                     icons.remove(&id);
                 }
-                MountItem::Image { id, source, .. } => {
-                    if let Some(source) = source {
-                        icons.insert(id, source.uri.to_string());
-                    }
+                MountItem::Image {
+                    id,
+                    source: Some(source),
+                    ..
+                } => {
+                    icons.insert(id, source.uri.to_string());
                 }
                 MountItem::Canvas { id, drawing } => {
                     icons.insert(id, format!("{:?}", drawing.ops));

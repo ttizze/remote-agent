@@ -1,3 +1,7 @@
+#[path = "support/conversation_open.rs"]
+mod opening;
+#[path = "support/conversation_rows.rs"]
+mod rows;
 #[path = "support/model_catalog.rs"]
 mod test_models;
 use agent_core::state::DraftKey;
@@ -23,80 +27,159 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
     if previous.sessions.conversations.contains_key(&id) {
         let subscription = uuid::Uuid::nil();
         Arc::make_mut(&mut next.sessions.subscriptions).insert(id.clone(), subscription);
+        let thread = change.apply(&previous.sessions.conversations[&id]).unwrap();
+        let sequence = previous
+            .sessions
+            .replicas
+            .get(&id)
+            .and_then(|replica| replica.cursor())
+            .map_or(8, |cursor| cursor.sequence + 1);
+        let generation = previous
+            .sessions
+            .replicas
+            .get(&id)
+            .map_or(1, |replica| replica.subscription());
+        let replica = rows::replica_at(
+            ThreadResponse {
+                thread,
+                ..Default::default()
+            },
+            generation,
+            sequence,
+        );
+        Arc::make_mut(&mut next.sessions.replicas)
+            .entry(id.clone())
+            .or_insert_with(|| {
+                Arc::new(agent_protocol::conversation::records::Replica::new(
+                    agent_protocol::sync::Scope::Conversation(id.clone()),
+                    generation,
+                ))
+            });
         (next, effects) = reduce(
             &next,
             "",
-            Event::SessionUpdate(Box::new(agent_protocol::session::SessionUpdate {
+            Event::ConversationRows {
                 subscription_id: subscription,
-                change: change.clone(),
-            })),
+                message: Box::new(replica.snapshot().unwrap()),
+            },
         );
         next.sessions.subscriptions = previous.sessions.subscriptions.clone();
     }
-    let active = match &change {
-        agent_protocol::session::SessionChange::Status { status } => {
-            *status == agent_protocol::models::SessionStatus::Running
-        }
-        agent_protocol::session::SessionChange::Turn { completed, .. } => !completed,
-        _ => return (next, effects),
-    };
-    let mut unread = previous
+    let mut updated = next;
+    let mut list = updated
         .lists
-        .task_activity
-        .as_ref()
-        .map(|state| state.unread.clone())
+        .threads
+        .as_deref()
+        .cloned()
         .unwrap_or_default();
-    if active {
-        unread.retain(|(session, _)| session != &id);
+    let mut summaries = list
+        .data
+        .into_iter()
+        .filter_map(|thread| thread.id.clone().map(|id| (id, thread)))
+        .collect::<BTreeMap<_, _>>();
+    for (id, thread) in updated.sessions.conversations.iter() {
+        summaries.insert(id.clone(), thread.as_ref().clone());
     }
-    if let agent_protocol::session::SessionChange::Turn {
-        completed: true,
-        turn,
-    } = &change
-        && turn.status == TurnStatus::Completed
-    {
-        unread.retain(|(session, _)| session != &id);
-        unread.push((id.clone(), turn.id.clone()));
+    if !updated.sessions.conversations.contains_key(&id) {
+        let previous = summaries.remove(&id).unwrap_or_else(|| Thread {
+            id: Some(id.clone()),
+            ..Default::default()
+        });
+        summaries.insert(id.clone(), change.apply(&previous).unwrap());
     }
-    let (updated, changes) = reduce(
-        &next,
-        "",
-        Event::Notification(agent_protocol::protocol::Notification::Activity {
-            session: id,
-            active,
-        }),
-    );
-    effects.extend(changes);
+    list.data = summaries.into_values().collect();
+    let conversation = updated
+        .sessions
+        .replicas
+        .get(&id)
+        .and_then(|replica| replica.cursor())
+        .or_else(|| {
+            updated
+                .lists
+                .replica
+                .as_ref()
+                .and_then(|replica| replica.cursor())
+        })
+        .unwrap_or(agent_protocol::sync::Cursor {
+            store: uuid::Uuid::nil(),
+            sequence: 8,
+        });
+    let sequence = updated
+        .lists
+        .replica
+        .as_ref()
+        .and_then(|replica| replica.cursor())
+        .map_or(conversation.sequence, |cursor| {
+            conversation.sequence.max(cursor.sequence + 1)
+        });
+    let cursor = agent_protocol::sync::Cursor {
+        sequence,
+        ..conversation
+    };
+    if updated.lists.replica.is_none() {
+        updated.lists.replica = Some(Arc::new(
+            agent_protocol::conversation::records::Replica::new(
+                agent_protocol::sync::Scope::List,
+                1,
+            ),
+        ));
+    }
+    let subscription = *updated
+        .lists
+        .subscription
+        .get_or_insert_with(uuid::Uuid::new_v4);
     let (updated, changes) = reduce(
         &updated,
         "",
-        Event::Notification(agent_protocol::protocol::Notification::TaskActivity {
-            state: agent_protocol::live_activity::TaskActivityState {
-                attention: Vec::new(),
-                waiting: Vec::new(),
-                revision: previous
-                    .lists
-                    .task_activity
-                    .as_ref()
-                    .map_or(1, |state| state.revision + 1),
-                statuses: Vec::new(),
-                display: agent_protocol::live_activity::TaskActivitySummary::default().display(),
-                background: Vec::new(),
-                unread,
-            },
-        }),
+        Event::ListRows {
+            subscription_id: subscription,
+            message: Box::new({
+                let mut message = rows::catalog(list, cursor);
+                if matches!(
+                    change,
+                    agent_protocol::session::SessionChange::Status { .. }
+                ) && let Some(previous) = previous.lists.replica.as_ref().and_then(|replica| {
+                    replica
+                        .rows()
+                        .get(&agent_protocol::sync::Key::Thread(id.clone()))
+                }) && let agent_protocol::sync::Content::Full(record) = &previous.content
+                    && let agent_protocol::conversation::records::Record::Thread(header) =
+                        record.as_ref()
+                    && let agent_protocol::sync::Message::Snapshot { rows, .. } = &mut message
+                    && let Some(row) = rows
+                        .iter_mut()
+                        .find(|row| row.key == agent_protocol::sync::Key::Thread(id.clone()))
+                    && let agent_protocol::sync::Content::Full(record) = &mut row.content
+                    && let agent_protocol::conversation::records::Record::Thread(next) =
+                        Arc::make_mut(record)
+                {
+                    next.details.activity.latest = header.details.activity.latest;
+                    next.details.activity.completion = header.details.activity.completion.clone();
+                }
+                message
+            }),
+        },
     );
     effects.extend(changes);
     (updated, effects)
 }
 
 fn initial(thread: Thread) -> Snapshot {
+    let id = thread.id.clone().unwrap();
+    let replica = rows::replica(
+        ThreadResponse {
+            thread,
+            ..Default::default()
+        },
+        1,
+    );
+    let thread = agent_protocol::conversation::records::project(&replica)
+        .unwrap()
+        .thread;
     Snapshot {
         sessions: agent_core::state::Sessions {
-            conversations: Arc::new(BTreeMap::from([(
-                thread.id.clone().unwrap(),
-                Arc::new(thread),
-            )])),
+            replicas: Arc::new(BTreeMap::from([(id.clone(), Arc::new(replica))])),
+            conversations: Arc::new(BTreeMap::from([(id, Arc::new(thread))])),
             ..Default::default()
         },
         ..Default::default()
@@ -109,18 +192,29 @@ fn applied<O: Operation>(
     output: O::Output,
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
+    if let Some(agent_protocol::sync::Scope::Conversation(id)) = operation.subscription_scope() {
+        Arc::make_mut(&mut next.sessions.replicas)
+            .entry(id.clone())
+            .or_insert_with(|| {
+                Arc::new(agent_protocol::conversation::records::Replica::new(
+                    agent_protocol::sync::Scope::Conversation(id.clone()),
+                    1,
+                ))
+            });
+    }
     let effects = operation.apply(&mut next, "", output);
     (next, effects)
 }
-fn reply(thread: Thread) -> agent_protocol::session::OpenedSession {
-    agent_protocol::session::OpenedSession {
-        session: thread.id.clone().unwrap(),
-        subscription_id: uuid::Uuid::nil(),
-        unchanged: false,
-        response: ThreadResponse {
-            thread,
-            ..Default::default()
-        },
+fn reply(thread: Thread) -> opening::Opened {
+    opening::Opened {
+        replica: rows::replica(
+            ThreadResponse {
+                thread,
+                ..Default::default()
+            },
+            1,
+        ),
+        subscription: uuid::Uuid::nil(),
     }
 }
 
@@ -135,7 +229,7 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     );
     snapshot.input.drafts = Arc::new(BTreeMap::from([(
         SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         }
         .into(),
@@ -147,12 +241,12 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     Arc::make_mut(snapshot.panes.primary_mut()).navigation =
         Arc::new(agent_core::state::Navigation {
             thread_id: Some(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }),
             cwd: "/fixture".into(),
             draft_key: SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }
             .into(),
@@ -160,15 +254,17 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     snapshot.sessions.pending_submissions = Arc::new(BTreeMap::from([(
         "sent".into(),
         Arc::new(agent_core::state::PendingSubmission {
+            new_draft_slot: None,
+            cursor: None,
             sequence: 0,
             submitted_at_ms: None,
             draft_key: SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }
             .into(),
             draft: snapshot.input.drafts[&DraftKey::from(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             })]
                 .clone(),
@@ -181,8 +277,14 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     )]));
     let restored: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let mut expected = snapshot.clone();
+    expected.sessions.replicas = Default::default();
+    expected.lists.replica = None;
+    expected.lists.subscription = None;
+    expected.lists.task_activity = None;
+    Arc::make_mut(&mut expected.lists.activity).active.clear();
     assert_eq!(
-        restored, snapshot,
+        restored, expected,
         "persisted snapshots must retain loaded history after reopening"
     );
 }
@@ -208,7 +310,7 @@ fn selected_folder_preserves_explicit_scope_without_losing_the_execution_directo
                 ..Default::default()
             },
             op::ReadThread::open(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }),
             reply(thread),
@@ -252,31 +354,34 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
             "",
             Event::Intent(Intent::Submit {
                 thread_id: Some(SessionRef {
-                    provider: ProviderKind::Codex,
+                    provider: Some(ProviderKind::Codex),
                     id: "thread".into(),
                 }),
-                client_user_message_id: "client".into(),
+                client_user_message_id: "5b1986e4-742d-5d96-81d1-93be060b53a6".into(),
                 alternate: false,
             }),
         );
         let mut finished = pending.clone();
         for (index, echo) in [echo_first, !echo_first].into_iter().enumerate() {
             if echo {
-                finished = fixture_change(&finished, json!({"session":{"provider":"codex","id":"thread"},"change":{"type":"item","turnId":"turn","item":{"id":"native","status":"unknown","clientInputId":"client","body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}}}})).0;
+                finished = fixture_change(&finished, json!({"session":{"provider":"codex","id":"thread"},"change":{"type":"item","turnId":"turn","item":{"id":"native","status":"unknown","clientInputId":"5b1986e4-742d-5d96-81d1-93be060b53a6","body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}}}})).0;
             } else {
                 op::SendSubmission {
                     thread_id: SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
                     },
-                    client_user_message_id: "client".into(),
+                    client_user_message_id: "5b1986e4-742d-5d96-81d1-93be060b53a6".into(),
                     draft: Arc::default(),
                     follow_up: Default::default(),
                 }
                 .apply(
                     &mut finished,
                     "",
-                    op::SubmissionProgress::Sent(Some("turn".into())),
+                    agent_protocol::sync::Cursor {
+                        store: uuid::Uuid::from_u128(1),
+                        sequence: 8,
+                    },
                 );
             }
             if index == 0 {
@@ -293,7 +398,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
 }
 
 #[test]
-fn submission_acknowledgement_moves_to_the_returned_turn() {
+fn submission_acknowledgement_waits_for_canonical_rows_without_guessing_a_turn() {
     use agent_core::state::Intent;
     let previous = initial(
         serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[{"id":"old","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"unknown"}}}}}]}]}))
@@ -304,49 +409,62 @@ fn submission_acknowledgement_moves_to_the_returned_turn() {
         "",
         Event::Intent(Intent::Submit {
             thread_id: Some(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }),
-            client_user_message_id: "client".into(),
+            client_user_message_id: "5b1986e4-742d-5d96-81d1-93be060b53a6".into(),
             alternate: false,
         }),
     );
     assert_eq!(
-        pending.sessions.pending_submissions["client"]
+        pending.sessions.pending_submissions["5b1986e4-742d-5d96-81d1-93be060b53a6"]
             .turn_id
             .as_deref(),
         Some("old")
     );
     assert_eq!(
-        pending.sessions.pending_submissions["client"]
+        pending.sessions.pending_submissions["5b1986e4-742d-5d96-81d1-93be060b53a6"]
             .after_item_id
             .as_deref(),
         Some("answer")
     );
     op::SendSubmission {
         thread_id: SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         },
-        client_user_message_id: "client".into(),
+        client_user_message_id: "5b1986e4-742d-5d96-81d1-93be060b53a6".into(),
         draft: Arc::default(),
         follow_up: Default::default(),
     }
     .apply(
         &mut pending,
         "",
-        op::SubmissionProgress::Sent(Some("new".into())),
+        agent_protocol::sync::Cursor {
+            store: uuid::Uuid::from_u128(1),
+            sequence: 8,
+        },
     );
+    let input = &pending.sessions.pending_submissions["5b1986e4-742d-5d96-81d1-93be060b53a6"];
+    assert!(input.accepted);
+    assert_eq!(input.turn_id.as_deref(), Some("old"));
+    assert_eq!(input.after_item_id.as_deref(), Some("answer"));
+    let (received, _) = fixture_change(
+        &pending,
+        json!({"session":{"provider":"codex","id":"thread"},"change":{"type":"turn","completed":false,"turn":{"id":"canonical-turn","status":"running","items":[{"id":"5b1986e4-742d-5d96-81d1-93be060b53a6","status":"completed","body":{"inline":{"body":{"userMessage":{"text":"saved input","content":[]}}}}}]}}}),
+    );
+    assert!(received.sessions.pending_submissions.is_empty());
     assert_eq!(
-        pending.sessions.pending_submissions["client"]
-            .turn_id
-            .as_deref(),
-        Some("new")
-    );
-    assert!(
-        pending.sessions.pending_submissions["client"]
-            .after_item_id
-            .is_none()
+        received.sessions.conversations
+            [&SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap()]
+            .turns
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap()
+            .id
+            .as_str(),
+        "canonical-turn"
     );
 }
 
@@ -375,7 +493,7 @@ fn model_settings_corpus() {
             input: agent_core::state::Input {
                 drafts: Arc::new(BTreeMap::from([(
                     SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
                     }
                     .into(),
@@ -394,7 +512,7 @@ fn model_settings_corpus() {
                 "",
                 Event::Intent(Intent::SelectModel {
                     thread_id: SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
                     }
                     .into(),
@@ -420,35 +538,10 @@ fn model_settings_corpus() {
         expected.model_settings_changed = case["select"].is_object();
         assert_eq!(
             *next.input.drafts[&DraftKey::from(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into()
             })],
             expected,
-            "{}",
-            case["name"]
-        );
-    }
-}
-#[test]
-fn event_corpus() {
-    let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/events.json")).unwrap();
-    assert_eq!(cases.len(), 7);
-    for case in cases {
-        let previous: Thread = serde_json::from_value(case["previous"].clone()).unwrap();
-        let id = previous.id.clone().unwrap();
-        let mut state = initial(previous);
-        for event in case["events"].as_array().unwrap() {
-            let (next, effects) = fixture_change(&state, event.clone());
-            assert!(effects.is_empty());
-            assert_eq!(next.panes.primary().error, None, "{}", case["name"]);
-            state = next;
-        }
-        assert_eq!(
-            serde_json::to_value(&state.sessions.conversations[&id]).unwrap(),
-            serde_json::to_value(
-                serde_json::from_value::<Thread>(case["expected"].clone()).unwrap()
-            )
-            .unwrap(),
             "{}",
             case["name"]
         );
@@ -468,7 +561,7 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     };
     let thread = Thread {
         id: Some(SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         }),
         turns: Some(vec![
@@ -489,12 +582,12 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     let mut state = initial(thread);
     Arc::make_mut(&mut state.sessions.conversations).insert(
         SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "other".into(),
         },
         Arc::new(Thread {
             id: Some(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "other".into(),
             }),
             ..Default::default()
@@ -506,23 +599,23 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     );
     assert!(Arc::ptr_eq(
         &state.sessions.conversations[&SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "other".into()
         }],
         &next.sessions.conversations[&SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "other".into()
         }]
     ));
     let old = state.sessions.conversations[&SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "thread".into(),
     }]
         .turns
         .as_ref()
         .unwrap();
     let new = next.sessions.conversations[&SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "thread".into(),
     }]
         .turns
@@ -542,7 +635,14 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
         Some("before after")
     );
     let restored: Snapshot = serde_json::from_slice(&serde_json::to_vec(&next).unwrap()).unwrap();
-    assert_eq!(restored, next);
+    assert!(restored.sessions.replicas.is_empty());
+    let mut expected = next.clone();
+    expected.sessions.replicas = Default::default();
+    expected.lists.replica = None;
+    expected.lists.subscription = None;
+    expected.lists.task_activity = None;
+    Arc::make_mut(&mut expected.lists.activity).active.clear();
+    assert_eq!(restored, expected);
 }
 
 #[test]
@@ -552,7 +652,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).thread_id =
             case["visible"].as_str().map(|id| SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: id.into(),
             });
         for event in case["events"].as_array().unwrap() {
@@ -560,7 +660,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
         }
         assert_eq!(
             snapshot.lists.activity.active[&SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "a".into()
             }],
             case["active"].as_bool().unwrap(),
@@ -569,7 +669,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
         );
         assert_eq!(
             snapshot.lists.activity.unread.contains(&SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "a".into()
             }),
             case["unread"].as_bool().unwrap(),
@@ -706,8 +806,17 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
         for open_thread in [false, true] {
             let next = if open_thread {
                 let mut next = previous.clone();
+                Arc::make_mut(&mut next.sessions.replicas).insert(
+                    SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
+                    Arc::new(agent_protocol::conversation::records::Replica::new(
+                        agent_protocol::sync::Scope::Conversation(
+                            SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
+                        ),
+                        1,
+                    )),
+                );
                 op::ReadThread::open(SessionRef {
-                    provider: ProviderKind::Codex,
+                    provider: Some(ProviderKind::Codex),
                     id: "thread".into(),
                 })
                 .apply(
@@ -750,23 +859,24 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     .unwrap();
     Arc::make_mut(&mut Arc::make_mut(unassigned.panes.primary_mut()).navigation).thread_id =
         Some(SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "chat".into(),
         });
     Arc::make_mut(&mut unassigned.sessions.conversations).insert(
         SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "chat".into(),
         },
         Arc::new(chat.thread.clone()),
     );
     let mut unassigned: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&unassigned).unwrap()).unwrap();
+    let output = opening::opened(chat, &mut unassigned);
     op::ReadThread::open(SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "chat".into(),
     })
-    .apply(&mut unassigned, "", reply(chat.thread));
+    .apply(&mut unassigned, "", output);
     assert!(unassigned.panes.primary().workspace.review.is_none());
     assert!(unassigned.panes.primary().workspace.review_cwd.is_none());
     assert_eq!(previous.files.file_drafts, unassigned.files.file_drafts);
@@ -782,7 +892,7 @@ fn file_change_delta_appends_to_output_without_inventing_a_diff() {
         );
         assert_eq!(next.panes.primary().error, None);
         let item = &next.sessions.conversations[&SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         }]
             .turns
@@ -804,7 +914,7 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
         input: agent_core::state::Input {
             drafts: Arc::new(BTreeMap::from([(
                 SessionRef {
-                    provider: ProviderKind::Codex,
+                    provider: Some(ProviderKind::Codex),
                     id: "thread".into(),
                 }
                 .into(),
@@ -819,11 +929,11 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
             agent_core::state::PaneState {
                 navigation: Arc::new(Navigation {
                     thread_id: Some(SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
                     }),
                     draft_key: SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
                     }
                     .into(),
@@ -849,12 +959,12 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
         json!({"session":{"provider":"codex","id":"thread"},"change":{"type":"turn","turn":{"id":"turn","status":"completed","items":[]},"completed":true}}),
     );
     assert!(completed.lists.activity.unread.contains(&SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "thread".into()
     }));
     assert_eq!(
         completed.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into()
         })]
             .text,
@@ -864,13 +974,19 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
 
 #[test]
 fn serialized_events_preserve_operation_inputs_and_replay_state() {
-    let events = vec![
-        Event::Connected,
+    let initial = reduce(
+        &Snapshot::default(),
+        "",
         Event::Intent(op::Intent::NewChat {
             cwd: "/fixture".into(),
         }),
+    )
+    .0;
+    let key = initial.panes.primary().navigation.draft_key.clone();
+    let events = vec![
+        Event::Connected,
         Event::Intent(op::Intent::SetDraftText {
-            thread_id: "new:/fixture".into(),
+            thread_id: key.clone(),
             text: "再生する下書き".into(),
         }),
         Event::Intent(op::Intent::ReadFile(op::ReadFile {
@@ -892,17 +1008,12 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
         serde_json::to_value(&events).unwrap()
     );
     let replay = |events: Vec<Event>| {
-        events
-            .into_iter()
-            .fold(Snapshot::default(), |snapshot, event| {
-                reduce(&snapshot, "", event).0
-            })
+        events.into_iter().fold(initial.clone(), |snapshot, event| {
+            reduce(&snapshot, "", event).0
+        })
     };
     assert_eq!(replay(events.clone()), replay(decoded));
-    assert_eq!(
-        replay(events).input.drafts[&DraftKey::from("new:/fixture")].text,
-        "再生する下書き"
-    );
+    assert_eq!(replay(events).input.drafts[&key].text, "再生する下書き");
 }
 
 #[test]
@@ -1238,11 +1349,16 @@ fn project_registration_navigates_only_while_current() {
     );
     let (opened, effects) = applied(&pending, operation.clone(), "/resolved-project".into());
     assert_eq!(opened.panes.primary().navigation.cwd, "/resolved-project");
-    assert_eq!(
-        opened.panes.primary().navigation.draft_key,
-        DraftKey::from("new:/resolved-project")
+    let expected = DraftKey::from(opened.input.new_drafts["0:/resolved-project"].clone());
+    assert_eq!(opened.panes.primary().navigation.draft_key, expected);
+    assert!(
+        !opened
+            .sessions
+            .conversations
+            .keys()
+            .any(|id| DraftKey::from(id) == expected)
     );
-    assert_eq!(effects.len(), 2); // Workspace review and project-list refresh.
+    assert_eq!(effects.len(), 2); // Workspace review and the initial catalog subscription.
     let (mut elsewhere, _) = reduce(
         &pending,
         "",
@@ -1271,7 +1387,7 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
     let mut snapshot = Snapshot::default();
     Arc::make_mut(&mut snapshot.input.drafts).insert(
         SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         }
         .into(),
@@ -1286,16 +1402,16 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
         "",
         Event::Intent(Intent::Submit {
             thread_id: Some(SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }),
-            client_user_message_id: "pending".into(),
+            client_user_message_id: "377b0cf5-2937-575d-939c-b6c404eb8257".into(),
             alternate: false,
         }),
     );
     assert!(
         snapshot.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into()
         })]
             .text
@@ -1303,7 +1419,7 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
     );
     assert!(
         snapshot.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into()
         })]
             .attachments
@@ -1311,7 +1427,7 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
     );
     Arc::make_mut(&mut snapshot.input.drafts).insert(
         SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         }
         .into(),
@@ -1325,10 +1441,14 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
             ..Default::default()
         }),
     );
-    let (snapshot, _) = reduce(&snapshot, "", Event::SubmissionFailed("pending".into()));
+    let (snapshot, _) = reduce(
+        &snapshot,
+        "",
+        Event::SubmissionFailed("377b0cf5-2937-575d-939c-b6c404eb8257".into()),
+    );
     assert!(snapshot.sessions.pending_submissions.is_empty());
     let restored = &snapshot.input.drafts[&DraftKey::from(SessionRef {
-        provider: ProviderKind::Codex,
+        provider: Some(ProviderKind::Codex),
         id: "thread".into(),
     })];
     assert_eq!(restored.text, "sent\nnext");
@@ -1346,7 +1466,7 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
 }
 
 #[test]
-fn unknown_submission_can_be_restored_or_discarded() {
+fn unknown_submission_waits_for_host_confirmation_before_restoration_or_discard() {
     let attachment = |path: &str| agent_core::state::Attachment {
         path: path.into(),
         name: path.into(),
@@ -1354,10 +1474,12 @@ fn unknown_submission_can_be_restored_or_discarded() {
     };
     let pending = |text: &str| {
         Arc::new(agent_core::state::PendingSubmission {
+            new_draft_slot: None,
+            cursor: None,
             sequence: 0,
             submitted_at_ms: None,
             draft_key: SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
             }
             .into(),
@@ -1376,15 +1498,21 @@ fn unknown_submission_can_be_restored_or_discarded() {
     let snapshot = Snapshot {
         sessions: agent_core::state::Sessions {
             pending_submissions: Arc::new(BTreeMap::from([
-                ("restore".into(), pending("uncertain")),
-                ("discard".into(), pending("unwanted")),
+                (
+                    "5011194f-fcfe-5425-90e6-d1445cec6cb3".into(),
+                    pending("uncertain"),
+                ),
+                (
+                    "306afbe0-7249-5f3d-afe0-f9d56e1de6d8".into(),
+                    pending("unwanted"),
+                ),
             ])),
             ..Default::default()
         },
         input: agent_core::state::Input {
             drafts: Arc::new(BTreeMap::from([(
                 SessionRef {
-                    provider: ProviderKind::Codex,
+                    provider: Some(ProviderKind::Codex),
                     id: "thread".into(),
                 }
                 .into(),
@@ -1399,66 +1527,25 @@ fn unknown_submission_can_be_restored_or_discarded() {
         ..Default::default()
     };
 
-    let (snapshot, effects) = reduce(
-        &snapshot,
-        "",
-        Event::Intent(Intent::RestoreUnknownSubmission {
-            client_user_message_id: "restore".into(),
-        }),
-    );
-    assert!(effects.is_empty());
-    assert_eq!(
-        snapshot.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
-            id: "thread".into()
-        })]
-            .text,
-        "uncertain\nnewer"
-    );
-    assert!(
-        !snapshot
-            .sessions
-            .pending_submissions
-            .contains_key("restore")
-    );
-    assert_eq!(
-        snapshot.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
-            id: "thread".into()
-        })]
-            .attachments,
-        vec![attachment("/newer"), attachment("/sent")]
-    );
-    let saved_draft = snapshot.input.drafts[&DraftKey::from(SessionRef {
-        provider: ProviderKind::Codex,
-        id: "thread".into(),
-    })]
-        .clone();
-
-    let (snapshot, effects) = reduce(
-        &snapshot,
-        "",
-        Event::Intent(Intent::DiscardUnknownSubmission {
-            client_user_message_id: "discard".into(),
-        }),
-    );
-    assert!(effects.is_empty());
-    assert!(snapshot.sessions.pending_submissions.is_empty());
-    assert_eq!(
-        snapshot.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
-            id: "thread".into()
-        })],
-        saved_draft
-    );
-    assert_eq!(
-        snapshot.input.drafts[&DraftKey::from(SessionRef {
-            provider: ProviderKind::Codex,
-            id: "thread".into()
-        })]
-            .text,
-        "uncertain\nnewer"
-    );
+    for intent in [
+        Intent::RestoreUnknownSubmission {
+            client_user_message_id: "5011194f-fcfe-5425-90e6-d1445cec6cb3".into(),
+        },
+        Intent::DiscardUnknownSubmission {
+            client_user_message_id: "306afbe0-7249-5f3d-afe0-f9d56e1de6d8".into(),
+        },
+    ] {
+        let (next, effects) = reduce(&snapshot, "", Event::Intent(intent));
+        assert_eq!(
+            effects.len(),
+            1,
+            "unknown delivery requires a durable Host decision"
+        );
+        assert_eq!(
+            next, snapshot,
+            "an unresolved delivery must not become a second sendable draft"
+        );
+    }
 }
 
 #[test]
@@ -1466,12 +1553,14 @@ fn unresolved_submission_actions_ignore_known_delivery_states() {
     let snapshot = Snapshot {
         sessions: agent_core::state::Sessions {
             pending_submissions: Arc::new(BTreeMap::from([(
-                "sending".into(),
+                "192867ea-8fe3-5a20-bf00-78605e31a020".into(),
                 Arc::new(agent_core::state::PendingSubmission {
+                    new_draft_slot: None,
+                    cursor: None,
                     sequence: 0,
                     submitted_at_ms: None,
                     draft_key: SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
                     }
                     .into(),
@@ -1493,10 +1582,10 @@ fn unresolved_submission_actions_ignore_known_delivery_states() {
 
     for intent in [
         Intent::RestoreUnknownSubmission {
-            client_user_message_id: "sending".into(),
+            client_user_message_id: "192867ea-8fe3-5a20-bf00-78605e31a020".into(),
         },
         Intent::DiscardUnknownSubmission {
-            client_user_message_id: "sending".into(),
+            client_user_message_id: "192867ea-8fe3-5a20-bf00-78605e31a020".into(),
         },
     ] {
         let (next, effects) = reduce(&snapshot, "", Event::Intent(intent));
@@ -1591,104 +1680,6 @@ fn editing_a_file_shares_other_drafts_and_preserves_previous_snapshots() {
         &original.files.file_drafts["/edited"],
         &edited.files.file_drafts["/edited"]
     ));
-}
-
-#[test]
-fn host_delivery_replay_resolves_unknown_input_without_overwriting_new_draft() {
-    use agent_protocol::session::SubmissionDelivery;
-    for delivery in [
-        SubmissionDelivery::Sending,
-        SubmissionDelivery::Accepted {
-            turn_id: Some("live".into()),
-        },
-        SubmissionDelivery::Rejected,
-    ] {
-        let mut original = initial(
-            serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[]}))
-                .unwrap(),
-        );
-        Arc::make_mut(&mut original.input.drafts).insert(
-            SessionRef {
-                provider: ProviderKind::Codex,
-                id: "thread".into(),
-            }
-            .into(),
-            Arc::new(Draft {
-                text: "sent text".into(),
-                ..Default::default()
-            }),
-        );
-        let (pending, _) = reduce(
-            &original,
-            "",
-            Event::Intent(Intent::Submit {
-                thread_id: Some(SessionRef {
-                    provider: ProviderKind::Codex,
-                    id: "thread".into(),
-                }),
-                client_user_message_id: "input".into(),
-                alternate: false,
-            }),
-        );
-        let (pending, _) = reduce(&pending, "", Event::SubmissionUnknown("input".into()));
-        let (mut pending, _) = reduce(
-            &pending,
-            "",
-            Event::Intent(Intent::SetDraftText {
-                thread_id: SessionRef {
-                    provider: ProviderKind::Codex,
-                    id: "thread".into(),
-                }
-                .into(),
-                text: "new text".into(),
-            }),
-        );
-        let mut thread = (*pending.sessions.conversations[&SessionRef {
-            provider: ProviderKind::Codex,
-            id: "thread".into(),
-        }])
-            .clone();
-        thread.submissions.insert("input".into(), delivery.clone());
-        op::ReadThread::new(SessionRef {
-            provider: ProviderKind::Codex,
-            id: "thread".into(),
-        })
-        .apply(&mut pending, "", reply(thread));
-        if delivery == SubmissionDelivery::Rejected {
-            assert!(pending.sessions.pending_submissions.is_empty());
-            assert_eq!(
-                pending.input.drafts[&DraftKey::from(SessionRef {
-                    provider: ProviderKind::Codex,
-                    id: "thread".into()
-                })]
-                    .text,
-                "sent text\nnew text"
-            );
-        } else {
-            let input = &pending.sessions.pending_submissions["input"];
-            assert!(!input.delivery_unknown);
-            assert_eq!(
-                input.accepted,
-                matches!(delivery, SubmissionDelivery::Accepted { .. })
-            );
-            assert_eq!(
-                pending.input.drafts[&DraftKey::from(SessionRef {
-                    provider: ProviderKind::Codex,
-                    id: "thread".into()
-                })]
-                    .text,
-                "new text"
-            );
-            if matches!(delivery, SubmissionDelivery::Accepted { .. }) {
-                let (lost_reply, _) =
-                    reduce(&pending, "", Event::SubmissionUnknown("input".into()));
-                assert!(
-                    !lost_reply.sessions.pending_submissions["input"].delivery_unknown,
-                    "a lost RPC reply cannot override Host acceptance already received through the subscription"
-                );
-            }
-        }
-    }
 }
 
 fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {

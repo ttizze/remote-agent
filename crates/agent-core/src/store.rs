@@ -1,7 +1,7 @@
 //! The single state owner. Independent RPC work publishes completed results.
 use crate::{
     client::{
-        ClientExt, SessionImage,
+        ClientExt, SessionImage, SubscriptionKind,
         persistence::{DevicePreferences, ModelChoice, Preferences},
     },
     diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
@@ -42,9 +42,7 @@ pub enum Outcome {
     StartedThread {
         id: crate::session::SessionRef,
     },
-    Submitted {
-        turn_id: Option<agent_protocol::ids::TurnId>,
-    },
+    Submitted,
     RemoteHostPaired {
         id: String,
     },
@@ -255,7 +253,11 @@ impl Receipt {
     }
 }
 struct Completed {
-    subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
+    subscriptions: Vec<(
+        uuid::Uuid,
+        SubscriptionKind,
+        agent_transport::client::Updates,
+    )>,
     scheduling: op::Scheduling,
     delivery_attempted: bool,
     scope: Scope,
@@ -371,6 +373,34 @@ impl Scheduled {
             }
             (key, generation)
         });
+        if let Some(scope) = &effect.subscription {
+            use agent_protocol::{conversation::records::Replica, sync::Scope};
+            let generation = operation
+                .as_ref()
+                .expect("subscriptions have an operation key")
+                .1;
+            match scope {
+                Scope::Conversation(target) => {
+                    let replicas = Arc::make_mut(&mut snapshot.sessions.replicas);
+                    let replica = match replicas.get(target) {
+                        Some(replica) => replica
+                            .resubscribe(generation)
+                            .expect("operation generations increase"),
+                        None => Replica::new(scope.clone(), generation),
+                    };
+                    replicas.insert(target.clone(), Arc::new(replica));
+                }
+                Scope::List => {
+                    let replica = match &snapshot.lists.replica {
+                        Some(replica) => replica
+                            .resubscribe(generation)
+                            .expect("operation generations increase"),
+                        None => Replica::new(Scope::List, generation),
+                    };
+                    snapshot.lists.replica = Some(Arc::new(replica));
+                }
+            }
+        }
         effect.operation.capture(snapshot, &pane_id);
         Self {
             scope: Scope {
@@ -646,7 +676,6 @@ impl Store {
                 {
                     drop(self.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))));
                 }
-                drop(self.dispatch(Intent::ReadTaskActivity(op::ReadTaskActivity {})));
                 return Ok(performance);
             };
             let disconnected = {
@@ -897,6 +926,16 @@ impl Store {
                     }
                 };
                 let update = if let Some((thread, choice)) = choice {
+                    let thread = if thread.is_empty() {
+                        candidate
+                            .input
+                            .new_drafts
+                            .get(crate::state::WELCOME_DRAFT_SLOT)
+                            .map(crate::state::DraftKey::from)
+                            .unwrap_or(thread)
+                    } else {
+                        thread
+                    };
                     candidate.input.drafts.get(&thread).and_then(|draft| {
                         draft.model.clone().map(|model| {
                             self.preferences.apply_model(
@@ -1112,10 +1151,7 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
             && open
             && completed.scope.report_error
             && completed.scope.operation.is_none()
-            && !matches!(
-                &completed.scheduling,
-                op::Scheduling::LatestProject(_) | op::Scheduling::LatestHostState(_)
-            );
+            && !matches!(&completed.scheduling, op::Scheduling::LatestHostState(_));
         let mut next = snapshot.clone();
         result = match completed.result {
             Ok(applied) => match applied.application.apply(&mut next, pane_id, current) {
@@ -1451,18 +1487,26 @@ async fn run(
     let mut introduction = connection.introduction.take();
     let mut held = Vec::new();
     loop {
-        let unused: Vec<_> = subscriptions
-            .keys()
-            .filter(|id| {
-                !updates
-                    .borrow()
-                    .sessions
-                    .subscriptions
-                    .values()
-                    .any(|current| current == *id)
-            })
-            .copied()
-            .collect();
+        let unused: Vec<_> = {
+            let snapshot = updates.borrow().clone();
+            subscriptions
+                .keys()
+                .filter(|id| {
+                    !snapshot
+                        .sessions
+                        .subscriptions
+                        .values()
+                        .any(|current| current == *id)
+                        && snapshot.lists.subscription.as_ref() != Some(*id)
+                        && !snapshot
+                            .sessions
+                            .live_outputs
+                            .values()
+                            .any(|(current, _)| current == *id)
+                })
+                .copied()
+                .collect()
+        };
         for id in unused {
             subscriptions.remove(&id);
         }
@@ -1569,11 +1613,17 @@ async fn run(
             _ = diagnostic_jobs.next(), if !diagnostic_jobs.is_empty() => {},
             result = jobs.next(), if !jobs.is_empty() => {
                 let mut result = result.unwrap();
-                for (id, stream) in result.subscriptions.drain(..) { subscriptions.insert(id, futures_util::stream::try_unfold(stream, |mut stream| async {
-                        Ok(stream.read::<crate::session::SessionChange>().await?.map(|line| (line, stream)))
-                    }).chain(futures_util::stream::once(async {
-                    Err(std::io::Error::other("subscription ended"))
-                })).boxed()); }
+                for (id, kind, stream) in result.subscriptions.drain(..) {
+                    let ended = matches!(kind, SubscriptionKind::Conversation | SubscriptionKind::List).then(|| Err(std::io::Error::other("subscription ended")));
+                    subscriptions.insert(id, futures_util::stream::try_unfold(stream, move |mut stream| async move {
+                        let event = match kind {
+                            SubscriptionKind::List => stream.read::<agent_protocol::conversation::records::Message>().await?.map(|message| Event::ListRows { subscription_id: id, message: Box::new(message) }),
+                            SubscriptionKind::Conversation => stream.read::<agent_protocol::conversation::records::Message>().await?.map(|message| Event::ConversationRows { subscription_id: id, message: Box::new(message) }),
+                            SubscriptionKind::Output => stream.read::<agent_protocol::sync::OutputUpdate>().await.ok().flatten().map(|update| Event::CommandOutput { subscription_id: id, update: Box::new(update) }),
+                        };
+                        Ok(event.map(|event| (event, stream)))
+                    }).chain(futures_util::stream::iter(ended)).boxed());
+                }
                 let scheduling = result.scheduling.clone();
                 let pane = result.scope.pane.clone();
                 let followups = finish(&updates, result);
@@ -1581,9 +1631,9 @@ async fn run(
                 effects.extend(followups);
             }
             Some(()) = preparation_jobs.next(), if !preparation_jobs.is_empty() => {},
-            Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
+            Some((_id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
                 match update {
-                    Ok(change) => effects.extend(apply(&updates, Event::SessionUpdate(Box::new(crate::session::SessionUpdate { subscription_id: id, change })))),
+                    Ok(event) => effects.extend(apply(&updates, event)),
                     Err(_) => break,
                 }
             }
@@ -1781,6 +1831,7 @@ pub struct Effect {
     operation: Box<dyn Pending>,
     scheduling: op::Scheduling,
     receipt: ReceiptPolicy,
+    subscription: Option<agent_protocol::sync::Scope<crate::session::SessionRef>>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReceiptPolicy {
@@ -1807,6 +1858,7 @@ impl Effect {
     pub fn execute<O: op::Operation>(operation: O) -> Self {
         Self {
             pane: None,
+            subscription: operation.subscription_scope(),
             scheduling: operation.scheduling(),
             operation: Box::new(Completion {
                 operation,
@@ -1877,15 +1929,19 @@ impl<O: op::Operation> Pending for Completion<O> {
 pub struct Execution<'a> {
     pub(crate) client: &'a Client,
     pub(crate) session: Option<&'a crate::transport::Session>,
-    subscriptions: &'a mut Vec<(uuid::Uuid, agent_transport::client::Updates)>,
+    subscriptions: &'a mut Vec<(
+        uuid::Uuid,
+        SubscriptionKind,
+        agent_transport::client::Updates,
+    )>,
 }
 impl Execution<'_> {
     pub(crate) async fn call<O: RpcMethod + Sync>(
         &mut self,
         operation: &O,
     ) -> Result<O::Output, PeerError> {
-        if let Some((output, stream, id)) = self.client.open_subscription(operation).await? {
-            self.subscriptions.push((id, stream));
+        if let Some((output, stream, id, kind)) = self.client.open_subscription(operation).await? {
+            self.subscriptions.push((id, kind, stream));
             Ok(output)
         } else {
             Ok(self.client.call(operation).await?)
@@ -2110,7 +2166,8 @@ mod tests {
     }
 
     fn queued(scheduling: op::Scheduling) -> Scheduled {
-        let mut effect = Effect::execute(op::ReadTaskActivity {});
+        let mut effect =
+            Effect::execute(crate::state::list_sync::SubscribeCatalog { refresh: false });
         effect.scheduling = scheduling;
         Scheduled {
             effect,
@@ -2128,7 +2185,7 @@ mod tests {
     fn item(id: &str) -> op::ReadItem {
         op::ReadItem {
             thread_id: crate::session::SessionRef {
-                provider: crate::session::ProviderKind::Codex,
+                provider: Some(crate::session::ProviderKind::Codex),
                 id: "chat".into(),
             },
             turn_id: "turn".into(),
@@ -2357,9 +2414,132 @@ mod tests {
         ));
     }
 
-    #[allow(dead_code)]
-    mod host_fixture {
-        include!("../tests/support/host.rs");
+    use crate::test_host as host_fixture;
+
+    #[tokio::test]
+    async fn saved_unknown_input_is_resolved_on_the_host_before_restoring_the_composer() {
+        use agent_protocol::{
+            conversation::{Outcome as CommandOutcome, records},
+            session::{
+                PreparationStage, PreparationStatus, ProviderKind, SessionPreparation, SessionRef,
+            },
+        };
+        use serde_json::json;
+        for (restore, accepted, other_host) in [
+            (true, true, false),
+            (false, true, false),
+            (true, false, false),
+            (false, false, false),
+            (true, true, true),
+        ] {
+            let session = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+            let mut snapshot = Snapshot::default();
+            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+                session.clone(),
+                Arc::new(crate::models::Thread {
+                    id: Some(session.clone()),
+                    active_provider: Some(ProviderKind::Codex),
+                    preparations: vec![SessionPreparation {
+                        submission: agent_protocol::operations::Submission {
+                            thread_id: session.clone(),
+                            client_user_message_id: input.clone(),
+                            input: vec![agent_protocol::operations::Input::Text {
+                                text: "recover me".into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
+                        stage: PreparationStage::Provider,
+                        status: PreparationStatus::Unknown,
+                    }],
+                    ..Default::default()
+                }),
+            );
+            let thread = snapshot.sessions.conversations[&session].as_ref().clone();
+            crate::test_conversations::open(
+                &mut snapshot,
+                crate::models::ThreadResponse {
+                    thread,
+                    ..Default::default()
+                },
+            );
+            let mut effect = op::resolve_saved_input(&mut snapshot, &input, restore).unwrap();
+            effect.operation.capture(&snapshot, "");
+            let ((client, _events), mut reader, writer) =
+                host_fixture::connect(&Snapshot::default()).await;
+            let mut subscriptions = Vec::new();
+            let mut context = Execution {
+                client: &client,
+                session: None,
+                subscriptions: &mut subscriptions,
+            };
+            let reply = async {
+                let request = reader.read_request().await.unwrap().unwrap();
+                assert_eq!(request["method"], "host/conversation/change");
+                let command: agent_protocol::conversation::Command =
+                    serde_json::from_value(request["params"]["command"].clone()).unwrap();
+                assert_eq!(
+                    command,
+                    agent_protocol::conversation::Command::ResolveUnknown {
+                        id: input.clone(),
+                        retry: false
+                    }
+                );
+                let receipt = records::Acknowledged {
+                    outcome: if accepted {
+                        CommandOutcome::Accepted
+                    } else {
+                        CommandOutcome::Rejected("already resolved".into())
+                    },
+                    cursor: agent_protocol::sync::Cursor {
+                        store: uuid::Uuid::from_u128(1),
+                        sequence: 2,
+                    },
+                };
+                writer
+                    .reply(&request, json!({"result":receipt}))
+                    .await
+                    .unwrap();
+            };
+            let key = crate::state::DraftKey::from(&session);
+            Arc::make_mut(&mut snapshot.input.drafts).insert(
+                key.clone(),
+                Arc::new(crate::state::Draft {
+                    text: "new typing".into(),
+                    ..Default::default()
+                }),
+            );
+            let (result, ()) = tokio::join!(effect.operation.run(&mut context), reply);
+            if other_host {
+                snapshot.connection.storage_scope = "another-host".into();
+            }
+            match result {
+                Ok(completion) => {
+                    let result = completion.application.apply(&mut snapshot, "", true);
+                    assert_eq!(result.is_ok(), accepted);
+                    if let Ok(effects) = result {
+                        assert!(effects.is_empty());
+                    }
+                }
+                Err(_) => assert!(!accepted),
+            }
+            assert_eq!(
+                snapshot.input.drafts[&key].text,
+                if restore && accepted && !other_host {
+                    "recover me\nnew typing"
+                } else {
+                    "new typing"
+                }
+            );
+            assert_eq!(
+                snapshot.sessions.conversations[&session].preparations.len(),
+                1,
+                "only canonical rows settle the saved input"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2375,10 +2555,11 @@ mod tests {
             subscriptions: &mut subscriptions,
         };
         let operation = op::StartSubmission {
+            thread_id: crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string())
+                .unwrap(),
             provider: agent_protocol::session::ProviderKind::Codex,
-            draft_key: "local".into(),
             cwd: Some("/project".into()),
-            client_user_message_id: "initial-input".into(),
+            client_user_message_id: "00000000-0000-0000-0000-00000000002a".into(),
             draft: Arc::new(crate::state::Draft {
                 text: "initial message".into(),
                 attachments: vec![crate::state::Attachment {
@@ -2395,41 +2576,65 @@ mod tests {
                 ..Default::default()
             }),
         };
+        let base = Arc::new(agent_protocol::conversation::records::Replica::new(
+            agent_protocol::sync::Scope::Conversation(operation.thread_id.clone()),
+            1,
+        ));
         let reply = async {
             let request = reader.read_request().await.unwrap().unwrap();
-            assert_eq!(request["method"], "host/session/create");
-            assert_eq!(
-                request["params"]["initialInput"]["clientUserMessageId"],
-                "initial-input"
-            );
-            assert_eq!(
-                request["params"]["initialInput"]["input"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                2
-            );
-            assert_eq!(request["params"]["initialInput"]["effort"], "high");
-            assert_eq!(request["params"]["initialInput"]["serviceTier"], "fast");
-            let mut submission = request["params"]["initialInput"].clone();
-            submission["threadId"] = json!({"provider":"codex","id":"admitted"});
-            submission["model"] = request["params"]["model"].clone();
-            let tier = submission
-                .as_object_mut()
-                .unwrap()
-                .remove("serviceTier")
+            assert_eq!(request["method"], "host/conversation/create");
+            let params = &request["params"];
+            assert_eq!(params["initial"][0], "00000000-0000-0000-0000-00000000002a");
+            assert_eq!(params["initial"][1]["parts"].as_array().unwrap().len(), 2);
+            assert_eq!(params["selection"]["effort"], "high");
+            assert_eq!(params["selection"]["service_tier"], "fast");
+            let mut response = crate::models::ThreadResponse {
+                thread: crate::models::Thread {
+                    id: Some(operation.thread_id.clone()),
+                    active_provider: Some(operation.provider),
+                    cwd: Some("/project".into()),
+                    status: crate::models::SessionStatus::Preparing,
+                    preparations: vec![agent_protocol::session::SessionPreparation {
+                        submission: agent_protocol::operations::Submission {
+                            thread_id: operation.thread_id.clone(),
+                            client_user_message_id: "00000000-0000-0000-0000-00000000002a".into(),
+                            input: serde_json::from_value(params["initial"][1]["parts"].clone())
+                                .unwrap(),
+                            model: operation.draft.model.clone(),
+                            effort: Some("high".into()),
+                            service_tier: Some("fast".into()),
+                            follow_up: Default::default(),
+                        },
+                        status: agent_protocol::session::PreparationStatus::Preparing,
+                        stage: agent_protocol::session::PreparationStage::Workspace,
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            response.model = operation.draft.model.clone();
+            let replica = crate::test_conversations::replica(response, 1);
+            let opened = agent_protocol::conversation::records::Opened {
+                session: operation.thread_id.clone(),
+                subscription_id: uuid::Uuid::nil(),
+                initial: replica.snapshot().unwrap(),
+            };
+            writer
+                .reply(&request, json!({"result": opened}))
+                .await
                 .unwrap();
-            submission["serviceTierForTurn"] = tier;
-            writer.reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"admitted"},"cwd":"/project","status":"preparing","preparation":{"submission":submission,"status":"preparing","stage":"workspace"}}}})).await.unwrap();
         };
-        let (opened, ()) = tokio::join!(operation.run((), &mut context), reply);
+        let (opened, ()) = tokio::join!(operation.run(base.clone(), &mut context), reply);
         let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.sessions.replicas).insert(operation.thread_id.clone(), base);
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
-            "initial-input".into(),
+            "00000000-0000-0000-0000-00000000002a".into(),
             Arc::new(crate::state::PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms: None,
-                draft_key: "local".into(),
+                draft_key: operation.thread_id.clone().into(),
                 draft: operation.draft.clone(),
                 turn_id: None,
                 after_item_id: None,
@@ -2439,12 +2644,15 @@ mod tests {
             }),
         );
         let effects = operation.apply(&mut snapshot, "", opened.unwrap());
-        assert!(snapshot.sessions.pending_submissions["initial-input"].accepted);
+        assert!(
+            snapshot.sessions.pending_submissions.is_empty(),
+            "the canonical input replaces the local outbox once its row arrives"
+        );
         let thread = snapshot.sessions.conversations.values().next().unwrap();
         assert_eq!(
             thread
-                .preparation
-                .as_ref()
+                .preparations
+                .first()
                 .unwrap()
                 .submission
                 .service_tier
@@ -2459,24 +2667,6 @@ mod tests {
             &None,
         );
         assert_eq!(rendered.queued.len(), 1);
-        assert_eq!(
-            rendered.queued[0].data.body.as_deref(),
-            Some("initial message")
-        );
-        let mut accepted = thread.as_ref().clone();
-        accepted.preparation = None;
-        let rendered = crate::presentation::conversation::project_conversation(
-            crate::localization::UiLanguage::Japanese,
-            &snapshot.panes.primary().navigation.draft_key,
-            &snapshot.sessions.pending_submissions,
-            Arc::new(accepted),
-            &Some(rendered),
-        );
-        assert_eq!(
-            rendered.queued.len(),
-            1,
-            "acceptance can precede the provider echo"
-        );
         assert_eq!(
             rendered.queued[0].data.body.as_deref(),
             Some("initial message")
@@ -2708,15 +2898,11 @@ mod tests {
         // out of order after newer work has already been published.
         let older = apply(
             &publications,
-            Event::Intent(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            ))),
+            Event::Intent(Intent::ListSessions(Default::default())),
         );
         let newer = apply(
             &publications,
-            Event::Intent(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            ))),
+            Event::Intent(Intent::ListSessions(Default::default())),
         );
         let mut receipts = Vec::new();
         for effects in [newer, older] {
@@ -2732,13 +2918,9 @@ mod tests {
             loop {
                 let request = reader.read_request().await.unwrap().unwrap();
                 let result = match request["method"].as_str().unwrap() {
-                    "host/session/list" => {
+                    "host/list/subscribe" => {
                         json!({"data":[{"id":{"provider":"claude","id":"latest"}}],
-                        "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,"projectPages":{}})
-                    }
-                    "host/taskActivity/read" => {
-                        json!({"revision":0,"statuses":[],"waiting":[],"unread":[],
-                        "display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
+                        "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5})
                     }
                     "host/model/list" => json!({"data":[]}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
@@ -2780,7 +2962,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
-        let mut initial = Snapshot::default();
+        let mut initial = reduce(
+            &Snapshot::default(),
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/project".into(),
+            }),
+        )
+        .0;
         Arc::make_mut(&mut initial.input.drafts).insert(
             initial.panes.primary().navigation.draft_key.clone(),
             Arc::new(crate::state::Draft {
@@ -2832,6 +3021,8 @@ mod tests {
     fn scheduling_a_submission_dates_only_that_input_once() {
         let pending = |submitted_at_ms| {
             Arc::new(crate::state::PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms,
                 draft_key: "draft".into(),
@@ -2859,8 +3050,12 @@ mod tests {
         };
         let send = |id: &str| {
             Effect::execute(op::StartSubmission {
+                thread_id: crate::session::SessionRef::new(
+                    crate::session::ProviderKind::Codex,
+                    uuid::Uuid::new_v4().to_string(),
+                )
+                .unwrap(),
                 provider: crate::session::ProviderKind::Codex,
-                draft_key: "draft".into(),
                 cwd: None,
                 client_user_message_id: id.into(),
                 draft: Arc::default(),
@@ -2938,7 +3133,6 @@ mod tests {
                         background: Vec::new(),
                         unread: Vec::new(),
                         statuses: Vec::new(),
-                        revision: 1,
                         display: agent_protocol::live_activity::TaskActivitySummary {
                             running: 1,
                             ..Default::default()
@@ -2954,13 +3148,11 @@ mod tests {
                     [(
                         "p".into(),
                         Arc::new(crate::models::ThreadList {
-                            revision: 0,
                             data: vec![],
                             projects: vec![],
                             has_more: false,
                             has_more_projects: false,
                             limit: 5,
-                            project_pages: Default::default(),
                             provider_errors: None,
                         }),
                     )]
@@ -2970,7 +3162,7 @@ mod tests {
             ("observed_agents", |snapshot| {
                 Arc::make_mut(snapshot.panes.primary_mut()).observed_agents =
                     Some(crate::session::SessionRef {
-                        provider: crate::session::ProviderKind::Codex,
+                        provider: Some(crate::session::ProviderKind::Codex),
                         id: "parent".into(),
                     });
             }),
@@ -3001,13 +3193,11 @@ mod tests {
             }),
             ("threads", |snapshot| {
                 snapshot.lists.threads = Some(Arc::new(crate::models::ThreadList {
-                    revision: 0,
                     data: Vec::new(),
                     projects: Vec::new(),
                     has_more: false,
                     has_more_projects: false,
                     limit: 5,
-                    project_pages: Default::default(),
 
                     provider_errors: None,
                 }))
@@ -3042,38 +3232,41 @@ mod model_reconnection_tests {
     use super::*;
 
     #[test]
-    fn reconnect_and_reopening_a_project_refresh_held_lists_without_clearing_them() {
+    fn reconnect_refreshes_the_catalog_while_project_expansion_uses_cached_rows() {
         let page = Arc::new(crate::models::ThreadList {
-            revision: 10,
             limit: 5,
-            data: vec![],
+            data: vec![crate::models::Thread {
+                id: Some(
+                    crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string())
+                        .unwrap(),
+                ),
+                active_provider: Some(agent_protocol::session::ProviderKind::Codex),
+                cwd: Some("/project".into()),
+                project_id: crate::models::ProjectMembership::Assigned("p".into()),
+                ..Default::default()
+            }],
             projects: vec![crate::models::Project {
                 id: "p".into(),
                 name: "Project".into(),
+                roots: vec![crate::models::ProjectRoot {
+                    path: "/project".into(),
+                }],
                 ..Default::default()
             }],
             has_more: false,
             has_more_projects: false,
-            project_pages: Default::default(),
             provider_errors: None,
         });
-        let previous = Snapshot {
+        let mut previous = Snapshot {
             lists: crate::state::Lists {
                 threads: Some(page.clone()),
                 project_threads: Arc::new([("p".into(), page)].into()),
-                unconfirmed_lists: Arc::new(
-                    [
-                        op::OperationKey::SessionList,
-                        op::OperationKey::ProjectList {
-                            project_id: "p".into(),
-                        },
-                    ]
-                    .into(),
-                ),
                 ..Default::default()
             },
             ..Default::default()
         };
+        let cached = previous.lists.threads.as_ref().unwrap().as_ref().clone();
+        crate::state::list_sync::seed(&mut previous, cached);
         let (connected, effects) = reduce(&previous, "", Event::Connected);
         assert!(connected.lists.threads.is_some());
         assert_eq!(
@@ -3095,13 +3288,93 @@ mod model_reconnection_tests {
         assert_eq!(
             effects
                 .iter()
-                .filter(|effect| effect.operation.key()
-                    == Some(op::OperationKey::ProjectList {
-                        project_id: "p".into()
-                    }))
+                .filter(|effect| matches!(
+                    effect.operation.key(),
+                    Some(
+                        op::OperationKey::SessionList
+                            | op::OperationKey::ListSearch
+                            | op::OperationKey::ListDecorations { .. }
+                    )
+                ))
                 .count(),
-            1
+            0
         );
+    }
+
+    #[test]
+    fn retrying_details_reads_a_deferred_item_and_reopens_only_a_failed_live_output() {
+        use crate::models::{Item, ItemBody, ItemStatus, Turn, TurnStatus};
+        for deferred in [false, true] {
+            let session =
+                crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            let read = op::ReadItem {
+                thread_id: session.clone(),
+                turn_id: "turn".into(),
+                item_id: "command".into(),
+            };
+            let mut item = Item::new(
+                read.item_id.clone(),
+                ItemStatus::Running,
+                ItemBody::CommandExecution {
+                    command: "pwd".into(),
+                    cwd: None,
+                    output: String::new(),
+                    output_omitted: false,
+                    exit_code: None,
+                },
+            );
+            if deferred {
+                item.defer();
+            }
+            let mut state = Snapshot::default();
+            state.connection.connected = true;
+            crate::test_conversations::open(
+                &mut state,
+                crate::models::ThreadResponse {
+                    thread: crate::models::Thread {
+                        id: Some(session.clone()),
+                        active_provider: Some(crate::session::ProviderKind::Codex),
+                        turns: Some(vec![Arc::new(Turn {
+                            id: read.turn_id.clone(),
+                            status: TurnStatus::Running,
+                            items: Some(vec![Arc::new(item)]),
+                            ..Default::default()
+                        })]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            let output = op::OperationKey::CommandOutput {
+                session,
+                item: read.item_id.clone(),
+            };
+            let detail = op::OperationKey::Item { item: read.clone() };
+            for key in [output.clone(), detail.clone()] {
+                Arc::make_mut(&mut state.operations).insert(
+                    key,
+                    op::OperationState {
+                        generation: 1,
+                        phase: op::OperationPhase::Failed {
+                            message: "temporarily unavailable".into(),
+                        },
+                    },
+                );
+            }
+            let (_, effects) = reduce(&state, "", Event::Intent(Intent::ReadItem(read)));
+            let keys: Vec<_> = effects
+                .iter()
+                .filter_map(|effect| effect.operation.key())
+                .collect();
+            assert_eq!(
+                keys.iter().filter(|key| **key == detail).count(),
+                usize::from(deferred)
+            );
+            assert_eq!(
+                keys.iter().filter(|key| **key == output).count(),
+                usize::from(!deferred)
+            );
+        }
     }
 
     #[test]

@@ -7,75 +7,38 @@ use agent_protocol::{
     operations as op,
     protocol::Call,
     requests::{Answer, QuestionAnswer, RequestBody},
-    session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef},
+    session::{ProviderKind, SessionRef},
 };
-use agent_transport::{client::Client, framing::Reader};
+use agent_transport::client::Client;
+// Each transport test binary uses a different subset of these shared helpers.
+#[allow(dead_code)]
+#[path = "support/conversations.rs"]
+mod conversations;
+use agent_protocol::conversation::Command;
+use conversations::{Conversation, submit};
 use host_fixture::test_support::{HostFixture, Memory};
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
-async fn open(client: &Client, session: &SessionRef) -> (OpenedSession, Reader) {
-    client
-        .request_stream(&Call::OpenSession(OpenSession {
-            include_activity: true,
-            known_version: None,
-            session: session.clone(),
-            limit: 20,
-        }))
-        .await
-        .unwrap()
+async fn open(
+    client: &Client,
+    session: &SessionRef,
+) -> (agent_protocol::models::ThreadResponse, Conversation) {
+    let stream = Conversation::open(client, session).await.unwrap();
+    (stream.view(), stream)
 }
-async fn change(events: &mut Reader) -> SessionChange {
-    tokio::time::timeout(Duration::from_secs(15), events.read())
-        .await
-        .expect("adapter event deadline")
-        .unwrap()
-        .expect("adapter stream closed")
+async fn finished(events: &mut Conversation) -> Turn {
+    events.finished().await
 }
-async fn finished(events: &mut Reader) -> Turn {
-    loop {
-        if let SessionChange::Turn {
-            turn,
-            completed: true,
-        } = change(events).await
-        {
-            return turn;
-        }
-    }
-}
-// Native completion and a deferred input echo may arrive independently.
-// Both must be observed before checking the persisted conversation.
-/// The turn that ran `input`, once that turn finished.
-async fn finished_with_input(events: &mut Reader, input: &ClientInputId) -> TurnId {
-    let mut owner = None;
-    let mut finished = std::collections::HashSet::new();
-    loop {
-        let (turn_id, items) = match change(events).await {
-            SessionChange::Turn { turn, completed } => {
-                if completed {
-                    assert_eq!(turn.status, TurnStatus::Completed, "{turn:#?}");
-                    finished.insert(turn.id.clone());
-                }
-                (turn.id, turn.items.unwrap_or_default())
-            }
-            SessionChange::Item { turn_id, item } => (turn_id, vec![item]),
-            _ => continue,
-        };
-        if items
-            .iter()
-            .any(|item| item.client_input_id.as_ref() == Some(input))
-        {
-            owner = Some(turn_id);
-        }
-        if let Some(owner) = owner.as_ref().filter(|owner| finished.contains(*owner)) {
-            return owner.clone();
-        }
-    }
+async fn finished_with_input(events: &mut Conversation, input: &ClientInputId) -> TurnId {
+    let turn = events.input_turn(input, true).await;
+    assert_eq!(turn.status, TurnStatus::Completed, "{turn:#?}");
+    turn.id
 }
 
 fn submission(session: &SessionRef, text: &str) -> op::Submission {
     op::Submission {
         thread_id: session.clone(),
-        client_user_message_id: ClientInputId::from(format!("{}:{text}", session.id)),
+        client_user_message_id: ClientInputId::from(uuid::Uuid::new_v4().to_string()),
         input: vec![op::Input::Text { text: text.into() }],
         model: None,
         effort: None,
@@ -94,19 +57,15 @@ fn prompt(provider: ProviderKind, scenario: &str) -> &str {
     }
 }
 async fn create(client: &Client, provider: ProviderKind, root: &Path) -> SessionRef {
-    client
-        .call(&op::CreateSession {
-            initial_input: None,
-            provider,
-            cwd: Some(root.to_string_lossy().into_owned()),
-            model: None,
-        })
-        .await
-        .unwrap()
-        .response
-        .thread
-        .id
-        .unwrap()
+    conversations::created(
+        client,
+        conversations::create_request(provider, Some(root.to_string_lossy().into_owned()), None),
+    )
+    .await
+    .unwrap()
+    .thread
+    .id
+    .unwrap()
 }
 
 async fn start(root: &Path, memory: Arc<Memory>) -> HostFixture {
@@ -245,21 +204,33 @@ async fn initial_import_discovers_native_projects_and_continues_the_original_ses
             .errors
             .is_empty()
     );
-    let registered: Vec<agent_protocol::models::Project> =
-        serde_json::from_slice(&std::fs::read(root.join("bex-projects.json")).unwrap()).unwrap();
+    let catalog = conversations::Catalog::open(&host.local().await.unwrap().peer).await;
+    let registered = catalog
+        .replica
+        .rows()
+        .values()
+        .filter_map(|row| match &row.content {
+            agent_protocol::sync::Content::Full(record)
+            | agent_protocol::sync::Content::Summary(record) => match record.as_ref() {
+                agent_protocol::conversation::records::Record::Project(project) => {
+                    Some(project.clone())
+                }
+                _ => None,
+            },
+        })
+        .collect::<Vec<_>>();
     assert_eq!(registered.len(), 1);
     assert_eq!(registered[0].roots[0].path, selected);
     let local = host.local().await.unwrap();
     let id = SessionRef::new(ProviderKind::Codex, "external-0".into()).unwrap();
     let (opened, mut events) = open(&local.peer, &id).await;
-    assert_eq!(opened.response.thread.id.as_ref(), Some(&id));
+    assert_eq!(opened.thread.id.as_ref(), Some(&id));
     assert_eq!(
-        opened.response.thread.project_id,
+        opened.thread.project_id,
         agent_protocol::models::ProjectMembership::Assigned(registered[0].id.clone())
     );
     assert!(
         opened
-            .response
             .thread
             .turns
             .as_ref()
@@ -267,11 +238,12 @@ async fn initial_import_discovers_native_projects_and_continues_the_original_ses
             .iter()
             .any(|turn| turn.id.as_str() == "original-turn")
     );
-    local
-        .peer
-        .call(&submission(&id, "continue imported conversation"))
-        .await
-        .unwrap();
+    submit(
+        &local.peer,
+        &submission(&id, "continue imported conversation"),
+    )
+    .await
+    .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
     assert_eq!(
         std::fs::read_to_string(&original_rollout).unwrap(),
@@ -296,7 +268,7 @@ async fn setup_catalog_isolates_stalled_native_providers(
 ) {
     use agent_core::{presentation::connections::AgentAvailability, state::operations::Operation};
     use agent_protocol::protocol::Response;
-    use host_daemon::{HostRpcService, ProjectStore};
+    use host_daemon::HostRpcService;
     use serde_json::json;
 
     let directory = tempfile::tempdir().unwrap();
@@ -340,10 +312,7 @@ async fn setup_catalog_isolates_stalled_native_providers(
     )
     .await
     .unwrap();
-    let service = HostRpcService::new(
-        [codex.into(), claude.into()],
-        ProjectStore::new(root.join("worktrees.json")),
-    );
+    let service = HostRpcService::new([codex.into(), claude.into()], root.join("worktrees.json"));
     let session = service.open_session();
     let accounts = service
         .dispatch(session.id(), &Call::ListAccounts(Empty {}))
@@ -514,7 +483,7 @@ async fn scenarios(provider: ProviderKind) {
     let session = create(&local.peer, provider, &root).await;
     let (_, mut events) = open(&local.peer, &session).await;
     let first = submission(&session, "first input");
-    assert!(local.peer.call(&first).await.unwrap().turn_id.is_some());
+    submit(&local.peer, &first).await.unwrap();
     let turn = finished(&mut events).await;
     assert_eq!(turn.status, TurnStatus::Completed);
     assert!(
@@ -529,7 +498,7 @@ async fn scenarios(provider: ProviderKind) {
             .any(|item| item.client_input_id.as_ref() == Some(&first.client_user_message_id))
     );
     let (history, _) = open(&local.peer, &session).await;
-    assert!(history.response.thread.turns.iter().flatten().any(|saved| {
+    assert!(history.thread.turns.iter().flatten().any(|saved| {
         saved
             .items
             .iter()
@@ -539,13 +508,16 @@ async fn scenarios(provider: ProviderKind) {
     local.close().await;
     let local = host.local().await.unwrap();
     let (_, mut events) = open(&local.peer, &session).await;
-    let receipt = local
-        .peer
-        .call(&submission(&session, "resumed input"))
+    let receipt = submit(&local.peer, &submission(&session, "resumed input"))
         .await
         .unwrap();
-    assert_ne!(receipt.turn_id, Some(turn.id));
-    assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
+    assert_eq!(
+        receipt.outcome,
+        agent_protocol::conversation::Outcome::Accepted
+    );
+    let resumed = finished(&mut events).await;
+    assert_ne!(resumed.id, turn.id);
+    assert_eq!(resumed.status, TurnStatus::Completed);
     let skill = catalog
         .candidates
         .iter()
@@ -558,10 +530,13 @@ async fn scenarios(provider: ProviderKind) {
         .clone();
     let mut invoke = submission(&session, &skill.token());
     invoke.input.push(skill.input());
-    local.peer.call(&invoke).await.unwrap();
+    submit(&local.peer, &invoke).await.unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
     if provider == ProviderKind::Claude {
-        let received = session_inputs(root.join(format!("claude-session-{}.jsonl", session.id)));
+        let received = session_inputs(root.join(format!(
+            "claude-session-{}.jsonl",
+            conversations::native_source(&root, &session, provider)
+        )));
         let text = received.as_array().unwrap().last().unwrap()["content"]
             .as_array()
             .unwrap()
@@ -574,13 +549,14 @@ async fn scenarios(provider: ProviderKind) {
     }
 
     // Resume after the Host and native subprocesses have actually exited.
+    let native = conversations::native_source(&root, &session, provider);
     local.close().await;
     host.close().await.unwrap();
     if provider == ProviderKind::Codex {
         // Codex's fixture loads archived native state from this file;
         // Claude's fixture writes its native transcript during the first run.
         std::fs::write(root.join("list-fixture.json"), serde_json::json!([{
-            "id":session.id,"cwd":root,"model":"fixture-model","historyMode":"paginated","status":{"type":"notLoaded"},
+            "id":native,"cwd":root,"model":"fixture-model","historyMode":"paginated","status":{"type":"notLoaded"},
             "turns":[{"id":"archived-turn","status":"completed","items":[
                 {"id":"archived-user","type":"userMessage","content":[{"type":"text","text":"first input"}]},
                 {"id":"archived-answer","type":"agentMessage","text":"saved reply","phase":"final_answer"}
@@ -589,11 +565,7 @@ async fn scenarios(provider: ProviderKind) {
     }
     let host = start(&root, memory.clone()).await;
     let local = host.local().await.unwrap();
-    local
-        .peer
-        .call(&op::ListSessions::new(Default::default()))
-        .await
-        .unwrap();
+    let _catalog = conversations::Catalog::open(&local.peer).await;
     if provider == ProviderKind::Codex {
         // The archived native state reaches the Host transcript on re-import.
         local
@@ -606,7 +578,7 @@ async fn scenarios(provider: ProviderKind) {
             .await
             .unwrap();
         for _ in 0..500 {
-            if open(&local.peer, &session).await.0.response.model.is_some() {
+            if open(&local.peer, &session).await.0.model.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -615,14 +587,14 @@ async fn scenarios(provider: ProviderKind) {
     let (history, mut events) = open(&local.peer, &session).await;
     if provider == ProviderKind::Codex {
         assert_eq!(
-            history.response.model,
+            history.model,
             Some(agent_protocol::models::ModelRef {
                 provider,
                 id: "fixture-model".into(),
             })
         );
     }
-    assert!(history.response.thread.turns.iter().flatten().any(|turn| {
+    assert!(history.thread.turns.iter().flatten().any(|turn| {
         turn.items.iter().flatten().any(|item| {
         matches!(item.body(), ItemBody::UserMessage { content, .. } if content.iter().any(|part| {
             matches!(part, agent_protocol::items::MessagePart::Text {text} if text == "first input")
@@ -637,12 +609,15 @@ async fn scenarios(provider: ProviderKind) {
     } else {
         0
     };
-    local
-        .peer
-        .call(&submission(&session, "after process restart"))
-        .await
-        .unwrap();
-    assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
+    let after_restart = submission(&session, "after process restart");
+    submit(&local.peer, &after_restart).await.unwrap();
+    assert_eq!(
+        events
+            .input_turn(&after_restart.client_user_message_id, true)
+            .await
+            .status,
+        TurnStatus::Completed
+    );
     if provider == ProviderKind::Codex {
         let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
         let operations: Vec<_> = trace
@@ -650,14 +625,14 @@ async fn scenarios(provider: ProviderKind) {
             .skip(trace_offset)
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect();
-        for method in ["thread/read", "thread/resume"] {
+        for (method, expected) in [("thread/read", 0), ("thread/resume", 1)] {
             assert_eq!(
                 operations
                     .iter()
                     .filter(|event| event["method"] == method)
                     .count(),
-                1,
-                "submission must reuse its routing evidence and resume the archived session"
+                expected,
+                "submission uses the saved conversation and resumes the same native source: {operations:?}"
             );
         }
     }
@@ -670,18 +645,11 @@ async fn scenarios(provider: ProviderKind) {
         let session = create(&local.peer, provider, &root).await;
         let (_, mut events) = open(&local.peer, &session).await;
         let initial = submission(&session, prompt(provider, "wait"));
-        let turn = local.peer.call(&initial).await.unwrap().turn_id.unwrap();
-        loop {
-            if matches!(
-                change(&mut events).await,
-                SessionChange::Turn {
-                    completed: false,
-                    ..
-                }
-            ) {
-                break;
-            }
-        }
+        submit(&local.peer, &initial).await.unwrap();
+        let turn = events
+            .input_turn(&initial.client_user_message_id, false)
+            .await
+            .id;
         let follow_up = op::Submission {
             follow_up: if case == "steer" {
                 op::FollowUp::Steer
@@ -690,51 +658,50 @@ async fn scenarios(provider: ProviderKind) {
             },
             ..submission(&session, &format!("{case} follow-up"))
         };
-        let receipt = local.peer.call(&follow_up).await.unwrap();
+        let receipt = submit(&local.peer, &follow_up).await.unwrap();
         let id = &follow_up.client_user_message_id;
         if case == "steer" {
-            assert_eq!(receipt.turn_id.as_ref(), Some(&turn));
-        } else {
-            assert!(receipt.turn_id.is_none());
-            let (opened, _) = open(&local.peer, &session).await;
             assert_eq!(
-                opened.response.thread.queue.inputs,
-                std::slice::from_ref(&follow_up)
+                receipt.outcome,
+                agent_protocol::conversation::Outcome::Accepted
             );
+        } else {
+            assert_eq!(
+                receipt.outcome,
+                agent_protocol::conversation::Outcome::Accepted
+            );
+            let (opened, _) = open(&local.peer, &session).await;
+            assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
         }
         if case == "stop" {
-            local
-                .peer
-                .call(&op::Interrupt {
-                    thread_id: session.clone(),
-                    turn_id: turn.clone(),
-                })
-                .await
-                .unwrap();
+            conversations::command(
+                &local.peer,
+                &session,
+                uuid::Uuid::new_v4(),
+                Command::Interrupt { turn: None },
+            )
+            .await
+            .unwrap();
             assert_eq!(finished(&mut events).await.status, TurnStatus::Interrupted);
             let (opened, _) = open(&local.peer, &session).await;
-            assert!(opened.response.thread.queue.held);
-            assert_eq!(
-                opened.response.thread.queue.inputs,
-                std::slice::from_ref(&follow_up)
-            );
-            local
-                .peer
-                .call(&op::ChangeQueue {
-                    thread_id: session.clone(),
-                    change: op::QueueChange::Resume,
-                })
-                .await
-                .unwrap();
+            assert!(opened.thread.queue.held);
+            assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
+            conversations::command(
+                &local.peer,
+                &session,
+                uuid::Uuid::new_v4(),
+                Command::ResumeQueue,
+            )
+            .await
+            .unwrap();
         } else {
             std::fs::write(root.join("release-inputs"), "").unwrap();
         }
         let turn_id = finished_with_input(&mut events, id).await;
         assert_eq!(turn_id == turn, case == "steer");
         let (history, _) = open(&local.peer, &session).await;
-        assert_eq!(history.response.thread.queue, Default::default());
+        assert_eq!(history.thread.queue, Default::default());
         let saved = history
-            .response
             .thread
             .turns
             .iter()
@@ -755,15 +722,17 @@ async fn scenarios(provider: ProviderKind) {
     for scenario in ["approval", "question"] {
         let session = create(&local.peer, provider, &root).await;
         let (_, mut events) = open(&local.peer, &session).await;
-        local
-            .peer
-            .call(&submission(&session, prompt(provider, scenario)))
-            .await
-            .unwrap();
+        submit(
+            &local.peer,
+            &submission(&session, prompt(provider, scenario)),
+        )
+        .await
+        .unwrap();
         let request = loop {
-            if let SessionChange::Request { request } = change(&mut events).await {
-                break request;
+            if let Some(request) = events.view().thread.requests.values().next() {
+                break request.clone();
             }
+            events.next().await;
         };
         let answer = match &request.body {
             RequestBody::Approval { choices, .. } => Answer::Approval {
@@ -789,33 +758,40 @@ async fn scenarios(provider: ProviderKind) {
             },
             other => panic!("unexpected conformance request: {other:?}"),
         };
-        local
-            .peer
-            .request::<Empty>(&Call::AnswerSession(op::SessionAnswer {
-                request_id: request.id.clone(),
+        conversations::command(
+            &local.peer,
+            &session,
+            uuid::Uuid::new_v4(),
+            Command::Answer {
+                id: request.id.clone(),
                 answer: answer.clone(),
-            }))
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
         assert!(
-            local
-                .peer
-                .request::<Empty>(&Call::AnswerSession(op::SessionAnswer {
-                    request_id: request.id,
+            conversations::command(
+                &local.peer,
+                &session,
+                uuid::Uuid::new_v4(),
+                Command::Answer {
+                    id: request.id.clone(),
                     answer
-                }))
-                .await
-                .is_err()
+                }
+            )
+            .await
+            .is_err()
         );
     }
     // Abnormal provider exit terminates the owned execution with neutral evidence.
     let session = create(&local.peer, provider, &root).await;
     let (_, mut events) = open(&local.peer, &session).await;
-    let _ = local
-        .peer
-        .call(&submission(&session, prompt(provider, "crash")))
-        .await;
+    let _ = submit(
+        &local.peer,
+        &submission(&session, prompt(provider, "crash")),
+    )
+    .await;
     let failed = finished(&mut events).await;
     assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(failed.error.unwrap().category, ErrorCategory::Network);
@@ -826,21 +802,18 @@ async fn scenarios(provider: ProviderKind) {
     };
     let healthy = create(&local.peer, other, &root).await;
     let (_, mut healthy_events) = open(&local.peer, &healthy).await;
-    local
-        .peer
-        .call(&submission(&healthy, "other provider is healthy"))
-        .await
-        .unwrap();
+    submit(
+        &local.peer,
+        &submission(&healthy, "other provider is healthy"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         finished(&mut healthy_events).await.status,
         TurnStatus::Completed
     );
     // PC operations remain available after one provider fails.
-    local
-        .peer
-        .call(&op::ListSessions::new(Default::default()))
-        .await
-        .unwrap();
+    let _catalog = conversations::Catalog::open(&local.peer).await;
     local
         .peer
         .request::<WorktreeSettings>(&Call::ReadWorktreeSettings(Empty {}))
@@ -869,7 +842,7 @@ async fn claude_conforms_to_host_conversations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_cursors() {
+async fn search_preserves_cached_catalog_rows_when_native_pagination_fails() {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let threads: Vec<_> = (0..101)
@@ -888,19 +861,24 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
     std::fs::create_dir(&chats).unwrap();
     let session = create(&local.peer, ProviderKind::Claude, &chats).await;
     let (_, mut events) = open(&local.peer, &session).await;
-    local
-        .peer
-        .call(&submission(&session, "saved conversation"))
+    submit(&local.peer, &submission(&session, "saved conversation"))
         .await
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
-    let query = op::ListSessions::new(agent_protocol::models::ListQuery {
-        limit: 200,
-        ..Default::default()
-    });
+    let mut catalog = conversations::Catalog::open(&local.peer).await;
+    catalog.wait_rows(102).await;
+    let query = agent_protocol::conversation::records::SearchList {
+        term: String::new(),
+        limit: Some(200),
+    };
     let listing = local.peer.call(&query).await.unwrap();
     assert_eq!(listing.data.len(), 102);
     assert!(listing.provider_errors.is_none());
+    let known = listing
+        .data
+        .iter()
+        .filter_map(|thread| thread.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     std::fs::write(root.join("repeat-list-cursor"), []).unwrap();
     let listing = local.peer.call(&query).await.unwrap();
     assert!(
@@ -910,9 +888,13 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
             .any(|thread| thread.id.as_ref() == Some(&session))
     );
     assert_eq!(
-        listing.data.len(),
-        101,
-        "keep the earlier healthy Codex page"
+        listing
+            .data
+            .iter()
+            .filter_map(|thread| thread.id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        known,
+        "a partial native failure preserves the already synchronized catalog"
     );
     assert_eq!(
         listing.provider_errors.unwrap()["codex"]["code"],
@@ -986,7 +968,12 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
             .unwrap_or_default()
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|entry| entry["method"] == "thread/list")
+            .filter(|entry| {
+                entry["method"] == "thread/list"
+                    && entry["sourceKinds"]
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "exec"))
+            })
             .count()
     };
     for (subagent, running) in [(false, true), (false, false), (true, true), (true, false)] {
@@ -1041,12 +1028,18 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
             .unwrap();
         assert_eq!(deleted.branch, "削除済み");
         assert!(deleted.blocked_reason.is_none() && deleted.threads.is_empty());
-        let activity = local
-            .peer
-            .call(&agent_protocol::live_activity::ReadTaskActivity {})
-            .await
-            .unwrap();
         let counted = running && !subagent;
+        let mut catalog = conversations::Catalog::open(&local.peer).await;
+        let activity = loop {
+            let activity = catalog.activity();
+            let fresh=catalog.replica.rows().values().any(|row|match &row.content {
+                agent_protocol::sync::Content::Full(record)|agent_protocol::sync::Content::Summary(record)=>matches!(record.as_ref(),agent_protocol::conversation::records::Record::Thread(header) if header.state.name==format!("Conversation 0: {running}") && header.details.parent.is_some()==subagent && (header.details.activity.status==agent_protocol::execution::SessionStatus::Running)==running)
+            });
+            if fresh && activity.display.current.total == u32::from(counted) {
+                break activity;
+            }
+            catalog.next().await;
+        };
         assert_eq!(activity.display.current.total, u32::from(counted));
         assert_eq!(activity.display.ongoing, counted);
         assert_eq!(
@@ -1086,32 +1079,27 @@ async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_adm
                 .lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .filter(|entry| entry["method"] == "thread/list" && entry["ancestorThreadId"].is_string()).count()
         };
-        let query = op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 150, ..Default::default()
-        });
-        let (first_page, second_page) = tokio::join!(first.peer.call(&query), second.peer.call(&query));
-        for page in [first_page.unwrap(), second_page.unwrap()] {
+        let (mut first_catalog,mut second_catalog)=tokio::join!(conversations::Catalog::open(&first.peer),conversations::Catalog::open(&second.peer));
+        tokio::join!(first_catalog.wait_rows(203),second_catalog.wait_rows(203));
+        for catalog in [&first_catalog,&second_catalog] {
+            let page=catalog.page(agent_protocol::models::ListQuery {limit:150,..Default::default()});
+            let page=page.lists.threads.as_ref().unwrap();
             assert!(page.provider_errors.is_none());
             assert!(page.has_more);
-            assert_eq!(page.data.len(), 150);
-            assert!(page.data.iter().all(|thread| thread.parent_id.is_none()));
+            assert_eq!(page.data.len(),150);
+            assert!(page.data.iter().all(|thread|thread.parent_id.is_none()));
         }
-        let complete = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 250, ..Default::default()
-        })).await.unwrap();
-        assert!(complete.provider_errors.is_none());
+        let complete=first_catalog.page(agent_protocol::models::ListQuery {limit:250,..Default::default()});
+        let complete=complete.lists.threads.as_ref().unwrap();
         assert!(!complete.has_more);
-        assert_eq!(complete.data.len(), 200);
-        let searched = first.peer.call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            search_term: "Conversation 199".into(), ..Default::default()
-        })).await.unwrap();
-        assert!(searched.provider_errors.is_none());
-        assert_eq!(searched.data.len(), 1);
-        assert_eq!(descendant_reads(), 0, "expanded, complete and searched root lists must not read descendants");
+        assert_eq!(complete.data.len(),200);
+        let searched=first.peer.call(&agent_protocol::conversation::records::SearchList {term:"Conversation 199".into(),limit: Some(100)}).await.unwrap();
+        assert_eq!(searched.data.len(),1);
+        assert_eq!(descendant_reads(),0,"catalogs and search must not issue descendant reads");
         let gate = root.join("hold-list-reads");
         std::fs::write(&gate, []).unwrap();
         let agents = op::ListAgents {
-            thread_id: agent_protocol::session::SessionRef { provider: ProviderKind::Codex, id: "root-199".into() },
+            thread_id: agent_protocol::session::SessionRef { provider: Some(ProviderKind::Codex), id: "root-199".into() },
         };
         let [a, b, c, d, e, f, g, h] = [
             &first.peer, &first.peer, &first.peer, &first.peer,
@@ -1142,273 +1130,159 @@ async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_adm
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_order() {
+async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_reads() {
+    use agent_core::state::{Event, Intent, reduce};
+    use agent_protocol::models::ListQuery;
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
-    let threads: Vec<_> = (0..2000)
-        .map(|index| {
-            serde_json::json!({
-                "id":format!("page-{index:04}"),"cwd":root,
-                "name":format!("Conversation {index:04}"),"updatedAt":index,
-            })
-        })
-        .collect();
-    let fixture = root.join("list-fixture.json");
-    std::fs::write(&fixture, serde_json::to_vec(&threads).unwrap()).unwrap();
-    let host = start(&root, Arc::new(Memory::default())).await;
-    let local = host.local().await.unwrap();
-    let chats = root.join("bex-chats");
-    std::fs::create_dir(&chats).unwrap();
-    let session = create(&local.peer, ProviderKind::Claude, &chats).await;
-    let (_, mut events) = open(&local.peer, &session).await;
-    local
-        .peer
-        .call(&submission(&session, "saved conversation"))
-        .await
-        .unwrap();
-    assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
-    let list_reads = || {
-        std::fs::read_to_string(root.join("rpc-trace.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|entry| entry["method"] == "thread/list")
-            .collect::<Vec<_>>()
-    };
-    let page_reads = || {
-        list_reads()
-            .iter()
-            .filter(|entry| entry["ancestorThreadId"].is_null())
-            .count()
-    };
-    let listing = local
-        .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 5,
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
-    assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(listing.data.len(), 5);
-    assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
-    assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
-    assert!(listing.has_more);
-    assert!(listing.provider_errors.is_none());
-    assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
-    local
-        .peer
-        .call(&agent_protocol::live_activity::ReadTaskActivity {})
-        .await
-        .unwrap();
-    assert_eq!(
-        page_reads(),
-        1,
-        "activity bootstrap must not scan historical titles"
-    );
-    let descendant_roots = list_reads()
-        .iter()
-        .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    assert!(
-        descendant_roots.is_empty(),
-        "root titles must not read fleets"
-    );
-    let selected = listing
-        .data
-        .iter()
-        .filter_map(|thread| thread.id.as_ref())
-        .find(|id| id.provider == ProviderKind::Codex)
-        .unwrap();
-    let agents = local
-        .peer
-        .call(&op::ListAgents {
-            thread_id: selected.clone(),
-        })
-        .await
-        .unwrap();
-    assert!(agents.is_empty());
-    assert_eq!(
-        list_reads()
-            .iter()
-            .filter_map(|entry| entry["ancestorThreadId"].as_str())
-            .collect::<Vec<_>>(),
-        [selected.id.as_str()],
-        "fleet reads must target only the selected parent"
-    );
-    let expanded = local
-        .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 150,
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
-    assert_eq!(expanded.data.len(), 150);
-    assert_eq!(expanded.data[0].id.as_ref(), Some(&session));
-    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
-    assert!(expanded.has_more);
-    assert_eq!(
-        page_reads(),
-        3,
-        "expansion needs only two additional page reads"
-    );
-
-    let found = local
-        .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            search_term: "Conversation 1900".into(),
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
-    assert_eq!(found.data.len(), 1);
-    assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
-    assert!(!found.has_more);
-    assert_eq!(page_reads(), 4);
-
-    let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
-        "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":100,
-    })).collect();
-    std::fs::write(&fixture, serde_json::to_vec(&tied).unwrap()).unwrap();
-    let listing = local
-        .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 5,
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
-    assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(listing.data.len(), 5);
-    assert!(
-        listing
-            .data
-            .iter()
-            .skip(1)
-            .all(|t| t.updated_at == Some(100.0))
-    );
-    assert!(listing.has_more);
-    assert_eq!(
-        page_reads(),
-        5,
-        "recent lists never exhaust timestamp ties across old pages"
-    );
-
-    let projects: Vec<_> = (0..3)
-        .map(|index| {
-            serde_json::json!({
-                "id":format!("project-{index}"), "name":format!("Project {index}"),
-                "roots":[{"path":root.join(format!("project-{index}"))}],
-            })
-        })
-        .collect();
-    std::fs::write(
-        root.join("bex-projects.json"),
-        serde_json::to_vec(&projects).unwrap(),
+    let projects=(0..9).map(|index| {
+        let path=root.join(format!("project-{index}"));
+        std::fs::create_dir(&path).unwrap();
+        serde_json::json!({"id":format!("project-{index}"),"name":format!("Project {index}"),"roots":[{"path":path}]})
+    }).collect::<Vec<_>>();
+    host_fixture::test_support::seed_projects(
+        &root,
+        serde_json::from_value(serde_json::json!(projects)).unwrap(),
     )
     .unwrap();
-    let scoped: Vec<_> = (0..2000).map(|index| serde_json::json!({
-        "id":format!("scoped-{index:04}"), "name":"Scoped conversation", "updatedAt":index,
-        "cwd":if index % 4 == 3 { root.clone() } else { root.join(format!("project-{}", index % 4)) },
-    })).collect();
-    std::fs::write(&fixture, serde_json::to_vec(&scoped).unwrap()).unwrap();
-    let listing = local
-        .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            limit: 5,
-            project_limit: 5,
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
+    let threads=(0..2000).map(|index|serde_json::json!({
+        "id":format!("scoped-{index:04}"),"name":format!("Scoped conversation {index}"),"updatedAt":index,
+        "cwd":if index%4==3 {root.clone()} else {root.join(format!("project-{}",index%4))}
+    })).collect::<Vec<_>>();
+    std::fs::write(
+        root.join("list-fixture.json"),
+        serde_json::to_vec(&threads).unwrap(),
+    )
+    .unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let mut catalog = conversations::Catalog::open(&local.peer).await;
+    catalog.wait_rows(2000).await;
+    let mut initial = catalog.page(ListQuery::default());
+    assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
+    let projects = initial
+        .lists
+        .threads
+        .as_ref()
+        .unwrap()
+        .projects
+        .iter()
+        .map(|project| project.id.clone())
+        .collect::<Vec<_>>();
+    for project_id in projects {
+        initial = reduce(
+            &initial,
+            "",
+            Event::Intent(Intent::SetProjectExpanded {
+                project_id,
+                expanded: true,
+            }),
+        )
+        .0;
+    }
+    let listing = initial.lists.threads.as_ref().unwrap();
     assert_eq!(
         listing
             .projects
             .iter()
+            .take(3)
             .map(|project| project.id.as_str())
             .collect::<Vec<_>>(),
         ["project-2", "project-1", "project-0"]
     );
-    assert_eq!(listing.data.len(), 20);
-    assert!(
+    assert_eq!(listing.projects.len(), 5);
+    assert!(listing.has_more_projects);
+    let displayed = initial.thread_list().unwrap();
+    assert_eq!(
+        displayed.threads.len()
+            + displayed
+                .projects
+                .iter()
+                .map(|project| project.threads.len())
+                .sum::<usize>(),
+        20
+    );
+    assert_eq!(
         listing
             .data
             .iter()
             .filter(|thread| thread.project_id.is_none())
-            .count()
-            == 5
+            .count(),
+        5
     );
-    assert!(!listing.has_more_projects);
-    assert!(listing.has_more);
     assert_eq!(
-        page_reads(),
-        6,
-        "initial project and chat pages share one native title walk"
+        initial.lists.project_threads["project-0"].data[0]
+            .id
+            .as_ref()
+            .unwrap()
+            .id,
+        "scoped-1996"
     );
-    let expanded = local
-        .peer
-        .call(&op::ListProjectSessions {
+    let reads = || {
+        std::fs::read_to_string(root.join("rpc-trace.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|entry| entry["method"] == "thread/list" || entry["method"] == "thread/read")
+            .collect::<Vec<_>>()
+    };
+    let before = reads();
+    assert!(
+        before.iter().all(|entry| entry["method"] == "thread/list"),
+        "catalog discovery must not import bodies"
+    );
+    let mut expanded = initial.clone();
+    for _ in 0..15 {
+        expanded = reduce(
+            &expanded,
+            "",
+            Event::Intent(Intent::ExpandThreadList {
+                project_id: Some("project-0".into()),
+            }),
+        )
+        .0;
+    }
+    let project = &expanded.lists.project_threads["project-0"];
+    assert_eq!(project.data.len(), 155);
+    assert_eq!(project.data[149].id.as_ref().unwrap().id, "scoped-1400");
+    assert!(project.has_more);
+    let (shown, _) = reduce(&expanded, "", Event::Intent(Intent::ExpandProjects));
+    assert_eq!(shown.lists.threads.as_ref().unwrap().projects.len(), 9);
+    assert!(!shown.lists.threads.as_ref().unwrap().has_more_projects);
+    assert!(
+        shown
+            .lists
+            .project_threads
+            .get("project-8")
+            .is_none_or(|page| page.data.is_empty())
+    );
+    let (collapsed, _) = reduce(
+        &shown,
+        "",
+        Event::Intent(Intent::SetProjectExpanded {
             project_id: "project-0".into(),
-            limit: 150,
-            search_term: String::new(),
+            expanded: false,
+        }),
+    );
+    assert_eq!(collapsed.lists.replica, initial.lists.replica);
+    assert_eq!(
+        reads(),
+        before,
+        "disclosure and pagination leave native discovery untouched"
+    );
+    let found = local
+        .peer
+        .call(&agent_protocol::conversation::records::SearchList {
+            term: "Scoped conversation 1900".into(),
+            limit: Some(100),
         })
         .await
         .unwrap();
-    assert_eq!(expanded.data.len(), 150);
-    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "scoped-1400");
-    assert_eq!(
-        expanded
-            .projects
-            .iter()
-            .map(|project| project.id.as_str())
-            .collect::<Vec<_>>(),
-        ["project-0"]
-    );
+    assert_eq!(found.data.len(), 1);
+    assert_eq!(found.data[0].id.as_ref().unwrap().id, "scoped-1900");
     assert!(
-        expanded
-            .data
-            .iter()
-            .all(|t| t.project_id.as_deref() == Some("project-0"))
-    );
-    assert!(expanded.has_more);
-    assert_eq!(
-        page_reads(),
-        13,
-        "project expansion reads only its own title page, never other sections"
-    );
-    let empty_projects: Vec<_> = (0..6)
-        .map(|index| {
-            serde_json::json!({
-                "id":format!("empty-{index}"),"name":format!("Empty {index}"),
-                "roots":[{"path":root.join(format!("empty-{index}"))}],
-            })
-        })
-        .collect();
-    std::fs::write(
-        root.join("bex-projects.json"),
-        serde_json::to_vec(&empty_projects).unwrap(),
-    )
-    .unwrap();
-    let before_empty = page_reads();
-    for project_limit in [5, 15] {
-        let page = local
-            .peer
-            .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-                project_limit,
-                ..Default::default()
-            }))
-            .await
-            .unwrap();
-        assert_eq!(page.data.len(), 5);
-        assert!(page.has_more);
-        assert_eq!(page.projects.len(), (project_limit as usize).min(6));
-        assert_eq!(page.has_more_projects, project_limit == 5);
-    }
-    assert_eq!(
-        page_reads(),
-        before_empty + 42,
-        "empty prefetched project pages are certified by exhausting titles without reading bodies"
+        catalog.replica.rows().len() >= 2009,
+        "search does not replace the replicated catalog"
     );
     local.close().await;
     host.close().await.unwrap();
@@ -1449,20 +1323,19 @@ async fn codex_queues_input_for_a_running_turn_it_has_not_observed() {
     .await
     .unwrap();
     let local = host.local().await.unwrap();
-    local
-        .peer
-        .call(&op::ListSessions::new(Default::default()))
-        .await
-        .unwrap();
+    let _catalog = conversations::Catalog::open(&local.peer).await;
     let session = SessionRef::new(ProviderKind::Codex, "external".into()).unwrap();
     // Even a steer waits for a running turn the Host has not observed.
     let input = op::Submission {
         follow_up: op::FollowUp::Steer,
         ..submission(&session, "queued for unobserved turn")
     };
-    assert!(local.peer.call(&input).await.unwrap().turn_id.is_none());
+    assert_eq!(
+        submit(&local.peer, &input).await.unwrap().outcome,
+        agent_protocol::conversation::Outcome::Accepted
+    );
     let (opened, _) = open(&local.peer, &session).await;
-    assert_eq!(opened.response.thread.queue.inputs, [input]);
+    assert_eq!(opened.thread.queue.inputs, [input]);
     let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
     assert!(!trace.lines().any(|line| {
         let event: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -1551,9 +1424,7 @@ async fn adapter_initialization_failure_preserves_the_other_provider_and_host() 
     );
     let session = create(&local.peer, ProviderKind::Codex, &root).await;
     let (_, mut events) = open(&local.peer, &session).await;
-    local
-        .peer
-        .call(&submission(&session, "healthy provider"))
+    submit(&local.peer, &submission(&session, "healthy provider"))
         .await
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
@@ -1581,16 +1452,16 @@ async fn adapter_initialization_failure_preserves_the_other_provider_and_host() 
     );
     assert!(Path::new(&worktrees[0].path).is_dir());
     assert!(
-        local
-            .peer
-            .call(&op::CreateSession {
-                initial_input: None,
-                provider: ProviderKind::Claude,
-                cwd: Some(root.to_string_lossy().into_owned()),
-                model: None
-            })
-            .await
-            .is_err()
+        conversations::created(
+            &local.peer,
+            conversations::create_request(
+                ProviderKind::Claude,
+                Some(root.to_string_lossy().into_owned()),
+                None
+            )
+        )
+        .await
+        .is_err()
     );
     local
         .peer

@@ -136,7 +136,7 @@ impl Shape {
 
 #[derive(Clone, PartialEq)]
 struct Row {
-    preparation: Option<agent_core::presentation::conversation::PreparationPresentation>,
+    preparation: Option<Box<agent_core::presentation::conversation::PreparationPresentation>>,
     id: String,
     body: SharedString,
     streaming: bool,
@@ -578,11 +578,7 @@ pub(crate) struct Timeline {
 }
 
 impl Timeline {
-    fn set_activity(
-        self,
-        activity: ActivityPresentation,
-        opening: bool,
-    ) -> Option<op::LoadTurnItems> {
+    fn set_activity(self, activity: ActivityPresentation, opening: bool) {
         self.expanded.update(|all| {
             if opening {
                 all.insert(activity.id.clone(), activity.status);
@@ -590,7 +586,6 @@ impl Timeline {
                 all.remove(&activity.id);
             }
         });
-        opening.then_some(activity.load_items).flatten()
     }
 
     fn toggle_group(self, id: String) {
@@ -1025,15 +1020,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                                             // where they were: at the end if
                                                             // they followed it.
                                                             let opening = !untracked(open);
-                                                            if let Some(load) = timeline.set_activity(activity, opening) {
-                                                                connection.dispatch(
-                                                                    Intent::LoadTurnItems(load),
-                                                                );
-                                                            }
+                                                            timeline.set_activity(activity, opening);
                                                         }
                                                     },
                                                 ))
-                                                .child(work_load_failure(connection, row, open))
                                         },
                                     ))
                                     .child(when(
@@ -1938,53 +1928,7 @@ fn interrupted_row(label: impl Fn() -> String + 'static) -> View {
         .child(rule())
 }
 
-/// An opened folded turn whose work did not load says why where that work
-/// would show, as T3 Code's "Couldn't load output" in an opened row, and
-/// loads it again on retry.
-fn work_load_failure(
-    connection: Connection,
-    row: Memo<Option<Row>>,
-    open: impl Fn() -> bool + Copy + 'static,
-) -> View {
-    let load = move || {
-        row.with(|row| {
-            row.as_ref()
-                .and_then(|row| row.activity.as_ref())
-                .and_then(|activity| activity.load_items.clone())
-        })
-    };
-    let failure = move || {
-        load()
-            .and_then(|load| {
-                connection
-                    .context
-                    .with(|context| context.turn_items_error(load.turn_id))
-            })
-            .map(|error| error.to_string())
-    };
-    view().child(when(
-        move || open() && failure().is_some(),
-        move || {
-            view()
-                .pt_2()
-                .gap_2()
-                .items_start()
-                .child(
-                    text(move || failure().unwrap_or_default())
-                        .selectable(true)
-                        .text_size(px(13.0))
-                        .text_color(nsh_core::element::rgb(0xff8e86)),
-                )
-                .child(crate::ui::text_button(tr("再試行"), move || {
-                    if let Some(load) = untracked(load) {
-                        connection.dispatch(Intent::LoadTurnItems(load));
-                    }
-                }))
-        },
-    ))
-}
-
-/// The history controls scroll with the messages without changing row indices.
+// History controls scroll with messages without changing their row indices.
 fn history_header(
     connection: Connection,
     following: Signal<bool>,
@@ -2038,7 +1982,8 @@ fn history_header(
         .child(text(move || notice.get().unwrap_or_default()))
 }
 
-/// A selected conversation whose history is loading or can be retried.
+/// A selected conversation whose history has not arrived: it is loading, or
+/// its read failed and can be retried.
 fn opening(connection: Connection) -> View {
     use crate::ui::{self, colors};
     use agent_core::presentation::context::ConversationOpening;

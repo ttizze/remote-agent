@@ -20,15 +20,36 @@ const IDLE: Duration = Duration::from_secs(30 * 60);
 const MAX_PIN: Duration = Duration::from_secs(4 * 60 * 60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
-#[derive(Default)]
 pub(super) struct Subscriptions {
     activity: Mutex<Activity>,
     /// Held across subscription requests so a release cannot overtake a resume.
-    released: tokio::sync::Mutex<HashSet<String>>,
+    access: tokio::sync::Mutex<()>,
+    scopes: Arc<crate::providers::scopes::Scopes>,
+    processed: tokio::sync::watch::Receiver<u64>,
+    stopped: CancellationToken,
 }
 impl Subscriptions {
+    pub(super) fn new(
+        scopes: Arc<crate::providers::scopes::Scopes>,
+        processed: tokio::sync::watch::Receiver<u64>,
+        stopped: CancellationToken,
+    ) -> Self {
+        Self {
+            activity: Default::default(),
+            access: Default::default(),
+            scopes,
+            processed,
+            stopped,
+        }
+    }
     pub(super) fn observe(&self, change: &AgentChange) {
         lock(&self.activity).observe(change, Instant::now());
+    }
+    pub(super) fn busy(&self, id: &str) -> bool {
+        lock(&self.activity)
+            .tree(id)
+            .iter()
+            .any(|thread| thread.active || !thread.running.is_empty())
     }
     pub(super) fn touch(&self, id: &str) {
         lock(&self.activity).touch(id, Instant::now());
@@ -41,10 +62,13 @@ impl Subscriptions {
         reload: bool,
         resume: impl Future<Output = Result<(), Failure>>,
     ) -> Result<(), Failure> {
-        let mut released = self.released.lock().await;
-        if reload || released.contains(id) {
+        let _access = self.access.lock().await;
+        let subscribed = lock(&self.activity)
+            .threads
+            .get(id)
+            .is_some_and(|thread| thread.subscribed);
+        if reload || !subscribed {
             resume.await?;
-            released.remove(id);
         }
         self.touch(id);
         Ok(())
@@ -56,28 +80,31 @@ impl Subscriptions {
         id: &str,
         only_idle: bool,
     ) -> Result<(), String> {
-        let mut released = self.released.lock().await;
+        let _access = self.access.lock().await;
         if only_idle && !lock(&self.activity).releasable(id, Instant::now()) {
             return Ok(());
         }
-        process
-            .request::<_, serde_json::Value>(
+        let reply = process
+            .request_sequenced::<_, serde_json::Value>(
                 "thread/unsubscribe",
-                &serde_json::json!({"threadId": id}),
+                &serde_json::json!({"threadId":id}),
             )
             .await
-            .map_err(|error| error.to_string())?
-            .outcome
             .map_err(|error| error.to_string())?;
-        released.insert(id.to_owned());
+        reply.value.outcome.map_err(|error| error.to_string())?;
+        let mut processed = self.processed.clone();
+        tokio::select! {
+            result = processed.wait_for(|sequence| *sequence >= reply.sequence) => {result.map_err(|error|error.to_string())?;},
+            _ = self.stopped.cancelled() => return Err("Codex event pump stopped".into()),
+        }
+        for source in lock(&self.activity).tree_ids(id) {
+            self.scopes.forget(&source);
+        }
         lock(&self.activity).forget(id);
         Ok(())
     }
-    pub(super) fn spawn_releaser(
-        self: Arc<Self>,
-        process: Arc<CodexAppServer>,
-        stopped: CancellationToken,
-    ) {
+    pub(super) fn spawn_releaser(self: Arc<Self>, process: Arc<CodexAppServer>) {
+        let stopped = self.stopped.clone();
         tokio::spawn(async move {
             let mut check = tokio::time::interval(CHECK_INTERVAL);
             loop {
@@ -138,11 +165,13 @@ impl Activity {
     fn observe(&mut self, change: &AgentChange, now: Instant) {
         match change {
             AgentChange::TaskParent { session, parent }
-                if session.provider == ProviderKind::Codex =>
+                if session.provider == Some(ProviderKind::Codex) =>
             {
                 self.thread(&session.id, now).parent = Some(parent.id.clone());
             }
-            AgentChange::Session { session, change } if session.provider == ProviderKind::Codex => {
+            AgentChange::Session { session, change }
+                if session.provider == Some(ProviderKind::Codex) =>
+            {
                 let thread = self.thread(&session.id, now);
                 thread.last = now;
                 match change {
@@ -256,6 +285,132 @@ mod tests {
                 }),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn a_restored_thread_resumes_once_and_a_failed_resume_remains_retryable() {
+        let subscriptions = Subscriptions::new(
+            Arc::default(),
+            tokio::sync::watch::channel(0).1,
+            CancellationToken::new(),
+        );
+        assert!(
+            subscriptions
+                .start("restored", false, async {
+                    Err(Failure::new("provider_unavailable", "resume failed"))
+                })
+                .await
+                .is_err()
+        );
+        let mut resumed = false;
+        subscriptions
+            .start("restored", false, async {
+                resumed = true;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(resumed);
+        subscriptions
+            .start("restored", false, async {
+                panic!("a subscribed thread must not resume twice")
+            })
+            .await
+            .unwrap();
+        subscriptions.touch("created");
+        subscriptions
+            .start("created", false, async {
+                panic!("thread/start already established this subscription")
+            })
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn releasing_a_source_drains_older_frames_before_a_new_reservation() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+        use agent_protocol::models::{ThreadResponse, Turn};
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("subscription-fixture");
+        std::fs::write(&program, r#"#!/usr/bin/env node
+const rl = require('node:readline').createInterface({input:process.stdin});
+rl.on('line', line => {
+  const m=JSON.parse(line); if(m.id === undefined) return;
+  const result=m.method==='initialize' ? {userAgent:'subscription-fixture',codexHome:process.env.CODEX_HOME} : {};
+  process.stdout.write(JSON.stringify({id:m.id,result})+'\n');
+});
+"#).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let process = Arc::new(
+            CodexAppServer::spawn(super::super::Config {
+                program,
+                codex_home: Some(directory.path().into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let mut events = process.subscribe();
+        assert!(matches!(events.recv().await.unwrap(), agent_transport::peer::PeerEvent::Response { .. }), "consume the retained initialization response before observing unsubscribe");
+        let scopes = Arc::new(crate::providers::scopes::Scopes::default());
+        let first = uuid::Uuid::new_v4();
+        let next = uuid::Uuid::new_v4();
+        scopes.reserve("native", first);
+        let started = |id: &str| AgentChange::Session {
+            session: session("native"),
+            change: SessionChange::Turn {
+                turn: Turn {
+                    id: id.into(),
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        };
+        assert_eq!(scopes.observe(&started("old")), Some(first));
+        let (processed, progress) = tokio::sync::watch::channel(0);
+        let subscriptions = Arc::new(Subscriptions::new(
+            scopes.clone(),
+            progress,
+            CancellationToken::new(),
+        ));
+        subscriptions.observe(&AgentChange::TaskParent {session:session("child"),parent:session("native")});
+        scopes.admit("child");
+        let child_frame = AgentChange::Session {session:session("child"),change:SessionChange::Turn {turn:Turn {id:"child-turn".into(),..Default::default()},completed:false}};
+        assert!(scopes.observe(&child_frame).is_some());
+        let mut release = Box::pin(subscriptions.release(&process,"native",false));
+        let sequence = loop {
+            tokio::select! {
+                result = &mut release => panic!("release completed before older frames were drained: {result:?}"),
+                event = events.recv() => if let agent_transport::peer::PeerEvent::Response {sequence,..} = event.unwrap() {break sequence;},
+            }
+        };
+        assert!(futures_util::poll!(&mut release).is_pending(),"native acknowledgement alone does not mean older callbacks were applied");
+        let mut resume = Box::pin(subscriptions.start("native", false, async {
+            scopes.history(&ThreadResponse {
+                thread: agent_protocol::models::Thread {
+                    id: Some(session("native")),
+                    turns: Some(vec![Arc::new(Turn {
+                        id: "old".into(),
+                        ..Default::default()
+                    })]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            scopes.reserve("native", next);
+            Ok(())
+        }));
+        assert!(futures_util::poll!(&mut resume).is_pending());
+        assert_eq!(scopes.observe(&started("old")), Some(first));
+        processed.send_replace(sequence);
+        release.await.unwrap();
+        assert!(scopes.observe(&child_frame).is_none(),"releasing a root also releases its child correlation scopes");
+        resume.await.unwrap();
+        assert_eq!(scopes.observe(&started("old")), None);
+        assert_eq!(scopes.observe(&started("new")), Some(next));
+        }).await.expect("native subscription release and resume settle");
     }
 
     #[test]

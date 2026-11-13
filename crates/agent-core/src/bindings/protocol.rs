@@ -130,17 +130,14 @@ struct OpenInEditor {
 }
 #[uniffi::remote(Enum)]
 enum ListDecorationScope {
-    Root { part: Option<ListPart> },
+    Root,
     Project { project_id: String },
-    Task { session: SessionRef },
 }
 #[uniffi::remote(Enum)]
 enum PushEnvironment {
     Sandbox,
     Production,
 }
-#[uniffi::remote(Record)]
-struct ReadTaskActivity {}
 #[uniffi::remote(Record)]
 struct RegisterLiveActivity {
     pub activity_id: Option<String>,
@@ -230,18 +227,11 @@ struct ServiceTier {
 struct ReasoningEffort {
     pub reasoning_effort: String,
 }
-#[uniffi::remote(Enum)]
-enum ListPart {
-    Projects,
-    Chats,
-}
 #[uniffi::remote(Record)]
 struct ListQuery {
-    pub part: Option<ListPart>,
     pub limit: u32,
     pub project_limit: u32,
     pub search_term: String,
-    pub project_limits: Option<std::collections::HashMap<String, u32>>,
 }
 #[uniffi::remote(Record)]
 struct FileList {
@@ -298,7 +288,7 @@ enum ProviderKind {
 }
 #[uniffi::remote(Record)]
 struct SessionRef {
-    pub provider: ProviderKind,
+    pub provider: Option<ProviderKind>,
     pub id: String,
 }
 #[uniffi::remote(Record)]
@@ -783,16 +773,6 @@ struct AddProject {
 #[uniffi::remote(Record)]
 struct ScanProjects {}
 #[uniffi::remote(Record)]
-struct ListSessions {
-    pub query: crate::models::ListQuery,
-}
-#[uniffi::remote(Record)]
-struct ListProjectSessions {
-    pub project_id: String,
-    pub limit: u32,
-    pub search_term: String,
-}
-#[uniffi::remote(Record)]
 struct ListAgents {
     pub thread_id: SessionRef,
 }
@@ -886,21 +866,7 @@ struct RewindSession {
     pub thread_id: SessionRef,
     pub turn_id: agent_protocol::ids::TurnId,
 }
-#[uniffi::remote(Record)]
-struct CreateSession {
-    pub provider: ProviderKind,
-    pub cwd: Option<String>,
-    pub model: Option<crate::models::ModelRef>,
-    pub initial_input: Option<InitialInput>,
-}
-#[uniffi::remote(Record)]
-struct InitialInput {
-    pub workspace: Option<WorkspaceStrategy>,
-    pub client_user_message_id: agent_protocol::ids::ClientInputId,
-    pub input: Vec<Input>,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
-}
+
 #[uniffi::remote(Enum)]
 enum WorkspaceStrategy {
     Root,
@@ -927,6 +893,7 @@ enum Input {
 }
 #[uniffi::remote(Record)]
 struct RetryPreparation {
+    pub input_id: agent_protocol::ids::ClientInputId,
     pub thread_id: SessionRef,
     pub work_locally: bool,
 }

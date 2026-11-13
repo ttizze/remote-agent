@@ -160,7 +160,6 @@ mod tests {
             section: Some("B".into()),
             chats_archived: false,
             expanded: true,
-            loading: false,
             error: None,
             threads: Vec::new(),
             has_more: false,

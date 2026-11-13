@@ -10,6 +10,8 @@ pub struct Recovery {
 }
 
 #[derive(Serialize, Deserialize)]
+// The detached worker is copied from the installed app before replacement.
+// These fields remain its wire contract through the first canonical-store update.
 pub struct InterruptedTask {
     pub native_session: SessionRef,
     pub submission: Submission,
@@ -21,7 +23,7 @@ pub struct InterruptedTask {
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum ContinuationDelivery {
     Pending,
-    /// Persisted before sending. A crash cannot cause an automatic duplicate.
+    /// The previous Host recorded this before sending. Never resend it automatically.
     Sending,
     /// The saved turn completed while the previous Host was stopping.
     Completed,

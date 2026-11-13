@@ -22,10 +22,14 @@ use agent_transport::transport::Endpoint;
 
 use agent_transport::transport::Relays;
 use codex_app_server::AppServerConfig;
-use host_fixture::test_support::{HostFixture, Memory, assert_project_directory};
+use host_fixture::test_support::{HostFixture, Memory, assert_project_directory, seed_projects};
 use serde_json::{Value, json};
 
 mod codex_fixture;
+// Each transport test binary uses a different subset of these shared helpers.
+#[allow(dead_code)]
+#[path = "support/conversations.rs"]
+mod conversations;
 
 async fn host(root: &Path, memory: Arc<Memory>, program: &Path) -> HostFixture {
     let existing = root.join("agent-codex-fixture");
@@ -94,6 +98,12 @@ async fn draft(store: &Store, text: &str) {
         .unwrap();
 }
 
+fn input_id(label: &str) -> agent_protocol::ids::ClientInputId {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, label.as_bytes())
+        .to_string()
+        .into()
+}
+
 async fn send(store: &Store, text: &str, client_id: &str) -> agent_protocol::session::SessionRef {
     draft(store, text).await;
     let thread_id = store
@@ -106,7 +116,7 @@ async fn send(store: &Store, text: &str, client_id: &str) -> agent_protocol::ses
     let outcome = store
         .dispatch(Intent::Submit {
             thread_id: thread_id.clone(),
-            client_user_message_id: client_id.into(),
+            client_user_message_id: input_id(client_id),
             alternate: false,
         })
         .await
@@ -114,7 +124,7 @@ async fn send(store: &Store, text: &str, client_id: &str) -> agent_protocol::ses
     let snapshot = store.snapshot();
     assert!(
         if thread_id.is_some() {
-            matches!(outcome, Outcome::Submitted { .. })
+            matches!(outcome, Outcome::Submitted)
         } else {
             matches!(outcome, Outcome::StartedThread { .. })
         },
@@ -180,7 +190,7 @@ async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snap
                 .sessions.conversations
                 .values()
                 .flat_map(|thread| thread.turns.iter().flatten())
-                .map(|turn| (&turn.id, &turn.status, &turn.error))
+                .map(|turn| (&turn.id, &turn.status, &turn.error, &turn.items))
                 .collect::<Vec<_>>(),
             snapshot
                 .requests()
@@ -262,9 +272,7 @@ async fn listed(
     project_root: Option<&Path>,
 ) -> Arc<Snapshot> {
     store
-        .dispatch(Intent::ListSessions(op::ListSessions::new(
-            Default::default(),
-        )))
+        .dispatch(Intent::ListSessions(Default::default()))
         .await
         .unwrap();
     if let Some(project_root) = project_root {
@@ -445,29 +453,29 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                 json!({"expectedModel":model}).to_string(),
             )
             .unwrap();
-            let response = local
-                .peer
-                .call(&op::CreateSession {
-                    initial_input: None,
-                    provider: agent_protocol::session::ProviderKind::Claude,
-                    cwd: Some(root.path().to_string_lossy().into()),
-                    model: Some(agent_protocol::models::ModelRef {
+            let response = conversations::created(
+                &local.peer,
+                conversations::create_request(
+                    ProviderKind::Claude,
+                    Some(root.path().to_string_lossy().into()),
+                    Some(models::ModelRef {
                         provider: ProviderKind::Claude,
                         id: model.into(),
                     }),
-                })
-                .await
-                .unwrap();
-            let id = response.response.thread.id.unwrap();
+                ),
+            )
+            .await
+            .unwrap();
+            let id = response.thread.id.unwrap();
             store
                 .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
                 .await
                 .unwrap();
-            local
-                .peer
-                .call(&rpc::Submission {
+            conversations::submit(
+                &local.peer,
+                &rpc::Submission {
                     thread_id: id.clone(),
-                    client_user_message_id: format!("delegate-{model}").into(),
+                    client_user_message_id: input_id(&format!("delegate-{model}")),
                     input: vec![rpc::Input::Text {
                         text: "delegate settings".into(),
                     }],
@@ -478,11 +486,12 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                     effort: Some(effort.into()),
                     service_tier: None,
                     follow_up: Default::default(),
-                })
-                .await
-                .unwrap();
+                },
+            )
+            .await
+            .unwrap();
             completed(&store, &id, 1, "completed").await;
-            let session = &id.id;
+            let session = conversations::native_source(root.path(), &id, ProviderKind::Claude);
             let inputs =
                 session_inputs(root.path().join(format!("claude-session-{session}.jsonl")));
             assert_eq!(inputs[0]["model"], model);
@@ -514,7 +523,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
         std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
         git(&workspace, &["add", "tracked.txt"]);
         git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
-        std::fs::write(root.join("bex-projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
+        seed_projects(&root, serde_json::from_value(json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
         let memory = Arc::new(Memory::default());
         let mut fixture = host(&root, memory.clone(), fixture_program()).await;
@@ -559,7 +568,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
             assert_eq!(responses.len(), 1, "streaming and completed blocks must not duplicate");
             assert!(item_text(responses[0]).unwrap().starts_with(&format!("reply {}: message {number}", number + 1)));
             let user = items.iter().find(|item| matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { .. })).unwrap();
-            assert_eq!(user.client_input_id.as_deref(), Some(format!("client-{number}").as_str()));
+            assert_eq!(user.client_input_id.as_deref(), Some(input_id(&format!("client-{number}")).as_str()));
             assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: format!("message {number}") })));
             let inputs = session_inputs(session_trace(Path::new(&cwd)));
             assert_eq!(inputs.as_array().unwrap().len(), number + 1);
@@ -623,7 +632,17 @@ async fn unsupported_controls_and_session_elicitation_keep_claude_running() {
                 let request = snapshot.requests().next().unwrap();
                 assert_eq!(
                     request.target,
-                    agent_protocol::requests::RequestTarget::Session
+                    agent_protocol::requests::RequestTarget::Turn {
+                        turn_id: snapshot.sessions.conversations[&id]
+                            .turns
+                            .as_ref()
+                            .unwrap()
+                            .last()
+                            .unwrap()
+                            .id
+                            .clone(),
+                        item_id: None,
+                    }
                 );
                 store
                     .dispatch(Intent::Respond(op::Respond {
@@ -800,23 +819,23 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
                 .queue
                 .inputs
                 .iter()
-                .any(|input| input.client_user_message_id.as_str() == "busy")
+                .any(|input| input.client_user_message_id.as_str() == input_id("busy").as_str())
         })
         .await;
         let local = fixture.local().await.unwrap();
         let previous_turn = &snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[2].id;
         assert!(
-            local
-                .peer
-                .call(
-                    &serde_json::from_value::<op::Interrupt>(
-                        json!({"threadId": id, "turnId": previous_turn}),
-                    )
-                    .unwrap()
-                )
-                .await
-                .is_err(),
-            "a delayed stop must not interrupt the next native turn"
+            conversations::command(
+                &local.peer,
+                &id,
+                uuid::Uuid::new_v4(),
+                agent_protocol::conversation::Command::Interrupt {
+                    turn: Some(previous_turn.clone())
+                }
+            )
+            .await
+            .is_err(),
+            "a delayed stop must not interrupt the next turn"
         );
         assert_eq!(
             store.snapshot().sessions.conversations[&id]
@@ -850,7 +869,7 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
             .dispatch(Intent::Queue {
                 thread_id: id.clone(),
                 action: agent_core::state::follow_up::QueueAction::Remove {
-                    client_user_message_id: "busy".into(),
+                    client_user_message_id: input_id("busy"),
                 },
             })
             .await
@@ -1138,7 +1157,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
         std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
         git(&workspace, &["add", "tracked.txt"]);
         git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
-        std::fs::write(root.join("bex-projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
+        seed_projects(&root, serde_json::from_value(json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
         let config = AppServerConfig { program: root.join("missing-codex"), ..Default::default() };
         let memory = Arc::new(Memory::default());
@@ -1196,7 +1215,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
             assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());
             let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
             let before = count_worktrees();
-            assert!(management.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","model":{"provider":"codex","id":"fixture-model"},"cwd":current})).unwrap()).await.is_err());
+            assert!(conversations::created(&management.peer,conversations::create_request(ProviderKind::Codex,Some(current.to_owned()),Some(models::ModelRef {provider:ProviderKind::Codex,id:"fixture-model".into()}))).await.is_err());
             assert_eq!(count_worktrees(), before, "an unavailable backend must not create a worktree");
             assert!(management.peer.call(&rpc::ReadHostStatus {}).await.is_ok());
             management.close().await;
@@ -1286,7 +1305,10 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         // BEX may return partial Claude results when Codex exits during listing.
         if let Ok(list) = local
             .peer
-            .call(&rpc::ListSessions::new(Default::default()))
+            .call(&agent_protocol::conversation::records::SearchList {
+                term: String::new(),
+                limit: Some(10000),
+            })
             .await
         {
             assert!(list.provider_errors.unwrap().contains_key("codex"));
@@ -1418,27 +1440,27 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
         draft(&store, "keep my draft").await;
         store.dispatch(Intent::Submit {
             thread_id: None,
-            client_user_message_id: "auth-failure".into(),
+            client_user_message_id: input_id("auth-failure"),
             alternate: false,
         }).await.unwrap();
         let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
         let failed_preparation = |snapshot: &Snapshot| {
-            snapshot.sessions.conversations[&id].preparation.as_ref().is_some_and(|preparation| matches!(preparation.status, agent_protocol::session::PreparationStatus::Failed { .. }))
+            snapshot.sessions.conversations[&id].preparations.iter().any(|preparation| matches!(preparation.status, agent_protocol::session::PreparationStatus::Failed { .. }))
         };
         let snapshot = until(&store, failed_preparation).await;
-        let preparation = snapshot.sessions.conversations[&id].preparation.as_ref().unwrap();
+        let preparation = snapshot.sessions.conversations[&id].preparations.first().unwrap();
         assert!(matches!(&preparation.status, agent_protocol::session::PreparationStatus::Failed { error } if error.message.contains("サブスク認証")));
         assert!(preparation.submission.input.iter().any(|input| matches!(input, rpc::Input::Text { text } if text == "keep my draft")));
-        assert!(snapshot.sessions.pending_submissions[&agent_protocol::ids::ClientInputId::from("auth-failure")].accepted);
+        assert_eq!(preparation.submission.client_user_message_id, input_id("auth-failure"));
         assert!(snapshot.sessions.conversations[&id].turns.as_ref().is_none_or(|turns| turns.is_empty()));
         std::fs::write(&config, json!({"initializeError":true}).to_string()).unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), work_locally: false })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("auth-failure"), work_locally: false })).await.unwrap();
         let snapshot = until(&store, |snapshot| {
-            snapshot.sessions.conversations[&id].preparation.as_ref().is_some_and(|preparation| matches!(&preparation.status, agent_protocol::session::PreparationStatus::Failed { error } if error.message.contains("fixture initialization failed")))
+            snapshot.sessions.conversations[&id].preparations.iter().any(|preparation| matches!(&preparation.status, agent_protocol::session::PreparationStatus::Failed { error } if error.message.contains("fixture initialization failed")))
         }).await;
         assert!(snapshot.sessions.conversations[&id].turns.as_ref().is_none_or(|turns| turns.is_empty()));
         std::fs::write(&config, json!({"resultError":true}).to_string()).unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), work_locally: false })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("auth-failure"), work_locally: false })).await.unwrap();
         let snapshot = completed(&store, &id, 1, "failed").await;
         assert_eq!(
             snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]
@@ -1515,12 +1537,12 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         send(&store, "Count from 1 to 100, one number per line. Do not use tools.", "live-before-additional").await;
         until(&store, |snapshot| snapshot.sessions.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 5 && turns[4].items.as_ref().is_some_and(|items| items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| !text.is_empty()))))).await;
         draft(&store, "Reply with exactly AGENT_CLAUDE_ADDITIONAL_OK. Do not use tools.").await;
-        store.dispatch(Intent::Submit { thread_id: Some(id.clone()), client_user_message_id: "live-additional".into(), alternate: true }).await.unwrap();
+        store.dispatch(Intent::Submit { thread_id: Some(id.clone()), client_user_message_id: input_id("live-additional"), alternate: true }).await.unwrap();
         let snapshot = completed(&store, &id, 5, "completed").await;
         assert!(snapshot.panes.primary().error.is_none(), "{:?}", snapshot.panes.primary().error);
         assert!(snapshot.sessions.pending_submissions.is_empty());
         let items = snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[4].items.as_ref().unwrap();
-        assert_eq!(items.iter().filter(|item| item.client_input_id.as_deref() == Some("live-additional")).count(), 1);
+        assert_eq!(items.iter().filter(|item| item.client_input_id.as_deref() == Some(input_id("live-additional").as_str())).count(), 1);
         assert!(items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.contains("AGENT_CLAUDE_ADDITIONAL_OK"))));
         store.close().await.unwrap();
         endpoint.close().await;
@@ -2127,32 +2149,14 @@ async fn claude_follows_an_intermediate_result_in_a_new_turn_after_reconnect() {
         if prompt == "background" {
             let snapshot = until(&store, |snapshot| {
                 snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[1]
-                    .items.as_ref().unwrap().iter().any(|item|
+                    .items.iter().flatten().any(|item|
                         item.status == agent_protocol::execution::ItemStatus::Completed
-                        && item.is_deferred()
-                        && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {output, exit_code:None, ..} if output == "background done"))
+                        && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution { output, exit_code:None, .. } if output == "background stdout\n"))
             }).await;
-            let turn = &snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[1];
-            assert_eq!(turn.status, TurnStatus::Running);
-            store
-                .dispatch(Intent::ReadItem(op::ReadItem {
-                    thread_id: id.clone(),
-                    turn_id: turn.id.clone(),
-                    item_id: "tool-1".into(),
-                }))
-                .await
-                .unwrap();
-            let snapshot = store.snapshot();
-            assert!(
-                snapshot.panes.primary().error.is_none(),
-                "{:?}",
-                snapshot.panes.primary().error
+            assert_eq!(
+                snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[1].status,
+                TurnStatus::Running
             );
-            assert!(snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[1].items.as_ref().unwrap().iter().any(|item|
-                item.status == agent_protocol::execution::ItemStatus::Completed
-                && !item.is_deferred()
-                && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {output, exit_code:None, ..} if output == "background stdout\n")
-            ), "expanded background work must recover native output while its turn is still running");
             std::fs::remove_file(root.path().join("background-paused")).unwrap();
         }
         let snapshot = completed(&store, &id, 2, "completed").await;
@@ -2304,7 +2308,8 @@ async fn claude_responses_show_their_time_and_fork_from_the_selected_turn() {
             .iter()
             .any(|(fork, thread)| {
                 fork != &id
-                    && fork.provider == ProviderKind::Claude
+                    && fork.provider.is_none()
+                    && thread.active_provider == Some(ProviderKind::Claude)
                     && thread.turns.as_ref().is_some_and(|turns| turns.len() == 1)
             })
     })
@@ -2431,7 +2436,7 @@ async fn claude_forks_a_completed_turn_while_a_later_turn_runs() {
     store
         .dispatch(Intent::Submit {
             thread_id: Some(id.clone()),
-            client_user_message_id: "running-fork-steer".into(),
+            client_user_message_id: input_id("running-fork-steer"),
             alternate: true,
         })
         .await
@@ -2539,7 +2544,7 @@ async fn claude_waits_on_a_background_shell_reports_in_a_new_turn_and_stop_ends_
     let thread = &snapshot.sessions.conversations[&id];
     assert_eq!(
         thread.active_turn_id(),
-        Some("background-shell-interrupted".into()),
+        Some(thread.turns.as_ref().unwrap()[2].id.clone()),
         "Stop targets the answered turn that left the shell running"
     );
     store
@@ -2551,6 +2556,10 @@ async fn claude_waits_on_a_background_shell_reports_in_a_new_turn_and_stop_ends_
         .unwrap();
     let snapshot = until(&store, |snapshot| {
         snapshot.sessions.conversations[&id].background.is_empty()
+            && snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[2]
+                .status
+                .label()
+                == "completed"
     })
     .await;
     let turn = &snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[2];
@@ -2629,19 +2638,39 @@ async fn claude_waits_on_its_background_roster_refuses_a_model_change_and_report
 
     store.dispatch(select("sonnet")).await.unwrap();
     draft(&store, "after the change").await;
-    let refused = store
+    store
         .dispatch(Intent::Submit {
             thread_id: Some(id.clone()),
-            client_user_message_id: "model-change".into(),
+            client_user_message_id: input_id("model-change"),
             alternate: false,
         })
         .await
-        .map(|_| ())
-        .unwrap_err()
-        .to_string();
+        .unwrap();
+    let snapshot = until(&store, |snapshot| {
+        snapshot.sessions.conversations[&id]
+            .preparations
+            .iter()
+            .any(|preparation| {
+                matches!(
+                    preparation.status,
+                    agent_protocol::session::PreparationStatus::Failed { .. }
+                )
+            })
+    })
+    .await;
+    let agent_protocol::session::PreparationStatus::Failed { error } =
+        &snapshot.sessions.conversations[&id]
+            .preparations
+            .first()
+            .unwrap()
+            .status
+    else {
+        unreachable!()
+    };
+    let refused = &error.message;
     let text = agent_core::presentation::error::error_text(
         agent_core::localization::UiLanguage::Japanese,
-        &refused,
+        refused,
     );
     assert_eq!(
         text.message,
@@ -2723,7 +2752,11 @@ async fn codex_waits_on_the_commands_and_subagents_its_turn_left_running() {
         "codex-background",
     )
     .await;
-    assert_eq!(id.provider, ProviderKind::Codex);
+    assert!(id.provider.is_none());
+    assert_eq!(
+        store.snapshot().sessions.conversations[&id].active_provider,
+        Some(ProviderKind::Codex)
+    );
     let roster = |snapshot: &Snapshot| {
         snapshot
             .sessions
@@ -2926,7 +2959,13 @@ async fn input_while_only_a_background_shell_runs_opens_the_turn_history_shows()
     let turns = snapshot.sessions.conversations[&id].turns.as_ref().unwrap();
     assert_eq!(turns.len(), 2, "{:?}", texts(&snapshot, &id));
     assert_eq!(turns[0].status.label(), "completed");
-    assert_eq!(turns[1].id, "while-background-shell".into());
+    assert!(
+        turns[1]
+            .items
+            .iter()
+            .flatten()
+            .any(|item| item.client_input_id.as_ref() == Some(&input_id("while-background-shell")))
+    );
     std::fs::remove_file(&paused).unwrap();
     let live = completed(&store, &id, 3, "completed").await;
     assert_eq!(
@@ -3021,21 +3060,23 @@ async fn claude_steers_a_running_turn_and_runs_queued_input_after_it() {
     );
     let local = fixture.local().await.unwrap();
     assert!(
-        local
-            .peer
-            .call(&rpc::Interrupt {
-                thread_id: id.clone(),
-                turn_id: "stale".into(),
-            })
-            .await
-            .is_err()
+        conversations::command(
+            &local.peer,
+            &id,
+            uuid::Uuid::new_v4(),
+            agent_protocol::conversation::Command::Interrupt {
+                turn: Some("stale".into())
+            }
+        )
+        .await
+        .is_err()
     );
     // The follow-up behavior queues; the alternate steers this one message.
     draft(&store, "follow-up").await;
     store
         .dispatch(Intent::Submit {
             thread_id: Some(id.clone()),
-            client_user_message_id: "steered".into(),
+            client_user_message_id: input_id("steered"),
             alternate: true,
         })
         .await
@@ -3053,7 +3094,7 @@ async fn claude_steers_a_running_turn_and_runs_queued_input_after_it() {
     assert_eq!(
         items
             .iter()
-            .filter(|item| item.client_input_id.as_deref() == Some("steered"))
+            .filter(|item| item.client_input_id.as_deref() == Some(input_id("steered").as_str()))
             .count(),
         1
     );
@@ -3106,7 +3147,7 @@ async fn claude_steers_a_running_turn_and_runs_queued_input_after_it() {
     assert!(
         items
             .iter()
-            .any(|item| item.client_input_id.as_deref() == Some("queued"))
+            .any(|item| item.client_input_id.as_deref() == Some(input_id("queued").as_str()))
     );
     assert!(
         items
@@ -3149,7 +3190,7 @@ async fn claude_steers_a_running_turn_and_runs_queued_input_after_it() {
             .iter()
             .map(|input| input.client_user_message_id.as_str())
             .collect::<Vec<_>>(),
-        ["queued-before-refresh"]
+        [input_id("queued-before-refresh").as_str()]
     );
     store
         .dispatch(Intent::Interrupt(op::Interrupt {
@@ -3226,27 +3267,21 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
     let missing = root.path().join("missing-claude-cli");
     let fixture = host(root.path(), Arc::new(Memory::default()), &missing).await;
     let local = fixture.local().await.unwrap();
-    let response = local
-        .peer
-        .call(&op::CreateSession {
-            initial_input: None,
-            provider: ProviderKind::Claude,
-            cwd: Some(root.path().to_string_lossy().into()),
-            model: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        response.response.model.unwrap(),
-        models::ModelRef {
-            provider: ProviderKind::Claude,
-            id: "default".into()
-        }
+    let response = conversations::created(
+        &local.peer,
+        conversations::create_request(
+            ProviderKind::Claude,
+            Some(root.path().to_string_lossy().into()),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        response.model.is_none(),
+        "selection is deferred until the first input"
     );
-    assert_eq!(
-        response.response.thread.id.unwrap().provider,
-        ProviderKind::Claude
-    );
+    assert_eq!(response.thread.id.unwrap().provider, None);
     local.close().await;
     fixture.close().await.unwrap();
 }

@@ -31,7 +31,6 @@ impl Page {
 struct State {
     chrome: Option<cdp::Chrome>,
     pages: HashMap<String, Page>,
-    aliases: HashMap<String, String>,
 }
 
 use agent_protocol::browser_native::Capture;
@@ -67,12 +66,6 @@ impl Browser {
         mcp::listen(&browser)?;
         Ok(browser)
     }
-    // A provider can assign the session ID after accepting its MCP configuration.
-    // Bind that startup scope before the first turn can run. Resume uses the ID directly.
-    pub async fn bind_scope(&self, scope: String, thread: String) {
-        self.state.lock().await.aliases.insert(scope, thread);
-    }
-
     pub async fn shutdown(&self) {
         self.stop.cancel();
         if let Some(chrome) = self.state.lock().await.chrome.take() {
@@ -195,16 +188,11 @@ impl Browser {
     ) -> Result<BrowserFrame, String> {
         super::validate_agent_action(&action)?;
         let mut state = self.state.lock().await;
-        let thread = state
-            .aliases
-            .get(thread)
-            .cloned()
-            .unwrap_or_else(|| thread.to_owned());
-        self.ensure(&mut state, &thread).await?;
-        let value = Self::action(&mut state, &thread, &action).await?;
+        self.ensure(&mut state, thread).await?;
+        let value = Self::action(&mut state, thread, &action).await?;
         Self::frame(
             &mut state,
-            &thread,
+            thread,
             if matches!(action, BrowserAction::Snapshot) {
                 Capture::Snapshot
             } else {

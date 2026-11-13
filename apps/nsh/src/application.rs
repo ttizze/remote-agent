@@ -169,30 +169,23 @@ impl State {
                 self.resolve_selection();
             }
             Update::Presentation { host, value } => {
-                let before = self.publications.get(&host).map(|p| {
-                    p.snapshot
-                        .panel_scope(host.clone(), p.context.navigation().draft_key)
-                });
-                if let Some(before) = before {
-                    let before = if let Some(session) =
-                        value.snapshot.submitted_session(before.draft.clone())
-                    {
-                        let submitted = value
-                            .snapshot
-                            .panel_scope(host.clone(), DraftKey::Session { session });
-                        self.panels = self.panels.clone().rekey(before, submitted.clone());
-                        submitted
-                    } else {
-                        before
-                    };
+                if let Some(previous) = self.publications.get(&host) {
+                    let before = previous
+                        .snapshot
+                        .panel_scope(host.clone(), previous.context.navigation().draft_key);
+                    let after = value
+                        .snapshot
+                        .panel_scope(host.clone(), value.context.navigation().draft_key);
+                    let welcome = value
+                        .snapshot
+                        .welcome_transition(before.draft.clone(), after.draft.clone());
                     self.panels = self.panels.clone().inherit_visibility(
                         before,
-                        value
-                            .snapshot
-                            .panel_scope(host.clone(), value.context.navigation().draft_key),
+                        after,
+                        value.context.navigation().thread_id.is_none(),
+                        welcome,
                     );
                 }
-                // Rekey and publication are one update, so every native view sees the same scope.
                 self.publications.insert(host, Shared(value));
             }
             Update::Error(reason) => self.failure = Some(reason),
@@ -776,6 +769,7 @@ impl Application {
         });
     }
 
+    #[cfg(desktop)]
     pub fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
         self.state.send_modify(|state| {
             let next = state.panels.clone().open_script(scope, cwd, command);
@@ -966,20 +960,129 @@ mod tests {
     }
 
     #[test]
-    fn submitting_a_draft_publishes_its_conversation_and_rekeyed_tabs_together() {
+    fn welcome_edit_moves_tools_once_and_send_or_rejection_keeps_the_scope() {
+        for send in [false, true] {
+            let mut snapshot = Snapshot::default();
+            snapshot.connection.storage_scope = "storage".into();
+            let draft = snapshot.panes.primary().navigation.draft_key.clone();
+            let host = "host".to_string();
+            let before = snapshot.panel_scope(host.clone(), draft);
+            let mut state = State::default();
+            state.receive(Update::Presentation {
+                host: host.clone(),
+                value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+            });
+            let opened = state
+                .panels
+                .clone()
+                .open(before.clone(), PanelKind::Browser, None);
+            state.panels = opened.panels;
+            snapshot = agent_core::state::reduce(
+                &snapshot,
+                "",
+                agent_core::state::Event::Intent(Intent::SetDraft {
+                    thread_id: before.draft.clone(),
+                    draft: agent_core::state::Draft {
+                        text: "welcome".into(),
+                        model: Some(agent_protocol::models::ModelRef {
+                            provider: ProviderKind::Codex,
+                            id: "fixture".into(),
+                        }),
+                        ..Default::default()
+                    },
+                }),
+            )
+            .0;
+            let stable = snapshot.panel_scope(
+                host.clone(),
+                snapshot.panes.primary().navigation.draft_key.clone(),
+            );
+            state.receive(Update::Presentation {
+                host: host.clone(),
+                value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+            });
+            assert_eq!(state.panels.get(stable.clone()).active, Some(opened.id));
+            assert!(state.panels.get(before.clone()).surfaces.is_empty());
+            let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+            let intent = if send {
+                Intent::Submit {
+                    thread_id: None,
+                    client_user_message_id: input.clone(),
+                    alternate: false,
+                }
+            } else {
+                Intent::NewChat { cwd: String::new() }
+            };
+            snapshot =
+                agent_core::state::reduce(&snapshot, "", agent_core::state::Event::Intent(intent))
+                    .0;
+            let after = snapshot.panel_scope(
+                host.clone(),
+                snapshot.panes.primary().navigation.draft_key.clone(),
+            );
+            state.receive(Update::Presentation {
+                host: host.clone(),
+                value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+            });
+            if send {
+                assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
+                assert!(state.panels.get(before.clone()).surfaces.is_empty());
+                let pending_navigation = snapshot.panes.primary().navigation.clone();
+                snapshot = agent_core::state::reduce(
+                    &snapshot,
+                    "",
+                    agent_core::state::Event::Intent(Intent::ShowThreadList),
+                )
+                .0;
+                state.receive(Update::Presentation {
+                    host: host.clone(),
+                    value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+                });
+                let separate = state
+                    .panels
+                    .clone()
+                    .open(before.clone(), PanelKind::Terminal, None);
+                state.panels = separate.panels;
+                assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
+                Arc::make_mut(snapshot.panes.primary_mut()).navigation = pending_navigation;
+                state.receive(Update::Presentation {
+                    host: host.clone(),
+                    value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+                });
+                assert_eq!(state.panels.get(before.clone()).active, Some(separate.id));
+                assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
+                snapshot = agent_core::state::reduce(
+                    &snapshot,
+                    "",
+                    agent_core::state::Event::SubmissionFailed(input),
+                )
+                .0;
+                state.receive(Update::Presentation {
+                    host,
+                    value: Presentation::project(Arc::new(snapshot), "", None).unwrap(),
+                });
+                assert_eq!(state.panels.get(after).active, Some(opened.id));
+                assert_eq!(state.panels.get(before).active, Some(separate.id));
+            } else {
+                assert_eq!(state.panels.get(stable).active, Some(opened.id));
+                assert!(state.panels.get(after).surfaces.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn submitting_a_draft_keeps_its_panel_scope_and_tabs() {
         for navigate_to_new_chat in [false, true] {
             let mut snapshot = Snapshot::default();
             snapshot.connection.storage_scope = "storage".into();
+            let session =
+                SessionRef::new(None, "00000000-0000-0000-0000-000000000001".into()).unwrap();
+            Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
+                DraftKey::from(&session);
             let initial = Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap();
             let draft = initial.context.navigation().draft_key;
-            let before = snapshot.panel_scope("host".into(), draft.clone());
-            let session = SessionRef::new(ProviderKind::Codex, "submitted".into()).unwrap();
-            let after = snapshot.panel_scope(
-                "host".into(),
-                DraftKey::Session {
-                    session: session.clone(),
-                },
-            );
+            let before = snapshot.panel_scope("host".into(), draft);
+            let after = before.clone();
             let mut state = State::default();
             state.receive(Update::Presentation {
                 host: "host".into(),
@@ -992,7 +1095,16 @@ mod tests {
             );
             state.panels = opened.panels;
             let retained = state.clone();
-            Arc::make_mut(&mut snapshot.sessions.draft_sessions).insert(draft, session.clone());
+            Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+                session.clone(),
+                Arc::new(agent_protocol::models::Thread {
+                    id: Some(session.clone()),
+                    active_provider: Some(ProviderKind::Codex),
+                    ..Default::default()
+                }),
+            );
+            Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).thread_id =
+                (!navigate_to_new_chat).then(|| session.clone());
             let selected = if navigate_to_new_chat {
                 DraftKey::from("next-draft")
             } else {
@@ -1005,7 +1117,6 @@ mod tests {
                 value: Presentation::project(Arc::new(snapshot), "", None).unwrap(),
             });
             assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
-            assert!(state.panels.get(before.clone()).surfaces.is_empty());
             assert_eq!(
                 state.publications["host"].pane().navigation.draft_key,
                 selected
@@ -1149,10 +1260,11 @@ mod tests {
             serde_json::from_value(serde_json::json!({
             "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]},
                          {"id":"other", "name":"Other", "roots":[{"path":"/other"}]}],
-                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":false
             }))
             .unwrap(),
         ));
+        crate::seed_catalog(&mut snapshot);
         snapshot = reduce(
             &snapshot,
             "",
@@ -1282,6 +1394,7 @@ mod tests {
         Arc::make_mut(snapshot.lists.threads.as_mut().unwrap())
             .projects
             .retain(|project| project.id != "repo");
+        crate::seed_catalog(&mut snapshot);
         snapshot = reduce(
             &snapshot,
             "",
@@ -1297,6 +1410,7 @@ mod tests {
                 .unwrap();
         assert_eq!(saved, in_project);
         Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).projects = projects;
+        crate::seed_catalog(&mut snapshot);
         publish(&snapshot);
         assert_eq!(application.snapshot().sidebar_projects, in_project);
         snapshot = reduce(
@@ -1349,14 +1463,14 @@ mod tests {
                          {"id":"other", "name":"Other", "roots":[{"path":"/other"}]}],
             "data": [{"id":{"provider":"codex", "id":"repo-chat"}, "projectId":"repo", "cwd":"/repo"},
                      {"id":{"provider":"codex", "id":"old-chat"}, "projectId":"other", "cwd":"/other"}],
-            "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+            "limit":60, "hasMore":false, "hasMoreProjects":false
         })).unwrap()));
         let target = SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "repo-chat".into(),
         };
         let old = SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: "old-chat".into(),
         };
         let a = reduce(

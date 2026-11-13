@@ -56,16 +56,6 @@ impl<'a> ChatPlacements<'a> {
     }
 }
 
-pub(crate) fn chat_placement<'a>(
-    preferences: Option<&'a BTreeMap<String, ProjectPreferences>>,
-    id: &crate::session::SessionRef,
-) -> Option<&'a str> {
-    preferences?
-        .iter()
-        .find(|(_, p)| p.placed_chats.iter().any(|chat| &chat.id == id))
-        .map(|(project, _)| project.as_str())
-}
-
 pub(crate) fn project_chat_visible(
     archived_before: Option<i64>,
     archived_ids: Option<&BTreeSet<crate::session::SessionRef>>,
@@ -262,7 +252,7 @@ mod tests {
     fn fixture() -> Snapshot {
         let list: ThreadList = serde_json::from_value(json!({
             "data":[],"projects":[{"id":"a","name":"Alpha","roots":[{"path":"C:/alpha"}]},{"id":"b","name":"Beta","roots":[]}],
-            "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
+            "hasMore":false,"hasMoreProjects":false,"limit":5
         })).unwrap();
         Snapshot {
             connection: crate::state::Connection {
@@ -497,7 +487,7 @@ mod tests {
         claude.name = Some("Searchable task".into());
         claude.project_id = crate::models::ProjectMembership::Unassigned {};
         let mut codex = claude.clone();
-        codex.id.as_mut().unwrap().provider = crate::session::ProviderKind::Codex;
+        codex.id.as_mut().unwrap().provider = Some(crate::session::ProviderKind::Codex);
         let id = claude.id.clone().unwrap();
         Arc::make_mut(s.lists.threads.as_mut().unwrap()).data = vec![claude, codex];
         let s = dispatch(
@@ -518,7 +508,7 @@ mod tests {
         assert_eq!(list.threads.len(), 1);
         assert_eq!(
             list.threads[0].id.provider,
-            crate::session::ProviderKind::Codex
+            Some(crate::session::ProviderKind::Codex)
         );
         assert_eq!(
             list.projects[1].threads[0].id, id,

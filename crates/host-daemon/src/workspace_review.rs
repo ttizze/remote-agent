@@ -209,9 +209,13 @@ mod tests {
             .await
             .unwrap();
         let task = store
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let branch = git(&task, &["branch", "--show-current"]).trim().to_owned();
         let key = comparison::base_key(&branch);

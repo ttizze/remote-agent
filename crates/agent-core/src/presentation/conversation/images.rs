@@ -133,6 +133,7 @@ mod tests {
                         "command".into(),
                         models::ItemStatus::Completed,
                         models::ItemBody::CommandExecution {
+                            output_omitted: false,
                             command: "capture screenshots".into(),
                             cwd: None,
                             output: String::new(),
@@ -364,6 +365,7 @@ mod tests {
             "command".into(),
             models::ItemStatus::Completed,
             models::ItemBody::CommandExecution {
+                output_omitted: false,
                 command: "pwd".into(),
                 cwd: None,
                 output: String::new(),

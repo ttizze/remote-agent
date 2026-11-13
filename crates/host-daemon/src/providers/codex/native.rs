@@ -224,9 +224,9 @@ fn message_parts(value: Value) -> Vec<MessagePart> {
                     path: take_string(&mut part, "path"),
                 },
                 Some("mention")
-                    if part["path"].as_str().is_some_and(|path| {
-                        path.starts_with("plugin://") || path.starts_with("app://")
-                    }) =>
+                    if part["path"]
+                        .as_str()
+                        .is_some_and(agent_protocol::composer::is_plugin_path) =>
                 {
                     MessagePart::Invocation {
                         name: take_string(&mut part, "name"),
@@ -390,6 +390,7 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
             summary: parts(take_value(&mut value, "summary")),
         },
         "commandExecution" => ItemBody::CommandExecution {
+            output_omitted: false,
             command: take_string(&mut value, "command"),
             cwd: field(&value, "cwd")?,
             output: take_string(&mut value, "aggregatedOutput"),
@@ -442,7 +443,7 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
             model: field(&value, "model")?,
             effort: field(&value, "reasoningEffort")?,
             sender: value["senderThreadId"].as_str().map(|id| SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: id.into(),
             }),
             receivers: value["receiverThreadIds"]
@@ -452,7 +453,7 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
                 .filter_map(Value::as_str)
                 .chain(value["agentThreadId"].as_str())
                 .map(|id| SessionRef {
-                    provider: ProviderKind::Codex,
+                    provider: Some(ProviderKind::Codex),
                     id: id.into(),
                 })
                 .collect(),
@@ -462,7 +463,7 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
                 .flat_map(|fields| fields.iter())
                 .map(|(id, state)| SubagentState {
                     session: SessionRef {
-                        provider: ProviderKind::Codex,
+                        provider: Some(ProviderKind::Codex),
                         id: id.clone(),
                     },
                     status: turn_status(state["status"].as_str()),
@@ -607,7 +608,6 @@ pub(crate) fn parse_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
                     .collect()
             })
             .transpose()?,
-        items_summary: value["itemsView"] == "summary",
         started_at: field(&value, "startedAt")?,
         duration_ms: field(&value, "durationMs")?,
         error: value
@@ -1051,13 +1051,13 @@ mod tests {
         );
         let subagent = parse_item(json!({"id":"s","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"same","receiverThreadIds":["same"],"agentsStates":{"same":{"status":"pendingInit"}}})).unwrap();
         assert!(
-            matches!(subagent.body(),ItemBody::Subagent {states,..} if states[0].session.provider == ProviderKind::Codex && states[0].status == TurnStatus::Running)
+            matches!(subagent.body(),ItemBody::Subagent {states,..} if states[0].session.provider == Some(ProviderKind::Codex) && states[0].status == TurnStatus::Running)
         );
         let future = json!({"id":"u","type":"futureItem","unknown":[1,2,3]});
         let activity = parse_item(json!({"id":"activity","type":"subAgentActivity","status":"completed","kind":"started","agentThreadId":"child"})).unwrap();
         assert!(
             matches!(activity.body(), ItemBody::Subagent { receivers, .. }
-            if receivers == &vec![SessionRef {provider: ProviderKind::Codex, id:"child".into()}])
+            if receivers == &vec![SessionRef {provider: Some(ProviderKind::Codex), id:"child".into()}])
         );
         assert!(
             matches!(parse_item(future.clone()).unwrap().body(),ItemBody::Custom {value,..} if value == &future)

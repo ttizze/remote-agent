@@ -1017,6 +1017,7 @@ mod deferred_item_tests {
                 "command".into(),
                 ItemStatus::Completed,
                 ItemBody::CommandExecution {
+                    output_omitted: false,
                     command,
                     cwd: None,
                     output: "hidden output".repeat(100),

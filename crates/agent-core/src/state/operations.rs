@@ -4,7 +4,7 @@ use crate::{
     store::{Execution, Outcome},
 };
 use agent_protocol::operations as rpc;
-use rpc::{Input, Submission};
+use rpc::Input;
 
 macro_rules! no_input {
     () => {
@@ -44,6 +44,11 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    WatchCommandOutput {
+        thread_id: crate::session::SessionRef,
+        item_id: agent_protocol::ids::ItemId,
+        watching: bool,
+    },
     EnsureFileMetadata {
         paths: Vec<String>,
         now_ms: u64,
@@ -65,7 +70,6 @@ pub enum Intent {
     SetConnectionEnabled {
         enabled: bool,
     },
-    ReadTaskActivity(ReadTaskActivity),
     RegisterLiveActivity(RegisterLiveActivity),
     UnregisterLiveActivity(UnregisterLiveActivity),
     ReadPermissionSettings(ReadPermissionSettings),
@@ -114,8 +118,7 @@ pub enum Intent {
     UpdateWorktreeSettings(UpdateWorktreeSettings),
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
-    ListSessions(ListSessions),
-    ListProjectSessions(ListProjectSessions),
+    ListSessions(crate::models::ListQuery),
     ListAgents(ListAgents),
     WatchAgents {
         thread_id: Option<crate::session::SessionRef>,
@@ -181,7 +184,6 @@ pub enum Intent {
     ReadThread(ReadThread),
     OpenRequest(OpenRequest),
     ReadItem(ReadItem),
-    LoadTurnItems(LoadTurnItems),
     ResizeTerminal(ResizeTerminal),
     Interrupt(Interrupt),
     ShowThreadList,
@@ -290,29 +292,48 @@ pub enum StalePolicy {
     Apply,
 }
 
+impl Intent {
+    pub(super) fn editing_draft(&mut self) -> Option<&mut DraftKey> {
+        match self {
+            Self::SetDraft { thread_id, .. }
+            | Self::SelectWorkspace { thread_id, .. }
+            | Self::EditComposer { thread_id, .. }
+            | Self::AppendTranscript { thread_id, .. }
+            | Self::InsertInvocation { thread_id, .. }
+            | Self::SetDraftText { thread_id, .. }
+            | Self::QuoteSelection { thread_id, .. }
+            | Self::SelectModel { thread_id, .. }
+            | Self::SelectEffort { thread_id, .. }
+            | Self::SelectServiceTier { thread_id, .. } => Some(thread_id),
+            Self::UploadAttachment(upload) => Some(&mut upload.draft_key),
+            Self::Transcribe(dictate) => Some(&mut dictate.draft_key),
+            Self::SelectAccountForDraft(account) => Some(&mut account.thread_id),
+            Self::StartAccountLogin(login) => login.thread_id.as_mut(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    InputRecovery {
+        input: agent_protocol::ids::ClientInputId,
+    },
+    CommandOutput {
+        session: crate::session::SessionRef,
+        item: agent_protocol::ids::ItemId,
+    },
     ProjectScan,
     ProjectImport,
-    TaskActivity,
     LiveActivity {
         activity_id: Option<String>,
-    },
-    TurnItems {
-        session: crate::session::SessionRef,
-        turn: agent_protocol::ids::TurnId,
     },
     ListDecorations {
         scope: agent_protocol::operations::ListDecorationScope,
     },
     SessionList,
-    SessionPage {
-        part: crate::models::ListPart,
-    },
-    ProjectList {
-        project_id: String,
-    },
+    ListSearch,
     Agents {
         session: crate::session::SessionRef,
     },
@@ -429,10 +450,6 @@ impl OperationKey {
             _ => None,
         }
     }
-
-    pub(crate) fn list(part: Option<crate::models::ListPart>) -> Self {
-        part.map_or(Self::SessionList, |part| Self::SessionPage { part })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -442,9 +459,7 @@ pub enum Scheduling {
     /// Host-owned state for the whole connection: navigation never makes it
     /// stale, and only the newest read of the key runs.
     LatestHostState(OperationKey),
-    LatestList(Option<crate::models::ListPart>),
     LatestAgents(crate::session::SessionRef),
-    LatestProject(String),
     LatestReview,
     Item(ReadItem),
     Terminal {
@@ -457,10 +472,6 @@ impl Scheduling {
     pub(crate) fn latest_key(&self, pane: &str) -> Option<OperationKey> {
         let key = match self {
             Self::LatestHostState(key) => Some(key.clone()),
-            Self::LatestList(part) => Some(OperationKey::list(*part)),
-            Self::LatestProject(project_id) => Some(OperationKey::ProjectList {
-                project_id: project_id.clone(),
-            }),
             Self::LatestAgents(session) => Some(OperationKey::Agents {
                 session: session.clone(),
             }),
@@ -489,6 +500,11 @@ impl Scheduling {
 
 /// Typed state application after Store checks the navigation epoch or list query.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
+    fn subscription_scope(
+        &self,
+    ) -> Option<agent_protocol::sync::Scope<crate::session::SessionRef>> {
+        None
+    }
     type Input: Send + std::fmt::Debug + 'static;
     fn capture(&self, snapshot: &Snapshot, pane_id: &str) -> Result<Self::Input, PeerError>;
     fn key(&self) -> Option<OperationKey> {
@@ -512,12 +528,8 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     /// an account login. Only results that select or replace a pane's content
     /// follow its navigation.
     fn navigation_bound(&self) -> bool {
-        !matches!(
-            self.scheduling(),
-            Scheduling::LatestHostState(_)
-                | Scheduling::LatestList(_)
-                | Scheduling::LatestProject(_)
-        ) && !matches!(self.key(), Some(OperationKey::AccountLogin { .. }))
+        !matches!(self.scheduling(), Scheduling::LatestHostState(_))
+            && !matches!(self.key(), Some(OperationKey::AccountLogin { .. }))
     }
     fn run(
         &self,

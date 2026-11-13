@@ -295,7 +295,7 @@ mod tests {
 
     fn session() -> SessionRef {
         SessionRef {
-            provider: ProviderKind::Claude,
+            provider: Some(ProviderKind::Claude),
             id: "thread".into(),
         }
     }

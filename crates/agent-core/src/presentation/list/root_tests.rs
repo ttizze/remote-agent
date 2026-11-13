@@ -24,7 +24,7 @@ fn standalone_rows_keep_unknown_memberships_while_recent_chats_include_assigned_
                     {"name":"No identity"}
                 ],
                 "projects":[{"id":"native","name":"Native","roots":[]},{"id":"","name":"Empty native ID","roots":[]}],
-                "hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":10
+                "hasMore":true,"hasMoreProjects":false,"limit":10
             })).unwrap())),
             ..Default::default()
         },

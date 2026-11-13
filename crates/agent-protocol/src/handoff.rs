@@ -87,59 +87,63 @@ impl Message {
         turn.items
             .iter()
             .flatten()
-            .filter_map(move |item| {
-                let (role, text) = match item.body() {
-                    ItemBody::UserMessage { text, content } => (
-                        Role::User,
-                        text.clone().unwrap_or_else(|| {
-                            content
-                                .iter()
-                                .filter_map(|part| match part {
-                                    MessagePart::Text { text } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }),
-                    ),
-                    ItemBody::AssistantText { text, .. } => (Role::Assistant, text.clone()),
-                    ItemBody::CommandExecution {
-                        command,
-                        output,
-                        exit_code,
-                        ..
-                    } => (
-                        Role::Assistant,
-                        format!("Command: {command}\nExit code: {exit_code:?}\n{output}"),
-                    ),
-                    ItemBody::FileChange { changes, .. } => (
-                        Role::Assistant,
-                        format!(
-                            "File changes: {}",
-                            changes
-                                .iter()
-                                .map(|change| change.path.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    ),
-                    ItemBody::Plan { text } => (Role::Assistant, text.clone()),
-                    _ => return None,
-                };
-                (!text.is_empty()).then(|| Self {
-                    role,
-                    text,
-                    source: format!(
-                        "turn={}, item={}, status={:?}",
-                        turn.id, item.id, turn.status
-                    ),
-                })
-            })
+            .filter(|item| !item.is_deferred())
+            .filter_map(move |item| Self::from_item(turn, item))
+            .filter(|message| !message.text.is_empty())
             .chain(turn.error.iter().map(move |error| Self {
                 role: Role::Assistant,
                 text: format!("Previous turn failed: {}", error.message),
                 source: format!("turn={}, status={:?}", turn.id, turn.status),
             }))
+    }
+
+    pub fn from_item(turn: &Turn, item: &crate::models::Item) -> Option<Self> {
+        let (role, text) = match item.body() {
+            ItemBody::UserMessage { text, content } => (
+                Role::User,
+                text.clone().unwrap_or_else(|| {
+                    content
+                        .iter()
+                        .filter_map(|part| match part {
+                            MessagePart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }),
+            ),
+            ItemBody::AssistantText { text, .. } => (Role::Assistant, text.clone()),
+            ItemBody::CommandExecution {
+                command,
+                output,
+                exit_code,
+                ..
+            } => (
+                Role::Assistant,
+                format!("Command: {command}\nExit code: {exit_code:?}\n{output}"),
+            ),
+            ItemBody::FileChange { changes, .. } => (
+                Role::Assistant,
+                format!(
+                    "File changes: {}",
+                    changes
+                        .iter()
+                        .map(|change| change.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ),
+            ItemBody::Plan { text } => (Role::Assistant, text.clone()),
+            _ => return None,
+        };
+        Some(Self {
+            role,
+            text,
+            source: format!(
+                "turn={}, item={}, status={:?}",
+                turn.id, item.id, turn.status
+            ),
+        })
     }
 
     fn render(&self) -> String {
@@ -578,12 +582,14 @@ mod tests {
         use std::sync::Arc;
         let bodies = [
             ItemBody::CommandExecution {
+                output_omitted: false,
                 command: "printf '🦀'".into(),
                 cwd: Some("ignored workspace".into()),
                 output: "stdout\nstderr".into(),
                 exit_code: Some(17),
             },
             ItemBody::CommandExecution {
+                output_omitted: false,
                 command: String::new(),
                 cwd: None,
                 output: String::new(),

@@ -185,7 +185,7 @@ final class LaunchUITests: XCTestCase {
 
     func simulatorTaskRowIdentifier(_ path: String) throws -> String {
         struct Session: Decodable {
-            let provider: String
+            let provider: String?
             let id: String
         }
 
@@ -195,7 +195,7 @@ final class LaunchUITests: XCTestCase {
 
         let response = try simulatorFixture(path, expectedStatus: 200, timeout: 15)
         let session = try JSONDecoder().decode(TaskIdentity.self, from: response).threadId
-        return "tasks.row.\(session.provider):\(session.id)"
+        return "tasks.row.\(session.provider ?? "bex"):\(session.id)"
     }
 
     func startSimulatorConversation(_ app: XCUIApplication, promptText: String) {

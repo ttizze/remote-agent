@@ -85,8 +85,6 @@ async fn main() {
         .install(&fixture, &directory)
         .unwrap()
     };
-    let projects = directory.join("bex-projects.json");
-    std::fs::write(&projects,serde_json::to_vec(&serde_json::json!([{"id":"simulator-project","name":"検証プロジェクト","roots":[{"path":workspace}],"createdAt":1,"updatedAt":1}])).unwrap()).unwrap();
     std::fs::write(directory.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
     let config = codex_app_server::AppServerConfig {
         program,
@@ -111,6 +109,9 @@ async fn main() {
     )
     .await
     .unwrap();
+    host.projects.replace_fixture_projects(&serde_json::from_value::<Vec<agent_protocol::models::Project>>(serde_json::json!([
+        {"id":"simulator-project","name":"検証プロジェクト","roots":[{"path":workspace}],"createdAt":1,"updatedAt":1}
+    ])).unwrap()).unwrap();
     if let Some(lease) = &lease {
         use host_daemon::CredentialStore;
         agent_local_host::save_private_bytes(
@@ -174,6 +175,7 @@ async fn main() {
     }
     let pairing = PairingServer::start(
         &directory,
+        host.projects.clone(),
         host.ticket.clone(),
         host.credentials.local_identity().await,
     )

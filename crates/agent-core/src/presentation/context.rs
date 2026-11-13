@@ -135,11 +135,11 @@ impl ConversationContext {
                     OperationKey::Fork {
                         session: target, ..
                     }
-                    | OperationKey::Rewind { session: target }
-                    | OperationKey::TurnItems {
+                    | OperationKey::Rewind { session: target } => Some(target) == session,
+                    OperationKey::Item { item } => Some(&item.thread_id) == session,
+                    OperationKey::CommandOutput {
                         session: target, ..
                     } => Some(target) == session,
-                    OperationKey::Item { item } => Some(&item.thread_id) == session,
                     OperationKey::Request { id } => session
                         .and_then(|id| snapshot.sessions.conversations.get(id))
                         .is_some_and(|thread| thread.requests.contains_key(id)),
@@ -175,8 +175,30 @@ impl ConversationContext {
     }
 }
 
+#[derive(Clone, Default, Debug, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ItemDetail {
+    pub loading: bool,
+    pub error: Option<super::error::ErrorText>,
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl ConversationContext {
+    pub fn item_detail(&self, item: crate::state::operations::ReadItem) -> ItemDetail {
+        let keys = [
+            OperationKey::Item { item: item.clone() },
+            OperationKey::CommandOutput {
+                session: item.thread_id,
+                item: item.item_id,
+            },
+        ];
+        ItemDetail {
+            loading: keys.iter().any(|key| self.operation_running(key)),
+            error: keys
+                .iter()
+                .find_map(|key| self.operation_error(key).cloned()),
+        }
+    }
     pub fn navigation(&self) -> Navigation {
         self.navigation.clone()
     }
@@ -240,15 +262,6 @@ impl ConversationContext {
         self.operation_error(&OperationKey::Fork { session, turn })
             .cloned()
     }
-    /// Why the work a folded turn expands to could not be loaded.
-    pub fn turn_items_error(
-        &self,
-        turn: agent_protocol::ids::TurnId,
-    ) -> Option<super::error::ErrorText> {
-        let session = self.navigation.thread_id.clone()?;
-        self.operation_error(&OperationKey::TurnItems { session, turn })
-            .cloned()
-    }
 }
 
 #[cfg(test)]
@@ -299,10 +312,6 @@ mod tests {
             session: selected.clone(),
             turn: "turn".into(),
         };
-        let turn_items = OperationKey::TurnItems {
-            session: selected.clone(),
-            turn: "turn".into(),
-        };
         let item = OperationKey::Item {
             item: ReadItem {
                 thread_id: selected,
@@ -313,7 +322,7 @@ mod tests {
         let request = OperationKey::Request {
             id: "request".into(),
         };
-        for key in [&fork, &turn_items, &item, &request] {
+        for key in [&fork, &item, &request] {
             Arc::make_mut(&mut snapshot.operations).insert(
                 key.clone(),
                 OperationState {
@@ -329,7 +338,7 @@ mod tests {
             "questions use the composer's field"
         );
         assert_eq!(initial.docked[0].id.as_str(), "request");
-        for key in [&fork, &turn_items, &item, &request] {
+        for key in [&fork, &item, &request] {
             assert!(initial.operation_running(key));
             assert!(initial.operation_error(key).is_none());
         }
@@ -340,10 +349,6 @@ mod tests {
 
         for key in [
             OperationKey::Fork {
-                session: other.clone(),
-                turn: "turn".into(),
-            },
-            OperationKey::TurnItems {
                 session: other.clone(),
                 turn: "turn".into(),
             },
@@ -374,7 +379,7 @@ mod tests {
             assert!(Arc::ptr_eq(&initial, &next));
             assert!(!next.operation_running(&key));
         }
-        for key in [&fork, &turn_items, &item, &request] {
+        for key in [&fork, &item, &request] {
             Arc::make_mut(&mut snapshot.operations)
                 .get_mut(key)
                 .unwrap()
@@ -384,7 +389,7 @@ mod tests {
             &initial,
             &ConversationContext::project(&snapshot, snapshot.panes.primary(), "", Some(&initial)),
         ));
-        for key in [&fork, &turn_items, &item, &request] {
+        for key in [&fork, &item, &request] {
             Arc::make_mut(&mut snapshot.operations)
                 .get_mut(key)
                 .unwrap()
@@ -394,7 +399,7 @@ mod tests {
         }
         let failed =
             ConversationContext::project(&snapshot, snapshot.panes.primary(), "", Some(&initial));
-        for key in [&fork, &turn_items, &item, &request] {
+        for key in [&fork, &item, &request] {
             assert!(!failed.operation_running(key));
             assert_eq!(
                 failed.operation_error(key),
@@ -402,14 +407,12 @@ mod tests {
             );
         }
         assert!(failed.fork_error("turn".into()).is_some());
-        assert!(failed.turn_items_error("turn".into()).is_some());
         Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).thread_id = None;
         let empty =
             ConversationContext::project(&snapshot, snapshot.panes.primary(), "", Some(&failed));
         assert!(empty.fork_phase("turn".into()).is_none());
         assert!(empty.fork_error("turn".into()).is_none());
-        assert!(empty.turn_items_error("turn".into()).is_none());
-        for key in [&fork, &turn_items, &item, &request] {
+        for key in [&fork, &item, &request] {
             assert!(empty.operation_error(key).is_none());
         }
     }
@@ -433,7 +436,7 @@ mod chrome_tests {
         let mut snapshot = Snapshot::default();
         snapshot.lists.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
-                "limit": 20, "data": [], "hasMore": false, "hasMoreProjects": false, "projectPages": {},
+                "limit": 20, "data": [], "hasMore": false, "hasMoreProjects": false,
                 "projects": [{"id": "p", "name": "Bex app", "roots": [{"path": "/work/bex"}, {"path": "/work/other"}], "icon": null}],
             }))
             .unwrap(),
@@ -561,5 +564,50 @@ mod opening_tests {
         Arc::make_mut(&mut snapshot.sessions.conversations)
             .insert(session, Arc::new(models::Thread::default()));
         assert_eq!(opening(&snapshot), None, "its history shows instead");
+    }
+    #[test]
+    fn command_output_loading_and_failure_are_visible_in_its_own_detail() {
+        use crate::state::operations::{OperationState, ReadItem};
+        let session = SessionRef::new(ProviderKind::Codex, "output".into()).unwrap();
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(snapshot.panes.primary_mut()).navigation = Arc::new(Navigation {
+            thread_id: Some(session.clone()),
+            ..Default::default()
+        });
+        let item = ReadItem {
+            thread_id: session.clone(),
+            turn_id: "turn".into(),
+            item_id: "command".into(),
+        };
+        let key = OperationKey::CommandOutput {
+            session,
+            item: item.item_id.clone(),
+        };
+        for phase in [
+            OperationPhase::Running,
+            OperationPhase::Failed {
+                message: "cannot load output".into(),
+            },
+        ] {
+            Arc::make_mut(&mut snapshot.operations).insert(
+                key.clone(),
+                OperationState {
+                    generation: 1,
+                    phase: phase.clone(),
+                },
+            );
+            let context =
+                ConversationContext::project(&snapshot, snapshot.panes.primary(), "", None);
+            let detail = context.item_detail(item.clone());
+            assert_eq!(detail.loading, phase == OperationPhase::Running);
+            assert_eq!(detail.error, snapshot.operation_error(key.clone()));
+            assert_eq!(
+                context.item_detail(ReadItem {
+                    item_id: "other".into(),
+                    ..item.clone()
+                }),
+                ItemDetail::default()
+            );
+        }
     }
 }

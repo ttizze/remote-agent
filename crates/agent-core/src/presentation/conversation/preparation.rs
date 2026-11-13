@@ -7,7 +7,7 @@ pub(super) fn project(
     thread: &models::Thread,
     setup: &WorkspaceSetup,
 ) -> PreparationPresentation {
-    let startup = thread.preparation.as_ref();
+    let startup = thread.preparations.first();
     let script_failed = setup.stages.iter().any(|stage| {
         stage.id == SetupStageId::SetupScript && stage.status == SetupStageStatus::Failed
     });
@@ -28,6 +28,7 @@ pub(super) fn project(
         })
         .map(|startup| agent_protocol::operations::RetryPreparation {
             thread_id: startup.submission.thread_id.clone(),
+            input_id: startup.submission.client_user_message_id.clone(),
             work_locally: false,
         });
     let cancel = startup
@@ -53,6 +54,7 @@ pub(super) fn project(
         })
         .map(|startup| agent_protocol::operations::RetryPreparation {
             thread_id: startup.submission.thread_id.clone(),
+            input_id: startup.submission.client_user_message_id.clone(),
             work_locally: true,
         });
     let steps = setup
@@ -173,7 +175,7 @@ mod tests {
         let id = SessionRef::new(ProviderKind::Codex, "admitted".into()).unwrap();
         models::Thread {
             id: Some(id.clone()),
-            preparation: Some(SessionPreparation {
+            preparations: vec![SessionPreparation {
                 submission: Submission {
                     thread_id: id,
                     client_user_message_id: "initial".into(),
@@ -185,7 +187,7 @@ mod tests {
                 },
                 status: PreparationStatus::Preparing,
                 stage: PreparationStage::Worktree,
-            }),
+            }],
             ..Default::default()
         }
     }
@@ -227,18 +229,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Branch", "Base", "Path"]
         );
-        source.preparation.as_mut().unwrap().status = PreparationStatus::Unknown;
+        source.preparations.first_mut().unwrap().status = PreparationStatus::Unknown;
         let uncertain = project(UiLanguage::English, &source, &setup);
         assert!(uncertain.cancel.is_none());
         assert!(uncertain.retry.is_none());
         assert!(uncertain.work_locally.is_none());
+        for status in [
+            PreparationStatus::Interrupted,
+            PreparationStatus::Failed {
+                error: Default::default(),
+            },
+        ] {
+            source.preparations.first_mut().unwrap().status = status;
+            let stopped = project(UiLanguage::English, &source, &setup);
+            assert!(stopped.retry.is_some());
+            assert!(stopped.work_locally.unwrap().work_locally);
+            assert!(stopped.cancel.is_none());
+        }
     }
 
     #[test]
     fn script_failure_after_agent_start_remains_visible_as_a_completed_warning_and_elapsed_time_freezes()
      {
         let mut source = thread();
-        source.preparation = None;
+        source.preparations.clear();
         source.turns = Some(vec![Arc::new(models::Turn {
             status: models::TurnStatus::Running,
             ..Default::default()
