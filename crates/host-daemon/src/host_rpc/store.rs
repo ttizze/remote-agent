@@ -897,7 +897,7 @@ mod tests {
                 params![
                     session.provider.key(),
                     session.id,
-                    protocol::encode(&history(vec![])).unwrap()
+                    protocol::encode(history(vec![])).unwrap()
                 ],
             )
             .unwrap();
@@ -907,7 +907,7 @@ mod tests {
                 params![
                     session.provider.key(),
                     session.id,
-                    protocol::encode(&turn("t", &["i"], TurnStatus::Completed)).unwrap()
+                    protocol::encode(turn("t", &["i"], TurnStatus::Completed)).unwrap()
                 ],
             )
             .unwrap();
