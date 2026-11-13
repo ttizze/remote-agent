@@ -19,6 +19,9 @@
 //! first (after editing T3 steps or selectors).
 //! The default compares element presence only. `--appearance` also measures
 //! position, size, colours, typography, corner radii and animation metadata.
+//! `--catalog` lists the complete source-derived T3 component checklist without
+//! building or launching either client.
+mod catalog;
 mod compare;
 mod inventory;
 mod manifest;
@@ -62,6 +65,9 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     // T3's server runs the Codex relay from its own checkout: paths are absolute.
     let existing = existing.map(|run| cwd.join(run));
     let target = nsh_acceptance::target(&cwd);
+    if matches!(arguments, [flag] if flag == "--catalog") {
+        return catalog::write(&cwd, &target);
+    }
     let map = Map::parse(&fs::read_to_string(cwd.join(MAP))?)
         .map_err(|error| format!("{MAP}: {error}"))?;
     let states = select(&map, filters)?;

@@ -59,14 +59,15 @@ nsh-acceptance *scenarios:
 # Compare the Mac app with the installed T3 Code state by state (apps/nsh/parity/map.toml);
 # T3_CODE_APP names the app (the Nightly by default) and T3_CODE_ROOT a checkout with its
 # dependencies installed, for Playwright and the Codex schema. `--compare RUN` measures a run
-# again. Presence only by default; --appearance adds visual metrics.
+# again. --catalog lists every source-derived T3 conversation component.
+# Presence only by default; --appearance adds visual metrics.
 # Only on request, as nsh-acceptance. Report: target/nsh-parity/run-*/report.md.
 nsh-parity *args:
     #!/usr/bin/env bash
     set -euo pipefail
     agent_parity_action=${1-}
     if [[ $agent_parity_action == --appearance ]]; then agent_parity_action=${2-}; fi
-    if [[ $agent_parity_action != --compare && $agent_parity_action != --t3 ]]; then
+    if [[ $agent_parity_action != --compare && $agent_parity_action != --t3 && $agent_parity_action != --catalog ]]; then
         AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
         cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
     fi
