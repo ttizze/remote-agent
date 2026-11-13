@@ -4,6 +4,8 @@ use crate::Result;
 use serde::Deserialize;
 use std::{fs, path::Path};
 
+mod implementation;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Catalog {
@@ -85,6 +87,7 @@ pub fn write(cwd: &Path, target: &Path) -> Result<()> {
     fs::create_dir_all(&directory)?;
     let path = directory.join("components.md");
     fs::write(&path, report)?;
+    implementation::write(cwd, &directory, &catalog)?;
     println!(
         "T3 source inventory: {}\n{} component groups",
         path.display(),

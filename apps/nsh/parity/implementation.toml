@@ -1,0 +1,1155 @@
+# Code-presence assessment joined to components.toml by component ID.
+# present covers the named elements; partial names concrete gaps in detail.
+# Pure UI state does not require a new shared Rust business model.
+# This file is not a record of runtime acceptance results.
+
+revision = "32814543279df08cf387dbf14d68f7d43af00ce1"
+
+[sources]
+agents = "crates/agent-core/src/presentation/agents.rs"
+background = "crates/agent-core/src/presentation/background_work.rs"
+body = "crates/agent-core/src/presentation/body.rs"
+bridge = "apps/nsh/src/conversation/native.rs"
+completion = "crates/agent-core/src/composer.rs"
+composer = "crates/agent-core/src/presentation/composer.rs"
+desktop_background = "apps/nsh/src/background_work.rs"
+desktop_card = "apps/nsh/src/desktop_workspace/card.rs"
+desktop_composer = "apps/nsh/src/composer.rs"
+desktop_details = "apps/nsh/src/details.rs"
+desktop_dictation = "apps/nsh/src/dictation.rs"
+desktop_find = "apps/nsh/src/find.rs"
+desktop_header = "apps/nsh/src/sidebar.rs"
+desktop_history = "apps/nsh/src/conversation.rs"
+desktop_media = "apps/nsh/src/media.rs"
+desktop_models = "apps/nsh/src/model_controls.rs"
+desktop_notices = "apps/nsh/src/notices.rs"
+desktop_permissions = "apps/nsh/src/permissions.rs"
+desktop_plans = "apps/nsh/src/plans.rs"
+desktop_queue = "apps/nsh/src/queue.rs"
+desktop_requests = "apps/nsh/src/requests.rs"
+desktop_root = "apps/nsh/src/lib.rs"
+desktop_sidechat = "apps/nsh/src/side_chat.rs"
+desktop_terminal = "apps/nsh/src/terminal.rs"
+desktop_threads = "apps/nsh/src/threads.rs"
+desktop_workbench = "apps/nsh/src/workbench.rs"
+desktop_workspace = "apps/nsh/src/desktop_workspace.rs"
+diagram = "crates/agent-core/src/presentation/markdown/diagram.rs"
+dictation = "crates/agent-core/src/client/native.rs"
+diff = "crates/agent-core/src/presentation/diff.rs"
+editors = "crates/agent-core/src/presentation/editors.rs"
+error = "crates/agent-core/src/presentation/error.rs"
+execution = "crates/agent-protocol/src/execution.rs"
+file_actions = "crates/agent-core/src/presentation/files/actions.rs"
+files = "crates/agent-core/src/presentation/files/metadata.rs"
+history = "crates/agent-core/src/presentation/conversation/rows.rs"
+intents = "crates/agent-core/src/state/operations.rs"
+invocations = "crates/agent-protocol/src/composer.rs"
+iphone_activity = "apps/mobile/iosApp/Bex/ConversationActivity.swift"
+iphone_attachments = "apps/mobile/iosApp/Bex/ConversationAttachments.swift"
+iphone_composer = "apps/mobile/iosApp/Bex/ConversationComposer.swift"
+iphone_content = "apps/mobile/iosApp/Bex/ConversationMarkdownContent.swift"
+iphone_diff = "apps/mobile/iosApp/Bex/WorkspaceDetails.swift"
+iphone_history = "apps/mobile/iosApp/Bex/ConversationHistory.swift"
+iphone_html = "apps/mobile/iosApp/Bex/ConversationVisualization.swift"
+iphone_import = "apps/mobile/iosApp/Bex/ConversationMediaImport.swift"
+iphone_input = "apps/mobile/iosApp/Bex/ConversationComposerInput.swift"
+iphone_markdown = "apps/mobile/iosApp/Bex/ConversationMarkdown.swift"
+iphone_media = "apps/mobile/iosApp/Bex/ConversationMedia.swift"
+iphone_media_actions = "apps/mobile/iosApp/Bex/ConversationMediaPresentation.swift"
+iphone_models = "apps/mobile/iosApp/Bex/ModelSettingsSheet.swift"
+iphone_notices = "apps/mobile/iosApp/Bex/ErrorNotices.swift"
+iphone_queue = "apps/mobile/iosApp/Bex/ConversationQueue.swift"
+iphone_requests = "apps/mobile/iosApp/Bex/ConversationRequest.swift"
+iphone_rows = "apps/mobile/iosApp/Bex/ConversationRows.swift"
+iphone_screen = "apps/mobile/iosApp/Bex/ConversationScreen.swift"
+iphone_selection = "apps/mobile/iosApp/Bex/ConversationTextSelection.swift"
+iphone_sidechat = "apps/mobile/iosApp/Bex/ConversationSideChat.swift"
+iphone_workspace = "apps/mobile/iosApp/Bex/ConversationWorkspacePicker.swift"
+items = "crates/agent-protocol/src/items.rs"
+links = "crates/agent-core/src/presentation/markdown/links.rs"
+list = "crates/agent-core/src/presentation/list.rs"
+mac_body = "apps/nsh/apple/Sources/BexNshNative/TranscriptBody.swift"
+mac_rows = "apps/nsh/apple/Sources/BexNshNative/Conversation.swift"
+markdown = "crates/agent-core/src/presentation/markdown.rs"
+media = "crates/agent-core/src/presentation/media.rs"
+models = "crates/agent-protocol/src/models.rs"
+operations = "crates/agent-protocol/src/operations.rs"
+panels = "crates/agent-core/src/panels.rs"
+permissions = "crates/agent-core/src/presentation/permissions.rs"
+preparation = "crates/agent-core/src/presentation/conversation/preparation.rs"
+questions = "crates/agent-core/src/questions.rs"
+queue = "crates/agent-core/src/state/follow_up.rs"
+requests = "crates/agent-protocol/src/requests.rs"
+rows = "crates/agent-core/src/presentation/conversation.rs"
+search = "crates/agent-core/src/presentation/conversation/search.rs"
+settings = "crates/agent-core/src/presentation/model_settings.rs"
+shared_swift = "apps/native-ui/Sources/NativeUI/Conversation.swift"
+state = "crates/agent-core/src/state.rs"
+terminals = "crates/agent-core/src/presentation/terminals.rs"
+timeline = "crates/agent-core/src/presentation/conversation/timeline.rs"
+tools = "crates/agent-core/src/presentation/body/tool_output.rs"
+win_native = "apps/nsh/src/native/windows/conversation.rs"
+win_rows = "apps/nsh/src/native/windows/conversation/control.rs"
+workspace = "crates/agent-core/src/presentation/workspace.rs"
+
+[[implementation]]
+components = ["canvas"]
+phase = "local"
+next = "構成要素ごとの不足を以下の項目で直す。"
+rust = { status = "ui_only", detail = "画面の配置。各領域が使う状態は個別項目で判定する。", evidence = ["rows", "composer"] }
+mac = { status = "present", detail = "NSHのヘッダー・入力欄・通知領域とネイティブ会話領域がある。", evidence = ["desktop_root", "desktop_composer", "mac_rows"] }
+iphone = { status = "present", detail = "ThreadScreenに履歴・入力欄・通知領域がある。", evidence = ["iphone_screen", "iphone_composer"] }
+windows = { status = "present", detail = "NSHのヘッダー・入力欄・通知領域とWin32会話領域がある。", evidence = ["desktop_root", "desktop_composer", "win_rows"] }
+
+[[implementation]]
+components = ["draft"]
+phase = "local"
+next = "新規の共通状態は不要。"
+rust = { status = "present", detail = "新規下書き、プロジェクト・フォルダ選択、未選択の状態がある。", evidence = ["state", "composer", "workspace"] }
+mac = { status = "present", detail = "新規会話・プロジェクト選択・空表示がある。", evidence = ["desktop_root", "desktop_composer", "desktop_workspace"] }
+iphone = { status = "partial", detail = "新規会話・既存プロジェクト選択・プロジェクトなしの開始はある。新規会話見出し内のプロジェクト追加操作がない。", evidence = ["iphone_screen", "iphone_workspace"] }
+windows = { status = "present", detail = "新規会話・プロジェクト選択・空表示がある。", evidence = ["desktop_root", "desktop_composer", "desktop_workspace"] }
+
+[[implementation]]
+components = ["empty"]
+phase = "local"
+next = "iPhoneの空状態を既存の選択/一覧情報から表示する。"
+rust = { status = "present", detail = "会話未選択とプロジェクト一覧が空の状態がある。", evidence = ["state", "list"] }
+mac = { status = "present", detail = "会話未選択とプロジェクトなしの空表示がある。", evidence = ["desktop_root"] }
+iphone = { status = "partial", detail = "新規会話とプロジェクトなしの開始はある。T3の会話未選択/プロジェクトなしの専用表示に相当する案内が不足。", evidence = ["iphone_screen"] }
+windows = { status = "present", detail = "会話未選択とプロジェクトなしの空表示がある。", evidence = ["desktop_root"] }
+
+[[implementation]]
+components = ["history"]
+phase = "local"
+next = "既存の履歴取得を維持する。"
+rust = { status = "present", detail = "履歴カーソル、追加取得、取得中・失敗を保持する。", evidence = ["models", "history", "intents"] }
+mac = { status = "present", detail = "過去の履歴を追加取得し、取得中・失敗を表示する。", evidence = ["desktop_history"] }
+iphone = { status = "present", detail = "historyControlで追加取得・失敗・再試行を表示する。", evidence = ["iphone_history", "iphone_screen"] }
+windows = { status = "present", detail = "過去の履歴を追加取得し、取得中・失敗を表示する。", evidence = ["desktop_history"] }
+
+[[implementation]]
+components = ["turn-fold"]
+phase = "restore"
+next = "iPhoneも共通TurnRowの完了作業行を受け取る。"
+rust = { status = "present", detail = "完了作業のFoldと遅延取得・失敗の状態がある。", evidence = ["timeline", "history"] }
+mac = { status = "present", detail = "折りたたみ、時刻、遅延取得中・失敗を投影・表示する。", evidence = ["desktop_history", "bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "活動の開閉と詳細取得はある。共通TurnRow.Foldを使わず、同じ完了作業のまとめ行になっていない。", evidence = ["iphone_history", "iphone_rows", "iphone_activity"] }
+windows = { status = "present", detail = "FoldをWin32の見出し・開閉操作・時刻として表示する。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["attempt-fold"]
+phase = "shared"
+next = "共通側に試行の識別・履歴・取得状態を追加し、その行を各UIへ渡す。"
+rust = { status = "missing", detail = "再試行情報はあるが、steerで中断された試行を独立して保持・遅延取得する折りたたみ契約がない。", evidence = ["execution", "models", "timeline"] }
+mac = { status = "missing", detail = "試行単位の折りたたみ・Cut off by a steer行がない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "missing", detail = "試行単位の折りたたみ・取得中・失敗表示がない。", evidence = ["iphone_history"] }
+windows = { status = "missing", detail = "試行単位の折りたたみ・Cut off by a steer行がない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["minimap"]
+phase = "restore"
+next = "共通検索・位置情報を使ってiPhoneにUIを追加する。Windowsはネイティブ領域との重なりを直す。"
+rust = { status = "partial", detail = "発言位置のマーカー計算と現在範囲の判断はある。前/次の発言への移動の共通判断がない。", evidence = ["rows"] }
+mac = { status = "partial", detail = "発言ストリップ・現在位置・ホバープレビュー・任意位置移動はある。前/次の発言ボタンと狭幅専用表示がない。", evidence = ["desktop_history"] }
+iphone = { status = "missing", detail = "会話ミニマップのUIがない。", evidence = ["iphone_screen"] }
+windows = { status = "partial", detail = "NSHミニマップはある。前/次の発言ボタンと狭幅専用表示がなく、Win32領域との重なりに問題がある。", evidence = ["desktop_history", "win_native"] }
+
+[[implementation]]
+components = ["find"]
+phase = "shared"
+next = "一致計算を再利用し、全履歴検索フローを共通化する。iPhoneへUIを接続し、Windowsの重なりを直す。"
+rust = { status = "partial", detail = "リテラル/大小無視の一致範囲計算はある。会話全体の検索結果・未取得履歴の検索フローはNSHにも共通側にもない。", evidence = ["search", "history"] }
+mac = { status = "partial", detail = "読込済み本文の検索入力・件数・前後移動・終了はある。全履歴検索、検索中・失敗/再試行がない。", evidence = ["desktop_find"] }
+iphone = { status = "missing", detail = "会話内検索の入力欄と一致移動のUIがない。", evidence = ["iphone_screen", "iphone_history"] }
+windows = { status = "partial", detail = "読込済み本文のNSH検索とRichEdit位置移動はある。全履歴検索/取得中/失敗がなく、ネイティブ領域との重なりが未解決。", evidence = ["desktop_find", "win_native"] }
+
+[[implementation]]
+components = ["overlays"]
+phase = "local"
+next = "既存の未読情報をUIに渡し、ドロップ強調はUI側で実装する。"
+rust = { status = "ui_only", detail = "未読情報は既存一覧にある。ビューポートの最新位置・ドロップ強調はUI状態。", evidence = ["rows", "list"] }
+mac = { status = "present", detail = "最新位置への移動・件数・ドロップ先表示がある。", evidence = ["desktop_history", "desktop_composer"] }
+iphone = { status = "partial", detail = "最新位置へ戻る操作はある。デスクトップと同じ未読件数付きオーバーレイとファイルのドロップ強調がない。", evidence = ["iphone_screen", "iphone_attachments"] }
+windows = { status = "partial", detail = "NSHの最新位置・ドロップ表示はある。会話上オーバーレイのWin32との重なりを解消する必要がある。", evidence = ["desktop_history", "win_native"] }
+
+[[implementation]]
+components = ["announcement"]
+phase = "local"
+next = "各OSのアクセシビリティ通知へ接続する。"
+rust = { status = "ui_only", detail = "状態変化をOSアクセシビリティへ通知するUIの責務。", evidence = ["rows"] }
+mac = { status = "partial", detail = "行のアクセシビリティはある。T3の会話状態変化を通知する専用ライブ通知がない。", evidence = ["mac_rows"] }
+iphone = { status = "partial", detail = "読み上げ用ラベルはある。会話状態変化の専用アナウンスがない。", evidence = ["iphone_screen"] }
+windows = { status = "partial", detail = "ネイティブ要素のアクセシビリティはある。会話状態の専用ライブ通知がない。", evidence = ["win_native", "win_rows"] }
+
+[[implementation]]
+components = ["triage-draft"]
+phase = "extension"
+next = "調査用会話を製品機能として持たせるなら共通の開始データから追加する。"
+rust = { status = "missing", detail = "T3の不具合調査用会話の種別・CLI収集情報の契約がない。", evidence = ["state", "models", "operations"] }
+mac = { status = "missing", detail = "調査用の新規会話見出し・マシン情報・CLIコピーがない。", evidence = ["desktop_root"] }
+iphone = { status = "missing", detail = "調査用新規会話のUIがない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "調査用の新規会話見出し・マシン情報・CLIコピーがない。", evidence = ["desktop_root"] }
+
+[[implementation]]
+components = ["user-message"]
+phase = "shared"
+next = "発言の属性・履歴イベントと添付の種別を共通モデルで表現する。"
+rust = { status = "partial", detail = "本文、画像・添付、送信状態はある。送信者属性、モデル切替・新コンテキストの履歴イベント、音声/動画の型付き部品がない。", evidence = ["items", "models", "rows"] }
+mac = { status = "partial", detail = "本文・吹き出し・画像・送信状態はある。送信者属性、切替区切り、音声/動画の専用本文表示がない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "本文・吹き出し・画像・送信状態はある。送信者属性、切替区切り、音声/動画の専用本文表示がない。", evidence = ["iphone_rows"] }
+windows = { status = "partial", detail = "本文・画像・送信状態はある。送信者属性、モデル/新コンテキスト区切り、音声/動画表示がない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["user-actions"]
+phase = "shared"
+next = "共通の発言リンク形式を決めて各UIのコピー操作に追加する。"
+rust = { status = "partial", detail = "時刻・編集・コピー対象本文はある。発言を指定するプロンプトリンク生成契約がない。コピー完了とホバーはUI状態。", evidence = ["rows", "operations"] }
+mac = { status = "partial", detail = "時刻・編集・コピーと完了表示はある。プロンプトリンクコピーがない。", evidence = ["mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "時刻・編集・コピーと完了表示はある。プロンプトリンクコピーがない。", evidence = ["iphone_rows", "shared_swift"] }
+windows = { status = "partial", detail = "時刻・編集・コピー・コピー完了はある。プロンプトリンクコピーがない。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["long-message"]
+phase = "restore"
+next = "iPhoneの検索接続時に対象の本文を展開する。"
+rust = { status = "present", detail = "長文を折りたたむ判断と検索対象本文がある。", evidence = ["body", "search"] }
+mac = { status = "present", detail = "長文の開閉、フェード、検索時の展開がある。", evidence = ["mac_rows", "shared_swift", "desktop_find"] }
+iphone = { status = "partial", detail = "長文の開閉とフェードはある。会話内検索がなく検索連動展開がない。", evidence = ["iphone_rows", "shared_swift"] }
+windows = { status = "present", detail = "長文の開閉、末尾マスク、検索位置への移動がある。", evidence = ["win_native", "win_rows", "desktop_find"] }
+
+[[implementation]]
+components = ["user-intent"]
+phase = "restore"
+next = "既存マーカーを使ってネイティブの追加指示アイコンを置く。"
+rust = { status = "present", detail = "queued/steerと入力の変更・昇格操作がある。", evidence = ["rows", "queue", "operations"] }
+mac = { status = "partial", detail = "追加指示・キューの文字はある。追加指示の専用アイコンと説明がない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "追加指示・キューの文字はある。追加指示の専用アイコンと説明がない。", evidence = ["iphone_rows"] }
+windows = { status = "partial", detail = "queued/steerをCaptionで表示する。追加指示の専用アイコンと説明がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["attributed-message"]
+phase = "shared"
+next = "発言に送信元の型と参照先を追加してからUIを作る。"
+rust = { status = "missing", detail = "ゲスト・自動実行・代理エージェントなどの送信元を発言に保持する構造がない。通常の親子会話とは別。", evidence = ["items", "models"] }
+mac = { status = "missing", detail = "送信元別見出し・開閉・設定/元エージェントへの操作がない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "missing", detail = "送信元別の発言行がない。", evidence = ["iphone_rows"] }
+windows = { status = "missing", detail = "送信元別の発言行がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["user-images"]
+phase = "local"
+next = "画像の要素を維持する。配置合わせは今回の判定対象外。"
+rust = { status = "present", detail = "送信画像の一覧、取得先、取得失敗を扱える。コラージュ配置はUI。", evidence = ["items", "rows"] }
+mac = { status = "present", detail = "単数・複数の画像、拡大、取得/デコード失敗と再試行がある。配置の違いは判定しない。", evidence = ["mac_rows", "mac_body", "desktop_media"] }
+iphone = { status = "present", detail = "単数・複数の画像、拡大、利用不能・再試行がある。配置の違いは判定しない。", evidence = ["iphone_rows", "iphone_media"] }
+windows = { status = "present", detail = "単数・複数の画像、コラージュ、拡大、失敗と再試行がある。", evidence = ["win_rows", "win_native", "desktop_media"] }
+
+[[implementation]]
+components = ["user-files"]
+phase = "shared"
+next = "添付メタデータと状態を共通の発言部品へ渡し、カードを実装する。"
+rust = { status = "partial", detail = "添付の名前・パス、ファイルのメタデータ・取得がある。発言添付のアップロード状態/長文貼付種別を保持する構造がない。", evidence = ["items", "files", "state"] }
+mac = { status = "partial", detail = "名前付きファイルリンクとファイルプレビューはある。容量付き添付カード、送信中、長文貼付の専用表示がない。", evidence = ["mac_body", "desktop_media"] }
+iphone = { status = "partial", detail = "ファイルリンク・プレビュー・共有はある。発言内の容量付きカード、送信中、長文貼付の専用表示がない。", evidence = ["iphone_markdown", "iphone_media_actions"] }
+windows = { status = "partial", detail = "ファイルリンクとプレビューはある。容量付き添付カード、送信中、長文貼付の専用表示がない。", evidence = ["win_rows", "desktop_media"] }
+
+[[implementation]]
+components = ["user-video"]
+phase = "shared"
+next = "共通添付モデルにメディア種別と取得状態を足し、OSのプレイヤーで描画する。"
+rust = { status = "partial", detail = "一般ファイルの転送・解決はある。音声/動画の種別・サムネイル・送信状態を持つ発言添付の型がない。", evidence = ["items", "state", "files"] }
+mac = { status = "missing", detail = "発言内の音声/動画プレイヤーがない。一般ファイルを外で開く動作とは別。", evidence = ["mac_body"] }
+iphone = { status = "partial", detail = "動画ファイルをQuickLookで開ける。発言内プレイヤー、動画専用の再試行・送信中表示、音声プレイヤーがない。", evidence = ["iphone_media", "iphone_media_actions", "iphone_rows"] }
+windows = { status = "missing", detail = "発言内の音声/動画プレイヤーがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["user-audio"]
+phase = "shared"
+next = "音声添付を投影し、各OSの音声プレイヤーで表示する。"
+rust = { status = "partial", detail = "一般ファイルの転送はある。発言の音声添付をプレイヤーへ渡す型付き投影がない。", evidence = ["items", "files"] }
+mac = { status = "missing", detail = "送信音声のプレイヤーがない。", evidence = ["mac_body"] }
+iphone = { status = "missing", detail = "送信音声のプレイヤーがない。", evidence = ["iphone_rows", "iphone_markdown"] }
+windows = { status = "missing", detail = "送信音声のプレイヤーがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["snapshot"]
+phase = "extension"
+next = "取得元と取得内容を持つ添付契約・取り込み操作から作る。"
+rust = { status = "missing", detail = "Snap Shotのアプリ・アクセシビリティ内容を保持する添付契約がない。画像添付とは別。", evidence = ["items", "state"] }
+mac = { status = "missing", detail = "Snap Shot専用の枠・詳細・開く操作がない。", evidence = ["mac_rows"] }
+iphone = { status = "missing", detail = "Snap Shot添付のUIがない。", evidence = ["iphone_rows", "iphone_attachments"] }
+windows = { status = "missing", detail = "Snap Shot添付のUIがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["context-chips"]
+phase = "shared"
+next = "Contextの種類・参照・本文を共通側に追加し、既存ファイルチップと統合する。"
+rust = { status = "partial", detail = "ファイル/フォルダのリンク・画像・Skill/Plugin invocationはある。会話/環境/ターミナル/ブラウザ要素/レビュー/PR/注釈を保持する共通Context部品がない。", evidence = ["items", "invocations", "links", "state"] }
+mac = { status = "partial", detail = "ファイル・フォルダのチップと画像はある。その他の構造化コンテキストとスキル詳細チップが不足。", evidence = ["mac_body", "bridge"] }
+iphone = { status = "partial", detail = "本文のファイルチップ・画像と入力のスキル候補はある。その他の構造化チップがない。", evidence = ["iphone_markdown", "iphone_content", "iphone_input"] }
+windows = { status = "partial", detail = "RichEditのファイルチップと画像はある。その他の構造化コンテキストチップがない。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["context-details", "terminal-context", "pending-terminal"]
+phase = "shared"
+next = "構造化Contextに選択範囲と内容を保持してから詳細UIを追加する。"
+rust = { status = "missing", detail = "通常のターミナル操作はあるが、選択行/要素HTML・CSS/レビュー差分/注釈を発言や下書きに保持する契約がない。", evidence = ["items", "state", "invocations"] }
+mac = { status = "missing", detail = "選択コンテキストのチップ・詳細ポップオーバーがない。", evidence = ["desktop_composer", "mac_rows"] }
+iphone = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["iphone_input", "iphone_rows"] }
+windows = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["desktop_composer", "win_rows"] }
+
+[[implementation]]
+components = ["skill-context"]
+phase = "shared"
+next = "既存invocationの説明を発言の部品に渡す。"
+rust = { status = "partial", detail = "Skill/Pluginの名前・パス・説明と候補がある。発言から詳細を引く専用の表示モデルがない。", evidence = ["invocations", "completion", "items"] }
+mac = { status = "partial", detail = "入力候補はある。送信済みスキルの専用チップ・詳細ポップオーバーがない。", evidence = ["desktop_composer", "mac_rows"] }
+iphone = { status = "partial", detail = "入力候補はある。送信済みスキルの専用チップ・詳細がない。", evidence = ["iphone_input", "iphone_rows"] }
+windows = { status = "partial", detail = "入力候補はある。送信済みスキルの専用チップ・詳細がない。", evidence = ["desktop_composer", "win_rows"] }
+
+[[implementation]]
+components = ["model-context"]
+phase = "shared"
+next = "モデル参照をContextへ追加する。"
+rust = { status = "missing", detail = "下書きのモデル選択はあるが、本文内モデルメンションを保持するContext契約がない。", evidence = ["state", "invocations"] }
+mac = { status = "missing", detail = "本文内のモデルメンションチップがない。", evidence = ["desktop_composer", "mac_rows"] }
+iphone = { status = "missing", detail = "本文内のモデルメンションチップがない。", evidence = ["iphone_input", "iphone_rows"] }
+windows = { status = "missing", detail = "本文内のモデルメンションチップがない。", evidence = ["desktop_composer", "win_rows"] }
+
+[[implementation]]
+components = ["context-drag"]
+phase = "local"
+next = "会話Contextを実装した後にOSのドラッグプレビューを付ける。"
+rust = { status = "ui_only", detail = "ドラッグの画像と件数はUI状態。参照する会話Context自体はcontext-chipsの不足。", evidence = ["models"] }
+mac = { status = "missing", detail = "会話チップのドラッグプレビューがない。", evidence = ["desktop_composer"] }
+iphone = { status = "missing", detail = "会話チップのドラッグプレビューがない。", evidence = ["iphone_input"] }
+windows = { status = "missing", detail = "会話チップのドラッグプレビューがない。", evidence = ["desktop_composer"] }
+
+[[implementation]]
+components = ["assistant-message"]
+phase = "restore"
+next = "既存回答データで不足している見出し・空表示を作り、iPhoneへ検索を接続する。"
+rust = { status = "present", detail = "回答本文、ストリーム、空表示用の状態、検索対象がある。", evidence = ["rows", "search", "items"] }
+mac = { status = "partial", detail = "本文・ストリーム・検索はある。T3の回答者見出しと空回答の専用表示がない。", evidence = ["mac_rows", "mac_body"] }
+iphone = { status = "partial", detail = "本文とストリームはある。回答者見出し、空回答の専用表示、会話内検索がない。", evidence = ["iphone_rows", "iphone_history"] }
+windows = { status = "partial", detail = "本文・ストリーム・検索はある。回答者見出しと空回答の専用表示がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["assistant-actions"]
+phase = "restore"
+next = "既存の操作状態をネイティブの回答操作へ渡す。"
+rust = { status = "present", detail = "コピー本文、分岐可否・実行中、時刻・状態がある。ホバーやコピー完了はUI状態。", evidence = ["rows", "operations"] }
+mac = { status = "partial", detail = "コピー・分岐・時刻・コピー完了はある。分岐中の専用表示と回答状態の表示が不足。", evidence = ["mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "コピー・分岐・時刻・コピー完了と分岐中の無効化はある。分岐中の専用表示と回答状態が不足。", evidence = ["iphone_rows", "shared_swift"] }
+windows = { status = "partial", detail = "コピー・分岐・時刻とコピー完了はある。分岐中の専用表示と回答状態が不足。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["changed-files"]
+phase = "restore"
+next = "共通diffを回答のカードへ接続し、既存ファイル操作メニューを再利用する。"
+rust = { status = "present", detail = "変更一覧、ディレクトリ構造、追加/削除行数、差分、ファイル操作がある。", evidence = ["diff", "file_actions", "workspace"] }
+mac = { status = "partial", detail = "変更ファイルカード・行数・一覧・差分はある。T3の各ファイルのコンテキストメニューが不足。", evidence = ["desktop_details", "desktop_workspace"] }
+iphone = { status = "partial", detail = "作業先から差分一覧は開ける。回答下の変更ファイルまとめカードとツリー・各ファイルメニューがない。", evidence = ["iphone_rows", "iphone_diff"] }
+windows = { status = "partial", detail = "変更ファイルカード・行数・一覧・差分はある。T3の各ファイルのコンテキストメニューが不足。", evidence = ["desktop_details", "desktop_workspace"] }
+
+[[implementation]]
+components = ["selection"]
+phase = "restore"
+next = "選択の受け渡しを修復し、構造化引用を追加する時に共通の長さ判断を置く。"
+rust = { status = "partial", detail = "選択本文を下書きへ引用する純粋関数と入力操作はある。構造化引用と選択長の制限情報はない。", evidence = ["completion", "state"] }
+mac = { status = "partial", detail = "TextKit選択メニューから引用・説明・サイドチャットができる。長すぎる選択の専用表示がない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "UITextViewのチャットに追加・サイドチャット操作はある。長すぎる選択の専用表示がない。", evidence = ["iphone_selection"] }
+windows = { status = "partial", detail = "RichEdit選択からチャット追加の操作はある。長すぎる選択の専用表示がない。", evidence = ["win_native"] }
+
+[[implementation]]
+components = ["citation", "citation-comment", "citation-source"]
+phase = "shared"
+next = "引用の参照先・範囲・コメントを共通モデルと下書きに追加する。"
+rust = { status = "missing", detail = "通常の引用テキストはある。引用元の会話/発言/範囲、コメント、参照位置を保存する構造化引用がない。", evidence = ["items", "state", "completion"] }
+mac = { status = "missing", detail = "引用チップ・元位置への移動/強調・コメント編集・引用メニューがない。", evidence = ["mac_rows", "mac_body"] }
+iphone = { status = "missing", detail = "引用チップ・元位置への移動/強調・コメント編集がない。", evidence = ["iphone_selection", "iphone_rows"] }
+windows = { status = "missing", detail = "引用チップ・元位置への移動/強調・コメント編集がない。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["markdown-text"]
+phase = "shared"
+next = "共通Markdown IRにdetailsと注記の構造を残してから各UIで描画する。"
+rust = { status = "partial", detail = "段落・見出し・強調・リスト・タスク・引用・罫線はある。details/summaryはタグを除去し、開閉構造を失う。GitHub注記種別もない。", evidence = ["markdown"] }
+mac = { status = "partial", detail = "基本Markdownとタスクはある。details/summaryの開閉とNote/Tip等の専用注記がない。", evidence = ["mac_body", "shared_swift"] }
+iphone = { status = "partial", detail = "基本Markdownとタスクはある。details/summaryの開閉と専用注記がない。", evidence = ["iphone_content", "iphone_markdown"] }
+windows = { status = "partial", detail = "基本Markdownはある。detailsの開閉とNote/Tip等の専用注記がない。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["markdown-links"]
+phase = "shared"
+next = "引用/PRの意味情報を共通側へ足し、ファビコンはUIで取得・表示する。"
+rust = { status = "partial", detail = "外部・ファイル/フォルダ・行番号・会話へのリンク判断がある。PRプレビューと構造化引用リンクがない。", evidence = ["links", "file_actions"] }
+mac = { status = "partial", detail = "外部/ファイルリンクとチップはある。外部ファビコン、PRプレビュー、引用リンクの専用UIがない。", evidence = ["mac_body"] }
+iphone = { status = "partial", detail = "外部/ファイルリンク・ファイルチップはある。外部ファビコン、PRプレビュー、引用専用UIがない。", evidence = ["iphone_content", "iphone_selection"] }
+windows = { status = "partial", detail = "リンクとファイルチップはある。ファビコン、PRプレビュー、引用専用UIがない。", evidence = ["win_native"] }
+
+[[implementation]]
+components = ["markdown-code"]
+phase = "local"
+next = "ネイティブのコード部品に不足する操作を足す。"
+rust = { status = "present", detail = "コード・言語・ファイル名とハイライト用の情報がある。コピー/折返し/実行の見せ方はUI。", evidence = ["markdown"] }
+mac = { status = "partial", detail = "コード・言語/ファイル名・ハイライト・コピー/完了・折返し切替はある。ターミナル実行と専用取得中表示がない。", evidence = ["mac_body", "shared_swift"] }
+iphone = { status = "partial", detail = "コード・言語/ファイル名・ハイライト・コピー/完了・折返し切替はある。ターミナル実行と専用取得中表示がない。", evidence = ["iphone_markdown", "shared_swift"] }
+windows = { status = "partial", detail = "コード・言語・ハイライト・コピー/完了・折返し切替はある。ターミナル実行と専用取得中表示がない。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["markdown-table"]
+phase = "local"
+next = "表のコピー完了フィードバックをUIに追加する。"
+rust = { status = "present", detail = "表のヘッダー・行・セルと元Markdownがある。CSV変換とコピー操作はUIから利用可能。", evidence = ["markdown"] }
+mac = { status = "partial", detail = "表・横スクロール・Markdown/CSVコピーメニューはある。表コピー完了の表示がない。", evidence = ["mac_body", "shared_swift"] }
+iphone = { status = "partial", detail = "表・横スクロール・Markdown/CSVコピーメニューはある。表コピー完了表示がない。", evidence = ["iphone_markdown", "shared_swift"] }
+windows = { status = "partial", detail = "RTF表・横スクロール・Markdown/CSVコピーメニューはある。表メニュー経由のコピー完了表示がない。", evidence = ["win_rows", "win_native"] }
+
+[[implementation]]
+components = ["mermaid"]
+phase = "restore"
+next = "既存の図とソースを共有Swift/Windowsの図部品へ渡す。"
+rust = { status = "partial", detail = "Mermaidソースと図生成はある。失敗はNoneとしてコードへ戻し、生成中/失敗理由の専用表示モデルがない。", evidence = ["markdown", "diagram"] }
+mac = { status = "partial", detail = "図/ソース切替、図の拡大、ソースコピーはある。図専用の取得中・失敗表示がない。", evidence = ["mac_body"] }
+iphone = { status = "partial", detail = "Mermaidフェンスはコードとして表示・コピーできる。共通の図生成を呼ばず、図・切替・拡大・生成中/失敗表示がない。", evidence = ["iphone_content", "iphone_markdown"] }
+windows = { status = "partial", detail = "図/ソース切替・図の拡大・ソースコピーはある。図専用の取得中・失敗表示がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["math"]
+phase = "shared"
+next = "共通パーサーで数式を保持し、各OSの数式描画へ渡す。"
+rust = { status = "missing", detail = "MarkdownBlock/Runにインライン数式・独立数式の解析結果がない。", evidence = ["markdown"] }
+mac = { status = "missing", detail = "数式のネイティブ描画がない。", evidence = ["mac_body"] }
+iphone = { status = "missing", detail = "数式のネイティブ描画がない。", evidence = ["iphone_content"] }
+windows = { status = "missing", detail = "数式の描画がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["artifact-template"]
+phase = "extension"
+next = "テンプレートを識別する共通部品と開始操作を追加する。"
+rust = { status = "missing", detail = "テンプレート種別とUse templateの操作契約がない。", evidence = ["markdown", "intents"] }
+mac = { status = "missing", detail = "成果物テンプレートカードがない。", evidence = ["mac_body"] }
+iphone = { status = "missing", detail = "成果物テンプレートカードがない。", evidence = ["iphone_content"] }
+windows = { status = "missing", detail = "成果物テンプレートカードがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["markdown-media"]
+phase = "shared"
+next = "共通Markdownメディアに種別を保持し、動画を画像から分ける。"
+rust = { status = "partial", detail = "画像ソースとファイル解決はある。Markdown動画を画像と分ける表示モデルがない。", evidence = ["markdown", "files"] }
+mac = { status = "partial", detail = "画像・拡大・失敗表示はある。画像の専用キャプションとMarkdown動画プレイヤーがない。", evidence = ["mac_body", "desktop_media"] }
+iphone = { status = "partial", detail = "画像・拡大・失敗表示と動画ファイルの外部プレビューはある。本文内動画プレイヤーがない。", evidence = ["iphone_content", "iphone_media_actions"] }
+windows = { status = "partial", detail = "画像・拡大・失敗表示はある。専用キャプションと本文内動画プレイヤーがない。", evidence = ["win_rows", "desktop_media"] }
+
+[[implementation]]
+components = ["video-player"]
+phase = "shared"
+next = "メディア種別の投影を作り、再生/シーク等はOSプレイヤーに任せる。"
+rust = { status = "partial", detail = "一般ファイルの取得/プレビュー情報はある。音声・動画プレイヤー用の部品・取得状態の投影がない。", evidence = ["files", "markdown"] }
+mac = { status = "missing", detail = "会話内の音声/動画プレイヤーがない。", evidence = ["mac_body"] }
+iphone = { status = "partial", detail = "QuickLookで動画ファイルを開ける。会話内のプレイヤー、時間表示、シーク、専用の再試行がない。", evidence = ["iphone_media", "iphone_media_actions"] }
+windows = { status = "missing", detail = "会話内の音声/動画プレイヤーがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["audio"]
+phase = "shared"
+next = "音声メディアを投影し、再生・シークと時間表示はOSプレイヤーで実装する。"
+rust = { status = "partial", detail = "一般ファイルの解決/取得はある。音声プレイヤー向けの部品・取得状態の投影がない。", evidence = ["files", "markdown"] }
+mac = { status = "missing", detail = "会話内の音声プレイヤーと再生時間/シーク/再試行がない。", evidence = ["mac_body"] }
+iphone = { status = "missing", detail = "会話内の音声プレイヤーがない。", evidence = ["iphone_markdown", "iphone_media_actions"] }
+windows = { status = "missing", detail = "会話内の音声プレイヤーがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["expanded-media"]
+phase = "shared"
+next = "動画部品から既存の拡大ビューへ接続する。"
+rust = { status = "partial", detail = "画像の取得・ギャラリーはある。動画メディア専用の投影はない。", evidence = ["media", "files"] }
+mac = { status = "partial", detail = "画像拡大・閉じる・保存・失敗/再試行はある。本文の動画から拡大プレイヤーを開く接続がない。", evidence = ["desktop_media", "mac_body"] }
+iphone = { status = "partial", detail = "画像拡大、動画のQuickLook、共有・閉じるはある。本文の動画プレイヤーからの接続と同じ再試行UIがない。", evidence = ["iphone_media", "iphone_media_actions"] }
+windows = { status = "partial", detail = "画像拡大・閉じる・失敗/再試行はある。動画の拡大プレイヤーがない。", evidence = ["desktop_media", "win_rows"] }
+
+[[implementation]]
+components = ["html-render"]
+phase = "restore"
+next = "iPhoneの既存HTML部品をMacでも使い、Windowsへ同等の表示を足す。"
+rust = { status = "present", detail = "HTML成果物の識別・LoadVisualizationと取得失敗を扱う。", evidence = ["markdown", "operations"] }
+mac = { status = "missing", detail = "HTML成果物への一般リンクだけで、本文内埋め込み・全画面・専用エラー表示がない。", evidence = ["bridge", "mac_body"] }
+iphone = { status = "present", detail = "サンドボックスWebKitの埋め込み・全画面・取得失敗がある。", evidence = ["iphone_html", "iphone_media_actions"] }
+windows = { status = "missing", detail = "HTML成果物への一般リンクだけで、埋め込み・全画面・専用エラー表示がない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["mcp-app"]
+phase = "extension"
+next = "Host側のMCP App資源/RPC/権限と共通ライフサイクルから追加する。"
+rust = { status = "missing", detail = "MCPツールのresource_uri等はあるが、App資源取得、権限、表示ライフサイクル、AppとのRPC契約がない。", evidence = ["items", "operations", "requests"] }
+mac = { status = "missing", detail = "MCP Appの埋め込み、全画面、閉じる/再表示、遷移停止がない。", evidence = ["mac_body"] }
+iphone = { status = "missing", detail = "MCP Appの表示UIがない。HTML成果物ビューとは別。", evidence = ["iphone_html", "iphone_content"] }
+windows = { status = "missing", detail = "MCP Appの表示UIがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["zoom-image"]
+phase = "local"
+next = "既存の倍率情報をiPhoneの表示/アクセシビリティへ接続する。"
+rust = { status = "present", detail = "倍率・制限・ホイール/ピンチ計算・倍率ラベルがある。", evidence = ["media"] }
+mac = { status = "present", detail = "拡大縮小・倍率・パン・キー操作がある。", evidence = ["desktop_media"] }
+iphone = { status = "partial", detail = "ピンチとパンはある。倍率の表示/読み上げとキーボードのズーム操作がない。", evidence = ["iphone_media"] }
+windows = { status = "present", detail = "拡大縮小・倍率・パン・キー操作がある。", evidence = ["desktop_media"] }
+
+[[implementation]]
+components = ["media-actions"]
+phase = "local"
+next = "共通ファイル操作を各OSのメディアメニューへ接続する。"
+rust = { status = "present", detail = "ファイル解決・保存、パス/相対パスを選ぶ操作がある。画像コピー等のOS処理はUI。", evidence = ["file_actions", "files", "operations"] }
+mac = { status = "partial", detail = "保存・ファイルを開く操作はある。画像の全パス/相対パス/URL/画像コピーを揃えた専用メニューと処理結果通知が不足。", evidence = ["mac_body", "desktop_media"] }
+iphone = { status = "partial", detail = "共有・保存・ファイルメニューはある。画像の全パス/相対パス/URL/画像コピーの専用メニューが不足。", evidence = ["iphone_media", "iphone_selection"] }
+windows = { status = "partial", detail = "画像保存・プレビューはある。パス/URL/画像コピーの専用メニューと処理結果通知が不足。", evidence = ["win_rows", "desktop_media"] }
+
+[[implementation]]
+components = ["working"]
+phase = "restore"
+next = "共通TurnRowの作業中行をiPhoneへ渡す。準備ポップオーバーはUIで追加する。"
+rust = { status = "present", detail = "Working/InProgress、経過時間、準備/圧縮状態がある。", evidence = ["rows", "timeline", "preparation"] }
+mac = { status = "partial", detail = "作業中テキスト・時間・シマーはある。準備チップの専用ポップオーバーがない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "activityHeaderはあるが、ConversationRowContent.inProgressをEmptyViewにしている。MacのTurnRowと共通の作業中行を使っていない。", evidence = ["iphone_history"] }
+windows = { status = "partial", detail = "作業中の行・時間・シマーはある。準備チップの専用ポップオーバーがない。", evidence = ["win_rows", "bridge"] }
+
+[[implementation]]
+components = ["thinking"]
+phase = "restore"
+next = "既存Thinkingの投影を共有Swift部品へ接続する。"
+rust = { status = "present", detail = "Thinking行、ラベル、シマー、グループの開閉情報がある。", evidence = ["timeline"] }
+mac = { status = "partial", detail = "思考本文と開閉はある。投影されたthinkingアイコンを汎用行で表示しない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "思考の詳細表示はある。共通Thinking行と同じアイコン・シマー付きグループを使っていない。", evidence = ["iphone_history", "iphone_activity"] }
+windows = { status = "present", detail = "行のアイコン・ラベル・シマーと開閉を表示する。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["live-work"]
+phase = "restore"
+next = "iPhoneを同じTurnRowの作業グループへ切り替える。"
+rust = { status = "present", detail = "Live/Group/Work、件数、開閉、実行中/失敗がある。", evidence = ["timeline"] }
+mac = { status = "present", detail = "共通行を作業グループ・件数・開閉・詳細として表示する。", evidence = ["bridge", "mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "活動ごとの開閉はある。共通TurnRowの実行中グループ・件数まとめを使っていない。", evidence = ["iphone_history", "iphone_activity"] }
+windows = { status = "present", detail = "共通グループ・件数・アイコン・失敗・開閉を表示する。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["work-group"]
+phase = "restore"
+next = "同じGroup投影をiPhoneへ渡し、グループ内部のスクロールをUIに追加する。"
+rust = { status = "present", detail = "Group/Work、件数、開閉とグループ内部の行がある。内部スクロールはUI。", evidence = ["timeline"] }
+mac = { status = "partial", detail = "グループ・件数・開閉と内部の行はある。グループ内部だけをスクロールする領域がない。", evidence = ["bridge", "mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "個別活動の開閉はある。共通の件数付き作業グループと内部スクロールがない。", evidence = ["iphone_history", "iphone_activity"] }
+windows = { status = "partial", detail = "グループ・件数・開閉と内部の行はある。グループ内部専用スクロールがない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["work-entry"]
+phase = "restore"
+next = "既存行アイコンを表示し、各OSが同じ作業投影を使うようにする。"
+rust = { status = "present", detail = "種類、見出し、時刻、失敗、詳細、関連会話の操作がある。", evidence = ["rows", "body", "timeline"] }
+mac = { status = "partial", detail = "作業の見出し・詳細・時刻と関連会話操作はある。通知等の汎用行で投影されたアイコンを表示しない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "個別活動の種類・詳細はある。共通TurnRowのグループ・通知行と同じ投影ではない。", evidence = ["iphone_activity", "iphone_rows"] }
+windows = { status = "present", detail = "行の種類アイコン、見出し、時刻、開閉、失敗、関連操作を表示する。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["reasoning"]
+phase = "local"
+next = "思考本文は維持し、外側のグループ差はthinkingで直す。"
+rust = { status = "present", detail = "要約・本文・追記とMarkdownの情報がある。", evidence = ["items", "body", "timeline"] }
+mac = { status = "present", detail = "思考の要約と展開した本文・追記を表示する。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "present", detail = "思考の要約と詳細本文・追記を表示する。", evidence = ["iphone_activity", "iphone_rows"] }
+windows = { status = "present", detail = "要約と展開した思考本文・追記を表示する。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["tool-inspector"]
+phase = "shared"
+next = "共通ツール出力に不足する構造化結果を追加して専用UIへ渡す。"
+rust = { status = "partial", detail = "コマンド/出力/終了コード、ファイル差分、検索、動的ツール、要求/通知/エラーの情報はある。T3のTodo段階・検索結果を専用部品として投影する構造が不足。", evidence = ["items", "body", "tools"] }
+mac = { status = "partial", detail = "詳細をテキスト/JSON/コードで開ける。検索結果の行/列/プレビュー、Todo段階、全ツール出力を専用UIで揃えていない。", evidence = ["bridge", "mac_rows", "mac_body"] }
+iphone = { status = "partial", detail = "詳細本文の遅延取得・表示はある。T3の各ツール専用インスペクターに相当する結果部品が不足。", evidence = ["iphone_rows", "iphone_activity"] }
+windows = { status = "partial", detail = "詳細本文は開ける。検索結果やTodo等の専用インスペクターが不足。", evidence = ["win_rows", "bridge"] }
+
+[[implementation]]
+components = ["work-media"]
+phase = "local"
+next = "既存の取得と表示を維持する。"
+rust = { status = "present", detail = "画像閲覧とツール詳細の遅延取得・失敗を扱う。", evidence = ["items", "history", "intents"] }
+mac = { status = "present", detail = "作業画像と詳細の取得中・失敗・再試行がある。", evidence = ["desktop_history", "bridge", "mac_body"] }
+iphone = { status = "present", detail = "活動画像と詳細の取得中・失敗・再試行がある。", evidence = ["iphone_rows", "iphone_activity"] }
+windows = { status = "present", detail = "画像と詳細の遅延取得・取得中・失敗を表示する。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["answer-history"]
+phase = "shared"
+next = "回答添付が必要な要求について共通の回答履歴契約を拡張する。"
+rust = { status = "partial", detail = "要求と回答の履歴情報はある。過去回答に添付を保持する構造がない。", evidence = ["requests", "items"] }
+mac = { status = "partial", detail = "質問/回答の詳細テキストはある。過去回答の添付表示がない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "履歴の質問/回答本文はある。過去回答の添付表示がない。", evidence = ["iphone_rows", "iphone_activity"] }
+windows = { status = "partial", detail = "質問/回答の詳細本文はある。過去回答の添付表示がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["turn-error"]
+phase = "restore"
+next = "既存の時刻を描画し、制限解除情報がある場合に共通エラーへ渡す。"
+rust = { status = "partial", detail = "タイトル・本文・詳細・時刻・制限判定と準備再試行はある。使用制限の解除時刻をエラー行に渡す契約がない。", evidence = ["rows", "execution", "preparation"] }
+mac = { status = "partial", detail = "見出し・本文・詳細と準備再試行はある。エラーアイコンとrow.timeを描画せず、制限解除時刻もない。", evidence = ["bridge", "mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "エラーの見出し・本文・詳細はある。エラーアイコン、行の時刻と制限解除時刻がない。", evidence = ["iphone_rows", "shared_swift"] }
+windows = { status = "partial", detail = "アイコン・見出し・本文・時刻はある。制限解除時刻がない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["compaction"]
+phase = "shared"
+next = "圧縮結果に前後トークン数・成否を持たせ、既存区切りへ渡す。"
+rust = { status = "partial", detail = "CompactionとDivider、圧縮中の状態はある。圧縮前後のトークン数と圧縮失敗の専用状態がない。", evidence = ["items", "timeline"] }
+mac = { status = "partial", detail = "圧縮区切りとアイコンはある。前後トークン数と失敗の専用表示がない。", evidence = ["mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "圧縮区切りとアイコンはある。前後トークン数と失敗表示がなく、進行中行の接続も不足。", evidence = ["iphone_history", "iphone_activity"] }
+windows = { status = "partial", detail = "区切り・アイコンはある。前後トークン数と圧縮失敗表示がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["tool-icons"]
+phase = "restore"
+next = "まず投影済みアイコンを描画し、固有アイコンはUIの既存アイコン体系に追加する。"
+rust = { status = "ui_only", detail = "種類判定は既存のツール情報を使える。画像・OSアプリアイコンの取得と代替表示はUIの責務。", evidence = ["items", "body"] }
+mac = { status = "partial", detail = "標準ツールアイコンと代替表示はある。一部汎用行でアイコンが落ち、プロバイダー固有画像/アプリアイコンがない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "標準アイコンはある。プロバイダー固有画像とネイティブアプリアイコンがない。", evidence = ["iphone_activity"] }
+windows = { status = "partial", detail = "標準ツールアイコンと代替表示はある。プロバイダー固有画像とアプリアイコンがない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["plan"]
+phase = "local"
+next = "共有ネイティブ計画部品にプレビュー開閉を追加する。"
+rust = { status = "present", detail = "計画本文・タイトル・コピー/保存用の本文と保存操作がある。開閉とコピー完了はUI状態。", evidence = ["items", "timeline", "operations"] }
+mac = { status = "partial", detail = "Planバッジ・タイトル・Markdown・コピー/保存メニューはある。長い計画のプレビュー開閉がない。", evidence = ["mac_rows", "shared_swift", "desktop_plans"] }
+iphone = { status = "partial", detail = "Planバッジ・タイトル・本文とコピー/書出し/保存メニューはある。長い計画のプレビュー開閉がない。", evidence = ["iphone_activity", "shared_swift"] }
+windows = { status = "partial", detail = "計画本文・タイトル・メニュー・保存はある。Planバッジと長い計画のプレビュー開閉が不足。", evidence = ["win_rows", "desktop_plans"] }
+
+[[implementation]]
+components = ["plan-save"]
+phase = "local"
+next = "既存の保存フローを維持する。"
+rust = { status = "present", detail = "ワークスペースへの書込み、処理中・失敗がある。", evidence = ["operations", "intents"] }
+mac = { status = "present", detail = "パス入力・保存・取消・処理中がある。", evidence = ["desktop_plans"] }
+iphone = { status = "present", detail = "パス入力・保存・取消・処理中がある。", evidence = ["iphone_activity"] }
+windows = { status = "present", detail = "パス入力・保存・取消・処理中がある。", evidence = ["desktop_plans"] }
+
+[[implementation]]
+components = ["worktree-setup"]
+phase = "restore"
+next = "既存の段階時刻を各UIへ渡して所要時間を表示する。"
+rust = { status = "present", detail = "準備の全体/段階状態、詳細・出力・各時刻、参照/パス、取消/端末/ローカル操作がある。", evidence = ["preparation", "rows", "workspace"] }
+mac = { status = "partial", detail = "準備カード・段階状態・詳細・出力と操作はある。段階ごとの時刻をbridgeが落とし、所要時間を表示しない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "準備カード・段階・詳細と操作はある。共通PreparationStepの時刻から段階ごとの所要時間を表示していない。", evidence = ["iphone_history", "shared_swift"] }
+windows = { status = "partial", detail = "準備状態・段階・詳細と操作はある。bridgeが段階時刻を渡さず、段階ごとの所要時間がない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["lifecycle"]
+phase = "restore"
+next = "既存中断行を各UIで揃え、モデル/コンテキスト切替の履歴イベントを共通側へ足す。"
+rust = { status = "partial", detail = "Interrupted、プロバイダー引継ぎ、親/分岐リンクはある。新セッション・モデル切替の履歴イベントがない。", evidence = ["timeline", "rows", "models"] }
+mac = { status = "partial", detail = "引継ぎ/分岐リンクはある。投影された中断のstopアイコンを汎用行で描画しない。新セッション/モデル区切りもない。", evidence = ["bridge", "mac_rows"] }
+iphone = { status = "partial", detail = "引継ぎと関連会話はある。共通Interrupted行を使わず、新セッション/モデル切替区切りがない。", evidence = ["iphone_history", "iphone_activity"] }
+windows = { status = "partial", detail = "中断アイコン・引継ぎ・関連会話はある。新セッションとモデル切替の履歴区切りがない。", evidence = ["bridge", "win_rows"] }
+
+[[implementation]]
+components = ["subagent"]
+phase = "restore"
+next = "既存のAgentSummary/子会話情報を表示へ渡し、アバター等はUIで作る。"
+rust = { status = "present", detail = "子会話の名前・状態・要約・経過時間・参照を解決する。", evidence = ["agents", "items", "timeline"] }
+mac = { status = "partial", detail = "名前・状態・要約・時刻・子会話操作はある。アバター、プロバイダー/環境表示、詳細ツールチップが不足。", evidence = ["mac_rows", "shared_swift"] }
+iphone = { status = "partial", detail = "名前・状態・要約・経過時間・子会話操作はある。アバター、プロバイダー/環境表示、詳細ツールチップが不足。", evidence = ["iphone_activity", "shared_swift"] }
+windows = { status = "partial", detail = "名前・状態・要約・子会話操作はある。アバター、プロバイダー/環境表示、詳細ツールチップが不足。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["subagent-group"]
+phase = "shared"
+next = "共通TurnRowへ子エージェントのグループと集計を追加する。"
+rust = { status = "partial", detail = "個別子エージェントと階層一覧はある。タイムラインの複数子作業をまとめる行、集計状態・経過時間の表示モデルがない。", evidence = ["agents", "timeline"] }
+mac = { status = "missing", detail = "子エージェントのまとめ行・アバター重なり・集計/開閉がない。", evidence = ["mac_rows"] }
+iphone = { status = "missing", detail = "子エージェントのまとめ行がない。", evidence = ["iphone_activity"] }
+windows = { status = "missing", detail = "子エージェントのまとめ行がない。", evidence = ["win_rows"] }
+
+[[implementation]]
+components = ["subagent-bar"]
+phase = "shared"
+next = "既存メタデータを共通の子会話表示へまとめ、自律モードが必要なら型を足す。"
+rust = { status = "partial", detail = "親参照、プロバイダー/モデル/状態/経過時間はある。T3の自律実行モードの専用フラグがない。", evidence = ["models", "agents", "settings"] }
+mac = { status = "partial", detail = "親子会話の移動とモデル設定はある。子会話専用のプロバイダー/モデル/推論/実行状態のバーがない。", evidence = ["desktop_details", "desktop_root"] }
+iphone = { status = "partial", detail = "子会話へ移動できる。親へ戻る操作とモデル/推論/状態をまとめる専用バーがない。", evidence = ["iphone_screen", "iphone_activity"] }
+windows = { status = "partial", detail = "親子移動とモデル設定はある。子会話専用の状態バーがない。", evidence = ["desktop_details", "desktop_root"] }
+
+[[implementation]]
+components = ["native-child"]
+phase = "shared"
+next = "プロバイダー連携で子作業記録を取得する共通操作から追加する。"
+rust = { status = "partial", detail = "Subagentの入力・結果はある。プロバイダー内部の子作業ステップを読み取り専用で取得する操作と取得状態がない。", evidence = ["items", "operations", "agents"] }
+mac = { status = "missing", detail = "内部子作業の読み取り専用ダイアログがない。", evidence = ["mac_rows", "desktop_details"] }
+iphone = { status = "missing", detail = "内部子作業の読み取り専用ダイアログがない。", evidence = ["iphone_activity"] }
+windows = { status = "missing", detail = "内部子作業の読み取り専用ダイアログがない。", evidence = ["win_rows", "desktop_details"] }
+
+[[implementation]]
+components = ["workflow-opening"]
+phase = "shared"
+next = "会話開始の由来と関連会話を共通イベントとして保持する。"
+rust = { status = "partial", detail = "親/子・分岐・プロバイダー引継ぎはある。委任/連携から開始した由来を表す専用イベントがない。", evidence = ["models", "rows", "items"] }
+mac = { status = "partial", detail = "通常の親/分岐リンクはある。委任・連携の開始行がない。", evidence = ["desktop_details", "mac_rows"] }
+iphone = { status = "partial", detail = "関連子会話は開ける。委任・連携の開始行がない。", evidence = ["iphone_activity"] }
+windows = { status = "partial", detail = "通常の関連会話操作はある。委任・連携の開始行がない。", evidence = ["desktop_details", "win_rows"] }
+
+[[implementation]]
+components = ["child-approval"]
+phase = "shared"
+next = "既存要求を子会話参照付きで親の共通投影へ集約する。"
+rust = { status = "partial", detail = "子会話の要求と回答操作はある。親画面で子要求を集約する投影と応答不能プロセスの状態が不足。", evidence = ["requests", "agents", "rows"] }
+mac = { status = "partial", detail = "子会話を開いて承認できる。親画面で子会話名付き承認カードを集約しない。", evidence = ["desktop_requests", "desktop_details"] }
+iphone = { status = "partial", detail = "子会話を開いて承認できる。親画面で子承認を集約しない。", evidence = ["iphone_requests", "iphone_activity"] }
+windows = { status = "partial", detail = "子会話で承認できる。親画面の子承認集約カードがない。", evidence = ["desktop_requests", "desktop_details"] }
+
+[[implementation]]
+components = ["approval", "approval-actions"]
+phase = "local"
+next = "既存要求契約とネイティブ操作を維持する。"
+rust = { status = "present", detail = "承認の理由/詳細、任意の許可/継続許可/拒否選択肢、応答可否・応答中・失敗がある。", evidence = ["requests", "rows"] }
+mac = { status = "present", detail = "承認の見出し・理由・詳細・選択肢、処理中/不可/失敗を表示する。", evidence = ["desktop_requests"] }
+iphone = { status = "present", detail = "承認アイコン・説明・選択肢と注記、応答中/不可/失敗を表示する。", evidence = ["iphone_requests"] }
+windows = { status = "present", detail = "承認の見出し・理由・詳細・選択肢、処理中/不可/失敗を表示する。", evidence = ["desktop_requests"] }
+
+[[implementation]]
+components = ["question"]
+phase = "local"
+next = "既存質問をiPhoneのMarkdown・候補キー表示に接続する。"
+rust = { status = "present", detail = "質問・選択肢/説明、単一/複数選択、質問位置、スキップの状態がある。", evidence = ["requests", "questions"] }
+mac = { status = "partial", detail = "質問・選択肢/説明・キー、位置、開閉とスキップはある。質問本文は通常テキストでMarkdown表示がない。", evidence = ["desktop_requests"] }
+iphone = { status = "partial", detail = "質問本文・選択肢・複数選択・位置・スキップはある。候補キー表示とT3のMarkdown質問本文が不足。", evidence = ["iphone_requests"] }
+windows = { status = "partial", detail = "質問・選択肢/説明・キー、位置、開閉とスキップはある。質問本文は通常テキストでMarkdown表示がない。", evidence = ["desktop_requests"] }
+
+[[implementation]]
+components = ["question-actions"]
+phase = "local"
+next = "既存質問フローを維持する。"
+rust = { status = "present", detail = "前後の質問、最終送信、回答中、停止、自由回答がある。", evidence = ["questions", "composer", "requests"] }
+mac = { status = "present", detail = "前後移動・最終送信・回答中・停止・入力欄での自由回答がある。", evidence = ["desktop_requests", "desktop_composer"] }
+iphone = { status = "present", detail = "前後移動・最終送信・停止・自由回答がある。", evidence = ["iphone_requests", "iphone_composer"] }
+windows = { status = "present", detail = "前後移動・最終送信・回答中・停止・入力欄での自由回答がある。", evidence = ["desktop_requests", "desktop_composer"] }
+
+[[implementation]]
+components = ["secret"]
+phase = "extension"
+next = "汎用秘密入力を流用せず、秘密情報の保管・参照と要求/拒否の共通契約を作る。"
+rust = { status = "partial", detail = "Question.secretとElicitationはある。専用SecretRequest、保存先/参照形式、秘密保管と回答済み履歴の契約がない。", evidence = ["requests", "operations"] }
+mac = { status = "partial", detail = "汎用の秘密質問は扱う。ソース選択・参照入力・安全な永続保存の要求カードはない。", evidence = ["desktop_requests"] }
+iphone = { status = "partial", detail = "秘密質問のSecureFieldはある。ソース選択・参照形式・保管先への保存要求カードはない。", evidence = ["iphone_requests"] }
+windows = { status = "partial", detail = "汎用の秘密質問は扱う。ソース選択・参照入力・安全な永続保存の要求カードはない。", evidence = ["desktop_requests"] }
+
+[[implementation]]
+components = ["link-request"]
+phase = "extension"
+next = "接続要求の型と権限判断を追加し、既存ペアリング操作へ接続する。"
+rust = { status = "partial", detail = "通常のHost接続・ペアリングはある。エージェントが会話中に接続を要求し、許可/拒否するRequestBodyがない。", evidence = ["requests", "operations"] }
+mac = { status = "missing", detail = "会話中のLinkRequestと接続確認ダイアログの接続がない。", evidence = ["desktop_requests"] }
+iphone = { status = "missing", detail = "会話中のLinkRequestのUIがない。", evidence = ["iphone_requests"] }
+windows = { status = "missing", detail = "会話中のLinkRequestと接続確認ダイアログの接続がない。", evidence = ["desktop_requests"] }
+
+[[implementation]]
+components = ["composer"]
+phase = "shared"
+next = "共通Context・入力履歴・長さ判断を用意し、エディタの装飾はUIで実装する。"
+rust = { status = "partial", detail = "本文・下書き・添付・invocationはある。入力履歴、構造化Context、プロンプト長警告、ライブ文字起こしの共通契約が不足。", evidence = ["state", "completion", "composer"] }
+mac = { status = "partial", detail = "本文・下書き・添付・候補・入力欄開閉はある。構造化チップ、コードブロック編集、履歴候補、長さ警告、ライブ文字起こしがない。", evidence = ["desktop_composer", "desktop_dictation"] }
+iphone = { status = "partial", detail = "ネイティブ本文入力・下書き・添付・候補はある。構造化チップ、コードブロック編集、入力履歴、長さ警告、ライブ文字起こしがない。", evidence = ["iphone_composer", "iphone_input"] }
+windows = { status = "partial", detail = "本文・下書き・添付・候補・入力欄開閉はある。構造化チップ、コードブロック編集、履歴候補、長さ警告、ライブ文字起こしがない。", evidence = ["desktop_composer", "desktop_dictation"] }
+
+[[implementation]]
+components = ["composer-code"]
+phase = "local"
+next = "ネイティブ入力欄の編集部品として追加する。"
+rust = { status = "ui_only", detail = "本文のコードフェンスを編集するエディタ機能。通常の下書きテキストを使用できる。", evidence = ["state"] }
+mac = { status = "missing", detail = "コードブロックの専用編集とブロック単位の言語選択がない。", evidence = ["desktop_composer"] }
+iphone = { status = "missing", detail = "入力中コードブロックと言語選択の専用UIがない。", evidence = ["iphone_input"] }
+windows = { status = "missing", detail = "コードブロックの専用編集とブロック単位の言語選択がない。", evidence = ["desktop_composer"] }
+
+[[implementation]]
+components = ["send-actions"]
+phase = "shared"
+next = "停止/再開は既存実装を維持する。圧縮送信の選択を共通送信操作に追加する。"
+rust = { status = "partial", detail = "送信・停止・停止後再開・steer・キュー・編集確定と可否がある。次の送信で履歴を圧縮/維持する明示契約がない。", evidence = ["composer", "queue", "operations"] }
+mac = { status = "partial", detail = "送信・停止・再開・追加指示・キュー・編集確定はある。圧縮して送信と履歴維持/圧縮切替がない。", evidence = ["desktop_composer", "desktop_queue"] }
+iphone = { status = "partial", detail = "送信・停止・再開・追加指示・キュー・編集確定はある。圧縮送信と履歴維持/圧縮切替がない。", evidence = ["iphone_composer", "iphone_queue"] }
+windows = { status = "partial", detail = "送信・停止・再開・追加指示・キュー・編集確定はある。圧縮して送信と履歴維持/圧縮切替がない。", evidence = ["desktop_composer", "desktop_queue"] }
+
+[[implementation]]
+components = ["composer-attachments"]
+phase = "shared"
+next = "添付メタデータと転送/保存状態を共通下書きへ持たせる。"
+rust = { status = "partial", detail = "添付の追加/削除・送信とファイル取得はある。動画/Snap Shot種別、容量、添付ごとのアップロード/保存失敗・再添付状態が不足。", evidence = ["state", "files", "operations"] }
+mac = { status = "partial", detail = "添付追加・画像サムネイル・削除・プレビューはある。動画/Snap Shot、容量、添付ごとの再試行/再添付警告が不足。", evidence = ["desktop_composer", "desktop_media"] }
+iphone = { status = "partial", detail = "画像/動画の取り込みと添付削除・プレビューはある。型付き動画サムネイル、Snap Shot、保存/再添付警告などが不足。", evidence = ["iphone_attachments", "iphone_import"] }
+windows = { status = "partial", detail = "添付追加・画像サムネイル・削除・プレビューはある。動画/Snap Shot、容量、添付ごとの再試行/再添付警告が不足。", evidence = ["desktop_composer", "desktop_media"] }
+
+[[implementation]]
+components = ["composer-menu"]
+phase = "shared"
+next = "共通候補の種類と参照を拡張して各エディタへ渡す。"
+rust = { status = "partial", detail = "Skill/Plugin候補・説明・検索/取得状態はある。ファイル/会話/環境/モデル/PR等を統合する候補契約がない。", evidence = ["completion", "invocations"] }
+mac = { status = "partial", detail = "invocation候補と空/取得中はある。T3の全候補種別と提供元バッジが不足。", evidence = ["desktop_composer"] }
+iphone = { status = "partial", detail = "Skill/Plugin候補はある。ファイル/会話/環境/モデル/PR等の候補と提供元バッジがない。", evidence = ["iphone_input"] }
+windows = { status = "partial", detail = "invocation候補と空/取得中はある。T3の全候補種別と提供元バッジが不足。", evidence = ["desktop_composer"] }
+
+[[implementation]]
+components = ["stash", "stash-badge"]
+phase = "shared"
+next = "共通に退避下書き一覧と添付保存の操作を追加する。"
+rust = { status = "missing", detail = "通常の下書き保存はある。複数下書きの退避・復元・削除と添付の保存状態/退避時刻を持つ一覧がない。", evidence = ["state", "intents"] }
+mac = { status = "missing", detail = "退避一覧・復元/削除・件数バッジがない。", evidence = ["desktop_composer"] }
+iphone = { status = "missing", detail = "退避一覧・復元/削除・件数バッジがない。", evidence = ["iphone_composer"] }
+windows = { status = "missing", detail = "退避一覧・復元/削除・件数バッジがない。", evidence = ["desktop_composer"] }
+
+[[implementation]]
+components = ["queue"]
+phase = "shared"
+next = "共通キュー投影をリッチな発言部品へ拡張する。"
+rust = { status = "partial", detail = "キューの順序・本文・保留・編集/steer/削除はある。QueuedMessageの投影は添付件数のみでサムネイル、Context、送信元、時刻が不足。", evidence = ["composer", "queue", "operations"] }
+mac = { status = "partial", detail = "本文・件数・順序・編集/取消/削除/steer・開閉はある。添付サムネイル、Context、送信元・時刻がない。", evidence = ["desktop_queue"] }
+iphone = { status = "partial", detail = "本文・件数・編集/取消/削除/steer・開閉はある。添付サムネイル、Context、送信元・時刻がない。", evidence = ["iphone_queue"] }
+windows = { status = "partial", detail = "本文・件数・順序・編集/取消/削除/steer・開閉はある。添付サムネイル、Context、送信元・時刻がない。", evidence = ["desktop_queue"] }
+
+[[implementation]]
+components = ["model-picker"]
+phase = "shared"
+next = "複数選択を実装するなら送信先・各会話の結果を共通側で定義する。"
+rust = { status = "partial", detail = "プロバイダー/モデル、検索、利用可否と警告・設定操作がある。複数モデルを一度に選ぶ下書き/送信契約がない。", evidence = ["settings", "state"] }
+mac = { status = "partial", detail = "プロバイダーとモデルの検索/選択・警告・設定はある。複数モデル選択がない。", evidence = ["desktop_models"] }
+iphone = { status = "partial", detail = "検索・プロバイダー/モデル一覧・警告・設定はある。複数モデル選択がない。", evidence = ["iphone_models"] }
+windows = { status = "partial", detail = "プロバイダーとモデルの検索/選択・警告・設定はある。複数モデル選択がない。", evidence = ["desktop_models"] }
+
+[[implementation]]
+components = ["model-options"]
+phase = "shared"
+next = "既存のモデルメタデータを拡張し、必要な任意オプションを共通化する。"
+rust = { status = "partial", detail = "推論レベル・推論なし、service tierによる速度、権限モードの選択がある。T3固有Ultracodeを含む任意オプションの契約はない。", evidence = ["settings", "permissions"] }
+mac = { status = "partial", detail = "推論・速度・権限と現在値はある。任意プロバイダーの追加オプションがない。", evidence = ["desktop_models", "desktop_permissions"] }
+iphone = { status = "partial", detail = "推論・速度・権限と現在値はある。任意オプションがない。", evidence = ["iphone_models"] }
+windows = { status = "partial", detail = "推論・速度・権限と現在値はある。任意プロバイダーの追加オプションがない。", evidence = ["desktop_models", "desktop_permissions"] }
+
+[[implementation]]
+components = ["composer-mode"]
+phase = "local"
+next = "既存モードと権限操作を維持する。"
+rust = { status = "present", detail = "実行/権限モードと変更可否がある。", evidence = ["permissions", "settings"] }
+mac = { status = "present", detail = "実行/権限の切替と狭幅時の追加メニューがある。", evidence = ["desktop_composer", "desktop_permissions"] }
+iphone = { status = "present", detail = "入力欄のメニューから実行/権限を切り替える。", evidence = ["iphone_composer"] }
+windows = { status = "present", detail = "実行/権限の切替と狭幅時の追加メニューがある。", evidence = ["desktop_composer", "desktop_permissions"] }
+
+[[implementation]]
+components = ["chatgpt-plan"]
+phase = "shared"
+next = "既存アカウント情報から表示判断を共通化してUIへ渡す。"
+rust = { status = "partial", detail = "アカウント認証情報と使用量はある。ChatGPTプラン利用の専用説明/表示モデルがない。", evidence = ["settings", "operations"] }
+mac = { status = "partial", detail = "アカウントと使用量は開ける。プラン利用の専用表示/説明がない。", evidence = ["desktop_models"] }
+iphone = { status = "partial", detail = "アカウント使用量はある。プラン利用の専用表示/説明がない。", evidence = ["iphone_models"] }
+windows = { status = "partial", detail = "アカウントと使用量は開ける。プラン利用の専用表示/説明がない。", evidence = ["desktop_models"] }
+
+[[implementation]]
+components = ["provider-traits"]
+phase = "shared"
+next = "プロバイダー固有オプションの記述と検証を共通側に追加する。"
+rust = { status = "partial", detail = "推論・service tierはある。任意の選択式/真偽式オプション記述、既定値説明、本文Ultrathinkの表示判断がない。", evidence = ["settings", "state"] }
+mac = { status = "partial", detail = "既存の推論/速度はある。任意オプション、既定値バッジ、Ultrathink注記がない。", evidence = ["desktop_models"] }
+iphone = { status = "partial", detail = "既存の推論/速度はある。任意オプションと既定値/Ultrathink注記がない。", evidence = ["iphone_models"] }
+windows = { status = "partial", detail = "既存の推論/速度はある。任意オプション、既定値バッジ、Ultrathink注記がない。", evidence = ["desktop_models"] }
+
+[[implementation]]
+components = ["dictation"]
+phase = "shared"
+next = "必要な時間/上限/処理段階を共通化し、録音表示は各OSで行う。"
+rust = { status = "partial", detail = "録音データの準備・文字起こし・下書き反映はある。ライブ文字起こし、上限/後処理スキップの共通状態がない。", evidence = ["dictation", "operations", "state"] }
+mac = { status = "partial", detail = "録音開始/波形/取消/確定・処理中/失敗はある。録音時間/上限と後処理スキップがない。", evidence = ["desktop_dictation"] }
+iphone = { status = "partial", detail = "録音・音量波形・取消/確定・文字起こし・下書き反映はある。録音時間/上限と後処理スキップがない。", evidence = ["iphone_import", "iphone_composer"] }
+windows = { status = "partial", detail = "録音開始/波形/取消/確定・処理中/失敗はある。録音時間/上限と後処理スキップがない。", evidence = ["desktop_dictation"] }
+
+[[implementation]]
+components = ["voice-setup"]
+phase = "extension"
+next = "モデルを端末配布する方式が必要なら準備状態と取得操作を共通化する。"
+rust = { status = "partial", detail = "文字起こしの準備とサーバー側処理はある。端末での音声モデル配布・検証・取消・マイク選択の共通管理がない。", evidence = ["dictation", "operations"] }
+mac = { status = "missing", detail = "音声モデルの容量・ダウンロード/検証とマイク選択の初期設定ダイアログがない。", evidence = ["desktop_dictation"] }
+iphone = { status = "missing", detail = "モデルの取得/検証・マイク選択の初期設定UIがない。", evidence = ["iphone_import"] }
+windows = { status = "missing", detail = "音声モデルの容量・ダウンロード/検証とマイク選択の初期設定ダイアログがない。", evidence = ["desktop_dictation"] }
+
+[[implementation]]
+components = ["provider-banner"]
+phase = "restore"
+next = "既存のErrorNoticeとプロバイダー状態から共通のバナー投影を使う。"
+rust = { status = "present", detail = "未設定・接続/取得失敗、設定画面への回復操作がある。", evidence = ["settings", "error"] }
+mac = { status = "partial", detail = "プロバイダーのエラーと設定操作はある。T3と同じ会話上の更新/閉じる専用バナーに揃っていない。", evidence = ["desktop_notices", "desktop_models"] }
+iphone = { status = "partial", detail = "設定エラーと回復操作はある。会話上で同じ専用バナーを表示していない。", evidence = ["iphone_notices", "iphone_models"] }
+windows = { status = "partial", detail = "プロバイダーのエラーと設定操作はある。T3と同じ会話上の更新/閉じる専用バナーに揃っていない。", evidence = ["desktop_notices", "desktop_models"] }
+
+[[implementation]]
+components = ["thread-error-banner"]
+phase = "shared"
+next = "使用制限の回復操作を共通投影へ追加して各UIへ渡す。"
+rust = { status = "partial", detail = "会話エラーと使用制限判定はある。管理者への依頼文・使用量画面への専用回復操作が不足。", evidence = ["error", "execution", "rows"] }
+mac = { status = "partial", detail = "会話エラーと閉じる操作はある。長文展開、制限専用表示、管理者依頼コピー/使用量操作が不足。", evidence = ["desktop_notices"] }
+iphone = { status = "partial", detail = "エラー通知はある。T3の会話エラー専用バナーの展開/制限回復操作が不足。", evidence = ["iphone_notices", "iphone_screen"] }
+windows = { status = "partial", detail = "会話エラーと閉じる操作はある。長文展開、制限専用表示、管理者依頼コピー/使用量操作が不足。", evidence = ["desktop_notices"] }
+
+[[implementation]]
+components = ["banner-stack"]
+phase = "shared"
+next = "各通知のデータを揃え、束ねる開閉状態はUIに置く。"
+rust = { status = "partial", detail = "個々のErrorNoticeと回復操作はある。T3の全通知種別を統合するカード投影がない。", evidence = ["error"] }
+mac = { status = "partial", detail = "個々の通知・見出し・説明・回復操作はある。複数通知の件数付き開閉/詳細がない。", evidence = ["desktop_notices"] }
+iphone = { status = "partial", detail = "個々の通知はある。複数カードの件数付きスタック/開閉がない。", evidence = ["iphone_notices"] }
+windows = { status = "partial", detail = "個々の通知・見出し・説明・回復操作はある。複数通知の件数付き開閉/詳細がない。", evidence = ["desktop_notices"] }
+
+[[implementation]]
+components = ["system-banners"]
+phase = "shared"
+next = "更新/割当の実行状態を共通通知へ追加し、接続通知は既存状態を使う。"
+rust = { status = "partial", detail = "Host接続/再接続・バージョン情報はある。会話上のサーバー更新進捗・自動割当て先更新通知の契約が不足。", evidence = ["intents", "error"] }
+mac = { status = "partial", detail = "Host接続失敗・再接続操作はある。T3の更新中/失敗/割当先変更を同じ通知領域へ出していない。", evidence = ["desktop_notices", "desktop_root"] }
+iphone = { status = "partial", detail = "接続エラー・再接続はある。会話上の更新進捗と割当先変更の通知が不足。", evidence = ["iphone_notices", "iphone_screen"] }
+windows = { status = "partial", detail = "Host接続失敗・再接続操作はある。T3の更新中/失敗/割当先変更を同じ通知領域へ出していない。", evidence = ["desktop_notices", "desktop_root"] }
+
+[[implementation]]
+components = ["project-clone"]
+phase = "extension"
+next = "Hostのリポジトリ取得操作と進捗を共通契約へ追加する。"
+rust = { status = "missing", detail = "既存フォルダの取り込みとは別に、リポジトリを取得/クローンする操作と進捗/失敗の契約がない。", evidence = ["intents", "operations"] }
+mac = { status = "missing", detail = "会話内のプロジェクトクローン進捗・失敗/回復通知がない。", evidence = ["desktop_notices"] }
+iphone = { status = "missing", detail = "会話内のプロジェクトクローン通知がない。", evidence = ["iphone_notices"] }
+windows = { status = "missing", detail = "会話内のプロジェクトクローン進捗・失敗/回復通知がない。", evidence = ["desktop_notices"] }
+
+[[implementation]]
+components = ["usage-limit"]
+phase = "shared"
+next = "制限からの再開ポリシーと待機期限を共通状態に追加する。"
+rust = { status = "partial", detail = "使用制限判定とアカウント使用量/リセット時刻はある。制限による自動再開・待機・スヌーズ設定の状態遷移がない。", evidence = ["execution", "operations", "settings", "queue"] }
+mac = { status = "partial", detail = "制限エラーと使用量は表示できる。自動再開時刻とスヌーズ操作がない。", evidence = ["desktop_notices", "desktop_models"] }
+iphone = { status = "partial", detail = "制限エラーと使用量はある。自動再開/待機設定とスヌーズがない。", evidence = ["iphone_notices", "iphone_models"] }
+windows = { status = "partial", detail = "制限エラーと使用量は表示できる。自動再開時刻とスヌーズ操作がない。", evidence = ["desktop_notices", "desktop_models"] }
+
+[[implementation]]
+components = ["model-fallback"]
+phase = "shared"
+next = "プロバイダーが報告する代替モデル選択を共通イベントに保持する。"
+rust = { status = "partial", detail = "選択モデル・エラー・アカウント使用量はある。代替モデルへ切り替えた理由と通知履歴を持つ専用イベントがない。", evidence = ["settings", "models", "execution"] }
+mac = { status = "missing", detail = "代替モデル利用とその使用量の専用通知がない。", evidence = ["desktop_notices"] }
+iphone = { status = "missing", detail = "代替モデル使用の専用通知がない。", evidence = ["iphone_notices"] }
+windows = { status = "missing", detail = "代替モデル利用とその使用量の専用通知がない。", evidence = ["desktop_notices"] }
+
+[[implementation]]
+components = ["feedback"]
+phase = "extension"
+next = "フィードバック機能を持たせるなら送信操作と状態から追加する。"
+rust = { status = "missing", detail = "T3のフィードバック送信と状態を会話へ通知する契約がない。", evidence = ["operations", "intents"] }
+mac = { status = "missing", detail = "フィードバック状態の会話通知がない。", evidence = ["desktop_notices"] }
+iphone = { status = "missing", detail = "フィードバック状態の会話通知がない。", evidence = ["iphone_notices"] }
+windows = { status = "missing", detail = "フィードバック状態の会話通知がない。", evidence = ["desktop_notices"] }
+
+[[implementation]]
+components = ["fresh-session-banner"]
+phase = "shared"
+next = "次回送信のコンテキスト方針を共通下書きへ追加する。"
+rust = { status = "missing", detail = "次の送信で新セッションに切り替える保留設定と取消の契約がない。", evidence = ["state", "operations"] }
+mac = { status = "missing", detail = "新セッション開始予告と取消がない。", evidence = ["desktop_notices", "desktop_composer"] }
+iphone = { status = "missing", detail = "新セッション開始予告と取消がない。", evidence = ["iphone_composer"] }
+windows = { status = "missing", detail = "新セッション開始予告と取消がない。", evidence = ["desktop_notices", "desktop_composer"] }
+
+[[implementation]]
+components = ["thread-now"]
+phase = "shared"
+next = "既存状態の行を揃え、目標は別の共通機能として追加する。"
+rust = { status = "partial", detail = "注意状態・バックグラウンド作業・同期状態はある。目標の状態がない。", evidence = ["background", "models", "error"] }
+mac = { status = "partial", detail = "バックグラウンド作業と注意/同期表示はある。目標行がない。", evidence = ["desktop_background", "desktop_notices"] }
+iphone = { status = "partial", detail = "バックグラウンド状態はある。会話中の注意/同期行が揃わず、目標行もない。", evidence = ["iphone_composer", "iphone_screen"] }
+windows = { status = "partial", detail = "バックグラウンド作業と注意/同期表示はある。目標行がない。", evidence = ["desktop_background", "desktop_notices"] }
+
+[[implementation]]
+components = ["activity-notices"]
+phase = "shared"
+next = "共通の停止段階/期限/強制停止を定義する。目標等はそれぞれ独立した共通状態を追加する。"
+rust = { status = "partial", detail = "停止要求中とバックグラウンド作業・停止はある。停止経過/応答不能/強制停止、目標、分岐不一致の専用通知契約が不足。", evidence = ["composer", "background", "operations", "workspace"] }
+mac = { status = "partial", detail = "停止中・バックグラウンド概要と停止はある。経過/強制停止、目標、分岐復元、拡張機能状態の通知が不足。", evidence = ["desktop_background", "desktop_composer", "desktop_notices"] }
+iphone = { status = "partial", detail = "停止とバックグラウンド状態はある。停止経過/強制停止、目標、分岐復元等の通知がない。", evidence = ["iphone_composer"] }
+windows = { status = "partial", detail = "停止中・バックグラウンド概要と停止はある。経過/強制停止、目標、分岐復元、拡張機能状態の通知が不足。", evidence = ["desktop_background", "desktop_composer", "desktop_notices"] }
+
+[[implementation]]
+components = ["background-details"]
+phase = "shared"
+next = "背景タスクの詳細取得操作と結果を共通化する。"
+rust = { status = "partial", detail = "背景タスクの名前・種類・状態はある。実行コマンド/ライブ出力を取得する詳細操作がない。", evidence = ["background", "execution", "operations"] }
+mac = { status = "partial", detail = "背景タスク概要はある。コマンドとライブ出力を開く詳細ダイアログがない。", evidence = ["desktop_background"] }
+iphone = { status = "partial", detail = "背景タスクの状態はある。コマンド/出力付き詳細ダイアログがない。", evidence = ["iphone_composer"] }
+windows = { status = "partial", detail = "背景タスク概要はある。コマンドとライブ出力を開く詳細ダイアログがない。", evidence = ["desktop_background"] }
+
+[[implementation]]
+components = ["thread-life-status"]
+phase = "shared"
+next = "実行状態と別の会話管理状態として完了扱い・スヌーズを追加する。"
+rust = { status = "partial", detail = "通常の実行完了はある。これとは別の手動の完了扱い・スヌーズ期限/解除/復帰通知の状態がない。", evidence = ["models", "intents", "list"] }
+mac = { status = "missing", detail = "スヌーズ・手動完了とその解除/復帰通知がない。", evidence = ["desktop_threads", "desktop_notices"] }
+iphone = { status = "missing", detail = "スヌーズと手動完了扱いのUIがない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "スヌーズ・手動完了とその解除/復帰通知がない。", evidence = ["desktop_threads", "desktop_notices"] }
+
+[[implementation]]
+components = ["header"]
+phase = "shared"
+next = "既存の親参照をヘッダーへ接続し、開始由来/共有は共通属性を追加する。"
+rust = { status = "partial", detail = "プロジェクト・タイトル・親参照とHostのRenameSessionはある。改名操作のcore Intent、リンク先環境からの開始属性とゲスト共有状態がない。", evidence = ["models", "operations", "intents"] }
+mac = { status = "partial", detail = "プロジェクトのアイコン/新規会話操作・タイトルはある。名前変更入力、親パンくず、リンク開始バッジ、ゲスト共有がない。", evidence = ["desktop_header", "desktop_threads"] }
+iphone = { status = "partial", detail = "タイトルと操作メニューはある。プロジェクト操作、親パンくず、リンク開始/共有表示が不足。", evidence = ["iphone_screen"] }
+windows = { status = "partial", detail = "プロジェクトのアイコン/新規会話操作・タイトルはある。名前変更入力、親パンくず、リンク開始バッジ、ゲスト共有がない。", evidence = ["desktop_header", "desktop_threads"] }
+
+[[implementation]]
+components = ["panel-controls"]
+phase = "local"
+next = "OSに合うパネル操作をUI側で実装する。"
+rust = { status = "present", detail = "会話ごとのPanelStateに開閉・選択・最大化と操作がある。新たな業務モデルは不要。", evidence = ["panels"] }
+mac = { status = "present", detail = "会話詳細・端末・右パネルの切替と最大化/復帰がある。", evidence = ["desktop_header", "desktop_workbench", "desktop_workspace"] }
+iphone = { status = "partial", detail = "ツール画面・シートを開ける。右パネルの切替/最大化UIはない。", evidence = ["iphone_screen"] }
+windows = { status = "present", detail = "会話詳細・端末・右パネルの切替と最大化/復帰がある。", evidence = ["desktop_header", "desktop_workbench", "desktop_workspace"] }
+
+[[implementation]]
+components = ["context-strip", "branch-toolbar"]
+phase = "local"
+next = "既存の共通作業先選択を維持する。"
+rust = { status = "present", detail = "環境・ブランチ、ローカル/ワークツリー・新規ワークツリー選択と可否がある。", evidence = ["workspace", "composer"] }
+mac = { status = "present", detail = "入力欄の環境・ブランチ・ワークツリー操作がある。", evidence = ["desktop_composer", "desktop_workspace"] }
+iphone = { status = "present", detail = "入力欄から作業先・ブランチ・ワークツリーを選べる。", evidence = ["iphone_composer", "iphone_workspace"] }
+windows = { status = "present", detail = "入力欄の環境・ブランチ・ワークツリー操作がある。", evidence = ["desktop_composer", "desktop_workspace"] }
+
+[[implementation]]
+components = ["thread-menu"]
+phase = "shared"
+next = "未対応の会話管理状態と操作を共通側へ追加し、既存操作はUIへ接続する。"
+rust = { status = "partial", detail = "検索・新規会話・パス/IDコピーはある。HostのRenameSessionはcore未接続。会話単位のピン/完了/スヌーズ/共有/自動完了/未読指定/アーカイブ/削除とタイトル再生成等が不足。プロジェクト非表示や既読化とは別。", evidence = ["intents", "operations", "list", "models"] }
+mac = { status = "partial", detail = "検索・新規会話とパス/ブランチ/タイトル/IDコピーはある。改名/再生成・未読指定・会話単位のピン/完了/スヌーズ/共有/自動完了/アーカイブ/削除等がない。", evidence = ["desktop_threads", "desktop_header", "desktop_find"] }
+iphone = { status = "partial", detail = "会話の新規作成・変更表示・更新はある。会話内のメニューに名前変更/未読/アーカイブ/削除・検索・各コピー項目がなく、ピン/完了/スヌーズ/共有/自動完了もない。", evidence = ["iphone_screen"] }
+windows = { status = "partial", detail = "検索・新規会話とパス/ブランチ/タイトル/IDコピーはある。改名/再生成・未読指定・会話単位のピン/完了/スヌーズ/共有/自動完了/アーカイブ/削除等がない。", evidence = ["desktop_threads", "desktop_header", "desktop_find"] }
+
+[[implementation]]
+components = ["thread-details"]
+phase = "shared"
+next = "不足データを個別に共通化し、既存の詳細は統合UIへ接続する。"
+rust = { status = "partial", detail = "環境/作業先/差分/エディタ・親子/サイドチャット・使用量の情報はある。会話サーバー一覧・自動実行・コンテキスト使用率と表示設定が不足。", evidence = ["workspace", "diff", "agents", "panels", "settings"] }
+mac = { status = "partial", detail = "作業先カード/ポップオーバー・エディタ・スクリプト・Git/差分・関連会話はある。PR/サーバー/自動実行/コンテキスト使用率/項目設定がない。", evidence = ["desktop_details", "desktop_workspace", "desktop_card"] }
+iphone = { status = "partial", detail = "作業先/差分などの個別画面はある。会話の全詳細を統合するカードとPR/サーバー/自動実行/使用率が不足。", evidence = ["iphone_diff", "iphone_screen"] }
+windows = { status = "partial", detail = "作業先カード/ポップオーバー・エディタ・スクリプト・Git/差分・関連会話はある。PR/サーバー/自動実行/コンテキスト使用率/項目設定がない。", evidence = ["desktop_details", "desktop_workspace", "desktop_card"] }
+
+[[implementation]]
+components = ["relationships"]
+phase = "shared"
+next = "既存階層を共通の関係一覧へ投影し、由来とページングを追加する。"
+rust = { status = "partial", detail = "親/子・分岐とエージェント階層はある。委任元/リモート由来を区別する属性と関係の専用ページングが不足。", evidence = ["agents", "models"] }
+mac = { status = "partial", detail = "関連会話/エージェント一覧と移動はある。委任元表示と関係の追加読み込みがない。", evidence = ["desktop_details"] }
+iphone = { status = "partial", detail = "子会話へ移動できる。親/分岐/委任をまとめた関係一覧と追加読み込みがない。", evidence = ["iphone_activity", "iphone_screen"] }
+windows = { status = "partial", detail = "関連会話/エージェント一覧と移動はある。委任元表示と関係の追加読み込みがない。", evidence = ["desktop_details"] }
+
+[[implementation]]
+components = ["terminal-drawers"]
+phase = "local"
+next = "既存の端末操作を維持する。"
+rust = { status = "present", detail = "会話/作業先に属する端末の開始・入出力・リサイズ・停止がある。", evidence = ["operations", "terminals"] }
+mac = { status = "present", detail = "会話に対応した端末を開ける。", evidence = ["desktop_terminal"] }
+iphone = { status = "present", detail = "ツール画面から会話の端末を開ける。", evidence = ["iphone_screen"] }
+windows = { status = "present", detail = "会話に対応した端末を開ける。", evidence = ["desktop_terminal"] }
+
+[[implementation]]
+components = ["right-panel"]
+phase = "shared"
+next = "PRの共通データ/操作を追加する。既存ツールを開く構成はUIで扱う。"
+rust = { status = "partial", detail = "差分・ファイル・ブラウザ・デバイス・サイドチャットの状態/操作はある。Pull Requestの専用モデル/操作がない。", evidence = ["panels", "workspace", "operations"] }
+mac = { status = "partial", detail = "差分/ファイル/ブラウザ/デバイス/サイドチャットはある。Pull Requestパネルがない。", evidence = ["desktop_workbench", "desktop_details", "desktop_root"] }
+iphone = { status = "partial", detail = "各ツール画面・サイドチャットはある。PRを扱うパネルがない。画面内の配置差は判定しない。", evidence = ["iphone_screen", "iphone_sidechat"] }
+windows = { status = "partial", detail = "差分/ファイル/ブラウザ/デバイス/サイドチャットはある。Pull Requestパネルがない。", evidence = ["desktop_workbench", "desktop_details", "desktop_root"] }
+
+[[implementation]]
+components = ["side-chat"]
+phase = "restore"
+next = "共通の会話行を接続する際にサイドチャットも同じ描画へ切り替える。"
+rust = { status = "present", detail = "独立した下書き・会話・選択状態と開始/終了がある。", evidence = ["panels", "state"] }
+mac = { status = "present", detail = "ヘッダー・本文・入力欄・閉じる操作がある。", evidence = ["desktop_sidechat"] }
+iphone = { status = "present", detail = "ネイティブの会話本文・入力欄と閉じる操作がある。", evidence = ["iphone_sidechat"] }
+windows = { status = "present", detail = "ヘッダー・本文・入力欄・閉じる操作がある。", evidence = ["desktop_sidechat"] }
+
+[[implementation]]
+components = ["mini-player"]
+phase = "extension"
+next = "既存プレビューに必要な最小の制御を足し、ミニ表示はUIで実装する。"
+rust = { status = "partial", detail = "ブラウザプレビューの状態はある。ミニプレイヤー専用の表示/制御契約がない。", evidence = ["panels"] }
+mac = { status = "missing", detail = "ブラウザプレビューのミニプレイヤーがない。", evidence = ["desktop_root"] }
+iphone = { status = "missing", detail = "ブラウザのミニプレイヤーがない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "ブラウザプレビューのミニプレイヤーがない。", evidence = ["desktop_root"] }
+
+[[implementation]]
+components = ["open-editor"]
+phase = "shared"
+next = "SSH起動先の解決を共通化し、OS連携メニューとアイコンをUIで追加する。"
+rust = { status = "partial", detail = "既定/利用可能エディタの選択と開く操作がある。SSHルートを使うエディタ起動契約が不足。", evidence = ["editors", "operations"] }
+mac = { status = "partial", detail = "エディタ選択/起動と利用不能表示はある。各エディタの画像アイコンとSSH経由起動がない。", evidence = ["desktop_details", "desktop_workspace"] }
+iphone = { status = "missing", detail = "外部エディタ選択とSSH経由の起動メニューがない。", evidence = ["iphone_screen", "iphone_diff"] }
+windows = { status = "partial", detail = "エディタ選択/起動と利用不能表示はある。各エディタの画像アイコンとSSH経由起動がない。", evidence = ["desktop_details", "desktop_workspace"] }
+
+[[implementation]]
+components = ["detail-usage"]
+phase = "shared"
+next = "コンテキスト使用量を共通モデルへ追加し、既存AccountUsageと一緒に詳細へ渡す。"
+rust = { status = "partial", detail = "AccountUsageの制限窓・残量・リセット時刻はある。会話のコンテキスト使用量/上限/圧縮しきい値とペース説明が不足。", evidence = ["operations", "settings", "models"] }
+mac = { status = "partial", detail = "モデル/アカウント設定に使用量はある。会話詳細のコンテキスト使用量・しきい値・ペース説明がない。", evidence = ["desktop_models", "desktop_details"] }
+iphone = { status = "partial", detail = "アカウント使用量はある。会話詳細のコンテキスト使用量・上限・しきい値がない。", evidence = ["iphone_models", "iphone_screen"] }
+windows = { status = "partial", detail = "モデル/アカウント設定に使用量はある。会話詳細のコンテキスト使用量・しきい値・ペース説明がない。", evidence = ["desktop_models", "desktop_details"] }
+
+[[implementation]]
+components = ["detail-servers"]
+phase = "extension"
+next = "Host側で会話由来のサーバーを追跡し、共通の一覧/停止操作を追加する。"
+rust = { status = "partial", detail = "背景コマンド/タスクはある。会話が起動したサーバーのポート/起動元と停止操作を列挙する専用契約がない。", evidence = ["execution", "operations", "models"] }
+mac = { status = "missing", detail = "会話サーバー一覧、ポート、開く/停止の詳細セクションがない。", evidence = ["desktop_details"] }
+iphone = { status = "missing", detail = "会話サーバー一覧がない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "会話サーバー一覧、ポート、開く/停止の詳細セクションがない。", evidence = ["desktop_details"] }
+
+[[implementation]]
+components = ["detail-automations"]
+phase = "extension"
+next = "スケジュールと実行管理をHost/共通側から作る。"
+rust = { status = "missing", detail = "自動実行の定義、予定/次回時刻、実行/一時停止/再開の共通契約がない。", evidence = ["operations", "models", "intents"] }
+mac = { status = "missing", detail = "会話の自動実行一覧・編集/実行/停止がない。", evidence = ["desktop_details"] }
+iphone = { status = "missing", detail = "自動実行一覧と操作がない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "会話の自動実行一覧・編集/実行/停止がない。", evidence = ["desktop_details"] }
+
+[[implementation]]
+components = ["detail-prs"]
+phase = "extension"
+next = "PR連携の取得操作と共通モデルを追加する。"
+rust = { status = "missing", detail = "会話に関連するPRの番号/状態/一覧・取得操作の型がない。通常のURL表示とは別。", evidence = ["operations", "models"] }
+mac = { status = "missing", detail = "会話詳細の現在PR・追加PR一覧がない。", evidence = ["desktop_details"] }
+iphone = { status = "missing", detail = "会話詳細のPR一覧がない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "会話詳細の現在PR・追加PR一覧がない。", evidence = ["desktop_details"] }
+
+[[implementation]]
+components = ["detail-items"]
+phase = "local"
+next = "詳細セクションが揃った後にUIの表示設定として追加する。"
+rust = { status = "ui_only", detail = "会話詳細の項目の表示/非表示と既定値はクライアントの表示設定。", evidence = ["panels"] }
+mac = { status = "missing", detail = "会話詳細の項目設定メニューがない。", evidence = ["desktop_details"] }
+iphone = { status = "missing", detail = "会話詳細の項目設定がない。", evidence = ["iphone_screen"] }
+windows = { status = "missing", detail = "会話詳細の項目設定メニューがない。", evidence = ["desktop_details"] }
+
+[[implementation]]
+components = ["overlay-dialogs"]
+phase = "shared"
+next = "PR開始とブランチ復元に必要な共通操作を揃え、確認ダイアログを接続する。"
+rust = { status = "partial", detail = "編集巻戻し・作業先変更・デバイス操作はある。PRから会話を開始する専用入力/確認用データがない。", evidence = ["operations", "workspace"] }
+mac = { status = "partial", detail = "巻戻し確認・デバイス設定はある。ブランチ復元とPRから会話を作る専用確認が不足。", evidence = ["desktop_root", "desktop_threads"] }
+iphone = { status = "partial", detail = "巻戻し確認とデバイス画面はある。ブランチ復元/PRから会話を作る専用確認がない。", evidence = ["iphone_screen"] }
+windows = { status = "partial", detail = "巻戻し確認・デバイス設定はある。ブランチ復元とPRから会話を作る専用確認が不足。", evidence = ["desktop_root", "desktop_threads"] }
+
+[[implementation]]
+components = ["guest-sharing"]
+phase = "extension"
+next = "Host側の共有権限/期限と共通のゲスト会話契約を先に追加する。"
+rust = { status = "missing", detail = "ゲスト共有リンク、期限/停止、送信待ちメッセージと承認/破棄の契約がない。Host端末の認証/ペアリングとは別。", evidence = ["operations", "requests", "models"] }
+mac = { status = "missing", detail = "ゲスト共有ダイアログと保留メッセージ操作がない。", evidence = ["desktop_root", "desktop_requests"] }
+iphone = { status = "missing", detail = "ゲスト共有と保留メッセージのUIがない。", evidence = ["iphone_screen", "iphone_requests"] }
+windows = { status = "missing", detail = "ゲスト共有ダイアログと保留メッセージ操作がない。", evidence = ["desktop_root", "desktop_requests"] }
