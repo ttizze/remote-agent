@@ -405,6 +405,24 @@ mod tests {
         assert!(text.deadline(token).is_none());
     }
     #[tokio::test(start_paused = true)]
+    async fn unfinished_blocks_do_not_delay_the_next_complete_paragraph() {
+        let token = Uuid::new_v4();
+        let key = ("a".into(), TextField::AssistantText);
+        let mut text = Text {
+            worker: Some(token),
+            ..Default::default()
+        };
+        text.pending.insert(key.clone(), entry("A\n\nx"));
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "A\n\n");
+        tokio::time::advance(Duration::from_millis(400)).await;
+        text.pending.get_mut(&key).unwrap().append("y");
+        assert!(text.ready(token).unwrap().is_empty());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        text.pending.get_mut(&key).unwrap().append("\n\n");
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "A\n\nxy\n\n");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn idle_delivery_never_shrinks_to_an_earlier_paragraph_boundary() {
         let token = Uuid::new_v4();
         let mut text = Text {
