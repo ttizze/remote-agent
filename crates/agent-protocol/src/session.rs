@@ -87,7 +87,7 @@ impl std::str::FromStr for SessionRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextField {
     AssistantText,
@@ -453,13 +453,12 @@ impl SessionChange {
                     let ItemBody::Reasoning { content, summary } = item.body_mut() else {
                         return Err(UpdateError::WrongBody);
                     };
-                    append_part(
+                    part(
                         match field {
                             ReasoningField::Content => content,
                             ReasoningField::Summary => summary,
                         },
                         *index,
-                        "",
                     )?;
                 }
                 Self::Error { error, .. } => {
@@ -1172,22 +1171,27 @@ impl HistoryReadState {
 /// Append one native text fragment in place. Owners choose the body and persist
 /// the result; this function has no state or I/O dependencies.
 pub fn text_delta(body: &mut ItemBody, field: TextField, delta: &str) -> Result<(), UpdateError> {
-    match (field, body) {
-        (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => text.push_str(delta),
-        (TextField::CommandOutput, ItemBody::CommandExecution { output, .. })
-        | (TextField::FileOutput, ItemBody::FileChange { output, .. }) => output.push_str(delta),
-        (TextField::ReasoningContent { index }, ItemBody::Reasoning { content, .. }) => {
-            append_part(content, index, delta)?
-        }
-        (TextField::ReasoningSummary { index }, ItemBody::Reasoning { summary, .. }) => {
-            append_part(summary, index, delta)?
-        }
-        _ => return Err(UpdateError::WrongBody),
-    }
+    text_part(body, field)?.push_str(delta);
     Ok(())
 }
 
-fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), UpdateError> {
+/// Select one text stream without replacing the other parts of its item.
+pub fn text_part(body: &mut ItemBody, field: TextField) -> Result<&mut String, UpdateError> {
+    match (field, body) {
+        (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => Ok(text),
+        (TextField::CommandOutput, ItemBody::CommandExecution { output, .. })
+        | (TextField::FileOutput, ItemBody::FileChange { output, .. }) => Ok(output),
+        (TextField::ReasoningContent { index }, ItemBody::Reasoning { content, .. }) => {
+            part(content, index)
+        }
+        (TextField::ReasoningSummary { index }, ItemBody::Reasoning { summary, .. }) => {
+            part(summary, index)
+        }
+        _ => Err(UpdateError::WrongBody),
+    }
+}
+
+fn part(parts: &mut Vec<String>, index: u32) -> Result<&mut String, UpdateError> {
     let index = index as usize;
     // Native summaries can announce indexes out of order. Bound sparse allocation.
     if index >= 4096 {
@@ -1196,8 +1200,7 @@ fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), U
     if index >= parts.len() {
         parts.resize_with(index + 1, String::new);
     }
-    parts[index].push_str(delta);
-    Ok(())
+    Ok(&mut parts[index])
 }
 
 #[cfg(test)]

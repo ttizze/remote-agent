@@ -603,22 +603,20 @@ impl Runtime {
                 .storage
                 .item(target, &key.item)?
                 .filter(|item| matches!(item.status, ItemStatus::Running | ItemStatus::Unknown))
-            {
-                if let ItemBody::CommandExecution {
+                && let ItemBody::CommandExecution {
                     output,
                     output_omitted,
                     ..
                 } = &mut item.body
-                {
-                    *output = tail.text;
-                    *output_omitted = tail.truncated;
-                    observations.push(Observation::Item {
-                        deferred: false,
-                        id: key.item,
-                        status: item_status,
-                        body: item.body,
-                    });
-                }
+            {
+                *output = tail.text;
+                *output_omitted = tail.truncated;
+                observations.push(Observation::Item {
+                    deferred: false,
+                    id: key.item,
+                    status: item_status,
+                    body: item.body,
+                });
             }
         }
         Ok(())

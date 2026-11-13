@@ -1520,6 +1520,93 @@ rl.on('line', line => {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn recorded_forks_send_the_selected_native_boundary() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        for data in [
+            include_str!("../fixtures/thread_fork_native_prior_turn/codex_transcript.ndjson"),
+            include_str!("../fixtures/thread_fork_native_continue/codex_transcript.ndjson"),
+            include_str!("../fixtures/thread_fork_native_siblings/codex_transcript.ndjson"),
+        ] {
+            let rows: Vec<Value> = data
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let forks: Vec<_> = rows
+                .iter()
+                .filter(|row| {
+                    row["type"] == "expect_outbound" && row["frame"]["method"] == "thread/fork"
+                })
+                .map(|row| {
+                    let frame = &row["frame"];
+                    let reply = rows
+                        .iter()
+                        .find(|row| {
+                            row["type"] == "emit_inbound"
+                                && row["frame"]["id"] == frame["id"]
+                                && row["frame"]["result"].is_object()
+                        })
+                        .unwrap();
+                    serde_json::json!({"request":frame,"result":reply["frame"]["result"]})
+                })
+                .collect();
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("forks.json"),
+                serde_json::to_vec(&forks).unwrap(),
+            )
+            .unwrap();
+            let program = directory.path().join("codex-fixture");
+            std::fs::write(&program, r##"#!/usr/bin/env node
+const assert=require('node:assert/strict'), fs=require('node:fs');
+const forks=JSON.parse(fs.readFileSync(__dirname+'/forks.json'));let cursor=0;
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const message=JSON.parse(line);if(message.id===undefined)return;
+ let result;
+ if(message.method==='initialize')result={userAgent:'fork-fixture',codexHome:process.env.CODEX_HOME};
+ else {
+  const reference=forks[cursor++];assert.equal(message.method,'thread/fork');
+  for(const key of ['threadId','lastTurnId'])assert.equal(message.params[key],reference.request.params[key]);
+  assert.equal(message.params.excludeTurns,false);result=reference.result;
+ }
+ process.stdout.write(JSON.stringify({id:message.id,result})+'\n');
+});
+"##).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let server = Arc::new(
+                CodexAppServer::spawn(Config {
+                    program,
+                    codex_home: Some(directory.path().join("codex")),
+                    ..Default::default()
+                })
+                .await
+                .unwrap(),
+            );
+            let agent = Codex::new(Ok(server));
+            let _events = agent.event_stream().unwrap();
+            let mut ids = std::collections::HashSet::new();
+            for fork in &forks {
+                let params = &fork["request"]["params"];
+                let response = agent
+                    .fork(
+                        params["threadId"].as_str().unwrap(),
+                        params["lastTurnId"].as_str().unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.thread.id.as_ref().unwrap().id,
+                    fork["result"]["thread"]["id"].as_str().unwrap()
+                );
+                assert!(ids.insert(response.thread.id.unwrap()));
+            }
+            agent.shutdown().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_recorded_subagent_without_thread_started_can_ask_for_approval_and_finish() {
         use super::*;
         use std::os::unix::fs::PermissionsExt;

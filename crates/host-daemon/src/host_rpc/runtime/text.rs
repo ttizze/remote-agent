@@ -1,7 +1,7 @@
 //! Provider resources collect complete item bodies at Markdown boundaries.
 //! Paragraphs are committed at least 400 ms apart; quiet partial text after 800 ms.
 use super::*;
-use agent_protocol::{conversation::Item, ids::ItemId, session::TextField};
+use agent_protocol::{ids::ItemId, session::TextField};
 use tokio::{
     sync::Notify,
     time::{Duration, Instant},
@@ -10,70 +10,72 @@ use tokio::{
 #[derive(Clone)]
 struct Buffered {
     attempt: Attempt,
-    item: Item,
-    delivered: agent_protocol::items::ItemBody,
+    text: String,
+    delivered: usize,
     changed: Instant,
     last_flush: Option<Instant>,
     boundary: bool,
 }
+impl Buffered {
+    fn append(&mut self, delta: &str) {
+        self.text.push_str(delta);
+        self.changed = Instant::now();
+        self.boundary = self
+            .last_flush
+            .is_none_or(|last| self.changed >= last + Duration::from_millis(400))
+            && paragraph_boundary(&self.text) > self.delivered;
+    }
+    fn deadline(&self) -> Option<Instant> {
+        (self.text.len() != self.delivered).then_some(if self.boundary {
+            self.changed
+        } else {
+            self.changed + Duration::from_millis(800)
+        })
+    }
+}
 #[derive(Default)]
 pub(super) struct Text {
-    pending: HashMap<ItemId, Buffered>,
+    // T3 tracks each reasoning part independently, just like assistant text.
+    pending: HashMap<(ItemId, TextField), Buffered>,
     worker: Option<Uuid>,
     wake: Arc<Notify>,
 }
 impl Text {
     pub(super) fn is_empty(&self) -> bool {
-        self.pending
-            .values()
-            .all(|entry| entry.item.body == entry.delivered)
+        self.pending.is_empty()
     }
     fn deadline(&self, token: Uuid) -> Option<Instant> {
         (self.worker == Some(token))
-            .then(|| {
-                self.pending
-                    .values()
-                    .filter(|entry| entry.item.body != entry.delivered)
-                    .map(|entry| {
-                        if entry.boundary {
-                            entry.changed
-                        } else {
-                            entry.changed + Duration::from_millis(800)
-                        }
-                    })
-                    .min()
-            })
+            .then(|| self.pending.values().filter_map(Buffered::deadline).min())
             .flatten()
     }
-    fn ready(&mut self, token: Uuid) -> Option<Vec<Buffered>> {
+    fn ready(&mut self, token: Uuid) -> Option<Vec<((ItemId, TextField), Buffered)>> {
         if self.worker != Some(token) {
             return None;
         }
         let now = Instant::now();
         let mut ready = Vec::new();
-        for entry in self
-            .pending
-            .values_mut()
-            .filter(|entry| entry.item.body != entry.delivered)
-        {
-            let body = if now >= entry.changed + Duration::from_millis(800) {
-                entry.item.body.clone()
-            } else if entry.boundary {
-                paragraph_body(&entry.item.body, &entry.delivered)
-            } else {
-                continue;
-            };
-            entry.boundary = false;
-            if body == entry.delivered {
+        for (key, entry) in &mut self.pending {
+            if entry.deadline().is_none_or(|deadline| deadline > now) {
                 continue;
             }
+            let length = if now >= entry.changed + Duration::from_millis(800) {
+                entry.text.len()
+            } else {
+                paragraph_boundary(&entry.text).max(entry.delivered)
+            };
+            entry.boundary = false;
+            entry.delivered = length;
             entry.last_flush = Some(now);
-            entry.delivered = body.clone();
             let mut publication = entry.clone();
-            publication.item.body = body;
-            ready.push(publication);
+            publication.text.truncate(length);
+            ready.push((key.clone(), publication));
         }
-        if self.is_empty() {
+        if self
+            .pending
+            .values()
+            .all(|entry| entry.deadline().is_none())
+        {
             self.worker = None;
         }
         Some(ready)
@@ -82,31 +84,21 @@ impl Text {
 impl resources::Source {
     pub(super) fn replace_text(&self, id: &ItemId) {
         let mut text = self.text.lock().unwrap();
-        text.pending.remove(id);
-        if text.is_empty() {
+        text.pending.retain(|(item, _), _| item != id);
+        if text
+            .pending
+            .values()
+            .all(|entry| entry.deadline().is_none())
+        {
             text.worker = None;
         }
         text.wake.notify_one();
     }
-    pub(super) fn take_text(&self) -> Vec<(Attempt, Observation)> {
+    fn take_text(&self) -> HashMap<(ItemId, TextField), Buffered> {
         let mut text = self.text.lock().unwrap();
         text.worker = None;
         text.wake.notify_one();
         std::mem::take(&mut text.pending)
-            .into_values()
-            .filter(|entry| entry.item.body != entry.delivered)
-            .map(|entry| {
-                (
-                    entry.attempt,
-                    Observation::Item {
-                        deferred: entry.item.deferred,
-                        id: entry.item.id,
-                        status: entry.item.status,
-                        body: entry.item.body,
-                    },
-                )
-            })
-            .collect()
     }
 }
 
@@ -115,25 +107,53 @@ impl Runtime {
         service: &HostRpcService,
         source: &resources::Source,
     ) -> Result<(), String> {
-        for (attempt, observation) in source.take_text() {
-            Self::event(
-                service,
-                &source.target,
-                Event::Provider {
-                    attempt: attempt.id,
-                    native_turn: service
-                        .inner
-                        .conversation
-                        .storage
-                        .execution(&source.target, attempt.id)?
-                        .and_then(|execution| execution.native_turn),
-                    native_items: Vec::new(),
-                    observation,
-                },
-            )
-            .await?;
+        for ((id, field), entry) in source.take_text() {
+            if entry.text.len() != entry.delivered {
+                Self::publish_text(service, source, &id, field, &entry).await?;
+            }
         }
         Ok(())
+    }
+    async fn publish_text(
+        service: &HostRpcService,
+        source: &resources::Source,
+        id: &ItemId,
+        field: TextField,
+        entry: &Buffered,
+    ) -> Result<(), String> {
+        let Some(mut item) = service
+            .inner
+            .conversation
+            .storage
+            .item(&source.target, id)?
+        else {
+            return Ok(());
+        };
+        *agent_protocol::session::text_part(&mut item.body, field)
+            .map_err(|error| error.to_string())? = entry.text.clone();
+        let native_turn = service
+            .inner
+            .conversation
+            .storage
+            .execution(&source.target, entry.attempt.id)?
+            .and_then(|execution| execution.native_turn);
+        Self::event(
+            service,
+            &source.target,
+            Event::Provider {
+                attempt: entry.attempt.id,
+                native_turn,
+                native_items: Vec::new(),
+                observation: Observation::Item {
+                    deferred: item.deferred,
+                    id: item.id,
+                    status: item.status,
+                    body: item.body,
+                },
+            },
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -205,70 +225,6 @@ fn paragraph_boundary(text: &str) -> usize {
     boundary
 }
 
-fn has_paragraph(
-    body: &agent_protocol::items::ItemBody,
-    delivered: &agent_protocol::items::ItemBody,
-) -> bool {
-    use agent_protocol::items::ItemBody;
-    let advanced = |text: &str, old: &str| paragraph_boundary(text) > old.len();
-    match (body, delivered) {
-        (ItemBody::AssistantText { text, .. }, ItemBody::AssistantText { text: old, .. }) => {
-            advanced(text, old)
-        }
-        (
-            ItemBody::Reasoning { content, summary },
-            ItemBody::Reasoning {
-                content: old_content,
-                summary: old_summary,
-            },
-        ) => [(content, old_content), (summary, old_summary)]
-            .into_iter()
-            .any(|(values, old)| {
-                values
-                    .iter()
-                    .enumerate()
-                    .any(|(i, text)| advanced(text, old.get(i).map_or("", String::as_str)))
-            }),
-        _ => false,
-    }
-}
-
-fn paragraph_body(
-    body: &agent_protocol::items::ItemBody,
-    delivered: &agent_protocol::items::ItemBody,
-) -> agent_protocol::items::ItemBody {
-    use agent_protocol::items::ItemBody;
-    fn trim(text: &mut String, delivered: &str) {
-        let floor = if text.starts_with(delivered) {
-            delivered.len()
-        } else {
-            0
-        };
-        text.truncate(paragraph_boundary(text).max(floor));
-    }
-    let mut body = body.clone();
-    match (&mut body, delivered) {
-        (ItemBody::AssistantText { text, .. }, ItemBody::AssistantText { text: old, .. }) => {
-            trim(text, old)
-        }
-        (
-            ItemBody::Reasoning { content, summary },
-            ItemBody::Reasoning {
-                content: old_content,
-                summary: old_summary,
-            },
-        ) => {
-            for (values, old) in [(content, old_content), (summary, old_summary)] {
-                for (index, value) in values.iter_mut().enumerate() {
-                    trim(value, old.get(index).map_or("", String::as_str));
-                }
-            }
-        }
-        _ => {}
-    }
-    body
-}
-
 impl Runtime {
     pub(super) fn text_delta(
         service: &HostRpcService,
@@ -290,40 +246,34 @@ impl Runtime {
             );
         }
         // The resource update lock serializes producers and its flush worker.
-        // Move an existing body instead of copying all earlier text per delta.
-        let pending = source.text.lock().unwrap().pending.remove(&id);
+        let key = (id, field);
+        let pending = source.text.lock().unwrap().pending.remove(&key);
         let mut entry = match pending {
             Some(entry) => entry,
             None => {
-                let Some(item) = service
+                let Some(mut item) = service
                     .inner
                     .conversation
                     .storage
-                    .item(&source.target, &id)?
+                    .item(&source.target, &key.0)?
                 else {
                     return Ok(());
                 };
+                let text = agent_protocol::session::text_part(&mut item.body, field)
+                    .map_err(|error| error.to_string())?;
                 Buffered {
                     attempt: attempt.clone(),
-                    delivered: item.body.clone(),
-                    item,
+                    delivered: text.len(),
+                    text: std::mem::take(text),
                     changed: Instant::now(),
                     last_flush: None,
                     boundary: false,
                 }
             }
         };
-        let result = agent_protocol::session::text_delta(&mut entry.item.body, field, delta);
-        if result.is_ok() {
-            entry.changed = Instant::now();
-            entry.boundary = entry
-                .last_flush
-                .is_none_or(|last| entry.changed >= last + Duration::from_millis(400))
-                && has_paragraph(&entry.item.body, &entry.delivered);
-        }
+        entry.append(delta);
         let mut text = source.text.lock().unwrap();
-        text.pending.insert(id, entry);
-        result.map_err(|error| error.to_string())?;
+        text.pending.insert(key, entry);
         text.wake.notify_one();
         if text.worker.is_some() {
             return Ok(());
@@ -349,51 +299,29 @@ impl Runtime {
                 let Some(ready) = source.text.lock().unwrap().ready(token) else {
                     break;
                 };
-                for entry in ready {
-                    let item = entry.item.clone();
-                    let result = async {
-                        let native_turn = service
-                            .inner
-                            .conversation
-                            .storage
-                            .execution(&source.target, entry.attempt.id)?
-                            .and_then(|execution| execution.native_turn);
-                        Self::event(
-                            &service,
-                            &source.target,
-                            Event::Provider {
-                                attempt: entry.attempt.id,
-                                native_turn,
-                                native_items: Vec::new(),
-                                observation: Observation::Item {
-                                    deferred: item.deferred,
-                                    id: item.id,
-                                    status: item.status,
-                                    body: item.body,
-                                },
-                            },
-                        )
-                        .await
-                    }
-                    .await;
-                    if let Err(error) = result {
+                for ((id, field), entry) in ready {
+                    if let Err(error) =
+                        Self::publish_text(&service, &source, &id, field, &entry).await
+                    {
                         tracing::error!(target: "agent", operation="conversation.text", %error);
                         let delivered = service
                             .inner
                             .conversation
                             .storage
-                            .item(&source.target, &entry.item.id)
+                            .item(&source.target, &id)
                             .ok()
                             .flatten()
-                            .map(|item| item.body);
+                            .and_then(|mut item| {
+                                agent_protocol::session::text_part(&mut item.body, field)
+                                    .ok()
+                                    .map(|text| text.len())
+                            });
                         let mut text = source.text.lock().unwrap();
                         text.worker = Some(token);
-                        if let Some(pending) = text.pending.get_mut(&entry.item.id) {
+                        if let Some(pending) = text.pending.get_mut(&(id, field)) {
                             pending.boundary = false;
                             pending.changed = Instant::now();
-                            if let Some(delivered) = delivered {
-                                pending.delivered = delivered;
-                            }
+                            pending.delivered = delivered.unwrap_or(0);
                         }
                     }
                 }
@@ -410,7 +338,6 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_protocol::items::{AssistantPhase, ItemBody};
 
     #[test]
     fn markdown_boundaries_hold_unfinished_blocks_and_section_titles() {
@@ -429,68 +356,70 @@ mod tests {
         }
     }
 
-    fn body(text: &str) -> ItemBody {
-        ItemBody::AssistantText {
-            text: text.into(),
-            phase: AssistantPhase::default(),
-        }
-    }
-    fn entry(id: &str, text: &str) -> Buffered {
-        Buffered {
+    fn entry(text: &str) -> Buffered {
+        let mut entry = Buffered {
             attempt: Attempt {
                 id: Uuid::nil(),
                 turn: "turn".into(),
                 provider: ProviderKind::Codex,
                 source: "source".into(),
             },
-            item: Item {
-                id: id.into(),
-                turn: "turn".into(),
-                position: 1,
-                status: agent_protocol::execution::ItemStatus::Running,
-                deferred: false,
-                input: None,
-                body: body(text),
-            },
-            delivered: body(""),
+            text: String::new(),
+            delivered: 0,
             changed: Instant::now(),
             last_flush: None,
-            boundary: true,
-        }
+            boundary: false,
+        };
+        entry.append(text);
+        entry
     }
     #[tokio::test(start_paused = true)]
-    async fn paragraphs_deliver_only_the_prefix_and_each_item_keeps_its_own_idle_deadline() {
+    async fn reasoning_parts_keep_independent_idle_deadlines_and_delivery_intervals() {
         let token = Uuid::new_v4();
         let mut text = Text {
             worker: Some(token),
             ..Default::default()
         };
-        text.pending.insert("a".into(), entry("a", "A\n\nx"));
-        let first = text.ready(token).unwrap();
-        assert_eq!(first[0].item.body, body("A\n\n"));
-        assert!(!text.is_empty());
+        let first = ("reason".into(), TextField::ReasoningSummary { index: 0 });
+        let second = ("reason".into(), TextField::ReasoningSummary { index: 1 });
+        text.pending.insert(first.clone(), entry("A\n\nx"));
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "A\n\n");
         tokio::time::advance(Duration::from_millis(300)).await;
-        text.pending.insert("b".into(), entry("b", "B\n\ny"));
-        let second = text.ready(token).unwrap();
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].item.body, body("B\n\n"));
-        tokio::time::advance(Duration::from_millis(500)).await;
+        text.pending.insert(second.clone(), entry("B\n\ny"));
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "B\n\n");
+        tokio::time::advance(Duration::from_millis(300)).await;
+        text.pending.get_mut(&second).unwrap().append(" more");
+        tokio::time::advance(Duration::from_millis(200)).await;
         let idle = text.ready(token).unwrap();
         assert_eq!(idle.len(), 1);
-        assert_eq!(idle[0].item.body, body("A\n\nx"));
+        assert_eq!(idle[0].0, first);
+        assert_eq!(idle[0].1.text, "A\n\nx");
+        // An idle flush still counts towards T3's 400ms minimum interval.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        text.pending.get_mut(&first).unwrap().append("\n\nnext");
+        assert!(text.ready(token).unwrap().is_empty());
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "B\n\ny more");
         tokio::time::advance(Duration::from_millis(300)).await;
-        assert_eq!(text.ready(token).unwrap()[0].item.body, body("B\n\ny"));
-        assert!(text.is_empty());
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "A\n\nx\n\nnext");
+        assert!(text.deadline(token).is_none());
     }
-    #[test]
-    fn idle_delivery_never_shrinks_to_an_earlier_paragraph_boundary() {
-        assert_eq!(
-            paragraph_body(&body("A\n\nB more"), &body("A\n\nB")),
-            body("A\n\nB")
-        );
-        assert_eq!(
-            paragraph_body(&body("A\n\nB more.\n\nC"), &body("A\n\nB")),
-            body("A\n\nB more.\n\n")
-        );
+    #[tokio::test(start_paused = true)]
+    async fn idle_delivery_never_shrinks_to_an_earlier_paragraph_boundary() {
+        let token = Uuid::new_v4();
+        let mut text = Text {
+            worker: Some(token),
+            ..Default::default()
+        };
+        let key = ("a".into(), TextField::AssistantText);
+        text.pending.insert(key.clone(), entry("A\n\nB"));
+        tokio::time::advance(Duration::from_millis(800)).await;
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "A\n\nB");
+        tokio::time::advance(Duration::from_millis(400)).await;
+        text.pending.get_mut(&key).unwrap().append(" more");
+        text.worker = Some(token);
+        assert!(text.ready(token).unwrap().is_empty());
+        text.pending.get_mut(&key).unwrap().append(".\n\nC");
+        assert_eq!(text.ready(token).unwrap()[0].1.text, "A\n\nB more.\n\n");
     }
 }

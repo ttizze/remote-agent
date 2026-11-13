@@ -3216,14 +3216,16 @@ pub(crate) mod execution_tests {
         worker.record.lock().await.session_id = Uuid::parse_str(native).unwrap();
         worker.session = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
         let session = worker.session.clone();
-        let offers = rows
+        let actions: Vec<_> = rows
             .iter()
             .filter(|row| {
-                row["type"] == "expect_outbound" && row["frame"]["type"] == "prompt.offer"
+                row["type"] == "expect_outbound"
+                    && matches!(
+                        row["frame"]["type"].as_str(),
+                        Some("prompt.offer" | "query.interrupt")
+                    )
             })
-            .map(|row| row["frame"]["message"]["message"]["content"].clone())
-            .collect::<Vec<_>>();
-        assert!(!offers.is_empty());
+            .collect();
         let user = |index: usize, content: &Value| {
             let text = content.as_str().expect("text-only reference prompt");
             Item::new(
@@ -3238,20 +3240,31 @@ pub(crate) mod execution_tests {
         worker
             .change(SessionChange::Item {
                 turn_id: worker.turn_id.clone(),
-                item: Arc::new(user(0, &offers[0])),
+                item: Arc::new(user(
+                    0,
+                    &actions[0]["frame"]["message"]["message"]["content"],
+                )),
             })
             .await?;
-        let (input, receiver) = mpsc::channel(offers.len().max(1));
+        let (input, receiver) = mpsc::channel(actions.len());
         worker.input = input.clone();
-        for (index, content) in offers.iter().enumerate().skip(1) {
+        for (index, row) in actions.iter().enumerate().skip(1) {
+            let content = &row["frame"]["message"]["message"]["content"];
+            let interrupt = row["frame"]["type"] == "query.interrupt";
             input
                 .send(Command {
                     execution: Some(Uuid::new_v4()),
-                    value: SdkInput::Message {
-                        id: format!("replay-input-{index}"),
-                        content: content.clone(),
+                    value: if interrupt {
+                        SdkInput::Interrupt {
+                            request_id: "recorded-stop".into(),
+                        }
+                    } else {
+                        SdkInput::Message {
+                            id: format!("replay-input-{index}"),
+                            content: content.clone(),
+                        }
                     },
-                    user: Some(user(index, content)),
+                    user: (!interrupt).then(|| user(index, content)),
                     delivered: None,
                 })
                 .await
@@ -3271,16 +3284,21 @@ const reader = createInterface({input:process.stdin});
 const inputs = reader[Symbol.asyncIterator]();
 const emit = event => process.stdout.write(JSON.stringify(event)+'\n');
 emit({type:'ready',initialized:{}});
-let first=true, current='replay-input-0';
+let first=true, current='replay-input-0', interrupt=null;
 for (const row of rows) {
-  if (row.type==='expect_outbound' && row.frame.type==='prompt.offer') {
+  if (row.type==='expect_outbound' && ['prompt.offer','query.interrupt'].includes(row.frame.type)) {
     if(first) first=false;
     else {
       const {value,done}=await inputs.next();
-      if(done) throw Error('reference prompt was never delivered');
+      if(done) throw Error('reference input was never delivered');
       const input=JSON.parse(value);
-      if(input.type!=='message' || JSON.stringify(input.content)!==JSON.stringify(row.frame.message.message.content)) throw Error('reference prompt differs');
-      current=input.id;
+      if(row.frame.type==='query.interrupt') {
+        if(input.type!=='interrupt') throw Error('expected reference interrupt');
+        interrupt=input.requestId;
+      } else {
+        if(input.type!=='message' || JSON.stringify(input.content)!==JSON.stringify(row.frame.message.message.content)) throw Error('reference prompt differs');
+        current=input.id;
+      }
     }
   }
   if(row.type!=='emit_inbound') continue;
@@ -3289,6 +3307,7 @@ for (const row of rows) {
   emit({type:'message',message});
   if(row.frame.type==='result') emit({type:'message',message:{type:'system',subtype:'session_state_changed',state:'idle'}});
 }
+if(interrupt!==null) emit({type:'interrupted',requestId:interrupt});
 reader.close();
 process.stdin.pause();
 "#;
@@ -4183,7 +4202,7 @@ for await (const line of createInterface({input: process.stdin})) {
                         .last()
                         .unwrap()
                         .status,
-                    ItemStatus::Running
+                    ItemStatus::Completed
                 );
             }
             worker.message(notice.clone()).await.unwrap();
