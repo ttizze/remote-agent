@@ -182,6 +182,13 @@ pub(super) fn write_history(
     let mut seen_turns = BTreeSet::new();
     let mut seen_items = BTreeSet::new();
     let key = thread_key(transaction, id)?;
+    let scope = rows::WriteScope {
+        key,
+        id,
+        sequence,
+        at: now,
+        process,
+    };
     let mut occurrences = std::collections::HashMap::<_, i64>::new();
     for native in response.thread.turns.iter().flatten() {
         state.counters.turn += 1;
@@ -227,13 +234,7 @@ pub(super) fn write_history(
         state.turns.insert(turn.id.clone(), turn.clone());
         rows::write(
             transaction,
-            &rows::WriteScope {
-                key,
-                id,
-                sequence,
-                at: now,
-                process,
-            },
+            &scope,
             &Change::Turn(turn.clone()),
             &state,
             &mut Vec::new(),
@@ -268,13 +269,7 @@ pub(super) fn write_history(
             };
             rows::write(
                 transaction,
-                &rows::WriteScope {
-                    key,
-                    id,
-                    sequence,
-                    at: now,
-                    process,
-                },
+                &scope,
                 &Change::Item(item.clone()),
                 &state,
                 &mut Vec::new(),

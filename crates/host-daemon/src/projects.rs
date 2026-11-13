@@ -233,8 +233,14 @@ mod tests {
     async fn corrupt_project_state_is_still_reported() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProjectStore::new(directory.path().join("bex-worktrees.json"));
-        let connection = rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
-        connection.execute("INSERT INTO projects(id,seq,body) VALUES ('broken',1,?1)", [vec![0xc1]]).unwrap();
+        let connection =
+            rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id,seq,body) VALUES ('broken',1,?1)",
+                [vec![0xc1]],
+            )
+            .unwrap();
         assert!(store.load().await.is_err());
     }
 

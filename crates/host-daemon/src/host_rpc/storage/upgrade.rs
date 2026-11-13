@@ -495,13 +495,7 @@ impl Previous {
         };
         rows::write(
             transaction,
-            &rows::WriteScope {
-                key,
-                id,
-                sequence,
-                at: now,
-                process,
-            },
+            scope,
             &Change::Input(pending),
             &state,
             &mut Vec::new(),

@@ -1670,35 +1670,81 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
 async fn unavailable_project_does_not_block_listing_or_opening_saved_conversations() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let service = HostRpcService::new([agent.backend()], ProjectStore::new(directory.path().join("projects.json")));
+    let service = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-    let _: records::Opened = call(&service, connection.id(), Call::CreateConversation(records::Create {
-        session: target.clone(), provider:ProviderKind::Codex, workspace:None, subscription:Uuid::new_v4(), cwd:Some(directory.path().to_string_lossy().into_owned()), selection:Default::default(), initial:Some((Uuid::new_v4().to_string().into(),content())),
-    })).await.unwrap();
-    completed(&service,&target,1).await;
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            session: target.clone(),
+            provider: ProviderKind::Codex,
+            workspace: None,
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_string_lossy().into_owned()),
+            selection: Default::default(),
+            initial: Some((Uuid::new_v4().to_string().into(), content())),
+        }),
+    )
+    .await
+    .unwrap();
+    completed(&service, &target, 1).await;
     #[cfg(unix)]
     let unavailable = {
         let path = directory.path().join("unavailable");
-        std::os::unix::fs::symlink(&path,&path).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
         path
     };
     #[cfg(windows)]
     let unavailable = std::path::PathBuf::from(r"\\?\UNC\wsl.localhost\Ubuntu\home\user\project");
-    let projects: Vec<agent_protocol::models::Project> = serde_json::from_value(serde_json::json!([
-        {"id":"offline","name":"Offline","roots":[{"path":unavailable}]}
-    ])).unwrap();
-    service.inner.conversation.storage.replace_projects(&projects).unwrap();
-    let listed: records::OpenedList = call(&service,connection.id(),Call::SubscribeList(records::SubscribeList {
-        subscription:Uuid::new_v4(),cached:None,refresh:true,
-    })).await.unwrap();
-    let list = records::Replica::new(Scope::List,1).apply(1,listed.initial).unwrap();
-    assert!(list.rows().contains_key(&agent_protocol::sync::Key::Thread(target.clone())));
-    let opened: records::Opened = call(&service,connection.id(),Call::SubscribeConversation(records::Subscribe {
-        session:target.clone(),subscription:Uuid::new_v4(),cached:None,window:10,
-    })).await.unwrap();
-    let replica = records::Replica::new(Scope::Conversation(target.clone()),1).apply(1,opened.initial).unwrap();
+    let projects: Vec<agent_protocol::models::Project> =
+        serde_json::from_value(serde_json::json!([
+            {"id":"offline","name":"Offline","roots":[{"path":unavailable}]}
+        ]))
+        .unwrap();
+    service
+        .inner
+        .conversation
+        .storage
+        .replace_projects(&projects)
+        .unwrap();
+    let listed: records::OpenedList = call(
+        &service,
+        connection.id(),
+        Call::SubscribeList(records::SubscribeList {
+            subscription: Uuid::new_v4(),
+            cached: None,
+            refresh: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let list = records::Replica::new(Scope::List, 1)
+        .apply(1, listed.initial)
+        .unwrap();
+    assert!(
+        list.rows()
+            .contains_key(&agent_protocol::sync::Key::Thread(target.clone()))
+    );
+    let opened: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::SubscribeConversation(records::Subscribe {
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cached: None,
+            window: 10,
+        }),
+    )
+    .await
+    .unwrap();
+    let replica = records::Replica::new(Scope::Conversation(target.clone()), 1)
+        .apply(1, opened.initial)
+        .unwrap();
     let history = records::project(&replica).unwrap();
-    assert_eq!(history.thread.id.as_ref(),Some(&target));
+    assert_eq!(history.thread.id.as_ref(), Some(&target));
     assert!(history.thread.turns.as_ref().unwrap().iter().flat_map(|turn|turn.items.iter().flatten()).any(|item|matches!(item.body(),agent_protocol::items::ItemBody::UserMessage {text:Some(text),..} if text=="run once")));
 }

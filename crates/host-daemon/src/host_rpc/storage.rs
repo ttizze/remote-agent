@@ -516,9 +516,10 @@ impl Storage {
             state = state.apply(&step.changes);
             let mut updated = Vec::new();
             let mut removed = Vec::new();
+            let scope = rows::WriteScope { key, id, sequence:through.sequence, at:context.now, process:self.process };
             for change in &step.changes {
                 rows::write(&transaction,
-&rows::WriteScope { key, id, sequence:through.sequence, at:context.now, process:self.process },
+&scope,
 change,
 &state,
 &mut updated,
